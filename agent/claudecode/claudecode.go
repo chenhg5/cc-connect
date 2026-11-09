@@ -155,6 +155,7 @@ func New(opts map[string]any) (core.Agent, error) {
 	}
 	model, _ := opts["model"].(string)
 	reasoningEffort, _ := opts["reasoning_effort"].(string)
+	subagentModel, _ := opts["subagent_model"].(string)
 	mode, _ := opts["mode"].(string)
 	mode = normalizePermissionMode(mode)
 	systemPrompt, _ := opts["system_prompt"].(string)
@@ -298,6 +299,7 @@ func New(opts map[string]any) (core.Agent, error) {
 		cmdArgsFlag:         cmdArgsFlag,
 		model:               model,
 		reasoningEffort:     normalizeEffort(reasoningEffort),
+		subagentModel:       strings.TrimSpace(subagentModel),
 		mode:                mode,
 		systemPrompt:        systemPrompt,
 		pluginDirs:          pluginDirs,
@@ -1033,6 +1035,9 @@ func (a *Agent) WorkspaceAgentOptions() map[string]any {
 	}
 	if a.reasoningEffort != "" {
 		opts["reasoning_effort"] = a.reasoningEffort
+	}
+	if a.subagentModel != "" {
+		opts["subagent_model"] = a.subagentModel
 	}
 	if len(a.allowedTools) > 0 {
 		opts["allowed_tools"] = stringsToAny(a.allowedTools)

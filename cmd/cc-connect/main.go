@@ -942,6 +942,9 @@ func main() {
 		engine.SetModelSaveFunc(func(model string) error {
 			return config.SaveAgentModel(projName, model)
 		})
+		engine.SetSubagentModelSaveFunc(func(model string) error {
+			return config.SaveAgentSubagentModel(projName, model)
+		})
 
 		// Wire config reload
 		capturedEngine := engine

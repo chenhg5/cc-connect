@@ -2,7 +2,9 @@ package core
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -175,5 +177,89 @@ func TestHandleSubagentCardActionSwitchNumbering(t *testing.T) {
 	e.handleSubagentCardAction("switch 3", "sess")
 	if got := a.GetSubagentModel(); got != "gpt-4.1-mini" {
 		t.Fatalf("card switch 3 selected %q, want gpt-4.1-mini", got)
+	}
+}
+
+func TestSetSubagentModelSavesBeforeApplying(t *testing.T) {
+	a := &stubSubagentAgent{}
+	e := NewEngine("test", a, []Platform{&stubPlatformEngine{n: "test"}}, "", LangEnglish)
+	var saved []string
+	e.SetSubagentModelSaveFunc(func(m string) error {
+		saved = append(saved, m)
+		if got := a.GetSubagentModel(); got != "" {
+			t.Errorf("save ran after memory changed to %q", got)
+		}
+		return nil
+	})
+
+	if err := e.setSubagentModel(a, "gpt-4.1", "sess", true); err != nil {
+		t.Fatalf("setSubagentModel() error: %v", err)
+	}
+	if got := a.GetSubagentModel(); got != "gpt-4.1" {
+		t.Errorf("memory = %q, want gpt-4.1", got)
+	}
+	if len(saved) != 1 || saved[0] != "gpt-4.1" {
+		t.Errorf("saved = %v, want [gpt-4.1]", saved)
+	}
+}
+
+func TestSetSubagentModelSaveFailureKeepsMemory(t *testing.T) {
+	a := &stubSubagentAgent{subagent: "gpt-4.1"}
+	e := NewEngine("test", a, []Platform{&stubPlatformEngine{n: "test"}}, "", LangEnglish)
+	e.SetSubagentModelSaveFunc(func(string) error { return errors.New("read-only config") })
+
+	if err := e.setSubagentModel(a, "gpt-4.1-mini", "sess", true); err == nil {
+		t.Fatal("setSubagentModel() error = nil, want save failure")
+	}
+	if got := a.GetSubagentModel(); got != "gpt-4.1" {
+		t.Errorf("memory = %q, want unchanged gpt-4.1", got)
+	}
+}
+
+func TestCmdSubagentSaveFailureKeepsModel(t *testing.T) {
+	a := &stubSubagentAgent{subagent: "gpt-4.1"}
+	p := &stubPlatformEngine{n: "test"}
+	e := NewEngine("test", a, []Platform{p}, "", LangEnglish)
+	e.SetSubagentModelSaveFunc(func(string) error { return errors.New("read-only config") })
+
+	e.cmdSubagent(p, &Message{SessionKey: "sess", ReplyCtx: "ctx"}, []string{"3"}, a)
+
+	if got := a.GetSubagentModel(); got != "gpt-4.1" {
+		t.Errorf("memory = %q, want unchanged gpt-4.1", got)
+	}
+	sent := p.getSent()
+	if len(sent) != 1 || !strings.Contains(sent[0], "Failed to change model") {
+		t.Errorf("sent = %v, want one model change failure message", sent)
+	}
+}
+
+type workdirSubagentAgent struct {
+	stubSubagentAgent
+	dir string
+}
+
+func (a *workdirSubagentAgent) GetWorkDir() string { return a.dir }
+
+func TestPersistWorkspaceSubagentOverride(t *testing.T) {
+	e := NewEngine("test", &stubSubagentAgent{}, []Platform{&stubPlatformEngine{n: "test"}}, "", LangEnglish)
+	e.multiWorkspace = true
+	e.projectState = NewProjectStateStore(filepath.Join(t.TempDir(), "state.json"))
+	ws := &workdirSubagentAgent{dir: t.TempDir()}
+
+	savedConfig := false
+	e.SetSubagentModelSaveFunc(func(string) error { savedConfig = true; return nil })
+
+	e.persistWorkspaceSubagentOverride("sess", ws, "gpt-4.1-mini")
+	key := normalizeWorkspacePath(ws.dir)
+	if got := e.projectState.WorkspaceSubagentOverride(key); got != "gpt-4.1-mini" {
+		t.Errorf("workspace override = %q, want gpt-4.1-mini", got)
+	}
+	if savedConfig {
+		t.Error("workspace override wrote the project config")
+	}
+
+	e.persistWorkspaceSubagentOverride("sess", ws, "")
+	if got := e.projectState.WorkspaceSubagentOverride(key); got != "" {
+		t.Errorf("workspace override after clear = %q, want empty", got)
 	}
 }

@@ -376,6 +376,8 @@ type Engine struct {
 	providerRefsSaveFunc    func(refs []string) error
 	listGlobalProvidersFunc func(agentType string) ([]ProviderConfig, error)
 	modelSaveFunc           func(model string) error
+	subagentModelSaveFunc   func(model string) error
+	subagentModelMu         sync.Mutex
 
 	ttsSaveFunc func(mode string) error
 
@@ -1120,6 +1122,10 @@ func (e *Engine) SetListGlobalProvidersFunc(fn func(agentType string) ([]Provide
 
 func (e *Engine) SetModelSaveFunc(fn func(model string) error) {
 	e.modelSaveFunc = fn
+}
+
+func (e *Engine) SetSubagentModelSaveFunc(fn func(model string) error) {
+	e.subagentModelSaveFunc = fn
 }
 
 // AddPlatform appends a platform to the engine after construction.
@@ -4209,6 +4215,9 @@ func (e *Engine) getOrCreateWorkspaceAgent(workspace string) (Agent, *SessionMan
 	if e.projectState != nil {
 		if m := e.projectState.WorkspaceModelOverride(workspace); m != "" {
 			opts["model"] = m
+		}
+		if m := e.projectState.WorkspaceSubagentOverride(workspace); m != "" {
+			opts["subagent_model"] = m
 		}
 	}
 
@@ -10613,7 +10622,10 @@ func (e *Engine) cmdSubagent(p Platform, msg *Message, args []string, agent Agen
 	}
 
 	if strings.EqualFold(strings.TrimSpace(args[0]), "inherit") {
-		sub.SetSubagentModel("")
+		if err := e.setSubagentModel(agent, "", msg.SessionKey, agent == e.agent); err != nil {
+			e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgModelChangeFailed, err))
+			return
+		}
 		e.resetSessionForEnvChange(msg.SessionKey)
 		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgSubagentInherit))
 		return
@@ -10627,13 +10639,19 @@ func (e *Engine) cmdSubagent(p Platform, msg *Message, args []string, agent Agen
 		return
 	}
 	if n == 1 {
-		sub.SetSubagentModel("")
+		if err := e.setSubagentModel(agent, "", msg.SessionKey, agent == e.agent); err != nil {
+			e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgModelChangeFailed, err))
+			return
+		}
 		e.resetSessionForEnvChange(msg.SessionKey)
 		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgSubagentInherit))
 		return
 	}
 	target := models[n-2].Name
-	sub.SetSubagentModel(target)
+	if err := e.setSubagentModel(agent, target, msg.SessionKey, agent == e.agent); err != nil {
+		e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgModelChangeFailed, err))
+		return
+	}
 	e.resetSessionForEnvChange(msg.SessionKey)
 	e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgModelChanged), target))
 }
@@ -10717,6 +10735,44 @@ func (e *Engine) switchModelOnAgent(agent Agent, target string, persistConfig bo
 	switcher.SetModel(target)
 	providerSwitcher.SetActiveProvider(active.Name)
 	return target, nil
+}
+
+// setSubagentModel applies a subagent-model choice. persistConfig saves the
+// project-level default; workspace-scoped agents store their override in
+// project state instead, mirroring switchModelOnAgent. The lock serialises
+// save and set so two concurrent choices cannot leave the config file and
+// memory on different values.
+func (e *Engine) setSubagentModel(agent Agent, target, sessionKey string, persistConfig bool) error {
+	sub, ok := agent.(SubagentModelSwitcher)
+	if !ok {
+		return nil
+	}
+
+	e.subagentModelMu.Lock()
+	defer e.subagentModelMu.Unlock()
+
+	if persistConfig && e.subagentModelSaveFunc != nil {
+		if err := e.subagentModelSaveFunc(target); err != nil {
+			return fmt.Errorf("save subagent model: %w", err)
+		}
+	}
+	sub.SetSubagentModel(target)
+	if !persistConfig {
+		e.persistWorkspaceSubagentOverride(sessionKey, agent, target)
+	}
+	return nil
+}
+
+func (e *Engine) persistWorkspaceSubagentOverride(sessionKey string, agent Agent, model string) {
+	if e.projectState == nil || !e.multiWorkspace || agent == e.agent {
+		return
+	}
+	workspace := workspaceModelOverrideKey(e.interactiveKeyForSessionKey(sessionKey), sessionKey, agent)
+	if workspace == "" {
+		return
+	}
+	e.projectState.SetWorkspaceSubagentOverride(workspace, model)
+	e.projectState.Save()
 }
 
 func (e *Engine) cmdReasoning(p Platform, msg *Message, args []string) {
@@ -13069,8 +13125,7 @@ func (e *Engine) handleModelCardAction(args, sessionKey string) *Card {
 // "inherit" clears the override so the CLI falls back to the main model.
 func (e *Engine) handleSubagentCardAction(args, sessionKey string) *Card {
 	agent, sessions := e.sessionContextForKey(sessionKey)
-	sub, ok := agent.(SubagentModelSwitcher)
-	if !ok {
+	if _, ok := agent.(SubagentModelSwitcher); !ok {
 		return e.renderModelCard(sessionKey)
 	}
 
@@ -13103,7 +13158,9 @@ func (e *Engine) handleSubagentCardAction(args, sessionKey string) *Card {
 		return e.renderModelCard(sessionKey)
 	}
 
-	sub.SetSubagentModel(target)
+	if err := e.setSubagentModel(agent, target, sessionKey, agent == e.agent); err != nil {
+		return e.renderModelSwitchResultCard(target, err)
+	}
 	e.cleanupInteractiveState(e.interactiveKeyForSessionKey(sessionKey))
 	sessions.Save()
 	return e.renderModelCard(sessionKey)
