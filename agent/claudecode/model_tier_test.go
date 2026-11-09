@@ -10,7 +10,7 @@ import (
 // Claude 5 tier alias again: subscription-auth users never reach the provider
 // API, so this list is the only source for them.
 func TestFallbackModelsIncludesFable(t *testing.T) {
-	models := fallbackModels()
+	models := (&Agent{}).fallbackModels()
 	if len(models) == 0 {
 		t.Fatal("fallbackModels returned no models")
 	}
@@ -33,7 +33,7 @@ func TestFallbackModelsShowsResolvedTierModel(t *testing.T) {
 	t.Setenv("ANTHROPIC_DEFAULT_FABLE_MODEL", "workbuddy-ai/deepseek-v4.1-flash[1m]")
 
 	byName := make(map[string]core.ModelOption)
-	for _, m := range fallbackModels() {
+	for _, m := range (&Agent{}).fallbackModels() {
 		byName[m.Name] = m
 	}
 
@@ -50,11 +50,11 @@ func TestFallbackModelsShowsResolvedTierModel(t *testing.T) {
 
 // TestResolveTierModelHaikuFallsBackToSmallFast covers the one tier that has a
 // second source: Claude Code uses the small/fast model for haiku-class work.
-func TestResolveTierModelHaikuFallsBackToSmallFast(t *testing.T) {
-	t.Setenv("ANTHROPIC_DEFAULT_HAIKU_MODEL", "")
-	t.Setenv("ANTHROPIC_SMALL_FAST_MODEL", "zed/claude-haiku-5-5[1m]")
-	if got := resolveTierModel("haiku"); got != "zed/claude-haiku-5-5[1m]" {
-		t.Errorf("resolveTierModel(haiku) = %q, want the small/fast model", got)
+func TestResolveTierModelHaikuUsesDefaultHaikuVar(t *testing.T) {
+	t.Setenv("ANTHROPIC_DEFAULT_HAIKU_MODEL", "zed/claude-haiku-5-5[1m]")
+	t.Setenv("ANTHROPIC_SMALL_FAST_MODEL", "deprecated-background-model")
+	if got := (&Agent{}).resolveTierModel("haiku"); got != "zed/claude-haiku-5-5[1m]" {
+		t.Errorf("resolveTierModel(haiku) = %q, want ANTHROPIC_DEFAULT_HAIKU_MODEL", got)
 	}
 }
 
@@ -115,7 +115,7 @@ func TestSubagentModelEnvInjection(t *testing.T) {
 // picker refresh. New tiers must be appended, never inserted.
 func TestFallbackModelsKeepsMainOrder(t *testing.T) {
 	want := []string{"sonnet", "sonnet[1m]", "opus", "opus[1m]", "fable", "haiku"}
-	got := fallbackModels()
+	got := (&Agent{}).fallbackModels()
 	if len(got) < len(want) {
 		t.Fatalf("fallbackModels() has %d entries, want at least %d", len(got), len(want))
 	}
@@ -142,5 +142,63 @@ func TestReasoningEffortsKeepMainOrder(t *testing.T) {
 		if got[i] != want[i] {
 			t.Errorf("level %d = %q, want %q", i, got[i], want[i])
 		}
+	}
+}
+
+// TestFallbackModelsResolvesTierFromConfigEnv covers the documented way to pin
+// a tier: [projects.agent.options.env], which never reaches the supervisor's
+// own process environment.
+func TestFallbackModelsResolvesTierFromConfigEnv(t *testing.T) {
+	t.Setenv("ANTHROPIC_DEFAULT_SONNET_MODEL", "")
+	a := &Agent{configEnv: []string{"ANTHROPIC_DEFAULT_SONNET_MODEL=K2.6"}}
+	for _, m := range a.fallbackModels() {
+		if m.Name == "sonnet" {
+			if m.Desc != "K2.6" {
+				t.Fatalf("sonnet Desc = %q, want K2.6 from config env", m.Desc)
+			}
+			return
+		}
+	}
+	t.Fatal("sonnet not in fallback list")
+}
+
+// TestFallbackModelsResolvesTierFromProviderEnv covers a provider's env map,
+// which is merged into the child environment after the config env.
+func TestFallbackModelsResolvesTierFromProviderEnv(t *testing.T) {
+	t.Setenv("ANTHROPIC_DEFAULT_OPUS_MODEL", "")
+	a := &Agent{
+		activeIdx: 0,
+		providers: []core.ProviderConfig{{
+			Name: "gw",
+			Env:  map[string]string{"ANTHROPIC_DEFAULT_OPUS_MODEL": "K2.6-opus"},
+		}},
+	}
+	for _, m := range a.fallbackModels() {
+		if m.Name == "opus" {
+			if m.Desc != "K2.6-opus" {
+				t.Fatalf("opus Desc = %q, want K2.6-opus from provider env", m.Desc)
+			}
+			return
+		}
+	}
+	t.Fatal("opus not in fallback list")
+}
+
+// TestEffectiveEnvValuePrecedence pins the order the CLI receives: session env
+// beats provider env, which beats config env, which beats the process env.
+func TestEffectiveEnvValuePrecedence(t *testing.T) {
+	const key = "ANTHROPIC_DEFAULT_SONNET_MODEL"
+	t.Setenv(key, "process")
+	a := &Agent{
+		configEnv: []string{key + "=config"},
+		providers: []core.ProviderConfig{{Name: "gw", Env: map[string]string{key: "provider"}}},
+		activeIdx: 0,
+	}
+	if got := a.effectiveEnvValue(key); got != "provider" {
+		t.Fatalf("provider env should beat config env, got %q", got)
+	}
+	a.sessionEnv = []string{key + "=session"}
+	if got := a.effectiveEnvValue(key); got != "session" {
+		t.Fatalf("session env should win, got %q", got)
 	}
 }

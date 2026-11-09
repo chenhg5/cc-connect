@@ -110,6 +110,7 @@ var claudeProviderManagedEnvVars = map[string]struct{}{
 	"ANTHROPIC_DEFAULT_HAIKU_MODEL_DESCRIPTION":            {},
 	"ANTHROPIC_DEFAULT_HAIKU_MODEL_NAME":                   {},
 	"ANTHROPIC_DEFAULT_HAIKU_MODEL_SUPPORTED_CAPABILITIES": {},
+	"ANTHROPIC_DEFAULT_FABLE_MODEL":                        {},
 	"ANTHROPIC_DEFAULT_OPUS_MODEL":                         {},
 	"ANTHROPIC_DEFAULT_OPUS_MODEL_DESCRIPTION":             {},
 	"ANTHROPIC_DEFAULT_OPUS_MODEL_NAME":                    {},
@@ -438,7 +439,7 @@ func (a *Agent) AvailableModels(ctx context.Context) []core.ModelOption {
 	if models := a.fetchModelsFromAPI(ctx); len(models) > 0 {
 		return models
 	}
-	return fallbackModels()
+	return a.fallbackModels()
 }
 
 // tierEnvVars maps a Claude Code model tier alias to the environment variable
@@ -453,19 +454,40 @@ var tierEnvVars = map[string]string{
 }
 
 // resolveTierModel returns the concrete model a tier alias resolves to, or ""
-// when the tier is not pinned through the environment. A tier may be pinned
-// with or without the "[1m]" context suffix, so both forms are checked.
-func resolveTierModel(alias string) string {
-	if env, ok := tierEnvVars[alias]; ok {
-		if v := strings.TrimSpace(os.Getenv(env)); v != "" {
+// when the tier is not pinned. It reads the environment the spawned CLI will
+// actually see (session, provider, config, then process env), not just the
+// cc-connect process env: the documented way to pin a tier is
+// [projects.agent.options.env] or a provider's env map, and neither is copied
+// into the supervisor's own environment.
+func (a *Agent) resolveTierModel(alias string) string {
+	key, ok := tierEnvVars[alias]
+	if !ok {
+		return ""
+	}
+	return a.effectiveEnvValue(key)
+}
+
+// effectiveEnvValue returns the value the child process will see for key.
+// Later sources win, matching MergeEnv's precedence at spawn time.
+func (a *Agent) effectiveEnvValue(key string) string {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	for i := len(a.sessionEnv) - 1; i >= 0; i-- {
+		if k, v, ok := strings.Cut(a.sessionEnv[i], "="); ok && k == key && strings.TrimSpace(v) != "" {
+			return strings.TrimSpace(v)
+		}
+	}
+	if a.activeIdx >= 0 && a.activeIdx < len(a.providers) {
+		if v := strings.TrimSpace(a.providers[a.activeIdx].Env[key]); v != "" {
 			return v
 		}
 	}
-	if alias == "haiku" {
-		// Background/fast tasks fall back to the small-fast model.
-		return strings.TrimSpace(os.Getenv("ANTHROPIC_SMALL_FAST_MODEL"))
+	for i := len(a.configEnv) - 1; i >= 0; i-- {
+		if k, v, ok := strings.Cut(a.configEnv[i], "="); ok && k == key && strings.TrimSpace(v) != "" {
+			return strings.TrimSpace(v)
+		}
 	}
-	return ""
+	return strings.TrimSpace(os.Getenv(key))
 }
 
 // fallbackModels is the picker list used when neither configured providers nor
@@ -473,7 +495,7 @@ func resolveTierModel(alias string) string {
 // (including fable, added with the Claude 5 family) plus their 1M-context
 // variants. Tiers pinned through ANTHROPIC_DEFAULT_*_MODEL carry that model in
 // Desc so the picker shows the real backend instead of a bare alias.
-func fallbackModels() []core.ModelOption {
+func (a *Agent) fallbackModels() []core.ModelOption {
 	descs := map[string]string{
 		"fable":  "Claude Fable (frontier)",
 		"opus":   "Claude Opus (most capable)",
@@ -498,7 +520,7 @@ func fallbackModels() []core.ModelOption {
 		if is1m {
 			desc += " (1M context)"
 		}
-		if real := resolveTierModel(e.tier); real != "" {
+		if real := a.resolveTierModel(e.tier); real != "" {
 			desc = real
 			if is1m {
 				desc += " (1M context)"
