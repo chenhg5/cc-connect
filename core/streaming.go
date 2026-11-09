@@ -185,7 +185,26 @@ func (sp *streamPreview) appendText(text string) {
 	}
 
 	sp.fullText += text
+	sp.flushOrScheduleLocked(true)
+}
 
+// replaceText makes text the whole preview body and sends it once the update
+// interval allows, however few characters changed.
+func (sp *streamPreview) replaceText(text string) {
+	sp.mu.Lock()
+	defer sp.mu.Unlock()
+
+	if sp.degraded || !sp.cfg.Enabled {
+		return
+	}
+
+	sp.fullText = text
+	sp.flushOrScheduleLocked(false)
+}
+
+// flushOrScheduleLocked sends fullText now or schedules it. checkDelta holds
+// back updates that add fewer than MinDeltaChars. Must hold sp.mu.
+func (sp *streamPreview) flushOrScheduleLocked(checkDelta bool) {
 	displayText := sp.fullText
 	maxChars := sp.cfg.MaxChars
 	if maxChars > 0 && len([]rune(displayText)) > maxChars {
@@ -196,7 +215,7 @@ func (sp *streamPreview) appendText(text string) {
 	elapsed := time.Since(sp.lastSentAt)
 	interval := time.Duration(sp.cfg.IntervalMs) * time.Millisecond
 
-	if delta < sp.cfg.MinDeltaChars && !sp.lastSentAt.IsZero() {
+	if checkDelta && delta < sp.cfg.MinDeltaChars && !sp.lastSentAt.IsZero() {
 		sp.scheduleFlushLocked(interval)
 		return
 	}

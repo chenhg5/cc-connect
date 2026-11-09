@@ -135,9 +135,19 @@ level = "info" # debug, info, warn, error
 #                           #        (the text emitted after the LAST tool_use). The
 #                           #        pre-tool "lead-in" is dropped by default. See
 #                           #        prepend_pre_tool_text below to opt back in.
+#                           #        If nothing follows the last tool_use, the text
+#                           #        block before it is delivered. While a tool runs,
+#                           #        the Feishu rich card clears the lead-in at once;
+#                           #        streaming cards and stream previews keep it until
+#                           #        the first post-tool text replaces it. With
+#                           #        tool_messages = true, every segment is delivered.
 #                           #        静默模式（仅最终消息）：隐藏思考和工具消息，只投递最后一个
 #                           #        tool_use 之后的文本块；默认丢弃 tool_use 之前的"开场白"。
 #                           #        如需保留开场白，请见下面的 prepend_pre_tool_text。
+#                           #        若最后一个 tool_use 之后没有文本，则投递它之前的文本块。
+#                           #        工具运行时，飞书富卡片会立即清除开场白；流式卡片和流式
+#                           #        预览会保留开场白，直到 tool_use 之后的第一段文本将其替换。
+#                           #        tool_messages = true 时会投递每一段文本。
 # thinking_messages = true  # Show/hide thinking messages (default: true) / 是否显示思考消息（默认 true）
 # thinking_max_len = 300    # Max chars for thinking messages (default: 300) / 思考消息最大字符数（默认 300）
 # tool_max_len = 500        # Max chars for tool use messages (default: 500) / 工具调用消息最大字符数（默认 500）
@@ -154,7 +164,7 @@ level = "info" # debug, info, warn, error
 #                                # concatenate it with the final text. Default false delivers
 #                                # only the post-tool text. Has no effect in full/compact mode.
 #                                # 仅对静默模式生效：true 时保留 tool_use 前的"开场白"并与最终文本
-#                                # 拼接后一起投递（恢复旧行为）；默认 false 仅投递 tool_use 之后的
+#                                # 拼接后一起投递；默认 false 仅投递 tool_use 之后的
 #                                # 文本。对 full/compact 模式无影响。
 
 # Per-project override: each [[projects]] entry may have its own [projects.display]
