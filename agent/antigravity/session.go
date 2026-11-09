@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 	"sync"
@@ -37,6 +38,9 @@ type antigravitySession struct {
 	wg               sync.WaitGroup
 	alive            atomic.Bool
 	permissionBridge *agyPermissionBridge
+	// bridgeAllowsNonWorkspace is set when the permission bridge is active and
+	// the installed agy accepts --settings, so the per-run override is used.
+	bridgeAllowsNonWorkspace bool
 }
 
 func newAntigravitySession(ctx context.Context, cmd string, extraArgs []string, workDir, model, mode, resumeID string, extraEnv []string, timeout time.Duration) (*antigravitySession, error) {
@@ -63,6 +67,7 @@ func newAntigravitySession(ctx context.Context, cmd string, extraArgs []string, 
 			return nil, fmt.Errorf("antigravity: initialize permission bridge: %w", err)
 		}
 		as.permissionBridge = bridge
+		as.bridgeAllowsNonWorkspace = agyBridgeCanAllowNonWorkspace(cmd, extraArgs, extraEnv)
 	}
 
 	resumeID = strings.TrimSpace(resumeID)
@@ -205,6 +210,57 @@ func (as *antigravitySession) Send(prompt string, messageID string, images []cor
 
 const agyBridgeSessionSettings = `{"allowNonWorkspaceAccess":true}`
 
+// agyBridgeCanAllowNonWorkspace decides once per session whether the bridge
+// may pass the --settings override. It is skipped when the configured cmd
+// already sets --settings (a second flag would replace the user's value) or
+// when the installed agy does not define the flag (older releases abort
+// with "flags provided but not defined"). Without the override agy keeps its
+// own confirmation, and a soft-denied action is reported by the parser.
+func agyBridgeCanAllowNonWorkspace(cmd string, extraArgs, extraEnv []string) bool {
+	if hasAgySettingsFlag(extraArgs) {
+		slog.Warn("antigravitySession: cmd already sets --settings; not adding allowNonWorkspaceAccess, so agy may soft-deny access outside the workspace")
+		return false
+	}
+	if !agyCLISupportsFlag(cmd, extraArgs, extraEnv, "--settings") {
+		slog.Warn("antigravitySession: installed agy does not support --settings; access outside the workspace will be soft-denied in default mode (upgrade agy to enable approval through cc-connect)")
+		return false
+	}
+	return true
+}
+
+var agyHelpCache sync.Map // command line -> agy --help output (string)
+
+// agyCLISupportsFlag reports whether the agy reached through cmd/extraArgs
+// lists flag in its --help output. The help text is the source of truth for
+// supported flags, so no version comparison is needed. Successful probes are
+// cached per command line and environment for the life of the process (an agy
+// upgrade is picked up after a restart); failures are not cached and report
+// false.
+func agyCLISupportsFlag(cmd string, extraArgs, extraEnv []string, flag string) bool {
+	key := cmd + "\x00" + strings.Join(extraArgs, "\x00") + "\x00\x00" + strings.Join(extraEnv, "\x00")
+	help, ok := agyHelpCache.Load(key)
+	if !ok {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		probe := exec.CommandContext(ctx, cmd, append(append([]string{}, extraArgs...), "--help")...)
+		env := os.Environ()
+		if len(extraEnv) > 0 {
+			env = core.MergeEnv(env, extraEnv)
+		}
+		probe.Env = env
+		out, err := probe.CombinedOutput()
+		if len(bytes.TrimSpace(out)) == 0 {
+			slog.Warn("antigravitySession: probing agy --help failed", "cmd", cmd, "error", err)
+			return false
+		}
+		// agy prints usage and exits 0; keep the output even on a non-zero
+		// exit so wrappers that return the CLI's status still work.
+		help, _ = agyHelpCache.LoadOrStore(key, string(out))
+	}
+	re := regexp.MustCompile(`(?m)^\s*` + regexp.QuoteMeta(flag) + `(\s|=|$)`)
+	return re.MatchString(help.(string))
+}
+
 func hasAgySettingsFlag(args []string) bool {
 	for _, arg := range args {
 		if arg == "--settings" || strings.HasPrefix(arg, "--settings=") {
@@ -221,18 +277,13 @@ func (as *antigravitySession) buildAntigravityArgs(chatID string, isResume bool,
 	if agyConfigDir != "" {
 		// Antigravity currently names this compatibility flag --gemini_dir.
 		args = append(args, "--gemini_dir="+agyConfigDir, "--print-timeout=24h")
-		if mode == "default" {
+		if mode == "default" && as.bridgeAllowsNonWorkspace {
 			// The PreToolUse hook already asks the chat user before every tool
 			// call. agy's own non-workspace confirmation cannot be answered in
 			// print mode and is soft-denied, ending the turn with an empty reply,
-			// so leave that decision to the hook for this run only (--settings is
-			// not persisted to settings.json). A --settings passed through the
-			// configured cmd wins, since a second flag would replace it.
-			if hasAgySettingsFlag(as.extraArgs) {
-				slog.Warn("antigravitySession: cmd already sets --settings; not adding allowNonWorkspaceAccess, so agy may soft-deny access outside the workspace")
-			} else {
-				args = append(args, "--settings="+agyBridgeSessionSettings)
-			}
+			// so leave that decision to the hook for this run only. --settings
+			// values are not written to settings.json (verified on agy 1.5.3).
+			args = append(args, "--settings="+agyBridgeSessionSettings)
 		}
 	}
 	if isResume {

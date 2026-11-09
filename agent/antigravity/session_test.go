@@ -110,9 +110,33 @@ func TestBuildAntigravityArgs_PromptAtEnd(t *testing.T) {
 	}
 }
 
+// writeFakeAgy writes a shell script standing in for agy. --help prints a
+// usage listing (with or without --settings); a run that receives --settings
+// without supporting it aborts like agy 1.0.x; any other run emits a result.
+func writeFakeAgy(t *testing.T, supportsSettings bool) string {
+	t.Helper()
+	settingsHelp := ""
+	rejectSettings := `    --settings*) echo "flags provided but not defined: -settings" >&2; exit 2 ;;`
+	if supportsSettings {
+		settingsHelp = "  --settings                      Settings for this session only, never saved\n"
+		rejectSettings = ""
+	}
+	script := "#!/bin/sh\n" +
+		"for a in \"$@\"; do\n  case \"$a\" in\n" +
+		"    --help) printf 'Usage of agy:\\n  --add-dir                       Add a directory\\n  --print-timeout                 Optional time limit\\n" + settingsHelp + "  --sandbox                       Run in a sandbox\\n'; exit 0 ;;\n" +
+		rejectSettings + "\n" +
+		"  esac\ndone\n" +
+		`echo '{"event":"result","result":{"conversation_id":"conv-1","status":"SUCCESS","response":"ran"}}'` + "\n"
+	path := filepath.Join(t.TempDir(), "fake-agy.sh")
+	if err := os.WriteFile(path, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
 func TestAntigravitySession_DefaultBridgeAllowsNonWorkspaceAccessViaHook(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
-	s, err := newAntigravitySession(context.Background(), "echo", nil, "/tmp", "", "default", "", nil, 0)
+	s, err := newAntigravitySession(context.Background(), writeFakeAgy(t, true), nil, "/tmp", "", "default", "", nil, 0)
 	if err != nil {
 		t.Fatalf("newAntigravitySession: %v", err)
 	}
@@ -126,13 +150,74 @@ func TestAntigravitySession_DefaultBridgeAllowsNonWorkspaceAccessViaHook(t *test
 	if contains(args, "--settings="+agyBridgeSessionSettings) {
 		t.Fatalf("without the permission bridge agy must keep its own non-workspace check, got: %v", args)
 	}
+}
 
+func TestAntigravitySession_UserSettingsFlagIsNotOverridden(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	agy := writeFakeAgy(t, true)
 	for _, userArgs := range [][]string{{"--settings", `{"model":"x"}`}, {`--settings={"model":"x"}`}} {
-		s.extraArgs = userArgs
-		args = s.buildAntigravityArgs("", false, "default", "/tmp/agy-config", "hi")
+		s, err := newAntigravitySession(context.Background(), agy, userArgs, "/tmp", "", "default", "", nil, 0)
+		if err != nil {
+			t.Fatalf("newAntigravitySession: %v", err)
+		}
+		args := s.buildAntigravityArgs("", false, "default", "/tmp/agy-config", "hi")
+		_ = s.Close()
 		if contains(args, "--settings="+agyBridgeSessionSettings) {
 			t.Fatalf("user --settings in cmd must not be overridden, got: %v", args)
 		}
+	}
+}
+
+// Older agy releases (e.g. 1.0.10) do not define --settings and abort flag
+// parsing with exit 2. The override must be omitted so the turn still runs.
+func TestAntigravitySession_OlderAgyWithoutSettingsFlagStillRuns(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	s, err := newAntigravitySession(context.Background(), writeFakeAgy(t, false), nil, t.TempDir(), "", "default", "", nil, 5*time.Second)
+	if err != nil {
+		t.Fatalf("newAntigravitySession: %v", err)
+	}
+	defer func() { _ = s.Close() }()
+
+	if args := s.buildAntigravityArgs("", false, "default", "/tmp/agy-config", "hi"); contains(args, "--settings="+agyBridgeSessionSettings) {
+		t.Fatalf("--settings must be omitted when agy --help does not list it, got: %v", args)
+	}
+	if err := s.Send("hi", "", nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	var text strings.Builder
+	deadline := time.After(5 * time.Second)
+	for {
+		select {
+		case ev := <-s.Events():
+			switch ev.Type {
+			case core.EventText:
+				text.WriteString(ev.Content)
+			case core.EventError:
+				t.Fatalf("turn failed on agy without --settings: %v", ev.Error)
+			case core.EventResult:
+				if text.String() != "ran" {
+					t.Fatalf("reply = %q, want %q", text.String(), "ran")
+				}
+				return
+			}
+		case <-deadline:
+			t.Fatal("timeout waiting for the turn")
+		}
+	}
+}
+
+func TestAgyCLISupportsFlag(t *testing.T) {
+	if !agyCLISupportsFlag(writeFakeAgy(t, true), nil, nil, "--settings") {
+		t.Fatal("expected --settings to be detected")
+	}
+	if agyCLISupportsFlag(writeFakeAgy(t, false), nil, nil, "--settings") {
+		t.Fatal("did not expect --settings on an older agy")
+	}
+	if agyCLISupportsFlag(writeFakeAgy(t, true), nil, nil, "--setting") {
+		t.Fatal("flag prefix must not match a longer flag name")
+	}
+	if agyCLISupportsFlag(filepath.Join(t.TempDir(), "missing-agy"), nil, nil, "--settings") {
+		t.Fatal("a failed probe must report the flag as unsupported")
 	}
 }
 
