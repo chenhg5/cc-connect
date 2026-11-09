@@ -112,7 +112,7 @@ func (r *askqRegistry) mint(sessionKey, chatID string, qIdx int, question, issue
 // for the same session and question — the caller must reject the callback
 // explicitly and must not dispatch anything.
 func (r *askqRegistry) claim(token string) (*askqClaim, bool) {
-	if token == "" {
+	if r == nil || token == "" {
 		return nil, false
 	}
 	r.mu.Lock()
@@ -131,7 +131,7 @@ func (r *askqRegistry) claim(token string) (*askqClaim, bool) {
 // carries none: the generic fallback card, and any card rendered by a version
 // before the token existed. False when nothing is pending there.
 func (r *askqRegistry) pendingToken(sessionKey string) (string, bool) {
-	if sessionKey == "" {
+	if r == nil || sessionKey == "" {
 		return "", false
 	}
 	r.mu.Lock()
@@ -150,6 +150,9 @@ func (r *askqRegistry) pendingToken(sessionKey string) (string, bool) {
 // lastExpired is the localized expired notice most recently minted, for a
 // rejection whose token the registry never knew.
 func (r *askqRegistry) lastExpired() string {
+	if r == nil {
+		return ""
+	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	return r.lastNotice
@@ -159,7 +162,7 @@ func (r *askqRegistry) lastExpired() string {
 // localized rejection notice on a callback that failed to claim. The claim may
 // be absent (unknown token) — the caller falls back to a default notice.
 func (r *askqRegistry) peek(token string) (*askqClaim, bool) {
-	if token == "" {
+	if r == nil || token == "" {
 		return nil, false
 	}
 	r.mu.Lock()
