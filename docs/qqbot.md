@@ -105,6 +105,23 @@ If your QQ client cannot send an image and an @mention together, send the image 
 
 Image URLs shared by the current and quoted messages are downloaded once. Only images explicitly included in the event are forwarded; cc-connect does not fetch unreceived group history or associate an empty @mention with the last group image.
 
+### 群任务完成回执 / Group task completion
+
+在该项目的 `[projects.platforms.options]` 中设置：
+
+```toml
+task_completion_group = "GROUP_OPEN_ID"
+task_completion_workspace = "/absolute/path/to/task-workspace"
+```
+
+只有该群的交互任务会使用此回执。完成时机器人会 @ 原发起人，并上传最终回复中通过 Markdown 链接列出的产物，例如 `[PPT](./report.pptx)`。附件必须是在任务期间新建或更新的工作目录内文件，最多 3 个，每个不超过 10 MiB。`attachment_send = "off"` 时只发送文字。QQ 明确拒绝 Markdown 时改发纯文本。
+
+The completion reply is opt-in for one group. It mentions the original sender and attaches up to three files (10 MiB each) linked in the final answer. Files must be created or modified during the turn inside the configured workspace. `attachment_send = "off"` disables the uploads. If QQ rejects Markdown, the completion can fall back to plain text.
+
+群 @ 的回复窗口为 5 分钟。窗口已过时，完成消息和附件会走 QQ 主动发送。请由群主在手机 QQ 的机器人设置中开启「机器人主动在群聊内发言」。没有权限时会记录发送失败。
+
+The group reply window is five minutes. After it expires, the completion and its attachments are sent as proactive group messages. The group owner must enable proactive messages for the bot in QQ. If QQ rejects the send, the failure is logged.
+
 ## 私聊 / Private Messages (C2C)
 
 支持一对一私聊消息，无需 @提及。

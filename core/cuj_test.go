@@ -2796,3 +2796,71 @@ type reasoningJourneyPlatform struct {
 func (p *reasoningJourneyPlatform) SetCardNavigationHandler(h CardNavigationHandler) {
 	p.navigation = h
 }
+
+type cujCompletionPlatform struct {
+	*stubPlatformEngine
+	workspace string
+}
+
+func (p *cujCompletionPlatform) TaskCompletionWorkspace(replyCtx any) (string, bool) {
+	destination, ok := replyCtx.(string)
+	return p.workspace, ok && strings.HasPrefix(destination, "group:")
+}
+
+func (p *cujCompletionPlatform) SendTaskCompletion(ctx context.Context, replyCtx any, text string, files []FileAttachment) error {
+	if err := p.Send(ctx, replyCtx, fmt.Sprintf("%s: %s", replyCtx, text)); err != nil {
+		return err
+	}
+	for _, file := range files {
+		if err := p.Send(ctx, replyCtx, fmt.Sprintf("%s: attached %s", replyCtx, file.FileName)); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func TestCUJ_A10_TaskCompletionKeepsOriginalDestinationAndFiles(t *testing.T) {
+	dir := t.TempDir()
+	stub := &stubPlatformEngine{n: "test"}
+	p := &cujCompletionPlatform{stubPlatformEngine: stub, workspace: dir}
+	a := &cujAgent{}
+	e := NewEngine("test", a, []Platform{p}, filepath.Join(dir, "sessions.json"), LangEnglish)
+	t.Cleanup(func() { _ = e.Stop() })
+	env := &cujEnv{t: t, engine: e, plat: stub, agent: a, tempDir: dir}
+	send := func(user, destination, message string) {
+		e.ReceiveMessage(p, &Message{
+			SessionKey: "test:" + user, Platform: "test", MessageID: message,
+			UserID: user, Content: message, ReplyCtx: destination,
+		})
+	}
+	file := filepath.Join(dir, "report.pptx")
+	a.setNextSessionEvents([]Event{{Type: EventResult, Content: "[PPT](./report.pptx)", Done: true}}, 250)
+	send("alice", "group:alice", "create a PPT")
+	env.waitFor("first turn start", 2*time.Second, func() bool {
+		a.mu.Lock()
+		defer a.mu.Unlock()
+		return len(a.sessions) == 1 && len(a.sessions[0].getSentPrompts()) == 1
+	})
+	if err := os.WriteFile(file, []byte("new file"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	env.waitFor("attachment addressed to Alice", 2*time.Second, func() bool {
+		return env.sentContains("group:alice: attached report.pptx")
+	})
+	old := time.Now().Add(-time.Minute)
+	if err := os.Chtimes(file, old, old); err != nil {
+		t.Fatal(err)
+	}
+	a.setNextSessionEvents([]Event{{Type: EventResult, Content: "[Previous PPT](./report.pptx)", Done: true}}, 0)
+	send("bob", "group:bob", "check the last report")
+	env.waitFor("Bob's own result", 2*time.Second, func() bool {
+		return env.sentContains("group:bob: Previous PPT")
+	})
+	send("carol", "private:carol", "private question")
+	env.waitFor("ordinary private reply", 2*time.Second, func() bool {
+		return env.sentContains("ok")
+	})
+	if env.sentContains("group:bob: attached") || env.sentContains("private:carol:") {
+		t.Fatalf("unexpected completion routing: %v", stub.getSent())
+	}
+}
