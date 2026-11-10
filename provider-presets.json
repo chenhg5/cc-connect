@@ -722,6 +722,33 @@
           "models": ["claude-sonnet-4-6", "gpt-5.5"]
         }
       }
+    },
+    {
+      "name": "uberllm",
+      "display_name": "UberLLM",
+      "description": "UberLLM: one prepaid, pay-as-you-go key for Claude, GPT, DeepSeek, Qwen and other models over OpenAI- and Anthropic-compatible APIs.",
+      "description_zh": "UberLLM：一个预付费、按量计费的密钥，通过 OpenAI 和 Anthropic 兼容 API 使用 Claude、GPT、DeepSeek、Qwen 等模型。",
+      "features": ["OpenAI Compatible", "Anthropic Compatible", "Pay As You Go"],
+      "tier": 3,
+      "website": "https://uberllm.dev",
+      "agents": {
+        "claudecode": {
+          "base_url": "https://api.uberllm.dev",
+          "model": "anthropic/claude-sonnet-4.6",
+          "models": ["anthropic/claude-sonnet-4.6", "anthropic/claude-opus-4.6", "anthropic/claude-haiku-4.5"]
+        },
+        "codex": {
+          "base_url": "https://api.uberllm.dev/v1",
+          "model": "openai/gpt-5.4",
+          "models": ["openai/gpt-5.4", "openai/gpt-5.4-mini", "openai/gpt-5.3-codex"],
+          "codex_config": { "wire_api": "responses" }
+        },
+        "opencode": {
+          "base_url": "https://api.uberllm.dev/v1",
+          "model": "deepseek/deepseek-v4-flash",
+          "models": ["deepseek/deepseek-v4-flash", "qwen/qwen3-coder"]
+        }
+      }
     }
   ]
 }
