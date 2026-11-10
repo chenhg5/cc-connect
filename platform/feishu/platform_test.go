@@ -1727,6 +1727,9 @@ func TestAllowChat_FiltersGroupMessages(t *testing.T) {
 
 			messageID := "om_test_" + tt.name
 			openID := "ou_test"
+			// Use cached names so the allow_chat test can run offline.
+			ip.userNameCache.Store(openID, "Test User")
+			ip.chatNameCache.Store(tt.chatID, "Test Chat")
 			msgType := "text"
 			senderType := "user"
 			content := `{"text":"hello"}`

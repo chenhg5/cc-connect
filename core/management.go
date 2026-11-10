@@ -1117,6 +1117,35 @@ func validateWorkspacePath(baseDir, target string) (string, error) {
 
 // ── Session endpoints ─────────────────────────────────────────
 
+// managementAgentSessions snapshots interactive AgentSession ownership by Session,
+// not routing key: /new and /switch can select another saved Session while its
+// previous AgentSession is still registered. Ownership writes hold interactiveMu.
+// Capture references under that lock only: state.mu can be held across platform
+// network calls, and waiting for it would stall the whole project. Call backend
+// methods only after releasing interactiveMu.
+func managementAgentSessions(e *Engine) map[*Session]AgentSession {
+	agents := make(map[*Session]AgentSession)
+	e.interactiveMu.Lock()
+	defer e.interactiveMu.Unlock()
+	for _, state := range e.interactiveStates {
+		if state == nil {
+			continue
+		}
+		if state.busySession != nil && state.agentSession != nil {
+			agents[state.busySession] = state.agentSession
+		}
+	}
+	return agents
+}
+
+func managementAgentSessionAlive(agents map[*Session]AgentSession, session *Session) *bool {
+	if agent := agents[session]; agent != nil {
+		alive := agent.Alive()
+		return &alive
+	}
+	return nil
+}
+
 func (m *ManagementServer) handleProjectSessions(w http.ResponseWriter, r *http.Request, projName string, e *Engine, rest string) {
 	// sub-routes like /sessions/switch
 	if rest == "switch" {
@@ -1142,6 +1171,7 @@ func (m *ManagementServer) handleProjectSessions(w http.ResponseWriter, r *http.
 		e.interactiveMu.Unlock()
 
 		idToKey, activeIDs := e.sessions.SessionKeyMap()
+		agents := managementAgentSessions(e)
 		stored := e.sessions.AllSessions()
 		sessions := make([]map[string]any, 0, len(stored))
 		for _, s := range stored {
@@ -1172,6 +1202,8 @@ func (m *ManagementServer) handleProjectSessions(w http.ResponseWriter, r *http.
 				"last_message":  lastMsg,
 			}
 			s.mu.Unlock()
+			info["busy"] = s.Busy()
+			info["agent_session_alive"] = managementAgentSessionAlive(agents, s)
 
 			sessionKey := idToKey[s.ID]
 			_, live := activeKeys[sessionKey]
@@ -1275,6 +1307,8 @@ func (m *ManagementServer) handleProjectSessionDetail(w http.ResponseWriter, r *
 			"history":          histJSON,
 		}
 		s.mu.Unlock()
+		data["busy"] = s.Busy()
+		data["agent_session_alive"] = managementAgentSessionAlive(managementAgentSessions(e), s)
 
 		if len(sessionKey) > 0 {
 			parts := splitSessionKey(sessionKey)
