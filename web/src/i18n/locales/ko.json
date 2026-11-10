@@ -119,7 +119,15 @@
     "linkGlobal": "전역 연결",
     "addCustom": "사용자 지정 추가",
     "allLinked": "모든 전역 제공업체가 이미 연결되어 있습니다.",
-    "manageGlobal": "전역 제공업체 관리"
+    "manageGlobal": "전역 제공업체 관리",
+    "notSupportedTag": "지원 안 함",
+    "notSupportedTitle": "이 에이전트 유형은 제공업체 전환을 지원하지 않습니다",
+    "notSupportedHint": "아래에 표시된 연결된 제공업체는 읽기 전용입니다. 이 에이전트 유형에서는 제공업체 전환, 활성화, 삭제가 불가능합니다.",
+    "linkedReadOnly": "연결된 제공업체 (읽기 전용)",
+    "noLinkedRefs": "연결된 제공업체가 없습니다.",
+    "loadFailed": "제공업체 목록을 불러오지 못했습니다",
+    "loadFailedHint": "제공업체 목록을 불러오지 못했습니다. 프로젝트에 제공업체가 구성되지 않았다는 의미는 아닙니다.",
+    "retry": "다시 시도"
   },
   "cron": {
     "title": "예약 작업",
