@@ -6453,8 +6453,13 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				// The card is the only delivery path for this turn, so the
 				// reply footer (model / usage / workdir) must ride on it;
 				// statusFooter is already empty for silent replies.
-				finalContent = appendReplyFooter(finalContent, statusFooter)
-				if err := streamCard.Finalize(e.ctx, finalContent); err != nil {
+				var finalizeErr error
+				if sfc, ok := streamCard.(StreamingCardStatusFooter); ok && statusFooter != "" {
+					finalizeErr = sfc.FinalizeWithStatusFooter(e.ctx, finalContent, statusFooter)
+				} else {
+					finalizeErr = streamCard.Finalize(e.ctx, appendReplyFooter(finalContent, statusFooter))
+				}
+				if err := finalizeErr; err != nil {
 					slog.Error("streaming card finalize failed, sending fallback", "error", err)
 					// Fallback: send the response as a normal message — but never
 					// for a silent reply, which has no deliverable content.

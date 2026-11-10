@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"strings"
 	"sync"
 	"time"
 
@@ -156,6 +157,68 @@ func (c *slackStreamingCard) Finalize(ctx context.Context, content string) error
 	c.lastSent = rendered
 	return nil
 }
+
+// slackSectionMaxText is Slack's limit for a section block's text.
+const slackSectionMaxText = 3000
+
+// FinalizeWithStatusFooter renders the body as a section block and the reply
+// footer as a context block (Slack's small, dim style), instead of inlining
+// the footer as bold text. The footer is plain_text so characters like "~"
+// in "[ctx: ~1%] · … · ~/path" aren't parsed as strikethrough. Bodies too long
+// for a section block fall back to Finalize with the footer inlined.
+// Implements core.StreamingCardStatusFooter.
+func (c *slackStreamingCard) FinalizeWithStatusFooter(ctx context.Context, content, statusFooter string) error {
+	body := core.MarkdownToSlackMrkdwn(content)
+	if statusFooter == "" || body == "" || len(body) > slackSectionMaxText {
+		return c.Finalize(ctx, appendFooterInline(content, statusFooter))
+	}
+
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.failed {
+		return nil
+	}
+	key := body + "\x00" + statusFooter
+	if key == c.lastSent {
+		return nil
+	}
+	blocks := slack.MsgOptionBlocks(
+		slack.NewSectionBlock(slack.NewTextBlockObject(slack.MarkdownType, body, false, false), nil, nil),
+		slack.NewContextBlock("", slack.NewTextBlockObject(slack.PlainTextType, statusFooter, false, false)),
+	)
+	// text is the notification / accessibility fallback when blocks are present.
+	opts := []slack.MsgOption{slack.MsgOptionText(body+"\n"+statusFooter, false), blocks}
+	var err error
+	if c.ts == "" {
+		if c.threadTS != "" {
+			opts = append(opts, slack.MsgOptionPostMessageParameters(slack.PostMessageParameters{ThreadTimestamp: c.threadTS}))
+		}
+		var ts string
+		_, ts, err = c.client.PostMessageContext(ctx, c.channel, opts...)
+		if err == nil {
+			c.ts = ts
+		}
+	} else {
+		_, _, _, err = c.client.UpdateMessageContext(ctx, c.channel, c.ts, opts...)
+	}
+	if err != nil {
+		c.failed = true
+		return fmt.Errorf("slack: finalize streaming card with footer: %w", err)
+	}
+	c.lastSent = key
+	return nil
+}
+
+// appendFooterInline mirrors the engine's inline fallback for cards that can't
+// use blocks (empty footer returns content unchanged).
+func appendFooterInline(content, footer string) string {
+	if footer == "" {
+		return content
+	}
+	return strings.TrimRight(content, "\n") + "\n\n_" + footer + "_"
+}
+
+var _ core.StreamingCardStatusFooter = (*slackStreamingCard)(nil)
 
 // Failed reports whether the card has entered a terminal failed state.
 func (c *slackStreamingCard) Failed() bool {

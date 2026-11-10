@@ -1635,6 +1635,68 @@ func TestProcessInteractiveEvents_StreamingCardIncludesReplyFooter(t *testing.T)
 	}
 }
 
+// footerAwareStreamingCard implements StreamingCardStatusFooter so the footer
+// arrives separately from the body.
+type footerAwareStreamingCard struct {
+	recordingStreamingCard
+	bodies  []string
+	footers []string
+}
+
+func (c *footerAwareStreamingCard) FinalizeWithStatusFooter(_ context.Context, content, statusFooter string) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.bodies = append(c.bodies, content)
+	c.footers = append(c.footers, statusFooter)
+	return nil
+}
+
+type footerAwareCardPlatform struct {
+	stubPlatformEngine
+	card *footerAwareStreamingCard
+}
+
+func (p *footerAwareCardPlatform) CreateStreamingCard(_ context.Context, _ any) (StreamingCard, error) {
+	return p.card, nil
+}
+
+// A card that can render the footer itself gets the body and footer separately,
+// so it can style the footer (e.g. small/dim) instead of inlining it.
+func TestProcessInteractiveEvents_StreamingCardStatusFooterRenderedSeparately(t *testing.T) {
+	homeDir := t.TempDir()
+	t.Setenv("HOME", homeDir)
+
+	agent := &stubWorkDirAgent{workDir: homeDir}
+	card := &footerAwareStreamingCard{}
+	p := &footerAwareCardPlatform{stubPlatformEngine: stubPlatformEngine{n: "slack"}, card: card}
+	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+	e.SetReplyFooterEnabled(true)
+
+	sessionKey := "slack:user-card-footer-sep"
+	session := e.sessions.GetOrCreateActive(sessionKey)
+	agentSession := newControllableSession("s-card-footer-sep")
+	agentSession.model = "gpt-5.4"
+	agentSession.workDir = filepath.Join(homeDir, "codes", "cc-connect")
+	agentSession.contextUsage = &ContextUsage{UsedTokens: 181424, ContextWindow: 258400}
+	state := &interactiveState{agentSession: agentSession, platform: p, replyCtx: "ctx", agent: agent}
+	e.interactiveStates[sessionKey] = state
+
+	agentSession.events <- Event{Type: EventResult, Content: "answer", Done: true}
+	e.processInteractiveEvents(state, session, e.sessions, sessionKey, "m-sep", time.Now(), nil, nil, state.replyCtx, 0)
+
+	card.mu.Lock()
+	defer card.mu.Unlock()
+	if len(card.finalized) != 0 {
+		t.Fatalf("plain Finalize called with %#v, want FinalizeWithStatusFooter only", card.finalized)
+	}
+	if len(card.bodies) != 1 || card.bodies[0] != "answer" {
+		t.Fatalf("bodies = %#v, want [\"answer\"] without footer inlined", card.bodies)
+	}
+	if !strings.Contains(card.footers[0], "gpt-5.4") || strings.HasPrefix(card.footers[0], "*") {
+		t.Fatalf("footer = %q, want raw footer text with the model", card.footers[0])
+	}
+}
+
 // Regression: an agent that only exposes a workdir (no model/effort/usage)
 // must not emit a footer at all. Previously this produced a footer like
 // "*~*" when the agent was running in the user's home directory, which
