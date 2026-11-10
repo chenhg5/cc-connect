@@ -2343,17 +2343,19 @@ type cujStreamingUpdate struct {
 
 type cujStreamingPlatform struct {
 	stubPlatformEngine
-	mu             sync.Mutex
-	previewOpens   []string
-	previewUpdates []cujStreamingUpdate
-	nextHandle     int
+	mu              sync.Mutex
+	previewOpens    []string
+	previewOpenCtxs []any
+	previewUpdates  []cujStreamingUpdate
+	nextHandle      int
 }
 
-func (p *cujStreamingPlatform) SendPreviewStart(_ context.Context, _ any, content string) (any, error) {
+func (p *cujStreamingPlatform) SendPreviewStart(_ context.Context, rctx any, content string) (any, error) {
 	p.mu.Lock()
 	p.nextHandle++
 	handle := fmt.Sprintf("preview-%d", p.nextHandle)
 	p.previewOpens = append(p.previewOpens, content)
+	p.previewOpenCtxs = append(p.previewOpenCtxs, rctx)
 	p.mu.Unlock()
 	return handle, nil
 }
@@ -2378,6 +2380,16 @@ func (p *cujStreamingPlatform) getPreviewUpdates() []cujStreamingUpdate {
 	defer p.mu.Unlock()
 	out := make([]cujStreamingUpdate, len(p.previewUpdates))
 	copy(out, p.previewUpdates)
+	return out
+}
+
+// getPreviewOpenCtxs returns the reply context each preview was opened
+// with, in open order — parallel to getPreviewOpens.
+func (p *cujStreamingPlatform) getPreviewOpenCtxs() []any {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	out := make([]any, len(p.previewOpenCtxs))
+	copy(out, p.previewOpenCtxs)
 	return out
 }
 
@@ -2597,6 +2609,120 @@ func TestCUJ_STREAM1_StreamingResumesAfterPermissionPrompt(t *testing.T) {
 		if strings.Contains(m, postText) {
 			t.Fatalf("post-resolution text was bulk-sent via plain Send (regression: streaming broken after permission prompt). getSent=%#v", plat.getSent())
 		}
+	}
+}
+
+// ===========================================================================
+// CUJ-STREAM-2 · A mid-turn /ps supplement must move the reply bubble.
+//
+// USER SCENARIO (reported on Feishu): the user sends a prompt, the agent
+// starts streaming into a reply bubble (interactive card) that renders
+// right under the prompt. Mid-turn the user sends "/ps more details". The
+// turn kept streaming into the SAME bubble — which sits ABOVE the /ps
+// message in the chat — so the agent's reply appeared to "remain" in the
+// bubble above the /ps message instead of answering below it.
+//
+// THE FIX: cmdPs pushes a boundaryAnchor carrying the /ps message's reply
+// context; the event loop drains it before rendering the next event —
+// sealing the current bubble (freeze + detach keeps it as a permanent
+// message) and opening a fresh preview anchored to the /ps message, plus
+// re-pointing state.replyCtx so the final response also lands below the
+// supplement.
+//
+// ≥3 user actions: (1) send prompt, (2) send /ps mid-turn, (3) observe the
+// continuation stream land in a new bubble anchored to the /ps message.
+// ===========================================================================
+
+func TestCUJ_STREAM2_PsSupplementReanchorsReplyBubble(t *testing.T) {
+	env := newCUJStreamingEnv(t)
+	plat := env.streamingPlat()
+	key := "test:jack"
+
+	preText := "pre-ps partial answer one two three four five"
+	postText := "post-ps continuation one two three four five"
+	finalText := "final answer after ps"
+
+	// The turn emits a first text chunk then goes quiet — no EventResult —
+	// so the session stays busy and /ps takes the mid-turn inject path.
+	env.agent.setNextSessionEvents([]Event{
+		{Type: EventText, Content: preText},
+	}, 0)
+
+	// === User action 1: send a prompt. ===
+	env.sendStreaming("jack", "please do a thing")
+	env.waitFor("pre-ps preview open", 2*time.Second, func() bool {
+		opens := plat.getPreviewOpens()
+		return len(opens) >= 1 && strings.Contains(opens[0], "pre-ps")
+	})
+
+	// The first bubble is anchored to the prompt's reply context.
+	if ctxs := plat.getPreviewOpenCtxs(); len(ctxs) != 1 || ctxs[0] != "ctx-jack" {
+		t.Fatalf("first preview anchor = %v, want exactly [ctx-jack]", ctxs)
+	}
+
+	// Preload what the agent emits once the supplement is injected: more
+	// streamed text, then the turn's final result.
+	env.agent.mu.Lock()
+	if len(env.agent.sessions) == 0 {
+		env.agent.mu.Unlock()
+		t.Fatal("no agent session started")
+	}
+	sess := env.agent.sessions[0]
+	env.agent.mu.Unlock()
+	sess.mu.Lock()
+	sess.pendingEvents = []Event{
+		{Type: EventText, Content: postText},
+		{Type: EventResult, Content: finalText, Done: true},
+	}
+	sess.mu.Unlock()
+
+	// === User action 2: send /ps mid-turn (distinct reply ctx so the
+	// two bubble anchors are distinguishable). ===
+	env.engine.ReceiveMessage(plat, &Message{
+		SessionKey: key,
+		Platform:   "test",
+		MessageID:  "msg-ps",
+		UserID:     "jack",
+		UserName:   "jack",
+		Content:    "/ps more details",
+		ReplyCtx:   "ctx-ps",
+	})
+
+	// === User action 3: observe the continuation bubble. ===
+	// A SECOND preview must open, anchored to the /ps message's reply
+	// context — in Feishu that renders below the /ps message. On the buggy
+	// path the post-supplement stream kept updating the first (ctx-jack)
+	// bubble above the /ps message and no second preview ever opened.
+	env.waitFor("post-ps preview opens under ps ctx", 2*time.Second, func() bool {
+		ctxs := plat.getPreviewOpenCtxs()
+		return len(ctxs) >= 2 && ctxs[1] == "ctx-ps"
+	})
+	if opens := plat.getPreviewOpens(); len(opens) < 2 || !strings.Contains(opens[1], "post-ps") {
+		t.Fatalf("post-ps preview opens = %v, want a second open containing post-ps text", opens)
+	}
+
+	// The sealed bubble above the /ps message must NOT have received any
+	// post-supplement text — that is the reported bug verbatim.
+	for _, u := range plat.getPreviewUpdates() {
+		if u.Handle == "preview-1" && strings.Contains(u.Content, "post-ps") {
+			t.Fatalf("post-ps text streamed into the sealed bubble above the /ps message (regression): %q", u.Content)
+		}
+	}
+
+	// Turn finalization lands below the supplement: either as the final
+	// update on the ps-anchored preview or as a send under ctx-ps.
+	env.waitFor("turn finalizes", 2*time.Second, func() bool {
+		for _, u := range plat.getPreviewUpdates() {
+			if u.Handle == "preview-2" && strings.Contains(u.Content, finalText) {
+				return true
+			}
+		}
+		return env.sentContains(finalText)
+	})
+
+	// The /ps acknowledgement reply itself is still delivered.
+	if !env.sentContains(env.engine.i18n.T(MsgPsSent)) {
+		t.Fatalf("expected MsgPsSent ack reply, got %v", plat.getSent())
 	}
 }
 

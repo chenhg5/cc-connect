@@ -531,6 +531,15 @@ type workspaceInitFlow struct {
 	channelName string
 }
 
+// boundaryAnchor marks where a mid-turn supplement (e.g. /ps) should
+// re-anchor the turn's reply bubble: output rendered after the boundary
+// is sent under the supplement's reply context so it appears below the
+// supplement message instead of remaining in the bubble above it.
+type boundaryAnchor struct {
+	replyCtx  any
+	messageID string
+}
+
 // queuedMessage holds a message that arrived while the session was busy.
 // The message is NOT sent to agent stdin at queue time; the event loop
 // sends it after the current turn completes to avoid mid-turn interference.
@@ -572,14 +581,19 @@ type interactiveState struct {
 	pending                  *pendingPermission
 	pendingUserInput         *pendingUserInput
 	pendingMessages          []queuedMessage // messages queued while session was busy
-	approveAll               bool            // when true, auto-approve all permission requests for this session
-	fromVoice                bool            // true if current turn originated from voice transcription
-	sideText                 string
-	deleteMode               *deleteModeState
-	modelSwitch              *modelSwitchState
-	pendingProviderAdd       *pendingProviderAddState
-	lastAutoCompressAt       time.Time
-	lastAutoCompressTokens   int
+	// boundaryAnchors holds the reply contexts of supplements injected
+	// into the in-flight turn (/ps), pushed by the command handler. The
+	// event loop drains them before processing the next event and
+	// re-anchors its reply bubble to the latest one.
+	boundaryAnchors        []boundaryAnchor
+	approveAll             bool // when true, auto-approve all permission requests for this session
+	fromVoice              bool // true if current turn originated from voice transcription
+	sideText               string
+	deleteMode             *deleteModeState
+	modelSwitch            *modelSwitchState
+	pendingProviderAdd     *pendingProviderAddState
+	lastAutoCompressAt     time.Time
+	lastAutoCompressTokens int
 
 	// Unsolicited event reader: a background goroutine that consumes agent
 	// events between user-initiated turns (e.g. background task completions).
@@ -767,6 +781,33 @@ func (s *interactiveState) markStopped() {
 		s.stopCh = make(chan struct{})
 	}
 	close(s.stopCh)
+}
+
+// pushBoundaryAnchor records a mid-turn supplement's reply context for the
+// running event loop to re-anchor to. nil reply contexts are ignored.
+func (s *interactiveState) pushBoundaryAnchor(anchor boundaryAnchor) {
+	if anchor.replyCtx == nil {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.boundaryAnchors = append(s.boundaryAnchors, anchor)
+}
+
+// popLatestBoundaryAnchor drains all pending boundary anchors and returns
+// the most recent one; ok is false when none are pending. Intermediate
+// anchors are dropped because re-anchoring straight to the latest
+// supplement produces the same visible result without sealing a bubble
+// that would have had no content.
+func (s *interactiveState) popLatestBoundaryAnchor() (anchor boundaryAnchor, ok bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if len(s.boundaryAnchors) == 0 {
+		return boundaryAnchor{}, false
+	}
+	anchor = s.boundaryAnchors[len(s.boundaryAnchors)-1]
+	s.boundaryAnchors = nil
+	return anchor, true
 }
 
 // resolve safely closes the Resolved channel exactly once.
@@ -4061,6 +4102,10 @@ func (e *Engine) processInteractiveMessageWith(p Platform, msg *Message, session
 	state.platform = p
 	state.replyCtx = msg.ReplyCtx
 	state.currentMessageID = msg.MessageID
+	// Boundary anchors pushed before this message arrived belonged to the
+	// previous turn's bubble position and are stale — this turn anchors to
+	// the newest user message.
+	state.boundaryAnchors = nil
 	state.currentTurnUserMessageTimeMs = msg.UserMessageTimeMs
 	state.mu.Unlock()
 	stopRecallMonitor := e.startMessageRecallMonitor(interactiveKey)
@@ -5638,6 +5683,66 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 		p := state.platform
 		state.mu.Unlock()
 
+		// Re-anchor the reply bubble when a mid-turn supplement (/ps)
+		// landed since the previous event. Drained here — after an event
+		// was pulled but before it is rendered — so the first event
+		// processed after the supplement opens a fresh bubble replying to
+		// the /ps message, instead of remaining in the bubble anchored to
+		// the earlier user message above it.
+		if anchor, ok := state.popLatestBoundaryAnchor(); ok && p != nil {
+			// Flush the unsent tail of the current segment under the OLD
+			// context when no preview is carrying it — same rule the
+			// permission-request boundary below applies.
+			anchorPreviewActive := sp.canPreview()
+			if len(textParts) > segmentStart {
+				if !anchorPreviewActive {
+					segment := strings.Join(textParts[segmentStart:], "")
+					if segment != "" {
+						for _, chunk := range SplitMessageCodeFenceAware(segment, maxPlatformMessageLen) {
+							sendWorkspace(p, replyCtx, chunk)
+						}
+					}
+				}
+				segmentStart = len(textParts)
+				silentHold = false
+			}
+			sp.freeze()
+			if anchorPreviewActive {
+				sp.detachPreview() // keep the sealed bubble as a permanent message
+			}
+			replyCtx = anchor.replyCtx
+			state.mu.Lock()
+			state.replyCtx = anchor.replyCtx
+			if anchor.messageID != "" {
+				state.currentMessageID = anchor.messageID
+			}
+			state.mu.Unlock()
+			sp = newStreamPreview(e.streamPreview, p, replyCtx, e.ctx, workspaceRenderer)
+			// Seal the pre-supplement progress card: its segment is done
+			// updating, so it must not spin as "running" forever.
+			cp.Finalize(ProgressCardStateCompleted)
+			cp.reanchor(replyCtx)
+			// Rich card: drop the sealed card's handle so the next rich
+			// event opens a fresh card under the supplement.
+			cardMessageID = nil
+			// Aggregated streaming card (Slack/DingTalk): finalize the card
+			// above the supplement at its current content, then continue
+			// in a new one anchored below it.
+			if streamCard != nil && !streamCard.Failed() {
+				_ = streamCard.Finalize(e.ctx, buildCardContent(cardThinkingText, cardToolCalls, cardAnswerText.String()))
+				streamCard = nil
+			}
+			if streamCard == nil {
+				if scp, ok := p.(StreamingCardPlatform); ok {
+					if sc, err := scp.CreateStreamingCard(e.ctx, replyCtx); err != nil {
+						slog.Debug("streaming card re-anchor failed", "platform", p.Name(), "error", err)
+					} else {
+						streamCard = sc
+					}
+				}
+			}
+		}
+
 		// main codebase has no per-session quiet flag; pr309 referenced
 		// sessionQuiet which we drop. e.display.ThinkingMessages /
 		// ToolMessages handle user-level quiet in the fallback branches.
@@ -6651,6 +6756,10 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				state.currentMessageID = queued.messageID
 				state.fromVoice = queued.fromVoice
 				state.currentTurnUserMessageTimeMs = queued.userMessageTimeMs
+				// The queued message is newer than any /ps anchor pushed
+				// so far — the next turn anchors to it, not to a stale
+				// supplement.
+				state.boundaryAnchors = nil
 				state.mu.Unlock()
 
 				// Stop the previous turn's typing indicator
@@ -7005,6 +7114,9 @@ func (e *Engine) drainPendingMessages(state *interactiveState, session *Session,
 		state.currentMessageID = queued.messageID
 		state.fromVoice = queued.fromVoice
 		state.currentTurnUserMessageTimeMs = queued.userMessageTimeMs
+		// The queued message is newer than any /ps anchor pushed so far —
+		// the next turn anchors to it, not to a stale supplement.
+		state.boundaryAnchors = nil
 		state.mu.Unlock()
 
 		e.i18n.DetectAndSet(queued.content)
@@ -7120,6 +7232,13 @@ func (e *Engine) cmdPs(p Platform, msg *Message, args []string) {
 		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgPsNoSession))
 		return
 	}
+	// Re-anchor the turn's reply bubble below this supplement: the running
+	// event loop seals the bubble opened for the earlier user message and
+	// continues in a new one replying to the /ps message, so the agent's
+	// reply no longer renders above the /ps message. Pushed before Send so
+	// it is already pending when the injected turn's next event arrives —
+	// pushing after would let a fast event slip into the sealed bubble.
+	state.pushBoundaryAnchor(boundaryAnchor{replyCtx: msg.ReplyCtx, messageID: msg.MessageID})
 	if err := state.agentSession.Send(text, "", nil, nil); err != nil {
 		slog.Error("ps: send failed", "error", err)
 		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgPsSendFailed))
