@@ -56,12 +56,13 @@ type Agent struct {
 
 	timeout time.Duration
 
-	callbackEnabled    bool
-	callbackAuth       bool
-	callbackInsecureOK bool
-	callbackAddr       string
-	callbackBase       string
-	replyToken         string // never log
+	callbackEnabled       bool
+	callbackAuth          bool
+	callbackInsecureOK    bool
+	callbackAddr          string
+	callbackAdvertiseHost string
+	callbackBase          string
+	replyToken            string // never log
 
 	outboxEnabled  bool
 	explicitOutbox string
@@ -88,24 +89,25 @@ func New(opts map[string]any) (core.Agent, error) {
 		return nil, err
 	}
 	a := &Agent{
-		webhookURL:         cfg.webhookURL,
-		apiKey:             cfg.apiKey,
-		authHeader:         cfg.authHeader,
-		keyEnv:             cfg.keyEnv,
-		workDir:            cfg.workDir,
-		timeout:            cfg.timeout,
-		callbackEnabled:    cfg.callbackEnabled,
-		callbackAuth:       cfg.callbackAuth,
-		callbackInsecureOK: cfg.callbackInsecureOK,
-		callbackAddr:       cfg.callbackAddr,
-		outboxEnabled:      cfg.outboxEnabled,
-		explicitOutbox:     cfg.explicitOutbox,
-		pathAllow:          cfg.pathAllow,
-		embedImages:        cfg.embedImages,
-		maxEmbedBytes:      cfg.maxEmbedBytes,
-		client:             &http.Client{Timeout: webhookHTTPTimeout},
-		waiters:            make(map[string]chan replyMsg),
-		done:               make(map[string]time.Time),
+		webhookURL:            cfg.webhookURL,
+		apiKey:                cfg.apiKey,
+		authHeader:            cfg.authHeader,
+		keyEnv:                cfg.keyEnv,
+		workDir:               cfg.workDir,
+		timeout:               cfg.timeout,
+		callbackEnabled:       cfg.callbackEnabled,
+		callbackAuth:          cfg.callbackAuth,
+		callbackInsecureOK:    cfg.callbackInsecureOK,
+		callbackAddr:          cfg.callbackAddr,
+		callbackAdvertiseHost: cfg.callbackAdvertiseHost,
+		outboxEnabled:         cfg.outboxEnabled,
+		explicitOutbox:        cfg.explicitOutbox,
+		pathAllow:             cfg.pathAllow,
+		embedImages:           cfg.embedImages,
+		maxEmbedBytes:         cfg.maxEmbedBytes,
+		client:                &http.Client{Timeout: webhookHTTPTimeout},
+		waiters:               make(map[string]chan replyMsg),
+		done:                  make(map[string]time.Time),
 	}
 	if cfg.callbackAuth {
 		token, err := randomHex(32)
@@ -269,22 +271,24 @@ func (a *Agent) authorized(r *http.Request) bool {
 }
 
 type parsedConfig struct {
-	webhookURL         string
-	webhookHost        string
-	apiKey             string
-	authHeader         string
-	keyEnv             string
-	workDir            string
-	timeout            time.Duration
-	callbackEnabled    bool
-	callbackAuth       bool
-	callbackAddr       string
-	outboxEnabled      bool
-	explicitOutbox     string
-	embedImages        bool
-	maxEmbedBytes      int
-	callbackInsecureOK bool
-	pathAllow          []string
+	webhookURL            string
+	webhookHost           string
+	apiKey                string
+	authHeader            string
+	keyEnv                string
+	workDir               string
+	timeout               time.Duration
+	callbackEnabled       bool
+	callbackAuth          bool
+	callbackAddr          string
+	callbackAdvertiseHost string
+	callbackInsecureOK    bool
+	webhookInsecureOK     bool
+	outboxEnabled         bool
+	explicitOutbox        string
+	embedImages           bool
+	maxEmbedBytes         int
+	pathAllow             []string
 }
 
 func parseOptions(opts map[string]any) (parsedConfig, error) {
@@ -309,8 +313,14 @@ func parseOptions(opts map[string]any) (parsedConfig, error) {
 	if err != nil || u.Host == "" || (u.Scheme != "https" && u.Scheme != "http") {
 		return parsedConfig{}, fmt.Errorf("grokbot: webhook_url must be an http(s) URL")
 	}
-	if u.Scheme != "https" && !localHost(u.Hostname()) {
-		slog.Warn("grokbot: webhook_url is not https", "host", u.Hostname())
+	if v, ok := boolFromAny(opts["webhook_insecure_ok"]); ok {
+		cfg.webhookInsecureOK = v
+	}
+	if u.Scheme == "http" && !isLoopbackBindHost(u.Hostname()) && !cfg.webhookInsecureOK {
+		return parsedConfig{}, fmt.Errorf("grokbot: webhook_url host %s is not https; the API key and reply token would be sent in cleartext. Use https, loopback http for a local mock, or webhook_insecure_ok = true on a trusted network", u.Hostname())
+	}
+	if u.Scheme == "http" && !isLoopbackBindHost(u.Hostname()) {
+		slog.Warn("grokbot: webhook_url is not https; the key and reply token are sent in cleartext", "host", u.Hostname())
 	}
 	cfg.webhookURL = rawURL
 	cfg.webhookHost = u.Host
@@ -362,6 +372,21 @@ func parseOptions(opts map[string]any) (parsedConfig, error) {
 		if !cfg.callbackAuth && !isLoopbackBindHost(host) && !cfg.callbackInsecureOK {
 			return parsedConfig{}, fmt.Errorf("grokbot: callback_auth=false cannot listen on %s; use a loopback callback_addr or set callback_insecure_ok = true", cfg.callbackAddr)
 		}
+		if isWildcardBindHost(host) {
+			adv, err := normalizeAdvertiseHost(stringOpt(opts, "callback_advertise_host"))
+			if err != nil {
+				return parsedConfig{}, err
+			}
+			if adv == "" {
+				return parsedConfig{}, fmt.Errorf("grokbot: callback_addr %s listens on every interface; set callback_advertise_host to the host or IP Grok Bot can reach. A loopback callback_addr does not need it", cfg.callbackAddr)
+			}
+			cfg.callbackAdvertiseHost = adv
+		}
+	}
+	if adv, err := normalizeAdvertiseHost(stringOpt(opts, "callback_advertise_host")); err != nil {
+		return parsedConfig{}, err
+	} else if adv != "" {
+		cfg.callbackAdvertiseHost = adv
 	}
 	if v, ok := opts["reply_path_allow"]; ok {
 		list, err := stringList(v)
@@ -470,15 +495,11 @@ func expandHome(path string) string {
 	return path
 }
 
-func localHost(host string) bool {
-	return isLoopbackBindHost(host)
-}
-
 // isLoopbackBindHost reports whether a callback bind stays on the local machine.
 // Empty host, 0.0.0.0, and :: listen on every interface.
 func isLoopbackBindHost(host string) bool {
 	host = strings.Trim(host, "[]")
-	if host == "" || host == "0.0.0.0" || host == "::" {
+	if isWildcardBindHost(host) {
 		return false
 	}
 	if strings.EqualFold(host, "localhost") {
@@ -486,6 +507,39 @@ func isLoopbackBindHost(host string) bool {
 	}
 	ip := net.ParseIP(host)
 	return ip != nil && ip.IsLoopback()
+}
+
+func isWildcardBindHost(host string) bool {
+	host = strings.Trim(host, "[]")
+	return host == "" || host == "0.0.0.0" || host == "::"
+}
+
+// normalizeAdvertiseHost accepts a hostname, IP, or host:port. A wildcard is
+// rejected because it is not a destination the routine can dial.
+func normalizeAdvertiseHost(raw string) (string, error) {
+	s := strings.TrimSpace(raw)
+	if s == "" {
+		return "", nil
+	}
+	if strings.Contains(s, "://") {
+		u, err := url.Parse(s)
+		if err != nil || u.Host == "" {
+			return "", fmt.Errorf("grokbot: callback_advertise_host must be a host or IP")
+		}
+		s = u.Hostname()
+	} else if h, _, err := net.SplitHostPort(s); err == nil {
+		s = h
+	}
+	s = strings.Trim(s, "[]")
+	if s == "" || isWildcardBindHost(s) {
+		return "", fmt.Errorf("grokbot: callback_advertise_host must be an address the routine can connect to, not a wildcard")
+	}
+	return s, nil
+}
+
+func stringOpt(opts map[string]any, key string) string {
+	s, _ := opts[key].(string)
+	return s
 }
 
 func stringList(v any) ([]string, error) {

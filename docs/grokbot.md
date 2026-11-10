@@ -77,14 +77,15 @@ Start cc-connect only after `GROK_BOT_WEBHOOK_KEY` is set. A missing URL or an e
 
 | Option | Default | Meaning |
 | --- | --- | --- |
-| `webhook_url` | required | Automation webhook URL. Use https except for a localhost mock. |
+| `webhook_url` | required | Automation webhook URL. Must be `https` so the API key and reply token are not sent in cleartext. `http` is accepted only for a loopback host (`127.0.0.1`, `localhost`, `::1`), which is the local mock. Anywhere else requires `webhook_insecure_ok = true`, and that sends both secrets in cleartext. |
 | `webhook_key_env` | `GROK_BOT_WEBHOOK_KEY` | Environment variable that holds the bearer key. `webhook_key` in the TOML file is rejected. |
 | `work_dir` | `.` | Where inbound images and files are saved. `/dir` updates it for the next turn. |
 | `timeout` | `6m` | How long to wait for the reply. A Go duration (`6m`, `180s`). `timeout_mins` is accepted instead. |
 | `callback` | `true` | Listen for `POST /outbox/<id>`. |
-| `callback_addr` | `127.0.0.1:9876` | Bind address. `127.0.0.1:0` picks a free port and puts it in `reply.http`. |
+| `callback_addr` | `127.0.0.1:9876` | Bind address. Loopback (`127.0.0.1`, `::1`) is advertised as that same address in `reply.http`. A wildcard (`0.0.0.0`, `::`) is refused unless `callback_advertise_host` names the host or IP the routine can actually dial. cc-connect does not rewrite a wildcard bind to `127.0.0.1`. |
 | `callback_auth` | `true` | Require `Authorization: Bearer <reply.token>` (or `X-Grokbot-Token`). The token is random per process and is sent only inside the webhook body. `false` is refused unless `callback_addr` is loopback, or `callback_insecure_ok = true`. |
 | `callback_insecure_ok` | `false` | Explicit opt-in for `callback_auth = false` on a non-loopback bind. |
+| `callback_advertise_host` | empty | Host or IP put in `reply.http`. Required when `callback_addr` is `0.0.0.0` or `::`. Example: `192.168.1.10`, while the socket still listens on the wildcard. |
 | `reply_path_allow` | empty | Extra directories a reply may read, besides `work_dir`, `<work_dir>/.cc-connect/attachments`, and the outbox. |
 | `outbox` | `true` | Also accept a JSON file. |
 | `outbox_dir` | `<work_dir>/.cc-connect/grokbot/outbox` | Directory for `reply.file`. Created mode `0700`. |
@@ -137,7 +138,7 @@ POST it to `reply.http` or write it atomically to `reply.file` (`write temp` + `
 
 `content` is accepted as an alias of `text`. `{"error":"model overloaded"}` ends the turn and shows the error in chat. Each image or file is either `data_base64` or a local path. After symlink resolution the path must sit inside `work_dir`, `<work_dir>/.cc-connect/attachments`, the outbox directory, or `reply_path_allow`. Anything else (home directory, SSH keys, config files) fails the turn and is not read into the chat. Remote URLs are not fetched. The per-attachment cap is 50 MiB. A path whose extension is unknown is typed with `http.DetectContentType`, not assumed to be `image/png`.
 
-Write `reply.file` by renaming a finished temp file into place. A file that is still not valid JSON after about a second fails the turn with a clear error instead of waiting out the full timeout. A callback POST that arrives after the turn has finished gets HTTP 409, not "unknown id". An invalid body is HTTP 400 even in that case.
+Write `reply.file` by renaming a finished temp file into place. The file must be a regular file of at most 32 MiB (the same cap as the HTTP callback body). A symlink, device, or FIFO is rejected and is not opened in a way that can block. A file that is still not valid JSON after about a second fails the turn with a clear error instead of waiting out the full timeout. A callback POST that arrives after the turn has finished gets HTTP 409, not "unknown id". An invalid body is HTTP 400 even in that case.
 
 With `callback_auth = true` (the default), send the token back:
 
@@ -163,7 +164,7 @@ HTTP results from the webhook itself:
 
 **Inbound (chat → Grok Bot).** The platform hands cc-connect image bytes. They are written under `work_dir/.cc-connect/attachments/<message-id>/` and the absolute path is both appended to `text` and listed in `images`. A desktop routine on the same machine can open `path`. A cloud routine cannot; set `embed_images = true` so the webhook also carries `data_base64` (up to `max_embed_bytes` per image).
 
-**Outbound (Grok Bot → chat).** Put paths or base64 in `images` / `files`. cc-connect reads them and calls the platform sender, so WeChat and Feishu receive real images rather than a path printed in the text. Platforms without image send still get the text; the skipped attachment is logged.
+**Outbound (Grok Bot → chat).** Put paths or base64 in `images` / `files`. cc-connect reads them and calls the platform sender, so WeChat and Feishu receive real images rather than a path printed in the text. A platform that cannot send images or files still gets the text, and a reply that is only attachments is not dropped: the chat shows which names could not be delivered.
 
 ## 5. Try it without Grok Bot
 

@@ -220,6 +220,7 @@ const (
 	MsgFailedToStartAgentSession MsgKey = "failed_to_start_agent_session"
 	MsgFailedToDeleteSession     MsgKey = "failed_to_delete_session"
 	MsgEmptyResponse             MsgKey = "empty_response"
+	MsgTurnMediaUndeliverable    MsgKey = "turn_media_undeliverable"
 	MsgPermissionPrompt          MsgKey = "permission_prompt"
 	MsgPermissionAllowed         MsgKey = "permission_allowed"
 	MsgPermissionApproveAll      MsgKey = "permission_approve_all"
@@ -900,6 +901,13 @@ var messages = map[MsgKey]map[Language]string{
 		LangTraditionalChinese: "(空回應)",
 		LangJapanese:           "（空のレスポンス）",
 		LangSpanish:            "(respuesta vacía)",
+	},
+	MsgTurnMediaUndeliverable: {
+		LangEnglish:            "Could not deliver attachment(s) on this platform: %s",
+		LangChinese:            "当前平台无法接收这些附件：%s",
+		LangTraditionalChinese: "目前平台無法接收這些附件：%s",
+		LangJapanese:           "このプラットフォームでは添付を配信できません: %s",
+		LangSpanish:            "No se pudieron entregar los adjuntos en esta plataforma: %s",
 	},
 	MsgPermissionPrompt: {
 		LangEnglish:            "⚠️ **Permission Request**\n\nAgent wants to use **%s**:\n\n```\n%s\n```\n\nReply **allow** / **deny** / **allow all** (skip all future prompts this session).",

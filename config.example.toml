@@ -2308,11 +2308,15 @@ app_secret = "your-feishu-app-secret"
 #
 # [projects.agent.options]
 # webhook_url = "https://api2.cursor.sh/automations/webhook/<routine-id>"
+# # http is only accepted for loopback (local mock). Remote cleartext needs:
+# # webhook_insecure_ok = true
 # # webhook_key_env = "GROK_BOT_WEBHOOK_KEY"   # default / 默认
 # work_dir = "/path/to/project"                # inbound images are saved here / 入站图片落在这里
 # timeout = "6m"                               # or timeout_mins = 6
 # callback = true                              # POST /outbox/<id> on localhost
-# callback_addr = "127.0.0.1:9876"             # use 127.0.0.1:0 for an ephemeral port
+# callback_addr = "127.0.0.1:9876"             # loopback is advertised as-is
+# # callback_addr = "0.0.0.0:9876"             # requires callback_advertise_host
+# # callback_advertise_host = "192.168.1.10"   # address the routine can dial
 # callback_auth = true                         # require reply.token from the webhook body
 # callback_insecure_ok = false                 # required to combine callback_auth=false with a public bind
 # outbox = true                                # also accept outbox/<id>.json

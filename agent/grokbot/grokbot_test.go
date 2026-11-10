@@ -12,6 +12,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -802,7 +803,9 @@ func TestCallbackAuthFalse_OptInAndSend(t *testing.T) {
 	opts["callback_auth"] = false
 	opts["callback_insecure_ok"] = true
 	opts["callback_addr"] = "0.0.0.0:0"
+	opts["callback_advertise_host"] = "127.0.0.1"
 	ag := mustAgent(t, opts)
+	require.True(t, strings.HasPrefix(ag.callbackBase, "http://127.0.0.1:"), ag.callbackBase)
 	resp, err := http.Get(ag.callbackBase + "/health")
 	require.NoError(t, err)
 	_ = resp.Body.Close()
@@ -834,6 +837,108 @@ func TestCallbackAuthFalse_OptInAndSend(t *testing.T) {
 	ev := readEvents(t, sess.Events(), 2)
 	require.Equal(t, "open callback", ev[len(ev)-1].Content)
 }
+
+func TestWebhookHTTPRemoteRefusedUnlessOptIn(t *testing.T) {
+	opts := baseOpts(t)
+	opts["webhook_url"] = "http://example.test/hook"
+	_, err := New(opts)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "not https")
+	require.NotContains(t, err.Error(), testKey)
+
+	opts["webhook_insecure_ok"] = true
+	ag := mustAgent(t, opts)
+	require.Equal(t, "http://example.test/hook", ag.webhookURL)
+
+	loop := baseOpts(t)
+	loop["webhook_url"] = "http://127.0.0.1:9/hook"
+	ag = mustAgent(t, loop)
+	require.Equal(t, "http://127.0.0.1:9/hook", ag.webhookURL)
+}
+
+func TestLoopbackCallbackAdvertisesItself(t *testing.T) {
+	opts := baseOpts(t)
+	opts["callback"] = true
+	opts["callback_addr"] = "127.0.0.1:0"
+	ag := mustAgent(t, opts)
+	require.True(t, strings.HasPrefix(ag.callbackBase, "http://127.0.0.1:"), ag.callbackBase)
+	require.NotContains(t, ag.callbackBase, "0.0.0.0")
+}
+
+func TestWildcardCallbackRequiresAdvertiseHost(t *testing.T) {
+	opts := baseOpts(t)
+	opts["callback"] = true
+	opts["callback_addr"] = "0.0.0.0:0"
+	_, err := New(opts)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "callback_advertise_host")
+	require.NotContains(t, err.Error(), "127.0.0.1")
+
+	opts["callback_advertise_host"] = "10.1.2.3"
+	ag := mustAgent(t, opts)
+	require.True(t, strings.HasPrefix(ag.callbackBase, "http://10.1.2.3:"), ag.callbackBase)
+	require.NotContains(t, ag.callbackBase, "127.0.0.1")
+}
+
+func TestConsumeOutbox_RejectsUnsafeFiles(t *testing.T) {
+	opts := baseOpts(t)
+	ag := mustAgent(t, opts)
+	dir := ag.outboxDir()
+	require.NoError(t, os.MkdirAll(dir, 0o700))
+
+	id := newID()
+	big, err := os.Create(filepath.Join(dir, id+".json"))
+	require.NoError(t, err)
+	require.NoError(t, big.Truncate(maxReplyBytes+1))
+	require.NoError(t, big.Close())
+	_, kind, err := ag.consumeOutbox(id)
+	require.Equal(t, outboxFatal, kind)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "exceeds")
+
+	real := filepath.Join(dir, "real.json")
+	require.NoError(t, os.WriteFile(real, []byte(`{"text":"hidden"}`), 0o600))
+	linkID := newID()
+	require.NoError(t, os.Symlink(real, filepath.Join(dir, linkID+".json")))
+	msg, kind, err := ag.consumeOutbox(linkID)
+	require.Equal(t, outboxFatal, kind)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "symlink")
+	require.Empty(t, msg.text)
+	require.NotContains(t, err.Error(), "hidden")
+
+	require.Error(t, replyFileProblem("d", modeInfo{mode: os.ModeDevice | 0o644, size: 1}))
+	require.Error(t, replyFileProblem("p", modeInfo{mode: os.ModeNamedPipe | 0o644, size: 0}))
+
+	if runtime.GOOS == "windows" {
+		return
+	}
+	fifoID := newID()
+	fifo := filepath.Join(dir, fifoID+".json")
+	require.NoError(t, mkfifo(fifo))
+	done := make(chan struct{})
+	go func() {
+		_, _, _ = ag.consumeOutbox(fifoID)
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("reading a FIFO outbox reply blocked")
+	}
+}
+
+type modeInfo struct {
+	mode os.FileMode
+	size int64
+}
+
+func (m modeInfo) Name() string       { return "reply.json" }
+func (m modeInfo) Size() int64        { return m.size }
+func (m modeInfo) Mode() os.FileMode  { return m.mode }
+func (m modeInfo) ModTime() time.Time { return time.Time{} }
+func (m modeInfo) IsDir() bool        { return m.mode.IsDir() }
+func (m modeInfo) Sys() any           { return nil }
 
 func tinyPNG(t *testing.T) []byte {
 	t.Helper()

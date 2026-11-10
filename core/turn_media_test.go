@@ -1,6 +1,7 @@
 package core
 
 import (
+	"context"
 	"strings"
 	"testing"
 	"time"
@@ -92,8 +93,12 @@ func TestProcessInteractiveEvents_TurnMediaRespectsAttachmentSend(t *testing.T) 
 	}
 	e.processInteractiveEvents(state, session, e.sessions, sessionKey, "m1", time.Now(), nil, nil, state.replyCtx, 0)
 
-	if sent := strings.Join(p.getSent(), "\n"); !strings.Contains(sent, "text stays") {
+	sent := strings.Join(p.getSent(), "\n")
+	if !strings.Contains(sent, "text stays") {
 		t.Fatalf("sent text = %q", sent)
+	}
+	if !strings.Contains(sent, "a.png") || !strings.Contains(sent, "a.txt") {
+		t.Fatalf("sent text = %q, want a visible fallback for the dropped attachments", sent)
 	}
 	if len(p.images) != 0 || len(p.files) != 0 {
 		t.Fatalf("attachments leaked: images=%#v files=%#v", p.images, p.files)
@@ -120,7 +125,77 @@ func TestProcessInteractiveEvents_TurnMediaSkipsUnsupportedPlatform(t *testing.T
 		Images:  []ImageAttachment{{Data: []byte("x"), FileName: "a.png"}},
 	}
 	e.processInteractiveEvents(state, session, e.sessions, sessionKey, "m1", time.Now(), nil, nil, state.replyCtx, 0)
-	if sent := strings.Join(p.getSent(), "\n"); !strings.Contains(sent, "words only") {
-		t.Fatalf("sent text = %q", sent)
+	sent := strings.Join(p.getSent(), "\n")
+	if !strings.Contains(sent, "words only") || !strings.Contains(sent, "a.png") {
+		t.Fatalf("sent text = %q, want the reply and a visible attachment fallback", sent)
+	}
+}
+
+func TestProcessInteractiveEvents_ImageOnlyOnTextPlatformIsVisible(t *testing.T) {
+	p := &stubPlatformEngine{n: "text-only"}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	sessionKey := "test:user-image"
+	session := e.sessions.GetOrCreateActive(sessionKey)
+	agentSession := newControllableSession("s1")
+	state := &interactiveState{
+		agentSession: agentSession,
+		platform:     p,
+		replyCtx:     "ctx-1",
+	}
+	e.interactiveStates[sessionKey] = state
+
+	agentSession.events <- Event{
+		Type:   EventResult,
+		Done:   true,
+		Images: []ImageAttachment{{Data: []byte("png"), FileName: "photo.png"}},
+		Files:  []FileAttachment{{Data: []byte("pdf"), FileName: "notes.pdf"}},
+	}
+	e.processInteractiveEvents(state, session, e.sessions, sessionKey, "m1", time.Now(), nil, nil, state.replyCtx, 0)
+
+	sent := strings.Join(p.getSent(), "\n")
+	if strings.TrimSpace(sent) == "" || strings.Contains(sent, "(empty response)") {
+		t.Fatalf("sent text = %q, want a visible fallback instead of silence", sent)
+	}
+	if !strings.Contains(sent, "photo.png") || !strings.Contains(sent, "notes.pdf") {
+		t.Fatalf("sent text = %q, want both attachment names", sent)
+	}
+}
+
+type imageOnlyPlatform struct {
+	stubPlatformEngine
+	images []ImageAttachment
+}
+
+func (p *imageOnlyPlatform) SendImage(_ context.Context, _ any, img ImageAttachment) error {
+	p.images = append(p.images, img)
+	return nil
+}
+
+func TestProcessInteractiveEvents_FileOnlyWithoutFileSenderIsVisible(t *testing.T) {
+	p := &imageOnlyPlatform{stubPlatformEngine: stubPlatformEngine{n: "images-only"}}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	sessionKey := "test:user-file"
+	session := e.sessions.GetOrCreateActive(sessionKey)
+	agentSession := newControllableSession("s1")
+	state := &interactiveState{
+		agentSession: agentSession,
+		platform:     p,
+		replyCtx:     "ctx-1",
+	}
+	e.interactiveStates[sessionKey] = state
+
+	agentSession.events <- Event{
+		Type:  EventResult,
+		Done:  true,
+		Files: []FileAttachment{{Data: []byte("bin"), FileName: "report.pdf"}},
+	}
+	e.processInteractiveEvents(state, session, e.sessions, sessionKey, "m1", time.Now(), nil, nil, state.replyCtx, 0)
+
+	sent := strings.Join(p.getSent(), "\n")
+	if !strings.Contains(sent, "report.pdf") {
+		t.Fatalf("sent text = %q, want the file name", sent)
+	}
+	if len(p.images) != 0 {
+		t.Fatalf("images = %#v, file must not be sent as an image", p.images)
 	}
 }

@@ -77,14 +77,15 @@ type = "weixin"
 
 | 选项 | 默认 | 含义 |
 | --- | --- | --- |
-| `webhook_url` | 必填 | 自动化 webhook。除了本机 mock，请使用 https。 |
+| `webhook_url` | 必填 | 自动化 webhook。必须是 `https`，避免 API key 和回复 token 明文传输。只有回环地址（`127.0.0.1`、`localhost`、`::1`）可以用 `http`，这是本机 mock。其他地址要设 `webhook_insecure_ok = true`，此时密钥和 token 会以明文发送。 |
 | `webhook_key_env` | `GROK_BOT_WEBHOOK_KEY` | 存放 bearer key 的环境变量名。TOML 里的 `webhook_key` 会被拒绝。 |
 | `work_dir` | `.` | 入站图片和文件的保存目录。聊天里的 `/dir` 会作用于下一轮。 |
 | `timeout` | `6m` | 等待回复的时间。Go duration（`6m`、`180s`）。也可以改用 `timeout_mins`。 |
 | `callback` | `true` | 监听 `POST /outbox/<id>`。 |
-| `callback_addr` | `127.0.0.1:9876` | 监听地址。`127.0.0.1:0` 会选一个空闲端口，并写进 `reply.http`。 |
+| `callback_addr` | `127.0.0.1:9876` | 监听地址。回环地址（`127.0.0.1`、`::1`）会原样写进 `reply.http`。通配地址（`0.0.0.0`、`::`）必须同时设置 `callback_advertise_host`，填 Grok Bot 真正能连上的主机或 IP。不会再把通配绑定悄悄改写成 `127.0.0.1`。 |
 | `callback_auth` | `true` | 要求 `Authorization: Bearer <reply.token>`（或 `X-Grokbot-Token`）。token 每次进程启动随机生成，只出现在 webhook 正文里。设为 `false` 时，除非 `callback_addr` 是回环地址，或显式 `callback_insecure_ok = true`，否则拒绝启动。 |
 | `callback_insecure_ok` | `false` | 允许在非回环地址上关闭 `callback_auth` 的显式开关。 |
+| `callback_advertise_host` | 空 | 写进 `reply.http` 的主机或 IP。`callback_addr` 为 `0.0.0.0` 或 `::` 时必填。例如套接字监听通配地址，这里填 `192.168.1.10`。 |
 | `reply_path_allow` | 空 | 回复还可以读取的额外目录。默认只允许 `work_dir`、`<work_dir>/.cc-connect/attachments` 和 outbox。 |
 | `outbox` | `true` | 同时接受一个 JSON 文件。 |
 | `outbox_dir` | `<work_dir>/.cc-connect/grokbot/outbox` | `reply.file` 所在目录，权限 `0700`。 |
@@ -137,7 +138,7 @@ POST 到 `reply.http`，或原子写入 `reply.file`（先写临时文件再 `re
 
 `content` 等同于 `text`。`{"error":"model overloaded"}` 会结束这一轮，并把错误发到聊天里。每张图片或文件要么是 `data_base64`，要么是本机路径。解析符号链接之后，路径必须落在 `work_dir`、`<work_dir>/.cc-connect/attachments`、outbox 目录或 `reply_path_allow` 之内。主目录、SSH 密钥、配置文件等其他路径会让这一轮失败，内容不会被读进聊天。不会去拉取远程 URL。单个附件上限 50 MiB。扩展名无法识别时用内容嗅探（`http.DetectContentType`）判断类型，而不是当成 `image/png`。
 
-`reply.file` 应先写临时文件再 rename。大约一秒后仍然不是合法 JSON 的文件会让这一轮直接失败，而不是一直等到总超时。轮次已经结束后才到达的回调返回 HTTP 409，而不是 “unknown id”。这种情况下正文不合法仍然是 HTTP 400。
+`reply.file` 应先写临时文件再 rename。文件必须是普通文件，且不超过 32 MiB（与 HTTP 回调正文上限相同）。符号链接、设备文件和 FIFO 会被拒绝，不会以可能阻塞的方式打开。大约一秒后仍然不是合法 JSON 的文件会让这一轮直接失败，而不是一直等到总超时。轮次已经结束后才到达的回调返回 HTTP 409，而不是 “unknown id”。这种情况下正文不合法仍然是 HTTP 400。
 
 默认 `callback_auth = true`，回传时要带上 token：
 
@@ -163,7 +164,7 @@ Webhook 本身的 HTTP 结果：
 
 **入站（聊天 → Grok Bot）。** 平台把图片字节交给 cc-connect。文件落在 `work_dir/.cc-connect/attachments/<message-id>/`，绝对路径会同时追加到 `text` 和 `images`。跑在同一台机器上的桌面 routine 可以直接打开 `path`。云端 routine 打不开本机路径，请设 `embed_images = true`，webhook 里会多带 `data_base64`（单张不超过 `max_embed_bytes`）。
 
-**出站（Grok Bot → 聊天）。** 在 `images` / `files` 里给路径或 base64。cc-connect 读入后调用平台的发送接口，微信和飞书收到的是图片本身，而不是贴在文字里的路径。平台如果不能发图片，文字仍然会到，被跳过的附件记在日志里。
+**出站（Grok Bot → 聊天）。** 在 `images` / `files` 里给路径或 base64。cc-connect 读入后调用平台的发送接口，微信和飞书收到的是图片本身，而不是贴在文字里的路径。平台如果不能发图片或文件，文字仍然会到；如果回复里只有附件，聊天里会看到无法送达的文件名，而不是一条空白消息。
 
 ## 5. 不连 Grok Bot 的本地试跑
 

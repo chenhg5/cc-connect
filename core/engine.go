@@ -5236,7 +5236,7 @@ func (e *Engine) runUnsolicitedReader(ctx context.Context, cancel context.Cancel
 						e.send(p, replyCtx, chunk)
 					}
 				}
-				e.deliverTurnMedia(p, replyCtx, event.Images, event.Files)
+				e.noteUndeliveredMedia(p, replyCtx, e.deliverTurnMedia(p, replyCtx, event.Images, event.Files))
 
 				// Safety note: concurrent writes to session.History by the
 				// unsolicited reader and a foreground turn cannot overlap.
@@ -6592,7 +6592,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			}
 
 			if hasTurnMedia && !suppressTurnMedia {
-				e.deliverTurnMedia(p, replyCtx, event.Images, event.Files)
+				e.noteUndeliveredMedia(p, replyCtx, e.deliverTurnMedia(p, replyCtx, event.Images, event.Files))
 			}
 
 			if elapsed := time.Since(replyStart); elapsed >= slowPlatformSend {

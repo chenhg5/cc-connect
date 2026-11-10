@@ -43,10 +43,14 @@ func (a *Agent) listen() error {
 		}
 		slog.Warn("grokbot: callback is not bound to loopback; keep it off the public internet", "addr", ln.Addr().String())
 	}
-	if host == "0.0.0.0" || host == "::" {
-		host = "127.0.0.1"
+	adv := host
+	if a.callbackAdvertiseHost != "" {
+		adv = a.callbackAdvertiseHost
+	} else if isWildcardBindHost(host) {
+		_ = ln.Close()
+		return fmt.Errorf("grokbot: callback_addr %s listens on every interface; set callback_advertise_host to the host or IP Grok Bot can reach", ln.Addr().String())
 	}
-	a.callbackBase = "http://" + net.JoinHostPort(host, port)
+	a.callbackBase = "http://" + net.JoinHostPort(adv, port)
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /health", a.handleHealth)
@@ -169,6 +173,7 @@ const (
 	outboxMissing outboxKind = iota
 	outboxReady
 	outboxInvalid
+	outboxFatal
 )
 
 func (a *Agent) waitRegistered(ctx context.Context, id string, ch <-chan replyMsg, timeout time.Duration) (replyMsg, error) {
@@ -181,6 +186,8 @@ func (a *Agent) waitRegistered(ctx context.Context, id string, ch <-chan replyMs
 		switch kind {
 		case outboxReady:
 			return msg, true, nil
+		case outboxFatal:
+			return replyMsg{}, false, err
 		case outboxInvalid:
 			if badSince.IsZero() {
 				badSince = time.Now()
@@ -260,9 +267,43 @@ func (a *Agent) consumeOutbox(id string) (replyMsg, outboxKind, error) {
 		return replyMsg{}, outboxMissing, nil
 	}
 	path := filepath.Join(dir, id+".json")
-	data, err := os.ReadFile(path)
+	fi, err := os.Lstat(path)
 	if err != nil {
-		return replyMsg{}, outboxMissing, nil
+		if os.IsNotExist(err) {
+			return replyMsg{}, outboxMissing, nil
+		}
+		return replyMsg{}, outboxFatal, fmt.Errorf("grokbot: outbox reply %s.json: %w", id, err)
+	}
+	if problem := replyFileProblem(id, fi); problem != nil {
+		return replyMsg{}, outboxFatal, problem
+	}
+	// Open the inode we will actually read. O_NOFOLLOW|O_NONBLOCK (unix) plus
+	// fstat close the gap where the path is swapped for a symlink, device, or
+	// FIFO between the Lstat above and the read.
+	f, err := openReplyFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return replyMsg{}, outboxMissing, nil
+		}
+		if errors.Is(err, errReplySymlink) {
+			return replyMsg{}, outboxFatal, fmt.Errorf("grokbot: outbox reply %s.json is a symlink", id)
+		}
+		return replyMsg{}, outboxFatal, fmt.Errorf("grokbot: outbox reply %s.json: %w", id, err)
+	}
+	defer func() { _ = f.Close() }()
+	st, err := f.Stat()
+	if err != nil {
+		return replyMsg{}, outboxFatal, fmt.Errorf("grokbot: outbox reply %s.json: %w", id, err)
+	}
+	if problem := replyFileProblem(id, st); problem != nil {
+		return replyMsg{}, outboxFatal, problem
+	}
+	data, err := io.ReadAll(io.LimitReader(f, maxReplyBytes+1))
+	if err != nil {
+		return replyMsg{}, outboxFatal, fmt.Errorf("grokbot: outbox reply %s.json: %w", id, err)
+	}
+	if int64(len(data)) > maxReplyBytes {
+		return replyMsg{}, outboxFatal, fmt.Errorf("grokbot: outbox reply %s.json exceeds %d bytes", id, maxReplyBytes)
 	}
 	msg, err := a.parseReply(data)
 	if err != nil {
@@ -276,6 +317,25 @@ func (a *Agent) consumeOutbox(id string) (replyMsg, outboxKind, error) {
 	a.pruneDoneLocked()
 	a.mu.Unlock()
 	return msg, outboxReady, nil
+}
+
+// errReplySymlink is returned by openReplyFile when the path is a symlink.
+var errReplySymlink = errors.New("grokbot: reply file is a symlink")
+
+func replyFileProblem(id string, fi os.FileInfo) error {
+	if fi == nil {
+		return fmt.Errorf("grokbot: outbox reply %s.json: missing file info", id)
+	}
+	if fi.Mode()&os.ModeSymlink != 0 {
+		return fmt.Errorf("grokbot: outbox reply %s.json is a symlink", id)
+	}
+	if !fi.Mode().IsRegular() {
+		return fmt.Errorf("grokbot: outbox reply %s.json is not a regular file", id)
+	}
+	if fi.Size() > maxReplyBytes {
+		return fmt.Errorf("grokbot: outbox reply %s.json exceeds %d bytes", id, maxReplyBytes)
+	}
+	return nil
 }
 
 func (a *Agent) parseReply(raw []byte) (replyMsg, error) {
