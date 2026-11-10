@@ -1,5 +1,7 @@
 # 使用指南
 
+[English](usage.md) | [中文](usage.zh-CN.md) | [Русский](usage.ru.md)
+
 cc-connect 完整功能使用指南。
 
 ## 目录
@@ -48,9 +50,14 @@ cc-connect 完整功能使用指南。
 | `/reasoning [等级]` | 查看或切换推理强度（Codex）|
 | `/mode [名称]` | 查看或切换权限模式 |
 | `/stop` | 停止当前执行 |
+| `/ps <消息>` / `/btw <消息>` | 向正在执行的任务补充指令 |
 | `/help` | 显示可用命令 |
 
 会话中 Agent 请求工具权限时，回复 **允许** / **拒绝** / **允许所有**。
+
+任务运行时，可用 `/ps`（或 `/btw`）补充指令；会话空闲时会拒绝该命令。送达确认表示桥接已发送请求，不表示 Agent 已完成处理。
+
+使用 Pi 时，设置 `rpc = true` 可启用原生中途引导：补充内容会在当前助手回合的工具调用结束后、下一次模型调用前送入。如果 Pi 已经结束、桥接仍在发送最终回复，补充内容会启动后续回合。Pi 默认的 JSON 模式保留原有的一次性发送行为，无法向已经运行的进程注入消息。
 
 也可以为项目开启“空闲后自动切换新会话”：
 
@@ -90,6 +97,26 @@ reset_on_idle_mins = 60
 | 自动编辑 | `auto-edit` | 模型自行决定 |
 | 全自动 | `full-auto` | 自动通过 + 沙箱保护 |
 | YOLO | `yolo` | 跳过所有审批 |
+
+### macOS 上的 Codex CLI 查找
+
+Codex 适配器按以下顺序选择可执行文件：
+
+1. 项目的 `cmd` 配置（兼容已弃用的 `cli_path` / `command`）。
+2. 未配置命令时，读取启动 cc-connect 的进程环境中的 `CODEX_CLI_PATH`。
+3. 从该进程的 `PATH` 查找可执行的 `codex`。
+4. macOS 下依次查找 `/Applications/ChatGPT.app`、`/Applications/Codex.app`；每个应用优先检查新目录 `Contents/Resources/codex-cli/CodexCLI.app/Contents/MacOS/codex`，再检查旧目录 `Contents/Resources/codex`。
+
+PATH 中没有命令或软链接失效时，会继续查找桌面应用。显式命令或 `CODEX_CLI_PATH` 必须有效，否则报错。每次启动 CLI 子进程都会重新查找，以兼容应用更新后的目录变化。Linux、Windows 继续使用配置的命令或 PATH。
+
+`exec`、`app_server`、运行配置读取、技能查询及 `/doctor` 使用同一选择规则。路径包含空格或需要额外参数时，使用数组形式：
+
+```toml
+[projects.agent.options]
+cmd = ["/path with spaces/codex", "--profile", "work"]
+```
+
+此功能通过现有 Codex 适配器运行应用内置 CLI。桌面专有工具和共享会话写锁有独立的适配要求，参见 [桌面后端讨论 #651](https://github.com/chenhg5/cc-connect/issues/651) 和 [会话写锁冲突 #1909](https://github.com/chenhg5/cc-connect/issues/1909)。
 
 ### Cursor Agent 模式
 
@@ -910,6 +937,8 @@ type = "claudecode"
 
 内嵌在二进制中的全功能管理界面，支持项目管理、会话管理、定时任务编辑、全局设置、聊天界面、多语言等。
 
+在管理后台从 CC-Switch 导入 Provider 时，如果选中的名称对应多个源 Provider，整个导入请求会在添加任何 Provider 前被拒绝。取消选择有歧义的名称后，可以继续导入其余名称唯一的 Provider。
+
 ### 快速启用（聊天命令）
 
 最简单的方式，在聊天中发送：
@@ -918,7 +947,7 @@ type = "claudecode"
 /web setup
 ```
 
-该命令会自动在 `config.toml` 中启用 **Management API** 和 **Bridge**，生成 token，并返回访问地址。首次启用后需要执行 `/restart` 使配置生效。
+该命令会自动在 `config.toml` 中启用 **Management API** 和 **Bridge**，生成 token，并返回访问地址。仅为本次新启用且未设置 bind 的监听器显式设置 `bind = "127.0.0.1"`；保留已配置的非空 bind，已启用监听器的 bind 也保持不变。缺失的 token 仍可能按原有行为自动补齐。首次启用后需要执行 `/restart` 使配置生效。
 
 启用后，打开返回的地址（默认 `http://localhost:9820`），用显示的 token 登录即可。
 
@@ -935,7 +964,7 @@ type = "claudecode"
 ```toml
 [management]
 enabled = true
-bind = "127.0.0.1"              # 默认仅允许本机访问；设为 0.0.0.0 才允许远程访问
+bind = "127.0.0.1"              # 显式仅允许本机访问；设为 0.0.0.0 才允许远程访问
 port = 9820                     # 管理后台监听端口
 token = "your-secret-token"     # 登录 token；/web setup 会自动生成
 cors_origins = ["*"]            # 允许的 CORS 来源；留空则不设置 CORS 头
@@ -943,7 +972,7 @@ cors_origins = ["*"]            # 允许的 CORS 来源；留空则不设置 COR
 
 然后重启 cc-connect。
 
-> **已有远程部署的迁移：** `bind` 默认值已改为 `127.0.0.1`（回环）。如果你此前从其他机器访问管理后台，请补上 `bind = "0.0.0.0"`（或具体网卡地址）并重启——非回环 `bind` 必须同时配置 `token`。删除 `bind` 一行并重启即可回滚。`bind` 与 `port` 仅在启动时读取，详见
+> **兼容与显式启用：** `bind` 未设置或为空时保留旧版通配监听，管理 token 仍可选。显式非空 `bind` 才启用绑定检查；非回环绑定必须配置非纯空白 token。删除 `bind` 并重启会恢复通配监听，可能扩大网络暴露，请保留 token 和防火墙保护。`bind` 与 `port` 修改后需重启，详见
 > [management-api.zh-CN.md §2.2](management-api.zh-CN.md#22-监听绑定迁移与回滚)。
 
 ### 构建选项
@@ -962,7 +991,7 @@ go build -tags 'no_web' ./cmd/cc-connect
 
 API 与 Web UI 共用同一端口。基础 URL：`http://<host>:<port>/api/v1`
 
-所有 API 请求需要 `Authorization: Bearer <token>` 请求头。
+配置 token 后，API 请求可使用 `Authorization: Bearer <token>` 请求头认证。
 
 主要接口：
 
@@ -998,7 +1027,7 @@ Bridge 提供 WebSocket + REST 服务，让外部适配器（自定义 UI、机�
 ```toml
 [bridge]
 enabled = true
-bind = "127.0.0.1"              # 默认仅允许本机访问；远程适配器接入时设为 0.0.0.0
+bind = "127.0.0.1"              # 显式仅允许本机访问；远程适配器接入时设为 0.0.0.0
 port = 9810                     # Bridge 监听端口（与管理后台分开）
 token = "your-bridge-secret"    # WebSocket 和 REST 的认证 token
 path = "/bridge/ws"             # WebSocket 端点路径
@@ -1007,12 +1036,12 @@ cors_origins = ["*"]            # 允许的 CORS 来源；留空则不设置 COR
 
 然后重启 cc-connect。
 
-> **远程适配器的迁移：** `bind` 默认值已改为 `127.0.0.1`（回环）。其他机器上的适配器需要补上 `bind = "0.0.0.0"`（或具体网卡地址）并重启——非回环 `bind` 必须同时配置 `token`。删除 `bind` 一行并重启即可回滚。`bind` 与 `port` 仅在启动时读取，详见
+> **兼容与显式启用：** `bind` 未设置或为空时保留旧版通配监听；除 `insecure = true` 外仍需 token。显式非回环 `bind` 必须配置非纯空白 token，即使启用 insecure 也不例外。删除 `bind` 并重启会恢复旧版行为，可能扩大网络暴露，请保留 token 和防火墙保护。`bind` 与 `port` 修改后需重启，详见
 > [bridge-protocol.zh-CN.md](bridge-protocol.zh-CN.md#绑定规则迁移与回滚)。
 
 ### 认证方式
 
-所有 Bridge 连接需要 token 认证，支持三种方式：
+除 `insecure = true` 且未配置 token 外，Bridge 连接需要 token 认证，支持三种方式：
 
 - URL 参数：`?token=<bridge-token>`
 - 请求头：`Authorization: Bearer <bridge-token>`

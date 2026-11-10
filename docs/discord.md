@@ -1,5 +1,7 @@
 # Discord Setup Guide
 
+[English](discord.md) | [Русский](discord.ru.md)
+
 This guide walks you through connecting **cc-connect** to Discord, so you can chat with your local Claude Code via a Discord bot.
 
 ## Prerequisites

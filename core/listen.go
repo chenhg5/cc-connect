@@ -3,26 +3,24 @@ package core
 import (
 	"fmt"
 	"net"
+	"net/netip"
 	"strconv"
 	"strings"
 )
 
-// defaultLoopbackBind keeps the optional HTTP listeners (Management API, Web
-// UI, Bridge) reachable from this host only. Remote deployments must opt in by
-// setting bind explicitly.
+// defaultLoopbackBind is the recommended explicit bind for local-only access.
 const defaultLoopbackBind = "127.0.0.1"
 
-// normalizeBind trims the configured bind address and applies the secure
-// loopback default. Bracketed IPv6 literals ("[::]", "[::1]") are accepted and
-// unwrapped, because net.JoinHostPort re-adds the brackets and would otherwise
-// turn "[::]" into the invalid "[[::]]:port".
+// normalizeBind preserves the legacy wildcard when bind is unset. Bracketed
+// IPv6 literals, including scoped addresses, are unwrapped for JoinHostPort.
 func normalizeBind(bind string) string {
 	bind = strings.TrimSpace(bind)
 	if bind == "" {
-		return defaultLoopbackBind
+		return ""
 	}
 	if len(bind) > 1 && bind[0] == '[' && bind[len(bind)-1] == ']' {
-		if inner := bind[1 : len(bind)-1]; net.ParseIP(inner) != nil {
+		inner := bind[1 : len(bind)-1]
+		if ip, err := netip.ParseAddr(inner); err == nil && ip.Is6() {
 			return inner
 		}
 	}
@@ -34,8 +32,8 @@ func normalizeBind(bind string) string {
 // may resolve beyond loopback — exposes the listener to the network.
 func isLoopbackBind(bind string) bool {
 	host := normalizeBind(bind)
-	if ip := net.ParseIP(host); ip != nil {
-		return ip.IsLoopback()
+	if ip, err := netip.ParseAddr(host); err == nil {
+		return ip.Unmap().IsLoopback()
 	}
 	return strings.EqualFold(host, "localhost")
 }
@@ -58,6 +56,9 @@ func listenAddress(bind string, port int) string {
 // the server announces readiness. The caller serves on the returned listener.
 func listenTCP(bind string, port int) (net.Listener, string, error) {
 	addr := listenAddress(bind, port)
+	if err := validateBind(bind); err != nil {
+		return nil, addr, err
+	}
 	ln, err := net.Listen("tcp", addr)
 	if err != nil {
 		return nil, addr, fmt.Errorf("listen on %s: %w", addr, err)
@@ -65,11 +66,29 @@ func listenTCP(bind string, port int) (net.Listener, string, error) {
 	return ln, addr, nil
 }
 
-// checkRemoteBindAuth rejects a listener that would be exposed beyond loopback
-// without authentication. An empty token is only safe on loopback, so insecure
-// development mode cannot accidentally publish an unauthenticated API.
+// validateBind rejects host:port values before they become misleading listen
+// errors. The port belongs in the separate port setting.
+func validateBind(bind string) error {
+	host := normalizeBind(bind)
+	if host == "" {
+		return nil
+	}
+	if _, err := netip.ParseAddr(host); err == nil {
+		return nil
+	}
+	if strings.ContainsAny(host, ":[]/ \t\r\n") {
+		return fmt.Errorf("invalid bind %q: use a bare hostname or IP address, not host:port; configure the port separately (IPv6 may be bracketed)", bind)
+	}
+	return nil
+}
+
+// checkRemoteBindAuth enforces authentication only for explicit binds.
+// Unset bind preserves legacy management and insecure bridge behavior.
 func checkRemoteBindAuth(server, bind, token string) error {
-	if token != "" || isLoopbackBind(bind) {
+	if err := validateBind(bind); err != nil {
+		return fmt.Errorf("%s: %w", server, err)
+	}
+	if normalizeBind(bind) == "" || strings.TrimSpace(token) != "" || isLoopbackBind(bind) {
 		return nil
 	}
 	return fmt.Errorf(

@@ -1,5 +1,7 @@
 # cc-connect Management API Specification
 
+[English](management-api.md) | [中文](management-api.zh-CN.md) | [Русский](management-api.ru.md)
+
 > **Version:** 1.1-draft  
 > **Status:** Draft — subject to change before implementation  
 > **Last Updated:** 2026-03-24
@@ -64,62 +66,60 @@ token = "mgmt-secret"
 | Field     | Type    | Default     | Description                                                        |
 |-----------|---------|-------------|--------------------------------------------------------------------|
 | `enabled` | boolean | `false`     | Enable the Management API server                                   |
-| `bind`    | string  | `127.0.0.1` | Interface to bind; use `0.0.0.0` only when remote access is needed |
+| `bind`    | string  | `""` | Unset/empty preserves wildcard binding; explicit value opts into checks |
 | `port`    | integer | `9820`      | TCP port to listen on                                              |
-| `token`   | string  | (required)  | Shared secret for authentication                                   |
+| `token`   | string  | `""` | Shared secret; required for an explicit non-loopback bind |
 
 When `enabled` is `false`, the Management API is not started. The token should be a strong, random string (e.g. 32+ characters).
 
 ### 2.2 Listener Binding, Migration and Rollback
 
-The Management API and the Web UI listen on `bind` and default to `127.0.0.1`
-(loopback). Only this host can reach them until you opt in to remote access.
+The Management API and Web UI preserve the legacy wildcard listener (`:9820`)
+when `bind` is unset or empty. In this compatibility mode the token remains
+optional. **Warning:** a reachable listener with no token allows unauthenticated
+management access. Set a strong token and restrict network access.
 
-Rules enforced at startup:
+An explicit non-empty `bind` opts into binding and authentication checks:
 
-- **`bind` must be a bare host, not `host:port`.** IPv6 literals may be written
-  with or without brackets (`"::1"` and `"[::1]"` are equivalent, and `"[::]"`
-  means the IPv6 wildcard).
-- **A non-loopback `bind` requires a non-empty `token`.** Startup fails with
-  `management: refusing to listen on non-loopback address "0.0.0.0" without a
-  token` when the token is empty. This includes `0.0.0.0`, `::`, a concrete NIC
-  address, and any hostname that is not `localhost`.
-- **Bind failures abort startup.** An invalid address, a bad port, or a port
-  already in use is reported before the process announces readiness — the
-  process exits with a non-zero status instead of logging the error from a
-  background goroutine.
-- **`bind` and `port` are read at startup only.** Changing either requires a
-  restart (`cc-connect daemon restart`, or restart the systemd/launchd unit /
-  container).
+- Use `bind = "127.0.0.1"` for local access only, or an explicit interface for remote access.
+- `bind` must be a host without a port, scheme or path. IPv6 may be bare or bracketed: `"::1"`, `"[::1]"`, `"fe80::1%eth0"` and `"[fe80::1%eth0]"` are valid forms (the interface must exist on the host).
+- An explicit non-loopback bind requires a token containing at least one non-whitespace character. This includes `0.0.0.0`, `::`, NIC addresses and hostnames other than `localhost`. Loopback binding does not require a token, but one is recommended.
+- Invalid addresses, invalid ports and occupied ports fail CLI startup before readiness. For Go callers, the existing `Start()` API is unchanged; `StartChecked() error` adds synchronous error reporting and is used by the CLI.
+- `bind` and `port` are read at startup only. Restart after changes (`cc-connect daemon restart`, or restart the systemd/launchd service or container).
 
-**Migrating an existing remote install.** Previous releases listened on the
-wildcard address (`:9820`), so remote browsers and API clients connected without
-any `bind` setting. After upgrading, such an install becomes loopback-only and
-the remote connection fails. To restore it, add both fields:
+**Existing deployments and opt-in.** No migration is required when `bind` is
+unset or empty. Web setup (`cc-connect web` or `/web setup`) explicitly sets
+`127.0.0.1` only for newly enabled listeners whose bind is unset. It preserves
+configured non-empty binds and leaves already enabled listener binds unchanged.
+Missing tokens may still be populated as before. For explicit remote binding:
 
 ```toml
 [management]
 enabled = true
-bind = "0.0.0.0"        # or the specific NIC address, e.g. "192.168.1.10"
+bind = "0.0.0.0"        # or a specific NIC address, e.g. "192.168.1.10"
 port = 9820
-token = "mgmt-secret"   # mandatory for a non-loopback bind
+token = "a-strong-random-secret"
 ```
 
-Then restart the process. Docker, systemd and launchd deployments only need the
-config change: the container/host port publishing (`-p 9820:9820`, `ListenStream=`,
-`Sockets=`) is unaffected because the process now binds the wildcard again.
+In Docker, bind to the container interface and publish only the intended host
+interface/port. A loopback listener inside a container is not exposed by port
+publishing. For systemd/launchd, restart the service after editing its config;
+check firewall and reverse-proxy settings separately.
 
-**Rollback.** Delete the `bind` line (`port` may stay) and restart. The listener
-returns to `127.0.0.1`, so remote access stops working again — keep a local
-browser or SSH tunnel (`ssh -L 9820:127.0.0.1:9820 host`) available before you
-remove it.
+**Rollback.** Remove `bind` (or set it to `""`) and restart to restore legacy
+wildcard binding and optional management authentication. This may broaden
+network access. Keep the token and firewall protection. To restrict access to
+this host instead, explicitly set `bind = "127.0.0.1"` and restart.
 
-**Reaching a loopback-bound UI from another machine.** Prefer an SSH tunnel or
-a reverse proxy over widening `bind`. A tunnel keeps the token off the network:
+**Reaching a loopback-bound UI from another machine.** Prefer an SSH tunnel, or
+a properly secured reverse proxy, over direct network exposure:
 
 ```bash
 ssh -L 9820:127.0.0.1:9820 user@host   # then open http://127.0.0.1:9820
 ```
+
+These rules cover Management/Web UI and Bridge only, not the separate inbound
+webhook listener. Configure and protect that listener separately.
 
 ### 2.3 Base URL
 
@@ -135,7 +135,7 @@ Example: `http://localhost:9820/api/v1/status`
 
 ## 3. Authentication
 
-Every request must include a valid token. Two methods are supported:
+When a token is configured, every request must include a valid token. Two methods are supported:
 
 ### 3.1 Bearer Token (Recommended)
 

@@ -10,6 +10,7 @@ import (
 	"log/slog"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -30,6 +31,8 @@ type ProjectSettingsUpdate struct {
 	ReplyFooter          *bool
 	InjectSender         *bool
 	PlatformAllowFrom    map[string]string
+	WorkspaceMode        *string
+	WorkspaceBaseDir     *string
 }
 
 // ManagementServer provides an HTTP REST API for external management tools
@@ -153,10 +156,10 @@ type GlobalProviderInfo struct {
 		Model string `json:"model"`
 		Alias string `json:"alias,omitempty"`
 	} `json:"models,omitempty"`
-	Endpoints       map[string]string              `json:"endpoints,omitempty"`
-	AgentModels     map[string]string              `json:"agent_models,omitempty"`
-	AgentModelLists map[string][]GlobalModelEntry   `json:"agent_model_lists,omitempty"`
-	Codex           *GlobalCodexConfig              `json:"codex,omitempty"`
+	Endpoints       map[string]string             `json:"endpoints,omitempty"`
+	AgentModels     map[string]string             `json:"agent_models,omitempty"`
+	AgentModelLists map[string][]GlobalModelEntry `json:"agent_model_lists,omitempty"`
+	Codex           *GlobalCodexConfig            `json:"codex,omitempty"`
 }
 
 // GlobalModelEntry is a model entry inside AgentModelLists.
@@ -203,11 +206,19 @@ type CCSwitchProviderInfo struct {
 	IsCurrent bool   `json:"is_current"`
 }
 
-// Start validates the listen configuration, binds the socket synchronously and
+// Start starts the server and logs startup failures, preserving the original API.
+// Use StartChecked when the caller needs to handle startup errors.
+func (m *ManagementServer) Start() {
+	if err := m.StartChecked(); err != nil {
+		slog.Error("management: failed to start server", "error", err)
+	}
+}
+
+// StartChecked validates the listen configuration, binds the socket synchronously and
 // then serves in the background. A bind failure (invalid address, port in use)
-// or a missing token on a non-loopback address is returned to the caller, so
+// or a missing token on an explicit non-loopback bind is returned, so
 // startup never reports a listener that is not actually accepting connections.
-func (m *ManagementServer) Start() error {
+func (m *ManagementServer) StartChecked() error {
 	if err := checkRemoteBindAuth("management", m.bind, m.token); err != nil {
 		return err
 	}
@@ -226,12 +237,12 @@ func (m *ManagementServer) Start() error {
 	}
 
 	if !isLoopbackBind(m.bind) {
-		// The token is enforced, but the web UI is now reachable from the
-		// network. Point operators at the exposure explicitly.
+		// The web UI is reachable from the network. Explicit binds require
+		// a token; unset binds retain legacy optional authentication.
 		slog.Warn("management api: listening on a non-loopback address",
 			"addr", m.listenAddr,
 			"scope", bindScope(m.bind),
-			"help", "the web UI and API are reachable from the network; keep the token secret and change bind/port (restart required) if this was unintended")
+			"help", "the web UI and API are reachable from the network; configure a token and change bind/port (restart required) if this was unintended")
 	}
 
 	go func() {
@@ -440,9 +451,23 @@ func (m *ManagementServer) handleStatus(w http.ResponseWriter, r *http.Request) 
 	defer m.mu.RUnlock()
 
 	platformSet := make(map[string]bool)
+	var degradedEntries []map[string]any
 	for _, e := range m.engines {
 		for _, p := range e.platforms {
 			platformSet[p.Name()] = true
+			// Issue #1618: surface per-platform degraded state in the
+			// management API so external monitors can alert on it.
+			if ph, ok := p.(PlatformHealth); ok {
+				info := ph.PlatformHealth()
+				if info.Degraded {
+					entry := map[string]any{
+						"name":   info.Name,
+						"reason": info.DegradedReason,
+						"since":  info.DegradedSince,
+					}
+					degradedEntries = append(degradedEntries, entry)
+				}
+			}
 		}
 	}
 	platforms := make([]string, 0, len(platformSet))
@@ -461,6 +486,7 @@ func (m *ManagementServer) handleStatus(w http.ResponseWriter, r *http.Request) 
 		"connected_platforms": platforms,
 		"projects_count":      len(m.engines),
 		"bridge_adapters":     adapters,
+		"degraded_platforms":  degradedEntries,
 	}
 	if m.bridgeServer != nil {
 		resp["bridge"] = map[string]any{
@@ -669,6 +695,8 @@ func (m *ManagementServer) handleProjectRoutes(w http.ResponseWriter, r *http.Re
 		m.handleProjectHeartbeat(w, r, projName, rest)
 	case "users":
 		m.handleProjectUsers(w, r, engine)
+	case "workspaces":
+		m.handleProjectWorkspaces(w, r, projName, engine, rest)
 	default:
 		mgmtError(w, http.StatusNotFound, "not found")
 	}
@@ -678,10 +706,24 @@ func (m *ManagementServer) handleProjectDetail(w http.ResponseWriter, r *http.Re
 	if r.Method == http.MethodGet {
 		platInfos := make([]map[string]any, len(e.platforms))
 		for i, p := range e.platforms {
-			platInfos[i] = map[string]any{
+			entry := map[string]any{
 				"type":      p.Name(),
 				"connected": true,
 			}
+			// Issue #1618: surface per-platform degraded state instead
+			// of a hardcoded "connected": true.
+			if ph, ok := p.(PlatformHealth); ok {
+				info := ph.PlatformHealth()
+				if info.Degraded {
+					entry["connected"] = false
+					entry["degraded"] = true
+					entry["degraded_reason"] = info.DegradedReason
+					if !info.DegradedSince.IsZero() {
+						entry["degraded_since"] = info.DegradedSince
+					}
+				}
+			}
+			platInfos[i] = entry
 		}
 
 		allSessions := e.sessions.AllSessions()
@@ -759,10 +801,51 @@ func (m *ManagementServer) handleProjectDetail(w http.ResponseWriter, r *http.Re
 			ReplyFooter          *bool             `json:"reply_footer"`
 			InjectSender         *bool             `json:"inject_sender"`
 			PlatformAllowFrom    map[string]string `json:"platform_allow_from"`
+			WorkspaceMode        *string           `json:"workspace_mode"`
+			WorkspaceBaseDir     *string           `json:"workspace_base_dir"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 			mgmtError(w, http.StatusBadRequest, "invalid JSON: "+err.Error())
 			return
+		}
+		if body.WorkDir != nil {
+			workDir, err := validateProjectWorkDir(*body.WorkDir)
+			if err != nil {
+				mgmtError(w, http.StatusBadRequest, err.Error())
+				return
+			}
+			*body.WorkDir = workDir
+		}
+		if body.WorkspaceBaseDir != nil {
+			baseDir, err := validateProjectWorkDir(*body.WorkspaceBaseDir)
+			if err != nil {
+				mgmtError(w, http.StatusBadRequest, err.Error())
+				return
+			}
+			*body.WorkspaceBaseDir = baseDir
+		}
+		if body.WorkspaceMode != nil {
+			wm := strings.TrimSpace(*body.WorkspaceMode)
+			if wm != "" && wm != "single" && wm != "multi-workspace" {
+				mgmtError(w, http.StatusBadRequest, fmt.Sprintf("invalid workspace_mode %q", wm))
+				return
+			}
+			if wm == "multi-workspace" {
+				effectiveBaseDir := ""
+				if body.WorkspaceBaseDir != nil {
+					effectiveBaseDir = *body.WorkspaceBaseDir
+				} else if m.getProjectConfig != nil {
+					if extra := m.getProjectConfig(name); extra != nil {
+						if bd, ok := extra["workspace_base_dir"].(string); ok {
+							effectiveBaseDir = bd
+						}
+					}
+				}
+				if strings.TrimSpace(effectiveBaseDir) == "" {
+					mgmtError(w, http.StatusBadRequest, "workspace_base_dir is required to enable multi-workspace mode")
+					return
+				}
+			}
 		}
 
 		if body.Language != nil {
@@ -824,6 +907,9 @@ func (m *ManagementServer) handleProjectDetail(w http.ResponseWriter, r *http.Re
 			}
 			restartRequired = true
 		}
+		if body.WorkspaceMode != nil || body.WorkspaceBaseDir != nil {
+			restartRequired = true
+		}
 
 		if m.saveProjectSettings != nil {
 			patch := ProjectSettingsUpdate{
@@ -838,6 +924,8 @@ func (m *ManagementServer) handleProjectDetail(w http.ResponseWriter, r *http.Re
 				ReplyFooter:          body.ReplyFooter,
 				InjectSender:         body.InjectSender,
 				PlatformAllowFrom:    body.PlatformAllowFrom,
+				WorkspaceMode:        body.WorkspaceMode,
+				WorkspaceBaseDir:     body.WorkspaceBaseDir,
 			}
 			if err := m.saveProjectSettings(name, patch); err != nil {
 				slog.Warn("management: failed to persist project settings", "project", name, "error", err)
@@ -938,6 +1026,139 @@ func (m *ManagementServer) handleProjectUsers(w http.ResponseWriter, r *http.Req
 	default:
 		mgmtError(w, http.StatusMethodNotAllowed, "GET or PATCH only")
 	}
+}
+
+// ── Workspace endpoints ───────────────────────────────────────
+
+// handleProjectWorkspaces manages channel↔workspace bindings for a project
+// running in multi-workspace mode (see Engine.SetMultiWorkspace).
+func (m *ManagementServer) handleProjectWorkspaces(w http.ResponseWriter, r *http.Request, projName string, e *Engine, rest string) {
+	if !e.multiWorkspace || e.workspaceBindings == nil {
+		mgmtError(w, http.StatusBadRequest, fmt.Sprintf("project %q is not in multi-workspace mode", projName))
+		return
+	}
+	projectKey := "project:" + projName
+
+	if rest != "" {
+		if r.Method != http.MethodDelete {
+			mgmtError(w, http.StatusMethodNotAllowed, "DELETE only")
+			return
+		}
+		e.workspaceBindings.Unbind(projectKey, rest)
+		mgmtOK(w, "workspace binding removed")
+		return
+	}
+
+	switch r.Method {
+	case http.MethodGet:
+		bindings := e.workspaceBindings.ListByProject(projectKey)
+		bound := make(map[string]bool, len(bindings))
+		list := make([]map[string]any, 0, len(bindings))
+		for channelKey, b := range bindings {
+			entry := map[string]any{
+				"channel_key":  channelKey,
+				"channel_name": b.ChannelName,
+				"workspace":    b.Workspace,
+				"bound_at":     b.BoundAt.Time,
+			}
+			if ws := e.workspacePool.Get(b.Workspace); ws != nil {
+				entry["active"] = ws.HasActiveTurn()
+				entry["last_activity"] = ws.LastActivity()
+			}
+			list = append(list, entry)
+			bound[normalizeWorkspacePath(b.Workspace)] = true
+		}
+
+		var suggestions []string
+		if e.baseDir != "" {
+			if entries, err := os.ReadDir(e.baseDir); err == nil {
+				for _, ent := range entries {
+					if !ent.IsDir() {
+						continue
+					}
+					candidate := filepath.Join(e.baseDir, ent.Name())
+					if bound[normalizeWorkspacePath(candidate)] {
+						continue
+					}
+					suggestions = append(suggestions, candidate)
+				}
+			}
+		}
+
+		mgmtJSON(w, http.StatusOK, map[string]any{
+			"base_dir":    e.baseDir,
+			"bindings":    list,
+			"suggestions": suggestions,
+		})
+
+	case http.MethodPost:
+		var body struct {
+			ChannelKey  string `json:"channel_key"`
+			ChannelName string `json:"channel_name"`
+			Workspace   string `json:"workspace"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			mgmtError(w, http.StatusBadRequest, "invalid JSON: "+err.Error())
+			return
+		}
+		channelKey := strings.TrimSpace(body.ChannelKey)
+		if channelKey == "" {
+			mgmtError(w, http.StatusBadRequest, "channel_key is required")
+			return
+		}
+		workspace, err := validateWorkspacePath(e.baseDir, body.Workspace)
+		if err != nil {
+			mgmtError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		channelName := strings.TrimSpace(body.ChannelName)
+		if channelName == "" {
+			channelName = channelKey
+		}
+		e.workspaceBindings.Bind(projectKey, channelKey, channelName, workspace)
+		mgmtJSON(w, http.StatusCreated, map[string]any{"message": "workspace bound", "workspace": workspace})
+
+	default:
+		mgmtError(w, http.StatusMethodNotAllowed, "GET or POST only")
+	}
+}
+
+// validateWorkspacePath ensures a workspace path is an existing directory
+// located under baseDir, rejecting traversal outside it.
+func validateWorkspacePath(baseDir, target string) (string, error) {
+	trimmed := strings.TrimSpace(target)
+	if trimmed == "" {
+		return "", fmt.Errorf("workspace path is required")
+	}
+	if baseDir == "" {
+		return "", fmt.Errorf("project has no base_dir configured")
+	}
+	if !filepath.IsAbs(trimmed) {
+		trimmed = filepath.Join(baseDir, trimmed)
+	}
+	cleaned := filepath.Clean(trimmed)
+	resolved, err := filepath.EvalSymlinks(cleaned)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return "", fmt.Errorf("workspace does not exist: %s", cleaned)
+		}
+		return "", fmt.Errorf("workspace is not accessible: %s: %w", cleaned, err)
+	}
+	cleanBase := filepath.Clean(baseDir)
+	if evalBase, err := filepath.EvalSymlinks(cleanBase); err == nil {
+		cleanBase = evalBase
+	}
+	if resolved != cleanBase && !strings.HasPrefix(resolved, cleanBase+string(filepath.Separator)) {
+		return "", fmt.Errorf("workspace path escapes base_dir")
+	}
+	info, err := os.Stat(resolved)
+	if err != nil {
+		return "", fmt.Errorf("workspace is not accessible: %s: %w", resolved, err)
+	}
+	if !info.IsDir() {
+		return "", fmt.Errorf("workspace is not a directory: %s", resolved)
+	}
+	return resolved, nil
 }
 
 // ── Session endpoints ─────────────────────────────────────────
@@ -1192,14 +1413,26 @@ func (m *ManagementServer) handleProjectProviders(w http.ResponseWriter, r *http
 			action = parts[1]
 		}
 		if action == "activate" && r.Method == http.MethodPost {
-			if !ps.SetActiveProvider(provName) {
+			found := false
+			for _, p := range ps.ListProviders() {
+				if p.Name == provName {
+					found = true
+					break
+				}
+			}
+			if !found {
 				mgmtError(w, http.StatusNotFound, fmt.Sprintf("provider not found: %s", provName))
 				return
 			}
-			e.resetAllSessions()
 			if e.providerSaveFunc != nil {
-				_ = e.providerSaveFunc(provName)
+				if err := e.providerSaveFunc(provName); err != nil {
+					slog.Error("failed to save active provider", "provider", provName, "error", err)
+					mgmtError(w, http.StatusInternalServerError, "failed to persist provider: "+err.Error())
+					return
+				}
 			}
+			ps.SetActiveProvider(provName)
+			e.resetAllSessions()
 			mgmtJSON(w, http.StatusOK, map[string]any{
 				"active_provider": provName,
 				"message":         "provider activated",
@@ -1226,10 +1459,14 @@ func (m *ManagementServer) handleProjectProviders(w http.ResponseWriter, r *http
 				mgmtError(w, http.StatusNotFound, fmt.Sprintf("provider not found: %s", provName))
 				return
 			}
-			ps.SetProviders(remaining)
 			if e.providerRemoveSaveFunc != nil {
-				_ = e.providerRemoveSaveFunc(provName)
+				if err := e.providerRemoveSaveFunc(provName); err != nil {
+					slog.Error("failed to persist provider removal", "provider", provName, "error", err)
+					mgmtError(w, http.StatusInternalServerError, "failed to persist provider removal: "+err.Error())
+					return
+				}
 			}
+			ps.SetProviders(remaining)
 			mgmtOK(w, "provider removed")
 			return
 		}
@@ -1284,12 +1521,16 @@ func (m *ManagementServer) handleProjectProviders(w http.ResponseWriter, r *http
 			Thinking: body.Thinking,
 			Env:      body.Env,
 		}
+		if e.providerAddSaveFunc != nil {
+			if err := e.providerAddSaveFunc(prov); err != nil {
+				slog.Error("failed to persist provider", "provider", prov.Name, "error", err)
+				mgmtError(w, http.StatusInternalServerError, "failed to persist provider: "+err.Error())
+				return
+			}
+		}
 		providers := ps.ListProviders()
 		providers = append(providers, prov)
 		ps.SetProviders(providers)
-		if e.providerAddSaveFunc != nil {
-			_ = e.providerAddSaveFunc(prov)
-		}
 		mgmtJSON(w, http.StatusOK, map[string]any{
 			"name":    body.Name,
 			"message": "provider added",
@@ -1884,7 +2125,8 @@ func (m *ManagementServer) handleCCSwitchProviders(w http.ResponseWriter, r *htt
 			return
 		}
 		var body struct {
-			Names []string `json:"names"`
+			Names    []string `json:"names"`
+			Language string   `json:"language,omitempty"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 			mgmtError(w, http.StatusBadRequest, "invalid JSON: "+err.Error())
@@ -1901,8 +2143,21 @@ func (m *ManagementServer) handleCCSwitchProviders(w http.ResponseWriter, r *htt
 			return
 		}
 		byName := make(map[string]CCSwitchProviderInfo, len(all))
+		ambiguous := make(map[string]bool)
 		for _, p := range all {
+			if _, exists := byName[p.Name]; exists {
+				ambiguous[p.Name] = true
+			}
 			byName[p.Name] = p
+		}
+
+		// Validate the entire selection before writing any providers. A name
+		// alone cannot identify which same-named source provider was selected.
+		for _, name := range body.Names {
+			if ambiguous[name] {
+				mgmtError(w, http.StatusBadRequest, NewI18n(NormalizeLanguageString(body.Language)).Tf(MsgCCSwitchAmbiguousProvider, name))
+				return
+			}
 		}
 
 		var imported, skipped []string
@@ -1943,10 +2198,10 @@ func (m *ManagementServer) handleCCSwitchProviders(w http.ResponseWriter, r *htt
 // applying per-agent-type overrides for base_url, model, and models.
 func resolveGlobalProviderForAgent(g GlobalProviderInfo, agentType string) ProviderConfig {
 	pc := ProviderConfig{
-		Name:   g.Name,
-		APIKey: g.APIKey,
+		Name:    g.Name,
+		APIKey:  g.APIKey,
 		BaseURL: g.BaseURL,
-		Model:  g.Model,
+		Model:   g.Model,
 	}
 	if ep, ok := g.Endpoints[agentType]; ok && ep != "" {
 		pc.BaseURL = ep

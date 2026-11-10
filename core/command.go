@@ -71,8 +71,12 @@ func (r *CommandRegistry) Remove(name string) bool {
 }
 
 // SetAgentDirs sets the directories to scan for agent command files.
+// Safe for concurrent use with Resolve / ListAll.
 func (r *CommandRegistry) SetAgentDirs(dirs []string) {
-	r.agentDirs = dirs
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	// Copy so later mutations of the caller's slice don't race with readers.
+	r.agentDirs = append([]string(nil), dirs...)
 }
 
 // Resolve looks up a command by name. Config commands take priority, then
@@ -96,6 +100,9 @@ func (r *CommandRegistry) Resolve(name string) (*CustomCommand, bool) {
 			return c, true
 		}
 	}
+	// Snapshot agentDirs under the lock so we don't hold it across file IO
+	// while still avoiding a data race with SetAgentDirs.
+	agentDirs := append([]string(nil), r.agentDirs...)
 	r.mu.RUnlock()
 
 	// Scan agent command directories; try both original name and hyphenated variant
@@ -103,7 +110,7 @@ func (r *CommandRegistry) Resolve(name string) (*CustomCommand, bool) {
 	if alt := strings.ReplaceAll(name, "_", "-"); alt != name {
 		candidates = append(candidates, alt)
 	}
-	for _, dir := range r.agentDirs {
+	for _, dir := range agentDirs {
 		absDir, err := filepath.Abs(dir)
 		if err != nil {
 			continue

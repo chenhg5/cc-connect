@@ -1,5 +1,7 @@
 # Usage Guide
 
+[English](usage.md) | [中文](usage.zh-CN.md) | [Русский](usage.ru.md)
+
 Complete guide to using cc-connect features.
 
 ## Table of Contents
@@ -46,9 +48,14 @@ Each user gets an independent session with full conversation context. Manage ses
 | `/reasoning [level]` | View or switch reasoning effort (Codex) |
 | `/mode [name]` | View or switch permission mode |
 | `/stop` | Stop current execution |
+| `/ps <message>` / `/btw <message>` | Send a supplement to the running task |
 | `/help` | Show available commands |
 
 During a session, the agent may request tool permissions. Reply **allow** / **deny** / **allow all**.
+
+Use `/ps` (or `/btw`) to add instructions while a task is running. An idle session rejects the command. The delivery confirmation means the bridge sent the request, not that the agent has finished processing it.
+
+With Pi, enable `rpc = true` for native steering: the supplement is queued for the next model call, after the current assistant turn's tool calls. If Pi has already finished while the bridge is still delivering its reply, the supplement starts a follow-up turn. Pi's default JSON mode keeps its existing one-shot sending behavior; it cannot inject into an already running process.
 
 cc-connect rotates to a fresh session automatically after long inactivity:
 
@@ -92,6 +99,26 @@ All agents support permission modes switchable at runtime via `/mode`.
 | Auto Edit | `auto-edit` | Model decides when to ask |
 | Full Auto | `full-auto` | Auto-approve with sandbox |
 | YOLO | `yolo` | Bypass all approvals and sandbox |
+
+### Codex CLI discovery on macOS
+
+The Codex adapter resolves its executable in this order:
+
+1. The project `cmd` option (including the deprecated `cli_path` / `command` aliases).
+2. `CODEX_CLI_PATH` from the environment that starts cc-connect, when no command is configured.
+3. An executable `codex` on that process's `PATH`.
+4. On macOS, `/Applications/ChatGPT.app`, then `/Applications/Codex.app`. Within each app, the current `Contents/Resources/codex-cli/CodexCLI.app/Contents/MacOS/codex` layout is checked before the legacy `Contents/Resources/codex` layout.
+
+Desktop discovery handles a missing PATH command or a broken PATH symlink. An explicit command or `CODEX_CLI_PATH` must be executable; an invalid override reports an error. Discovery is repeated before each CLI process starts so an app update can change the bundled layout. Linux and Windows continue to use the configured command or PATH.
+
+Both `exec` and `app_server`, runtime configuration reads, skill queries, and `/doctor` use this selection. Use the array form for paths containing spaces or additional CLI arguments:
+
+```toml
+[projects.agent.options]
+cmd = ["/path with spaces/codex", "--profile", "work"]
+```
+
+This runs the bundled CLI using the existing Codex adapter. Desktop-only tools and shared-thread locking have separate requirements; see [Desktop backend discussion #651](https://github.com/chenhg5/cc-connect/issues/651) and [thread writer conflict #1909](https://github.com/chenhg5/cc-connect/issues/1909).
 
 ### Cursor Agent Modes
 
@@ -997,6 +1024,8 @@ type = "claudecode"
 
 A full-featured management UI embedded in the binary — project CRUD, session management, cron job editor, global settings, chat interface, and i18n support.
 
+When importing providers from CC-Switch in the dashboard, an import is rejected if a selected name matches multiple source providers. No providers are added in that request. Deselect the ambiguous name to import the remaining unique providers.
+
 ### Quick Setup (Chat Command)
 
 The easiest way to enable web admin:
@@ -1005,7 +1034,7 @@ The easiest way to enable web admin:
 /web setup
 ```
 
-This automatically enables both the **Management API** and the **Bridge** in `config.toml`, generates tokens, and prints the access URL. You may need to run `/restart` for changes to take effect.
+This automatically enables both the **Management API** and the **Bridge** in `config.toml`, generates tokens, and prints the access URL. It explicitly sets `bind = "127.0.0.1"` only for newly enabled listeners whose bind is unset, preserves configured non-empty binds, and leaves already enabled listener binds unchanged. Missing tokens may still be populated as before. You may need to run `/restart` for changes to take effect.
 
 After setup, open the URL shown (default `http://localhost:9820`) and log in with the token.
 
@@ -1022,7 +1051,7 @@ Add the following to `config.toml`:
 ```toml
 [management]
 enabled = true
-bind = "127.0.0.1"              # Loopback only by default; set 0.0.0.0 to allow remote access
+bind = "127.0.0.1"              # Explicit loopback-only binding; set 0.0.0.0 to allow remote access
 port = 9820                     # Management UI & API listen port
 token = "your-secret-token"     # Login token; /web setup generates one automatically
 cors_origins = ["*"]            # Allowed CORS origins; empty = no CORS headers
@@ -1030,11 +1059,11 @@ cors_origins = ["*"]            # Allowed CORS origins; empty = no CORS headers
 
 Then restart cc-connect.
 
-> **Migrating a remote install:** the `bind` default changed to `127.0.0.1`
-> (loopback). If you reached the web admin from another machine, add
-> `bind = "0.0.0.0"` (or your NIC address) and restart — a non-loopback `bind`
-> requires `token` to be set. Remove the `bind` line and restart to roll back.
-> `bind` and `port` are read at startup only. See
+> **Compatibility and opt-in:** unset or empty `bind` preserves legacy wildcard
+> listening and optional management authentication. An explicit non-empty bind
+> enables checks; a non-loopback bind requires a non-whitespace token. Removing
+> `bind` and restarting restores wildcard exposure, so keep the token and firewall
+> protection. Changes to `bind` or `port` require a restart. See
 > [management-api.md §2.2](management-api.md#22-listener-binding-migration-and-rollback).
 
 ### Build Options
@@ -1053,7 +1082,7 @@ When built with `no_web`, the `/web` command will report that web admin is not a
 
 The Management API is served on the same port as the UI. Base URL: `http://<host>:<port>/api/v1`
 
-All API requests require the `Authorization: Bearer <token>` header.
+When a token is configured, API requests can authenticate with the `Authorization: Bearer <token>` header.
 
 Key endpoints:
 
@@ -1089,7 +1118,7 @@ Add the following to `config.toml`:
 ```toml
 [bridge]
 enabled = true
-bind = "127.0.0.1"              # Loopback only by default; set 0.0.0.0 to allow remote adapters
+bind = "127.0.0.1"              # Explicit loopback-only binding; set 0.0.0.0 to allow remote adapters
 port = 9810                     # Bridge listen port (separate from management)
 token = "your-bridge-secret"    # Auth token for WebSocket and REST
 path = "/bridge/ws"             # WebSocket endpoint path
@@ -1098,16 +1127,16 @@ cors_origins = ["*"]            # Allowed CORS origins; empty = no CORS
 
 Then restart cc-connect.
 
-> **Migrating a remote adapter:** the `bind` default changed to `127.0.0.1`
-> (loopback). For adapters on other machines, add `bind = "0.0.0.0"` (or your
-> NIC address) and restart — a non-loopback `bind` requires `token` to be set.
-> Remove the `bind` line and restart to roll back. `bind` and `port` are read at
-> startup only. See
+> **Compatibility and opt-in:** unset or empty `bind` preserves legacy wildcard
+> listening; a token is still required unless `insecure = true`. An explicit
+> non-loopback bind requires a non-whitespace token even in insecure mode. Removing
+> `bind` and restarting restores legacy behavior and may broaden network access;
+> keep the token and firewall protection. Changes to `bind` or `port` require a restart. See
 > [bridge-protocol.md](bridge-protocol.md#binding-rules-migration-and-rollback).
 
 ### Authentication
 
-All Bridge connections require a token. Supported methods:
+Bridge connections require a token unless `insecure = true` and no token is configured. Supported methods:
 
 - Query parameter: `?token=<bridge-token>`
 - Header: `Authorization: Bearer <bridge-token>`

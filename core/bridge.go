@@ -192,11 +192,11 @@ func newBridgeServer(bind string, port int, token, path string, corsOrigins []st
 		return nil
 	}
 	if insecure && token == "" {
-		if isLoopbackBind(bind) {
+		if normalizeBind(bind) == "" || isLoopbackBind(bind) {
 			slog.Warn("bridge: running in INSECURE mode without authentication - only use for local development!",
 				"bind", normalizeBind(bind))
 		} else {
-			// Start rejects this: an unauthenticated listener must never leave loopback.
+			// StartChecked rejects explicitly configured remote binds without a token.
 			slog.Error("bridge: insecure mode without a token is only allowed on loopback",
 				"bind", normalizeBind(bind),
 				"help", "set bridge.token, or bind to "+defaultLoopbackBind)
@@ -231,11 +231,19 @@ func (bs *BridgeServer) RegisterEngine(projectName string, engine *Engine, bp *B
 	bs.engines[projectName] = &bridgeEngineRef{engine: engine, platform: bp}
 }
 
-// Start validates the listen configuration, binds the socket synchronously and
-// then serves in the background. Bind failures and unauthenticated non-loopback
-// exposure are returned to the caller instead of only being logged from a
+// Start starts the server and logs startup failures, preserving the original API.
+// Use StartChecked when the caller needs to handle startup errors.
+func (bs *BridgeServer) Start() {
+	if err := bs.StartChecked(); err != nil {
+		slog.Error("bridge: failed to start server", "error", err)
+	}
+}
+
+// StartChecked validates the listen configuration, binds the socket synchronously and
+// then serves in the background. Bind failures and unauthenticated explicit
+// non-loopback exposure are returned to the caller instead of only being logged from a
 // goroutine after startup already reported success.
-func (bs *BridgeServer) Start() error {
+func (bs *BridgeServer) StartChecked() error {
 	if err := checkRemoteBindAuth("bridge", bs.bind, bs.token); err != nil {
 		return err
 	}
@@ -268,7 +276,7 @@ func (bs *BridgeServer) Start() error {
 }
 
 // warnRemoteExposure logs the specific risks of a non-loopback bridge listener.
-// A token is required for such a bind, but insecure mode additionally disables
+// Explicit remote binds require a token, but insecure mode additionally disables
 // the WebSocket origin check, and a wildcard CORS origin widens the browser
 // surface — both deserve a targeted warning rather than a generic one.
 func (bs *BridgeServer) warnRemoteExposure(addr string) {

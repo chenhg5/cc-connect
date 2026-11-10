@@ -23,8 +23,9 @@ import (
 // kimSession manages multi-turn conversations with the Kimi CLI.
 // Each Send() launches a new `kimi --prompt` process (with `--print
 // --output-format stream-json` when the installed binary still supports
-// --print) and uses --resume for conversation continuity. The exact flag
-// surface is decided by the Agent's one-shot probe; see kimiFlagSupport.
+// --print) and resumes via `--resume` (legacy kimi-cli) or `-r` (Kimi Code
+// CLI, #1561) for conversation continuity. The exact flag surface is decided
+// by the Agent's one-shot probe; see kimiFlagSupport.
 type kimiSession struct {
 	cmd         string
 	extraArgs   []string // extra args from cmd, prepended before kimi args
@@ -74,6 +75,16 @@ func newKimiSession(ctx context.Context, cmd string, extraArgs []string, workDir
 // tested without launching the CLI. The `--print` flag is only emitted when
 // the locally installed binary advertises it in `kimi --help`; the newer Kimi
 // Code CLI dropped that flag and rejects it outright (see issue #1456).
+//
+// Dialect notes (#1561):
+//   - Session resume: legacy kimi-cli takes `--resume <id>`; the Kimi Code
+//     CLI dialect uses `-r <id>` (the command its own resume hint prints).
+//   - Quiet mode: passed through only when the binary advertises `--quiet`;
+//     otherwise intermediate events are suppressed locally (see
+//     suppressIntermediateEvents).
+//   - Permission flags: never pass `--yolo`/`--auto`. Bare `--prompt` mode
+//     auto-approves tools on both CLI flavors, and Kimi Code CLI rejects
+//     `--prompt` combined with `--yolo`/`--auto`.
 func (ks *kimiSession) buildArgs(prompt string) []string {
 	args := append([]string{}, ks.extraArgs...)
 	if ks.flagSupport.Print {
@@ -85,11 +96,17 @@ func (ks *kimiSession) buildArgs(prompt string) []string {
 	case "plan":
 		args = append(args, "--plan")
 	case "quiet":
-		args = append(args, "--quiet")
+		if ks.flagSupport.Quiet {
+			args = append(args, "--quiet")
+		}
 	}
 
 	if sid := ks.CurrentSessionID(); sid != "" {
-		args = append(args, "--resume", sid)
+		if ks.flagSupport.isModernFlavor() {
+			args = append(args, "-r", sid)
+		} else {
+			args = append(args, "--resume", sid)
+		}
 	}
 	if ks.model != "" {
 		args = append(args, "--model", ks.model)
@@ -321,6 +338,12 @@ func extractResumeSessionID(line string) string {
 // Kimi CLI stream-json message roles:
 //   - "assistant": content (think + text), tool_calls
 //   - "tool":      content (tool execution result), tool_call_id
+//   - "meta":      session metadata (Kimi Code CLI, e.g. session.resume_hint)
+//
+// Note on content shape (#1561): the legacy kimi-cli wraps message content in
+// typed blocks ([{"type":"text","text":...}]), while the Kimi Code CLI emits
+// content as a plain string. Both shapes are accepted regardless of probed
+// flavor so the parser stays tolerant of future format drift.
 func (ks *kimiSession) handleEvent(raw map[string]any) {
 	role, _ := raw["role"].(string)
 
@@ -329,32 +352,72 @@ func (ks *kimiSession) handleEvent(raw map[string]any) {
 		ks.handleAssistant(raw)
 	case "tool":
 		ks.handleTool(raw)
+	case "meta":
+		ks.handleMeta(raw)
 	default:
 		slog.Debug("kimiSession: unhandled role", "role", role)
 	}
 }
 
-func (ks *kimiSession) handleAssistant(raw map[string]any) {
-	content, _ := raw["content"].([]any)
-	for _, item := range content {
-		block, ok := item.(map[string]any)
-		if !ok {
-			continue
+// handleMeta processes Kimi Code CLI meta events. The CLI reports the
+// resumable session id as {"role":"meta","type":"session.resume_hint",...}
+// on stdout instead of the legacy plain-text/stderr hint; capturing it here
+// is what keeps multi-turn continuity working on the modern dialect (#1561).
+func (ks *kimiSession) handleMeta(raw map[string]any) {
+	metaType, _ := raw["type"].(string)
+	if metaType != "session.resume_hint" {
+		slog.Debug("kimiSession: unhandled meta type", "type", metaType)
+		return
+	}
+	id, _ := raw["session_id"].(string)
+	if id == "" {
+		// Fallback: the meta line also carries the legacy plain-text hint.
+		if content, _ := raw["content"].(string); content != "" {
+			id = extractResumeSessionID(content)
 		}
-		blockType, _ := block["type"].(string)
-		switch blockType {
-		case "think", "thinking":
-			if think, ok := block["think"].(string); ok && think != "" {
-				evt := core.Event{Type: core.EventThinking, Content: think}
-				select {
-				case ks.events <- evt:
-				case <-ks.ctx.Done():
-					return
-				}
+	}
+	if id != "" {
+		ks.sessionID.Store(id)
+		slog.Debug("kimiSession: session id from meta resume hint", "session_id", id)
+	}
+}
+
+// suppressIntermediateEvents reports whether quiet mode must be emulated
+// locally: the Kimi Code CLI dropped --quiet, so thinking/tool events are
+// filtered here and only the final text reaches the platform. When the
+// binary does advertise --quiet the CLI itself does the filtering.
+func (ks *kimiSession) suppressIntermediateEvents() bool {
+	return ks.mode == "quiet" && !ks.flagSupport.Quiet
+}
+
+func (ks *kimiSession) handleAssistant(raw map[string]any) {
+	if text, ok := raw["content"].(string); ok {
+		// Kimi Code CLI shape: content is a plain string (#1561).
+		if text != "" {
+			ks.pendingMsgs = append(ks.pendingMsgs, text)
+		}
+	} else {
+		content, _ := raw["content"].([]any)
+		for _, item := range content {
+			block, ok := item.(map[string]any)
+			if !ok {
+				continue
 			}
-		case "text":
-			if text, ok := block["text"].(string); ok && text != "" {
-				ks.pendingMsgs = append(ks.pendingMsgs, text)
+			blockType, _ := block["type"].(string)
+			switch blockType {
+			case "think", "thinking":
+				if think, ok := block["think"].(string); ok && think != "" && !ks.suppressIntermediateEvents() {
+					evt := core.Event{Type: core.EventThinking, Content: think}
+					select {
+					case ks.events <- evt:
+					case <-ks.ctx.Done():
+						return
+					}
+				}
+			case "text":
+				if text, ok := block["text"].(string); ok && text != "" {
+					ks.pendingMsgs = append(ks.pendingMsgs, text)
+				}
 			}
 		}
 	}
@@ -374,6 +437,9 @@ func (ks *kimiSession) handleAssistant(raw map[string]any) {
 			toolID, _ := tcMap["id"].(string)
 
 			slog.Debug("kimiSession: tool_call", "tool", toolName, "id", toolID)
+			if ks.suppressIntermediateEvents() {
+				continue
+			}
 			evt := core.Event{
 				Type:      core.EventToolUse,
 				ToolName:  toolName,
@@ -391,23 +457,29 @@ func (ks *kimiSession) handleAssistant(raw map[string]any) {
 
 func (ks *kimiSession) handleTool(raw map[string]any) {
 	toolCallID, _ := raw["tool_call_id"].(string)
-	content, _ := raw["content"].([]any)
-	var outputParts []string
-	for _, item := range content {
-		block, ok := item.(map[string]any)
-		if !ok {
-			continue
-		}
-		blockType, _ := block["type"].(string)
-		if blockType == "text" {
-			if text, ok := block["text"].(string); ok {
-				outputParts = append(outputParts, text)
+	var output string
+	if text, ok := raw["content"].(string); ok {
+		// Kimi Code CLI shape: content is a plain string (#1561).
+		output = text
+	} else {
+		content, _ := raw["content"].([]any)
+		var outputParts []string
+		for _, item := range content {
+			block, ok := item.(map[string]any)
+			if !ok {
+				continue
+			}
+			blockType, _ := block["type"].(string)
+			if blockType == "text" {
+				if text, ok := block["text"].(string); ok {
+					outputParts = append(outputParts, text)
+				}
 			}
 		}
+		output = strings.Join(outputParts, "")
 	}
-	output := strings.Join(outputParts, "")
 
-	if output != "" {
+	if output != "" && !ks.suppressIntermediateEvents() {
 		slog.Debug("kimiSession: tool result", "tool_call_id", toolCallID)
 		evt := core.Event{
 			Type:       core.EventToolResult,
@@ -428,7 +500,7 @@ func (ks *kimiSession) flushPendingAsThinking() {
 	}
 	text := strings.Join(ks.pendingMsgs, "")
 	ks.pendingMsgs = ks.pendingMsgs[:0]
-	if text != "" {
+	if text != "" && !ks.suppressIntermediateEvents() {
 		evt := core.Event{Type: core.EventThinking, Content: text}
 		select {
 		case ks.events <- evt:

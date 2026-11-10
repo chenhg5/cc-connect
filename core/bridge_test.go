@@ -40,8 +40,8 @@ func startTestBridge(t *testing.T, token string) (*BridgeServer, string) {
 	return bs, wsURL
 }
 
-// Socket-level coverage for the loopback default and explicit bind lives in
-// listen_test.go (TestBridgeServer_DefaultBindIsLoopback and friends).
+// Socket-level coverage for legacy wildcard and explicit bind lives in
+// listen_test.go (TestBridgeServer_ExplicitLoopbackBind and friends).
 
 func dialWS(t *testing.T, url string, headers http.Header) *websocket.Conn {
 	t.Helper()

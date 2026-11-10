@@ -13,8 +13,8 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
-	"unicode/utf8"
 
 	"github.com/chenhg5/cc-connect/core"
 )
@@ -45,9 +45,52 @@ const (
 	typingRepeatInterval = 5 * time.Second
 )
 
+// sendPath labels the call site that reaches the outbound API so the burst
+// budget can be scoped to where ilink actually throttles us (issue #1742).
+//   - sendPathReply: reactive reply to an inbound user message. The gateway
+//     does not throttle replies on interactive deployments, so the push-path
+//     budget must NOT consume them. This covers Reply and also Send with a
+//     reply context taken from an inbound message: the engine sends a turn's
+//     answer through Send (issue #1937).
+//   - sendPathPush: proactive push (cron / timer / file transfer / SendImage /
+//     SendFile / SendAudio). Counts against burst_limit.
+//
+// File transfers count as push because they share the same outbound
+// sendMessage endpoint and are exactly the kind of "separate-message" traffic
+// that the gateway throttles.
+type sendPath string
+
+const (
+	sendPathReply sendPath = "reply"
+	sendPathPush  sendPath = "push"
+)
+
+// pushBudgetExceededCounter is incremented every time the push-path burst
+// budget is exhausted. Exposed via PushBudgetExceededTotal() for diagnostics
+// (`cc-connect doctor` and on-demand queries). Per-process — the budget itself
+// is per-account, but the counter is only observability and reset on restart.
+var pushBudgetExceededCounter atomic.Int64
+
+// PushBudgetExceededTotal returns how many times the push-path burst budget
+// has blocked a send since process start. Replies are not counted because they
+// bypass the quota entirely.
+func PushBudgetExceededTotal() int64 {
+	return pushBudgetExceededCounter.Load()
+}
+
+// resetPushBudgetExceededCounter is for tests only.
+func resetPushBudgetExceededCounter() {
+	pushBudgetExceededCounter.Store(0)
+}
+
 type replyContext struct {
 	peerUserID   string
 	contextToken string
+	// inbound marks a context built from a received user message
+	// (dispatchInbound). The engine delivers a turn's answer through Send with
+	// this context, so Send uses it to tell a reply from a proactive push.
+	// Contexts rebuilt by ReconstructReplyCtx (cron, timer, relay) leave it false.
+	inbound bool
 }
 
 // Platform implements core.Platform for Weixin personal chat via the ilink bot HTTP API
@@ -81,8 +124,12 @@ type Platform struct {
 	syncBuf     string
 	syncBufPath string
 
-	dedupMu sync.Mutex
-	dedup   map[string]time.Time
+	// dedupEnabled mirrors the optional dedup_enabled config key (default true for
+	// weixin because ilink can retransmit the same message_id on ACK delay —
+	// see issue #1667). When false, the dispatch path skips the cache entirely.
+	dedupEnabled bool
+	// dedup tracks recently seen composite keys to absorb retransmissions.
+	dedup *core.MessageDedup
 
 	pauseMu    sync.Mutex
 	pauseUntil time.Time
@@ -196,6 +243,18 @@ func New(opts map[string]any) (core.Platform, error) {
 		burstWindow = defaultBurstWindowSecs
 	}
 
+	// dedup_enabled (default true) and dedup_window_seconds (default 300s, the
+	// legacy value) — see issue #1667. ilink can retransmit the same message_id
+	// on ACK delay; without dedup the bot replies twice.
+	dedupEnabled := pickBool(opts["dedup_enabled"])
+	if _, ok := opts["dedup_enabled"]; !ok {
+		dedupEnabled = true
+	}
+	dedupWindow := pickInt(opts["dedup_window_seconds"])
+	if dedupWindow <= 0 {
+		dedupWindow = 300
+	}
+
 	p := &Platform{
 		token:           token,
 		baseURL:         baseURL,
@@ -208,7 +267,8 @@ func New(opts map[string]any) (core.Platform, error) {
 		httpClient:      httpClient,
 		cdnHttpClient:   cdnHttpClient,
 		tokens:          make(map[string]string),
-		dedup:           make(map[string]time.Time),
+		dedupEnabled:    dedupEnabled,
+		dedup:           core.NewMessageDedup(time.Duration(dedupWindow) * time.Second),
 		typingTickets:   make(map[string]typingTicketEntry),
 		sendQuotaLimit:  burstLimit,
 		sendQuotaWindow: time.Duration(burstWindow) * time.Second,
@@ -238,6 +298,26 @@ func pickInt(v any) int {
 		return int(x)
 	default:
 		return 0
+	}
+}
+
+// pickBool interprets an any value as a bool. Numeric values are treated as
+// "non-zero => true" so the same key works for both booleans and 0/1 ints.
+func pickBool(v any) bool {
+	switch x := v.(type) {
+	case bool:
+		return x
+	case int:
+		return x != 0
+	case int64:
+		return x != 0
+	case float64:
+		return x != 0
+	case string:
+		s := strings.ToLower(strings.TrimSpace(x))
+		return s == "true" || s == "1" || s == "yes" || s == "on"
+	default:
+		return false
 	}
 }
 
@@ -485,24 +565,15 @@ func (p *Platform) dispatchInbound(ctx context.Context, m *weixinMessage, h core
 		}
 	}
 
-	// Include create_time_ms and client_id so (seq,message_id)=(0,0) or duplicates are less likely to collide.
+	// Include create_time_ms and client_id so (seq,message_id)=(0,0) or duplicates
+	// are less likely to collide. Dedup window is configurable via
+	// dedup_window_seconds; the cache is a thin wrapper over core.MessageDedup
+	// (see issue #1667).
 	dedupKey := fmt.Sprintf("%s|%d|%d|%d|%s", from, m.MessageID, m.Seq, m.CreateTimeMs, strings.TrimSpace(m.ClientID))
-	p.dedupMu.Lock()
-	if p.dedup == nil {
-		p.dedup = make(map[string]time.Time)
-	}
-	now := time.Now()
-	for k, ts := range p.dedup {
-		if now.Sub(ts) > 5*time.Minute {
-			delete(p.dedup, k)
-		}
-	}
-	if _, ok := p.dedup[dedupKey]; ok {
-		p.dedupMu.Unlock()
+	if p.dedupEnabled && p.dedup != nil && p.dedup.IsDuplicate(dedupKey) {
+		slog.Debug("weixin: dropping duplicate message", "from", from, "message_id", m.MessageID, "seq", m.Seq)
 		return
 	}
-	p.dedup[dedupKey] = now
-	p.dedupMu.Unlock()
 
 	if tok := strings.TrimSpace(m.ContextToken); tok != "" {
 		p.setContextToken(from, tok)
@@ -518,7 +589,7 @@ func (p *Platform) dispatchInbound(ctx context.Context, m *weixinMessage, h core
 		return
 	}
 
-	rc := &replyContext{peerUserID: from, contextToken: strings.TrimSpace(m.ContextToken)}
+	rc := &replyContext{peerUserID: from, contextToken: strings.TrimSpace(m.ContextToken), inbound: true}
 	msgID := fmt.Sprintf("%d", m.MessageID)
 	if m.MessageID == 0 {
 		msgID = randomHex(8)
@@ -567,12 +638,27 @@ func randomHex(n int) string {
 	return hex.EncodeToString(b)
 }
 
+// Reply sends a reactive text reply to an inbound user message. Replies bypass
+// the push-path burst budget (issue #1742): the gateway does not throttle
+// replies on interactive deployments, and counting them against the push
+// budget silently bricked weixin bots at 4 replies per 24h after the v1.5.0
+// default landed.
 func (p *Platform) Reply(ctx context.Context, replyCtx any, content string) error {
-	return p.sendChunks(ctx, replyCtx, content)
+	return p.sendChunks(ctx, replyCtx, content, sendPathReply)
 }
 
+// Send delivers a message the engine did not route through Reply. The engine
+// uses Send for each turn's answer, passing the reply context of the user's
+// message; that is a reply and bypasses the burst budget like Reply does
+// (#1937). Every other Send — cron, timer, relay, whose reply context comes
+// from ReconstructReplyCtx — is a proactive push and counts against the budget,
+// because ilink DOES throttle proactive sends (see #1643 / #1742).
 func (p *Platform) Send(ctx context.Context, replyCtx any, content string) error {
-	return p.sendChunks(ctx, replyCtx, content)
+	path := sendPathPush
+	if rc, ok := replyCtx.(*replyContext); ok && rc != nil && rc.inbound {
+		path = sendPathReply
+	}
+	return p.sendChunks(ctx, replyCtx, content, path)
 }
 
 // StartTyping sends a typing indicator to the peer and repeats every few seconds
@@ -681,7 +767,22 @@ func (p *Platform) refreshTypingTicket(ctx context.Context, peerID, contextToken
 // fail-fast philosophy (see sendChunk) applies: do not keep hammering a
 // throttled bot. Configure via burst_limit / burst_window_secs platform
 // options. A limit of 0 disables the quota.
-func (p *Platform) checkSendQuota(ctx context.Context) error {
+//
+// The quota is intentionally scoped to the PUSH path (proactive cron/timer and
+// outbound media). The REPLY path bypasses it entirely: the gateway does not
+// throttle replies on interactive deployments, and counting them against the
+// push budget silently bricked weixin bots at 4 replies per 24h after the
+// v1.5.0 default landed (issue #1742). File transfers count as push because
+// they hit the same outbound API. See sendPath values below.
+func (p *Platform) checkSendQuota(ctx context.Context, path sendPath) error {
+	if path == sendPathReply {
+		// Replies are never throttled by ilink in practice; applying the
+		// push-path budget to replies would block interactive conversations
+		// the moment the proactive-push budget is exhausted. The fixed-cost
+		// window-bucket logic is also wrong for replies: a user can easily
+		// exchange >4 messages in a day on a busy chat. Issue #1742.
+		return nil
+	}
 	if p.sendQuotaLimit <= 0 || p.sendQuotaWindow <= 0 {
 		return nil
 	}
@@ -697,20 +798,28 @@ func (p *Platform) checkSendQuota(ctx context.Context) error {
 	p.sendQuotaTimes = kept
 	if len(p.sendQuotaTimes) >= p.sendQuotaLimit {
 		p.sendQuotaMu.Unlock()
-		return fmt.Errorf("weixin: send budget exhausted (%d messages in the last %s); "+
-			"ilink throttles the bot after roughly 5-6 sends per window — reduce messages or re-login later", p.sendQuotaLimit, p.sendQuotaWindow)
+		pushBudgetExceededCounter.Add(1)
+		slog.Error("weixin: push_path_budget_exceeded",
+			"path", string(path),
+			"used", len(p.sendQuotaTimes),
+			"limit", p.sendQuotaLimit,
+			"window", p.sendQuotaWindow.String(),
+			"hint", "ilink throttles the bot after roughly 5-6 pushes per window — reduce cron/timer pushes or re-login later",
+		)
+		return fmt.Errorf("weixin: push budget exhausted (%d push messages in the last %s); "+
+			"ilink throttles the bot after roughly 5-6 pushes per window — reduce messages or re-login later", p.sendQuotaLimit, p.sendQuotaWindow)
 	}
 	p.sendQuotaTimes = append(p.sendQuotaTimes, now)
 	p.sendQuotaMu.Unlock()
 	return nil
 }
 
-func (p *Platform) sendChunks(ctx context.Context, replyCtx any, content string) error {
+func (p *Platform) sendChunks(ctx context.Context, replyCtx any, content string, path sendPath) error {
 	rc, ok := replyCtx.(*replyContext)
 	if !ok || rc == nil {
 		return fmt.Errorf("weixin: invalid reply context")
 	}
-	if err := p.checkSendQuota(ctx); err != nil {
+	if err := p.checkSendQuota(ctx, path); err != nil {
 		return err
 	}
 	if strings.TrimSpace(rc.contextToken) == "" {
@@ -726,7 +835,7 @@ func (p *Platform) sendChunks(ctx context.Context, replyCtx any, content string)
 	if strings.TrimSpace(content) == "" {
 		return nil
 	}
-	chunks := splitUTF8(content, maxWeixinChunk)
+	chunks := core.SplitMessageCodeFenceAware(content, maxWeixinChunk)
 	total := len(chunks)
 	for i, chunk := range chunks {
 		// Add delay between chunks to avoid rate limiting (except for first chunk)
@@ -790,23 +899,6 @@ func truncatePreview(s string, max int) string {
 	return s[:max] + "..."
 }
 
-func splitUTF8(s string, maxRunes int) []string {
-	if maxRunes <= 0 || utf8.RuneCountInString(s) <= maxRunes {
-		return []string{s}
-	}
-	var out []string
-	runes := []rune(s)
-	for len(runes) > 0 {
-		n := maxRunes
-		if len(runes) < n {
-			n = len(runes)
-		}
-		out = append(out, string(runes[:n]))
-		runes = runes[n:]
-	}
-	return out
-}
-
 // ReconstructReplyCtx implements core.ReplyContextReconstructor for cron / proactive sends.
 func (p *Platform) ReconstructReplyCtx(sessionKey string) (any, error) {
 	if !strings.HasPrefix(sessionKey, sessionKeyPrefix) {
@@ -820,17 +912,17 @@ func (p *Platform) ReconstructReplyCtx(sessionKey string) (any, error) {
 	return &replyContext{peerUserID: peer, contextToken: tok}, nil
 }
 
-// FormattingInstructions implements core.FormattingInstructionProvider.
-func (p *Platform) FormattingInstructions() string {
-	return "Replies are delivered as plain text to Weixin. Avoid markdown tables; use short paragraphs."
-}
+// Weixin renders standard Markdown, so this platform intentionally does not
+// implement core.FormattingInstructionProvider. That optional interface exists
+// for platforms whose syntax deviates from standard Markdown (Slack mrkdwn,
+// Google Chat), and the majority of adapters — Feishu, Telegram, Discord,
+// DingTalk among them — likewise leave it unimplemented.
 
 var (
-	_ core.Platform                      = (*Platform)(nil)
-	_ core.ReplyContextReconstructor     = (*Platform)(nil)
-	_ core.FormattingInstructionProvider = (*Platform)(nil)
-	_ core.ImageSender                   = (*Platform)(nil)
-	_ core.FileSender                    = (*Platform)(nil)
-	_ core.TypingIndicator               = (*Platform)(nil)
-	_ core.AsyncRecoverablePlatform      = (*Platform)(nil)
+	_ core.Platform                  = (*Platform)(nil)
+	_ core.ReplyContextReconstructor = (*Platform)(nil)
+	_ core.ImageSender               = (*Platform)(nil)
+	_ core.FileSender                = (*Platform)(nil)
+	_ core.TypingIndicator           = (*Platform)(nil)
+	_ core.AsyncRecoverablePlatform  = (*Platform)(nil)
 )

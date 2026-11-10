@@ -19,8 +19,8 @@ func TestNormalizeBind(t *testing.T) {
 		in   string
 		want string
 	}{
-		{"empty defaults to loopback", "", "127.0.0.1"},
-		{"blank defaults to loopback", "   ", "127.0.0.1"},
+		{"empty preserves wildcard", "", ""},
+		{"blank preserves wildcard", "   ", ""},
 		{"trimmed", " 0.0.0.0 ", "0.0.0.0"},
 		{"ipv4 loopback", "127.0.0.1", "127.0.0.1"},
 		{"wildcard", "0.0.0.0", "0.0.0.0"},
@@ -29,7 +29,7 @@ func TestNormalizeBind(t *testing.T) {
 		{"bracketed ipv6 loopback is unwrapped", "[::1]", "::1"},
 		{"bare ipv6 loopback", "::1", "::1"},
 		{"hostname", "localhost", "localhost"},
-		{"brackets that are not an ip are kept", "[fe80::1%eth0]", "[fe80::1%eth0]"},
+		{"scoped ipv6 is unwrapped", "[fe80::1%eth0]", "fe80::1%eth0"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -48,7 +48,9 @@ func TestListenAddressNeverDoubleBracketsIPv6(t *testing.T) {
 		port int
 		want string
 	}{
-		{"", 9820, "127.0.0.1:9820"},
+		{"", 9820, ":9820"},
+		{"[fe80::1%eth0]", 9820, "[fe80::1%eth0]:9820"},
+		{"fe80::1%eth0", 9820, "[fe80::1%eth0]:9820"},
 		{"0.0.0.0", 9820, "0.0.0.0:9820"},
 		{"[::]", 9820, "[::]:9820"},
 		{"::", 9820, "[::]:9820"},
@@ -87,7 +89,7 @@ func TestIsLoopbackBind(t *testing.T) {
 		bind string
 		want bool
 	}{
-		{"", true},
+		{"", false},
 		{"127.0.0.1", true},
 		{"127.0.0.53", true},
 		{"[::1]", true},
@@ -114,7 +116,8 @@ func TestCheckRemoteBindAuth(t *testing.T) {
 		token   string
 		wantErr bool
 	}{
-		{"loopback without token is allowed", "", "", false},
+		{"legacy wildcard without token is allowed", "", "", false},
+		{"remote whitespace token is refused", "0.0.0.0", " \t", true},
 		{"loopback ip without token is allowed", "127.0.0.1", "", false},
 		{"loopback v6 without token is allowed", "[::1]", "", false},
 		{"wildcard without token is refused", "0.0.0.0", "", true},
@@ -202,12 +205,12 @@ func dialTCP(t *testing.T, addr string) (net.Conn, error) {
 }
 
 // ---------------------------------------------------------------------------
-// Management server: default loopback, explicit remote, refusal, bind errors
+// Management server: explicit loopback, remote, refusal, and bind errors
 // ---------------------------------------------------------------------------
 
-func TestManagementServer_DefaultBindIsLoopback(t *testing.T) {
-	mgmt := NewManagementServer(0, "tok", nil)
-	if err := mgmt.Start(); err != nil {
+func TestManagementServer_ExplicitLoopbackBind(t *testing.T) {
+	mgmt := NewManagementServerWithBind("127.0.0.1", 0, "tok", nil)
+	if err := mgmt.StartChecked(); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
 	t.Cleanup(mgmt.Stop)
@@ -223,7 +226,7 @@ func TestManagementServer_DefaultBindIsLoopback(t *testing.T) {
 
 func TestManagementServer_ExplicitBindAllowsRemoteAccess(t *testing.T) {
 	mgmt := NewManagementServerWithBind("0.0.0.0", 0, "tok", nil)
-	if err := mgmt.Start(); err != nil {
+	if err := mgmt.StartChecked(); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
 	t.Cleanup(mgmt.Stop)
@@ -258,10 +261,10 @@ func TestManagementServer_RefusesRemoteBindWithoutToken(t *testing.T) {
 	port := freePort(t)
 	mgmt := NewManagementServerWithBind("0.0.0.0", port, "", nil)
 
-	err := mgmt.Start()
+	err := mgmt.StartChecked()
 	if err == nil {
 		t.Cleanup(mgmt.Stop)
-		t.Fatal("Start() = nil, want an error for an unauthenticated non-loopback bind")
+		t.Fatal("StartChecked() = nil, want an error for an unauthenticated non-loopback bind")
 	}
 	if !strings.Contains(err.Error(), "without a token") {
 		t.Fatalf("error %q does not mention the missing token", err)
@@ -274,7 +277,7 @@ func TestManagementServer_RefusesRemoteBindWithoutToken(t *testing.T) {
 
 func TestManagementServer_AllowsIPv6WildcardWithToken(t *testing.T) {
 	mgmt := NewManagementServerWithBind("[::]", 0, "tok", nil)
-	if err := mgmt.Start(); err != nil {
+	if err := mgmt.StartChecked(); err != nil {
 		t.Skipf("IPv6 unavailable on this host: %v", err)
 	}
 	t.Cleanup(mgmt.Stop)
@@ -299,9 +302,9 @@ func TestManagementServer_StartReportsPortInUse(t *testing.T) {
 	port := blocker.Addr().(*net.TCPAddr).Port
 
 	mgmt := NewManagementServer(port, "tok", nil)
-	if err := mgmt.Start(); err == nil {
+	if err := mgmt.StartChecked(); err == nil {
 		t.Cleanup(mgmt.Stop)
-		t.Fatal("Start() = nil, want an error when the port is already in use")
+		t.Fatal("StartChecked() = nil, want an error when the port is already in use")
 	}
 	if mgmt.Addr() != "" {
 		t.Fatalf("Addr() = %q after a failed start, want empty", mgmt.Addr())
@@ -310,9 +313,9 @@ func TestManagementServer_StartReportsPortInUse(t *testing.T) {
 
 func TestManagementServer_StartReportsInvalidBindAddress(t *testing.T) {
 	mgmt := NewManagementServerWithBind("not a host", 0, "tok", nil)
-	if err := mgmt.Start(); err == nil {
+	if err := mgmt.StartChecked(); err == nil {
 		t.Cleanup(mgmt.Stop)
-		t.Fatal("Start() = nil, want an error for an invalid bind address")
+		t.Fatal("StartChecked() = nil, want an error for an invalid bind address")
 	}
 }
 
@@ -321,8 +324,8 @@ func TestManagementServer_StartReportsInvalidBindAddress(t *testing.T) {
 func TestManagementServer_LoopbackBindNotReachableViaNonLoopbackAddress(t *testing.T) {
 	remote := firstNonLoopbackIPv4(t)
 
-	mgmt := NewManagementServer(0, "tok", nil)
-	if err := mgmt.Start(); err != nil {
+	mgmt := NewManagementServerWithBind("127.0.0.1", 0, "tok", nil)
+	if err := mgmt.StartChecked(); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
 	t.Cleanup(mgmt.Stop)
@@ -367,9 +370,9 @@ func firstNonLoopbackIPv4(t *testing.T) net.IP {
 // Bridge server
 // ---------------------------------------------------------------------------
 
-func TestBridgeServer_DefaultBindIsLoopback(t *testing.T) {
-	bs := NewBridgeServer(freePort(t), "tok", "/bridge/ws", nil)
-	if err := bs.Start(); err != nil {
+func TestBridgeServer_ExplicitLoopbackBind(t *testing.T) {
+	bs := NewBridgeServerWithBind("127.0.0.1", freePort(t), "tok", "/bridge/ws", nil)
+	if err := bs.StartChecked(); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
 	t.Cleanup(bs.Stop)
@@ -385,7 +388,7 @@ func TestBridgeServer_DefaultBindIsLoopback(t *testing.T) {
 
 func TestBridgeServer_ExplicitBindAllowsRemoteAccess(t *testing.T) {
 	bs := NewBridgeServerWithBind("0.0.0.0", freePort(t), "tok", "/bridge/ws", nil)
-	if err := bs.Start(); err != nil {
+	if err := bs.StartChecked(); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
 	t.Cleanup(bs.Stop)
@@ -418,10 +421,10 @@ func TestBridgeServer_RefusesInsecureRemoteBindWithoutToken(t *testing.T) {
 		t.Fatal("NewBridgeServerInsecureWithBind returned nil")
 	}
 
-	err := bs.Start()
+	err := bs.StartChecked()
 	if err == nil {
 		t.Cleanup(bs.Stop)
-		t.Fatal("Start() = nil, want an error for insecure mode on a non-loopback bind without a token")
+		t.Fatal("StartChecked() = nil, want an error for insecure mode on a non-loopback bind without a token")
 	}
 	if !strings.Contains(err.Error(), "without a token") {
 		t.Fatalf("error %q does not mention the missing token", err)
@@ -445,7 +448,7 @@ func TestBridgeServer_InsecureLoopbackWithoutTokenStillStarts(t *testing.T) {
 	if bs == nil {
 		t.Fatal("NewBridgeServerInsecureWithBind returned nil")
 	}
-	if err := bs.Start(); err != nil {
+	if err := bs.StartChecked(); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
 	t.Cleanup(bs.Stop)
@@ -461,9 +464,9 @@ func TestBridgeServer_StartReportsPortInUse(t *testing.T) {
 	port := blocker.Addr().(*net.TCPAddr).Port
 
 	bs := NewBridgeServer(port, "tok", "/bridge/ws", nil)
-	if err := bs.Start(); err == nil {
+	if err := bs.StartChecked(); err == nil {
 		t.Cleanup(bs.Stop)
-		t.Fatal("Start() = nil, want an error when the port is already in use")
+		t.Fatal("StartChecked() = nil, want an error when the port is already in use")
 	}
 	if bs.Addr() != "" {
 		t.Fatalf("Addr() = %q after a failed start, want empty", bs.Addr())
@@ -486,5 +489,124 @@ func TestListenTCPReportsAddressInUse(t *testing.T) {
 	}
 	if want := "127.0.0.1:" + strconv.Itoa(port); addr != want {
 		t.Fatalf("listenTCP reported addr %q, want %q", addr, want)
+	}
+}
+
+// Compile-time guards for callers implementing the original public API.
+var (
+	_ interface{ Start() } = (*ManagementServer)(nil)
+	_ interface{ Start() } = (*BridgeServer)(nil)
+)
+
+func TestManagementServer_LegacyWildcardWithoutToken(t *testing.T) {
+	for _, bind := range []string{"", "   "} {
+		t.Run("bind="+bind, func(t *testing.T) {
+			mgmt := NewManagementServerWithBind(bind, 0, "", nil)
+			if err := mgmt.StartChecked(); err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(mgmt.Stop)
+			requireUnspecifiedHost(t, mgmt.Addr())
+			_, port, _ := net.SplitHostPort(mgmt.Addr())
+			resp, err := (&http.Client{Timeout: 3 * time.Second}).Get("http://127.0.0.1:" + port + "/api/v1/status")
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer func() { _ = resp.Body.Close() }()
+			if resp.StatusCode != http.StatusOK {
+				t.Fatalf("legacy unauthenticated status = %d", resp.StatusCode)
+			}
+		})
+	}
+}
+
+func TestBridgeServer_LegacyWildcardCompatibility(t *testing.T) {
+	if bs := NewBridgeServer(freePort(t), "", "/bridge/ws", nil); bs != nil {
+		t.Fatal("legacy secure bridge must still require a token")
+	}
+	for _, insecure := range []bool{false, true} {
+		t.Run(strconv.FormatBool(insecure), func(t *testing.T) {
+			var bs *BridgeServer
+			if insecure {
+				bs = NewBridgeServerInsecure(freePort(t), "", "/bridge/ws", nil)
+			} else {
+				bs = NewBridgeServer(freePort(t), "tok", "/bridge/ws", nil)
+			}
+			if bs == nil {
+				t.Fatal("constructor returned nil")
+			}
+			if err := bs.StartChecked(); err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(bs.Stop)
+			requireUnspecifiedHost(t, bs.Addr())
+			_, port, _ := net.SplitHostPort(bs.Addr())
+			resp, err := (&http.Client{Timeout: 3 * time.Second}).Get("http://127.0.0.1:" + port + "/bridge/sessions?session_key=k")
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer func() { _ = resp.Body.Close() }()
+			if insecure && resp.StatusCode == http.StatusUnauthorized {
+				t.Fatal("legacy insecure bridge unexpectedly requires authentication")
+			}
+			if !insecure && resp.StatusCode != http.StatusUnauthorized {
+				t.Fatalf("secure bridge status = %d", resp.StatusCode)
+			}
+		})
+	}
+}
+
+func TestExplicitRemoteBindRejectsWhitespaceToken(t *testing.T) {
+	mgmt := NewManagementServerWithBind("0.0.0.0", 0, " \t ", nil)
+	if err := mgmt.StartChecked(); err == nil {
+		mgmt.Stop()
+		t.Fatal("management accepted whitespace-only token")
+	}
+	bs := NewBridgeServerWithBind("0.0.0.0", freePort(t), " \t ", "/bridge/ws", nil)
+	if bs == nil {
+		t.Fatal("expected startup validation")
+	}
+	if err := bs.StartChecked(); err == nil {
+		bs.Stop()
+		t.Fatal("bridge accepted whitespace-only token")
+	}
+}
+
+func TestBindRejectsHostPortWithActionableError(t *testing.T) {
+	for _, bind := range []string{"localhost:9820", "127.0.0.1:9820", "[::1]:9820", "[invalid]", "not a host"} {
+		if err := checkRemoteBindAuth("management", bind, "tok"); err == nil || !strings.Contains(err.Error(), "not host:port") {
+			t.Fatalf("bind %q: expected bare-host guidance, got %v", bind, err)
+		}
+	}
+	for _, bind := range []string{"[fe80::1%eth0]", "fe80::1%eth0", "[::1]", "localhost", ""} {
+		if err := validateBind(bind); err != nil {
+			t.Fatalf("valid bind %q: %v", bind, err)
+		}
+	}
+}
+
+func TestManagementServer_LegacyReachableViaNonLoopbackWithoutToken(t *testing.T) {
+	remote := firstNonLoopbackIPv4(t)
+	mgmt := NewManagementServer(0, "", nil)
+	if err := mgmt.StartChecked(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(mgmt.Stop)
+	requireUnspecifiedHost(t, mgmt.Addr())
+	_, port, err := net.SplitHostPort(mgmt.Addr())
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Bypass environment HTTP proxies: this request must exercise the local NIC.
+	transport := &http.Transport{}
+	defer transport.CloseIdleConnections()
+	client := &http.Client{Transport: transport, Timeout: 3 * time.Second}
+	resp, err := client.Get("http://" + net.JoinHostPort(remote.String(), port) + "/api/v1/status")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("legacy remote status = %d, want 200", resp.StatusCode)
 	}
 }

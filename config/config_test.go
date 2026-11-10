@@ -583,6 +583,84 @@ func TestLoad_DefaultsDataDir(t *testing.T) {
 	}
 }
 
+// TestLoad_DataDirAbsoluteWhenExplicitlyRelative regresses the
+// "Append system prompt file not found" bug: even when a user sets
+// data_dir to a relative path in config.toml, Load must anchor it to
+// an absolute path so that agent subprocesses (which cd into
+// project.work_dir before reading system prompt files) do not resolve
+// data_dir against the child's working directory instead of the
+// supervisor's.
+func TestLoad_DataDirAbsoluteWhenExplicitlyRelative(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("HOME", dir)
+
+	cfgPath := filepath.Join(dir, "config.toml")
+	body := "data_dir = \"./my-data\"\n" + baseConfigTOML
+	if err := os.WriteFile(cfgPath, []byte(body), 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	cfg, err := Load(cfgPath)
+	if err != nil {
+		t.Fatalf("Load() error: %v", err)
+	}
+	if !filepath.IsAbs(cfg.DataDir) {
+		t.Fatalf("Load() data_dir = %q, want absolute path", cfg.DataDir)
+	}
+	if !strings.HasSuffix(cfg.DataDir, "my-data") {
+		t.Fatalf("Load() data_dir = %q, want suffix my-data", cfg.DataDir)
+	}
+}
+
+func TestLoad_DataDirExpandsCurrentUserHome(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	cfgPath := filepath.Join(t.TempDir(), "config.toml")
+	body := "data_dir = \"~/.cc-connect\"\n" + baseConfigTOML
+	if err := os.WriteFile(cfgPath, []byte(body), 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	cfg, err := Load(cfgPath)
+	if err != nil {
+		t.Fatalf("Load() error: %v", err)
+	}
+
+	want := filepath.Join(home, ".cc-connect")
+	if cfg.DataDir != want {
+		t.Fatalf("Load() data_dir = %q, want %q", cfg.DataDir, want)
+	}
+}
+
+// TestLoad_DataDirAbsoluteWhenHOMEEmpty covers the fallback path when
+// os.UserHomeDir fails. This is exercised by service managers like
+// launchd (gui/... bootstrap) and systemd (system units) that do not
+// propagate HOME. Even in that degraded state, Load must still return
+// an absolute data_dir so subprocesses do not silently write to
+// <work_dir>/.cc-connect. Windows uses USERPROFILE, which we cannot
+// reliably clear from a test.
+func TestLoad_DataDirAbsoluteWhenHOMEEmpty(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("HOME does not gate os.UserHomeDir on windows")
+	}
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "config.toml")
+	if err := os.WriteFile(cfgPath, []byte(baseConfigTOML), 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	t.Setenv("HOME", "")
+
+	cfg, err := Load(cfgPath)
+	if err != nil {
+		t.Fatalf("Load() error: %v", err)
+	}
+	if !filepath.IsAbs(cfg.DataDir) {
+		t.Fatalf("Load() data_dir = %q, want absolute path even when HOME unset", cfg.DataDir)
+	}
+}
+
 func TestLoad_ResolvesEnvPlaceholders(t *testing.T) {
 
 	root := t.TempDir()
@@ -2817,6 +2895,59 @@ func TestSaveProjectSettings_ExtraFields(t *testing.T) {
 	}
 }
 
+func TestSaveProjectSettings_WorkspaceModeAndBaseDir(t *testing.T) {
+	configPath := writeConfigFixture(t, feishuConfigFixture)
+	patchConfigPath(t, configPath)
+
+	wsMode := "multi-workspace"
+	wsBaseDir := "/tmp/workspaces"
+	err := SaveProjectSettings("alpha", ProjectSettingsUpdate{
+		WorkspaceMode:    &wsMode,
+		WorkspaceBaseDir: &wsBaseDir,
+	})
+	if err != nil {
+		t.Fatalf("SaveProjectSettings: %v", err)
+	}
+
+	cfg := readConfigFixture(t, configPath)
+	proj := cfg.Projects[0]
+	if proj.Mode != wsMode {
+		t.Fatalf("Mode = %q, want %q", proj.Mode, wsMode)
+	}
+	if proj.BaseDir != wsBaseDir {
+		t.Fatalf("BaseDir = %q, want %q", proj.BaseDir, wsBaseDir)
+	}
+
+	details := GetProjectConfigDetails("alpha")
+	if details["workspace_mode"] != wsMode {
+		t.Fatalf("workspace_mode = %v, want %q", details["workspace_mode"], wsMode)
+	}
+	if details["workspace_base_dir"] != wsBaseDir {
+		t.Fatalf("workspace_base_dir = %v, want %q", details["workspace_base_dir"], wsBaseDir)
+	}
+
+	// Switching back to single mode clears Mode but leaves BaseDir untouched.
+	single := "single"
+	if err := SaveProjectSettings("alpha", ProjectSettingsUpdate{WorkspaceMode: &single}); err != nil {
+		t.Fatalf("SaveProjectSettings (single): %v", err)
+	}
+	cfg = readConfigFixture(t, configPath)
+	if cfg.Projects[0].Mode != "" {
+		t.Fatalf("Mode = %q, want empty after switching to single", cfg.Projects[0].Mode)
+	}
+}
+
+func TestSaveProjectSettings_WorkspaceModeRequiresBaseDir(t *testing.T) {
+	configPath := writeConfigFixture(t, feishuConfigFixture)
+	patchConfigPath(t, configPath)
+
+	wsMode := "multi-workspace"
+	err := SaveProjectSettings("alpha", ProjectSettingsUpdate{WorkspaceMode: &wsMode})
+	if err == nil {
+		t.Fatal("expected error enabling multi-workspace mode without base_dir, got nil")
+	}
+}
+
 func TestGetProjectConfigDetails(t *testing.T) {
 	configPath := writeConfigFixture(t, feishuConfigFixture)
 	patchConfigPath(t, configPath)
@@ -3488,5 +3619,29 @@ func TestRemoveGlobalProvider_CleansUpProviderRefs(t *testing.T) {
 	refs2 := cfg.Projects[1].Agent.ProviderRefs
 	if len(refs2) != 0 {
 		t.Errorf("proj2 provider_refs: want [], got %v", refs2)
+	}
+}
+
+func TestEnableWebAdmin_PreservesExistingListenerBinds(t *testing.T) {
+	cases := []struct {
+		name, content, management, bridge string
+	}{
+		{"enabled legacy management", "[management]\nenabled=true\n", "", "127.0.0.1"},
+		{"enabled legacy bridge", "[bridge]\nenabled=true\ntoken='existing'\n", "127.0.0.1", ""},
+		{"both enabled legacy", "[management]\nenabled=true\n[bridge]\nenabled=true\n", "", ""},
+		{"configured disabled listeners", "[management]\nenabled=false\nbind='0.0.0.0'\n[bridge]\nenabled=false\nbind='[::1]'\n", "0.0.0.0", "[::1]"},
+		{"configured enabled listeners", "[management]\nenabled=true\nbind='10.0.0.1'\n[bridge]\nenabled=true\nbind='[fe80::1%eth0]'\n", "10.0.0.1", "[fe80::1%eth0]"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			writeTestConfig(t, tc.content)
+			if _, err := EnableWebAdmin("management-token", "bridge-token"); err != nil {
+				t.Fatal(err)
+			}
+			cfg := readTestConfig(t)
+			if cfg.Management.Bind != tc.management || cfg.Bridge.Bind != tc.bridge {
+				t.Fatalf("binds = (%q, %q), want (%q, %q)", cfg.Management.Bind, cfg.Bridge.Bind, tc.management, tc.bridge)
+			}
+		})
 	}
 }
