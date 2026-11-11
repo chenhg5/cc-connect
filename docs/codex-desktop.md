@@ -38,19 +38,24 @@ Both the desktop application's callback environment and the watcher must use the
 - Completion callbacks include the desktop thread ID and the full final text.
 - Complete public `commentary` messages forward as progress updates without waiting for the entire turn. Partial text, hidden reasoning, tool output and child-agent conversations are excluded.
 - No old completed commentary before initial configuration is replayed. The initial enabled timestamp persists across watcher restarts; delivered IDs remain deduplicated.
-- Notifications register the thread only for their exact destination and do not switch that destination's active conversation/workspace.
-- Outbound jobs remain on disk until sending succeeds. A failed job does not stop unrelated jobs. `ret=-2` suspends automatic sending for one hour while retaining the queue; the delay is a local retry policy, not a guaranteed platform recovery time.
+- Notifications register the thread only for their exact destination and do not switch that destination's active conversation/workspace or create a workspace agent. Routes expire 24 hours after the notification and are pruned during registration and lookup. Reconnection restores only unexpired routes, preserving their original deadline. Saved routes from older versions without a deadline require a fresh notification.
+- Outbound jobs remain on disk until sending succeeds or a permanent failure is identified. HTTP 4xx responses other than 408/429 move the job to the private `invalid/` directory for inspection; fix the destination/workspace and move the job back to `outbox/` to retry it explicitly. Transport failures, 408/429 and 5xx retain the job for retry. A failed job does not stop unrelated jobs. `ret=-2` suspends automatic sending for one hour while retaining the queue; the delay is a local retry policy, not a guaranteed platform recovery time.
 - The platform's existing long-message splitting is reused. Transport failures after partial delivery may still cause duplicates on retry; no end-to-end exactly-once delivery is claimed.
 
 The companion forwards already-generated messages; model output during the original task still uses its normal tokens. There is no periodic model prompt or strict ten-minute scheduler. Public message text can itself contain sensitive content, so enable forwarding only to a destination you trust. No files are uploaded by this companion.
 
 ## Local API extension
 
-`POST /send` accepts `reply_thread_id` and optional `desktop_event` (`completed` or `progress`). Supply `work_dir` as runtime routing metadata. A request containing a thread ID but no message registers its route without sending. A nonexistent thread fails registration. The existing owner-only socket permission remains the trust boundary.
+`POST /send` accepts `reply_thread_id` and optional `desktop_event` (`completed` or `progress`). Supply `work_dir` as runtime routing metadata. A request containing a thread ID but no message registers its route without sending. A nonexistent thread fails registration and its notification is rejected. The existing owner-only socket permission remains the trust boundary.
+
+The destination stays explicit in `session_key`; the registry does not infer a recipient from a UUID. Its destination-scoped records authorize the optional desktop command extension in the subsequent change. Validation uses the project agent's capability and exact rollout metadata without creating a workspace agent.
+
+`desktop_route_expires_at` optionally supplies the route's Unix expiry time in seconds. It must be in the next 24 hours; omitting it gives a 24-hour lifetime. The companion persists this deadline and sends the same value when restoring a route, so reconnecting does not renew old authorization.
 
 ## Verification
 
 ```sh
 python3 scripts/codex-desktop/test_bridge.py
+python3 scripts/codex-desktop/test_notification_failures.py
 go test ./core -run 'TestDesktopNotification|TestHandleSend'
 ```

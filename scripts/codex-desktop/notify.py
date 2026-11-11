@@ -17,9 +17,14 @@ import time
 
 ROOT = Path(os.environ.get("CC_CONNECT_DESKTOP_STATE_DIR", str(Path.home() / ".cc-connect" / "codex-desktop"))).expanduser()
 CODEX_HOME = Path(os.environ.get("CODEX_HOME", str(Path.home() / ".codex")))
+ROUTE_TTL = 24 * 60 * 60
 
 
 class WeChatThrottled(OSError):
+    pass
+
+
+class PermanentSendError(OSError):
     pass
 
 
@@ -45,7 +50,7 @@ def queue(key, event, root=ROOT):
     with (root / "delivery.lock").open("a") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)
         path = root / "outbox" / (key + ".json")
-        if path.exists() or (root / "done" / key).exists():
+        if path.exists() or (root / "done" / key).exists() or (root / "invalid" / path.name).exists():
             return False
         save(path, event)
         return True
@@ -77,6 +82,8 @@ def post(body, root=ROOT):
         if response.status != 200:
             if b"ret=-2" in detail:
                 raise WeChatThrottled("WeChat rejected proactive sending (ret=-2); cooling down")
+            if 400 <= response.status < 500 and response.status not in (408, 429):
+                raise PermanentSendError("cc-connect send status %s" % response.status)
             raise OSError("cc-connect send status %s" % response.status)
     finally:
         connection.close()
@@ -108,6 +115,7 @@ def _drain(root):
             body = {"project": settings["project"], "session_key": settings["session_key"],
                     "reply_thread_id": event["thread-id"], "work_dir": event["cwd"],
                     "desktop_event": kind,
+                    "desktop_route_expires_at": int(time.time()) + ROUTE_TTL,
                     "message": str(event.get("notification") or event.get("last-assistant-message") or "")}
         except (ValueError, KeyError, TypeError):
             (root / "invalid").mkdir(exist_ok=True, mode=0o700)
@@ -116,6 +124,11 @@ def _drain(root):
             continue
         try:
             post(body, root)
+        except PermanentSendError as error:
+            (root / "invalid").mkdir(exist_ok=True, mode=0o700)
+            path.replace(root / "invalid" / path.name)
+            logging.warning("notification quarantined after permanent failure: %s", error)
+            continue
         except WeChatThrottled as error:
             # ponytail: one account-wide cooldown; per-account state if adding bots.
             save(cooldown, {"retry_after": time.time() + 3600})
@@ -150,6 +163,32 @@ def configure(project, session_key, api_socket, root=ROOT):
                     "api_socket": api_socket, "enabled_at_ms": enabled})
 
 
+def restore_routes(root=ROOT):
+    refs = root / "threads.json"
+    threads = json.loads(refs.read_text()) if refs.exists() else {}
+    if not isinstance(threads, dict):
+        raise ValueError("saved desktop routes must be an object")
+    restored, changed = True, False
+    for key, body in list(threads.items()):
+        expiry = body.get("desktop_route_expires_at", 0) if isinstance(body, dict) else 0
+        if not isinstance(expiry, int) or expiry <= time.time() or expiry > time.time() + ROUTE_TTL:
+            del threads[key]
+            changed = True
+            continue
+        try:
+            post(body, root)
+        except PermanentSendError as error:
+            del threads[key]
+            changed = True
+            logging.warning("desktop route removed after permanent failure: %s", error)
+        except (OSError, http.client.HTTPException):
+            restored = False
+            logging.warning("desktop route registration deferred")
+    if changed:
+        save(refs, threads)
+    return restored
+
+
 def worker(root=ROOT):
     import desktop
     threading.Thread(target=desktop.watch, daemon=True, name="desktop-listener").start()
@@ -161,14 +200,7 @@ def worker(root=ROOT):
             stat = Path(settings["api_socket"]).stat()
             socket_id = (stat.st_ino, stat.st_ctime_ns)
             if refs.exists() and restored_socket != socket_id:
-                restored = True
-                for body in json.loads(refs.read_text()).values():
-                    try:
-                        post(body, root)
-                    except (OSError, http.client.HTTPException):
-                        restored = False
-                        logging.warning("desktop route registration deferred")
-                if restored:
+                if restore_routes(root):
                     restored_socket = socket_id
             drain(root)
         except (OSError, ValueError, KeyError, TypeError, http.client.HTTPException):

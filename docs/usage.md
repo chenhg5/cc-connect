@@ -1221,6 +1221,12 @@ type = "feishu"  # or wps-xiezuo, dingtalk, telegram, slack, discord, wecom, wei
 
 ---
 
+## Optional desktop conversation notifications
+
+For an opt-in companion that forwards already-generated Codex Desktop completion and public progress messages, see [Codex Desktop notifications](codex-desktop.md). It does not start a second thread writer or run periodic model prompts.
+
+---
+
 ## FAQ
 
 Quick answers to questions that came up repeatedly in issues and that the
@@ -1331,8 +1337,3 @@ tunneled through it.
 
 Full reference: [docs/telegram.md](./telegram.md#21-optional-use-a-proxy).
 This option was added in PR #389.
-
-
-### Optional desktop conversation notifications
-
-For an opt-in companion that forwards already-generated Codex Desktop completion and public progress messages, see [Codex Desktop notifications](codex-desktop.md). It does not start a second thread writer or run periodic model prompts.
