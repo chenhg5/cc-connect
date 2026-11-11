@@ -96,7 +96,7 @@ func (a *Agent) desktopCall(ctx context.Context, args ...string) (json.RawMessag
 			for i, masked := range core.RedactArgs(helper) {
 				if masked != helper[i] {
 					secret := helper[i]
-					if _, value, found := strings.Cut(secret, "="); found {
+					if _, value, found := strings.Cut(secret, "="); found && masked != "***" {
 						secret = value
 					}
 					detail = core.RedactToken(detail, secret)
