@@ -2098,33 +2098,16 @@ func (p *Platform) dispatchMessageWithHistory(ctx context.Context, msgType, cont
 		})
 
 	case "post":
-		textParts, images := p.parsePostContent(messageID, content, mentions...)
-		text := stripMentions(strings.Join(textParts, "\n"), mentions, p.getBotOpenID())
-		// Top-level files[] of a rich-text post message were silently dropped
-		// before #1884 — the user could attach a file alongside text and the
-		// bot would only ever see the text. Reuse the existing file download
-		// helper to pull each non-folder attachment and surface it to the agent.
-		var postFiles []core.FileAttachment
-		for _, pf := range p.parsePostFiles(content) {
-			if pf.FileKey == "" || pf.IsFolder {
-				continue
-			}
-			fileData, err := p.downloadResource(messageID, pf.FileKey, "file")
-			if err != nil {
-				slog.Error(p.tag()+": download post file failed",
-					"error", err,
-					"file_key", pf.FileKey,
-					"file_name", pf.FileName,
-				)
-				continue
-			}
-			postFiles = append(postFiles, core.FileAttachment{
-				MimeType: detectMimeType(fileData),
-				Data:     fileData,
-				FileName: pf.FileName,
-			})
+		post := p.parsePostBody(content)
+		if post == nil {
+			post = &postLang{}
 		}
-		if text == "" && historyText == "" && len(images) == 0 && len(postFiles) == 0 && quoted.text == "" && len(quoted.images) == 0 {
+		textParts, images := p.extractPostParts(messageID, post, mentions...)
+		files, notices := p.downloadPostFiles(messageID, post.Files, strings.Join(textParts, "\n"))
+		textParts = append(textParts, notices...)
+		files = append(files, p.downloadQuotedFiles(ctx, p.filterQuotedFilesForUser(quoted.files, mentions, userID))...)
+		text := stripMentions(strings.Join(textParts, "\n"), mentions, p.getBotOpenID())
+		if text == "" && historyText == "" && len(images) == 0 && len(files) == 0 && quoted.text == "" && len(quoted.images) == 0 {
 			return
 		}
 		// Flush any image batch buffered earlier in this session (#1686 P1-B).
@@ -2133,7 +2116,7 @@ func (p *Platform) dispatchMessageWithHistory(ctx context.Context, msgType, cont
 			SessionKey: sessionKey, Platform: p.platformName,
 			MessageID: messageID,
 			UserID:    userID, UserName: userName, ChatName: chatName,
-			Content: text, ExtraContent: quoted.text, Images: append(quoted.images, images...), Files: postFiles,
+			Content: text, ExtraContent: quoted.text, Images: append(quoted.images, images...), Files: files,
 			ReplyCtx:          rctx,
 			UserMessageTimeMs: createTimeMs,
 		})
@@ -2157,7 +2140,7 @@ func (p *Platform) dispatchMessageWithHistory(ctx context.Context, msgType, cont
 			return
 		}
 		slog.Debug(p.tag()+": file downloaded", "file_name", fileBody.FileName, "size", len(fileData))
-		mimeType := detectMimeType(fileData)
+		mimeType := http.DetectContentType(fileData)
 		// Flush any image batch buffered earlier in this session (#1686 P1-B).
 		p.flushImageBatchForSession(sessionKey)
 		dispatchCore(&core.Message{
@@ -2699,9 +2682,22 @@ func (p *Platform) fetchSingleMessage(ctx context.Context, messageID string) *ch
 			text = replaceMentions(textBody.Text, item.Mentions)
 		}
 	case "post":
-		textParts, postImages := p.parsePostContent(messageID, content)
+		post := p.parsePostBody(content)
+		if post == nil {
+			post = &postLang{}
+		}
+		textParts, postImages := p.extractPostParts(messageID, post)
 		text = replaceMentions(strings.Join(textParts, "\n"), item.Mentions)
 		images = postImages
+		// Keep post files lazy, with the same mention/sender privacy gates as standalone quoted files.
+		for _, file := range post.Files {
+			if file.FileKey != "" && !file.IsFolder {
+				files = append(files, quotedFileMeta{fileKey: file.FileKey, fileName: file.FileName, messageID: messageID, senderID: item.Sender.ID})
+			}
+		}
+		if text == "" && len(files) > 0 {
+			text = "[file]"
+		}
 		if text == "" && len(images) > 0 {
 			text = "[image]"
 		}
@@ -2907,8 +2903,13 @@ func extractPostPlainText(content string) string {
 	if err := json.Unmarshal([]byte(content), &post); err != nil || len(post.Content) == 0 {
 		var localeWrapper map[string]json.RawMessage
 		if err2 := json.Unmarshal([]byte(content), &localeWrapper); err2 == nil {
-			for _, v := range localeWrapper {
-				if err3 := json.Unmarshal(v, &post); err3 == nil && len(post.Content) > 0 {
+			keys := make([]string, 0, len(localeWrapper))
+			for k := range localeWrapper {
+				keys = append(keys, k)
+			}
+			sort.Strings(keys)
+			for _, k := range keys {
+				if err3 := json.Unmarshal(localeWrapper[k], &post); err3 == nil && len(post.Content) > 0 {
 					break
 				}
 			}
@@ -3420,7 +3421,14 @@ func (p *Platform) formatMergeForwardTree(parentID string, childrenMap map[strin
 			}
 
 		case "post":
-			textParts, postImages := p.parsePostContent(msgID, content)
+			post := p.parsePostBody(content)
+			if post == nil {
+				post = &postLang{}
+			}
+			textParts, postImages := p.extractPostParts(msgID, post)
+			postAttachments, notices := p.downloadPostFiles(msgID, post.Files, strings.Join(textParts, "\n"))
+			*files = append(*files, postAttachments...)
+			textParts = append(textParts, notices...)
 			*images = append(*images, postImages...)
 			text := replaceMentions(strings.Join(textParts, "\n"), item.Mentions)
 			if text != "" {
@@ -3456,7 +3464,7 @@ func (p *Platform) formatMergeForwardTree(parentID string, childrenMap map[strin
 					slog.Error(p.tag()+": download merge_forward file failed", "error", err)
 					sb.WriteString(fmt.Sprintf("%s[%s] %s: [file: %s - download failed]\n", indent, ts, senderName, fileBody.FileName))
 				} else {
-					mt := detectMimeType(fileData)
+					mt := http.DetectContentType(fileData)
 					*files = append(*files, core.FileAttachment{MimeType: mt, Data: fileData, FileName: fileBody.FileName})
 					sb.WriteString(fmt.Sprintf("%s[%s] %s: [file: %s]\n", indent, ts, senderName, fileBody.FileName))
 				}
@@ -3730,7 +3738,7 @@ func detectMimeType(data []byte) string {
 		if string(data[:4]) == "GIF8" {
 			return "image/gif"
 		}
-		if string(data[:4]) == "RIFF" && string(data[8:12]) == "WEBP" {
+		if len(data) >= 12 && string(data[:4]) == "RIFF" && string(data[8:12]) == "WEBP" {
 			return "image/webp"
 		}
 	}
@@ -4185,7 +4193,7 @@ func (p *Platform) downloadQuotedFiles(ctx context.Context, metas []quotedFileMe
 			continue
 		}
 		out = append(out, core.FileAttachment{
-			MimeType: detectMimeType(data),
+			MimeType: http.DetectContentType(data),
 			Data:     data,
 			FileName: m.fileName,
 		})
@@ -5919,42 +5927,30 @@ type postLang struct {
 	Files   []postFile      `json:"files"`
 }
 
-// parsePostContent handles both formats of feishu post content:
-// 1. {"title":"...", "content":[[...]]}  (receive event)
-// 2. {"zh_cn":{"title":"...", "content":[[...]]}}  (some SDK versions)
-func (p *Platform) parsePostContent(messageID, raw string, mentions ...*larkim.MentionEvent) ([]string, []core.ImageAttachment) {
-	// try flat format first
-	var flat postLang
-	if err := json.Unmarshal([]byte(raw), &flat); err == nil && flat.Content != nil {
-		return p.extractPostParts(messageID, &flat, mentions...)
-	}
-	// try language-keyed format
-	var langMap map[string]postLang
-	if err := json.Unmarshal([]byte(raw), &langMap); err == nil {
-		for _, lang := range langMap {
-			return p.extractPostParts(messageID, &lang, mentions...)
-		}
-	}
-	slog.Error(p.tag()+": failed to parse post content", "raw", raw)
-	return nil, nil
-}
-
-// parsePostFiles extracts the top-level file attachments of a rich-text (post)
-// message, handling the same two content shapes as parsePostContent. Returns
-// nil when neither shape carries a files array. See issue #1884 — the post
-// body's top-level files[] was silently dropped before this helper existed.
-func (p *Platform) parsePostFiles(raw string) []postFile {
+// parsePostBody decodes a feishu post body once, handling both formats:
+// 1. {"title":"...", "content":[[...]], "files":[...]}  (receive event)
+// 2. {"zh_cn":{"title":"...", "content":[[...]]}}       (some SDK versions)
+// A locale-keyed body picks the first locale in sorted key order, so the text
+// and the files[] handed to the agent always come from the same locale (Go
+// randomizes map iteration, so two independent range loops could disagree).
+// Returns nil when the body is neither shape.
+func (p *Platform) parsePostBody(raw string) *postLang {
 	var flat postLang
 	if err := json.Unmarshal([]byte(raw), &flat); err == nil && (flat.Content != nil || flat.Files != nil) {
-		return flat.Files
+		return &flat
 	}
 	var langMap map[string]postLang
-	if err := json.Unmarshal([]byte(raw), &langMap); err == nil {
-		for _, lang := range langMap {
-			return lang.Files
-		}
+	if err := json.Unmarshal([]byte(raw), &langMap); err != nil || len(langMap) == 0 {
+		slog.Error(p.tag()+": failed to parse post content", "raw", raw)
+		return nil
 	}
-	return nil
+	keys := make([]string, 0, len(langMap))
+	for k := range langMap {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	lang := langMap[keys[0]]
+	return &lang
 }
 
 func (p *Platform) extractPostParts(messageID string, post *postLang, mentions ...*larkim.MentionEvent) ([]string, []core.ImageAttachment) {
