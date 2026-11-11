@@ -6186,8 +6186,8 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			if !event.Done {
 				slog.Debug("EventResult: non-terminal result event, continuing event loop",
 					"session", session.ID,
-					"input_tokens", event.InputTokens,
-					"output_tokens", event.OutputTokens,
+					"input_tokens", event.BillableUsage().InputTokens,
+					"output_tokens", event.BillableUsage().OutputTokens,
 					"metadata", event.Metadata,
 				)
 				continue
@@ -6411,8 +6411,8 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				"tools", toolCount,
 				"response_len", len(fullResponse),
 				"turn_duration", turnDuration,
-				"input_tokens", event.InputTokens,
-				"output_tokens", event.OutputTokens,
+				"input_tokens", event.BillableUsage().InputTokens,
+				"output_tokens", event.BillableUsage().OutputTokens,
 				"silent", isSilent,
 			)
 			// DEBUG: full assistant response for in-depth debugging.

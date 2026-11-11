@@ -140,6 +140,8 @@ type appServerRequestUserInputAnswer struct {
 }
 
 type appServerSession struct {
+	turnTokens     codexTurnTokens
+	sidechain      codexSidechainMeter
 	cliBin         string
 	cliExtraArgs   []string
 	url            string
@@ -234,6 +236,11 @@ func newAppServerSession(ctx context.Context, cliBin string, cliExtraArgs []stri
 		_ = s.Close()
 		return nil, err
 	}
+	usageHome := s.codexHome
+	if usageHome == "" {
+		usageHome, _ = resolveCodexHome(s.extraEnv)
+	}
+	s.sidechain.begin(usageHome, s.CurrentSessionID(), resumeID != "" && resumeID != core.ContinueSession)
 	if err := s.refreshUsage(context.Background()); err != nil {
 		slog.Debug("codex app-server: initial rate limit fetch failed", "error", err)
 	}
@@ -382,6 +389,9 @@ func (s *appServerSession) ensureThread(resumeID string) error {
 	}
 	s.applyThreadRuntimeState(resp.Cwd, resp.Model, resp.ReasoningEffort)
 	s.threadID.Store(resp.Thread.ID)
+	s.stateMu.Lock()
+	s.turnTokens.newThread()
+	s.stateMu.Unlock()
 	slog.Info("codex app-server thread started", "thread_id", resp.Thread.ID)
 	return nil
 }
@@ -529,6 +539,9 @@ func (s *appServerSession) Send(prompt string, messageID string, images []core.I
 		params["approvalPolicy"] = approval
 	}
 
+	s.stateMu.Lock()
+	s.turnTokens.beginTurn()
+	s.stateMu.Unlock()
 	var resp turnStartResponse
 	if err := s.request("turn/start", params, &resp); err != nil {
 		return fmt.Errorf("codex app-server turn/start: %w", err)
@@ -1242,6 +1255,9 @@ func (s *appServerSession) handleNotification(method string, paramsRaw json.RawM
 		var notif appServerThreadTokenUsageNotification
 		if err := json.Unmarshal(paramsRaw, &notif); err == nil && s.acceptsTurnNotification(method, notif.ThreadID, notif.TurnID) {
 			s.storeContextUsage(mapAppServerTokenUsage(notif))
+			s.stateMu.Lock()
+			s.turnTokens.observe(notif.TokenUsage.Total, notif.TokenUsage.Last)
+			s.stateMu.Unlock()
 		}
 
 	case "error":
@@ -1642,9 +1658,13 @@ func (s *appServerSession) completeTurn() {
 	}
 	s.currentTurn = ""
 	s.turnRevision++
+	start, end := s.turnTokens.finishTurn()
 	s.stateMu.Unlock()
 	s.flushPendingAsText()
-	s.emit(core.Event{Type: core.EventResult, SessionID: s.CurrentSessionID(), Done: true})
+	event := core.Event{Type: core.EventResult, SessionID: s.CurrentSessionID(), Done: true}
+	applyCodexTurnUsage(&event, start, end)
+	event.Sidechain = s.sidechain.collect()
+	s.emit(event)
 }
 
 func (s *appServerSession) failTurn(err error) bool {
@@ -1655,9 +1675,15 @@ func (s *appServerSession) failTurn(err error) bool {
 	}
 	s.currentTurn = ""
 	s.turnRevision++
+	start, end := s.turnTokens.finishTurn()
 	s.pendingMsgs = s.pendingMsgs[:0]
 	s.stateMu.Unlock()
-	s.emitError(err)
+	if err != nil {
+		event := core.Event{Type: core.EventError, Error: err}
+		applyCodexTurnUsage(&event, start, end)
+		event.Sidechain = s.sidechain.collect()
+		s.emit(event)
+	}
 	return true
 }
 
