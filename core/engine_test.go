@@ -14525,6 +14525,87 @@ func TestUnsolicitedReader_RelaysEventResult(t *testing.T) {
 	}
 }
 
+// TestUnsolicitedReader_StripsTrailingNoReplyDeliversText verifies that on an
+// unsolicited turn, text written before a trailing NO_REPLY marker is
+// delivered with the marker stripped — mirroring the foreground EventResult
+// handling. Before the fix, event.Content ("NO_REPLY") took precedence and the
+// pre-marker text was silently dropped.
+func TestUnsolicitedReader_StripsTrailingNoReplyDeliversText(t *testing.T) {
+	p := &stubPlatformEngine{n: "test"}
+	sess := newControllableSession("unsol-strip")
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	defer e.Stop()
+
+	sessions := e.sessions
+	session := sessions.GetOrCreateActive("test:ch1:u1")
+
+	state := &interactiveState{
+		agentSession:     sess,
+		platform:         p,
+		replyCtx:         "ctx",
+		eventsNeedResync: false,
+	}
+	iKey := "test:ch1:u1"
+	e.interactiveMu.Lock()
+	e.interactiveStates[iKey] = state
+	e.interactiveMu.Unlock()
+
+	e.startUnsolicitedReader(state, session, sessions, iKey, "")
+	defer e.stopUnsolicitedReader(state)
+
+	// A background turn that streams progress text and then ends with a bare
+	// NO_REPLY marker as the final assistant segment.
+	sess.events <- Event{Type: EventText, Content: "Merge scan finished: 3 proposals ready for review\n"}
+	sess.events <- Event{Type: EventResult, Content: "NO_REPLY", Done: true}
+
+	sent := waitForPlatformSend(p, 1, 5*time.Second)
+	if len(sent) == 0 {
+		t.Fatal("expected pre-NO_REPLY text to be delivered, got nothing")
+	}
+	joined := strings.Join(sent, "\n")
+	if !strings.Contains(joined, "Merge scan finished") {
+		t.Errorf("expected delivered content to contain pre-NO_REPLY text, got %v", sent)
+	}
+	if strings.Contains(joined, "NO_REPLY") {
+		t.Errorf("expected NO_REPLY marker to be stripped from delivery, got %v", sent)
+	}
+}
+
+// TestUnsolicitedReader_BareNoReplyStaysSilent verifies that a bare NO_REPLY
+// marker on an unsolicited turn stays fully silent — the marker must never be
+// relayed verbatim to the platform.
+func TestUnsolicitedReader_BareNoReplyStaysSilent(t *testing.T) {
+	p := &stubPlatformEngine{n: "test"}
+	sess := newControllableSession("unsol-silent")
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	defer e.Stop()
+
+	sessions := e.sessions
+	session := sessions.GetOrCreateActive("test:ch1:u1")
+
+	state := &interactiveState{
+		agentSession:     sess,
+		platform:         p,
+		replyCtx:         "ctx",
+		eventsNeedResync: false,
+	}
+	iKey := "test:ch1:u1"
+	e.interactiveMu.Lock()
+	e.interactiveStates[iKey] = state
+	e.interactiveMu.Unlock()
+
+	e.startUnsolicitedReader(state, session, sessions, iKey, "")
+	defer e.stopUnsolicitedReader(state)
+
+	sess.events <- Event{Type: EventResult, Content: "NO_REPLY", Done: true}
+
+	// Give the reader time to (incorrectly) relay; then assert silence.
+	time.Sleep(300 * time.Millisecond)
+	if sent := p.getSent(); len(sent) != 0 {
+		t.Errorf("expected bare NO_REPLY to stay silent on unsolicited turn, got %v", sent)
+	}
+}
+
 // TestUnsolicitedReader_ResetsIdleCloseOnEventResult verifies the P1-C P1-1
 // fix: an unsolicited EventResult must re-arm the per-session idle close
 // timer. Before the fix, the idle timer was only scheduled at the end of
