@@ -23,7 +23,8 @@ func init() {
 	core.RegisterAgent("cursor", New)
 }
 
-// Agent drives the Cursor Agent CLI (`agent`) using --print --output-format stream-json.
+// Agent drives the Cursor Agent CLI (`cursor-agent`, also aliased as `agent`)
+// using --print --output-format stream-json.
 //
 // Modes (maps to Cursor agent CLI flags):
 //   - "default":  default permissions (ask permission for tools)
@@ -34,13 +35,24 @@ type Agent struct {
 	workDir      string
 	model        string
 	mode         string
-	cmd          string   // CLI binary name, default "agent"
+	cmd          string   // Resolved CLI binary name or explicit command
 	cliExtraArgs []string // extra args from cmd after the binary name
 	configEnv    []string // env vars from [projects.agent.options.env]
 	providers    []core.ProviderConfig
 	activeIdx    int
 	sessionEnv   []string
 	mu           sync.RWMutex
+}
+
+// Some installations only provide cursor-agent. Prefer that canonical name
+// while retaining the older agent alias when it is the only one installed.
+func discoverCursorCLI() (string, error) {
+	for _, name := range []string{"cursor-agent", "agent"} {
+		if _, err := exec.LookPath(name); err == nil {
+			return name, nil
+		}
+	}
+	return "", fmt.Errorf("cursor agent CLI not found in PATH (looked for cursor-agent and agent); install it or set cmd in [projects.agent.options]")
 }
 
 func New(opts map[string]any) (core.Agent, error) {
@@ -51,9 +63,16 @@ func New(opts map[string]any) (core.Agent, error) {
 	model, _ := opts["model"].(string)
 	mode, _ := opts["mode"].(string)
 	mode = normalizeMode(mode)
-	cmd, extraArgs := core.ParseCmdOpts(opts, "agent")
+	cmd, extraArgs := core.ParseCmdOpts(opts, "")
+	if cmd == "" {
+		var err error
+		cmd, err = discoverCursorCLI()
+		if err != nil {
+			return nil, fmt.Errorf("cursor: %w", err)
+		}
+	}
 	if _, err := exec.LookPath(cmd); err != nil {
-		return nil, fmt.Errorf("cursor: %q CLI not found in PATH, install with: npm i -g @anthropic-ai/cursor-agent (or from Cursor IDE settings)", cmd)
+		return nil, fmt.Errorf("cursor: %q CLI not found in PATH: %w; install the Cursor Agent CLI or set cmd in [projects.agent.options]", cmd, err)
 	}
 
 	return &Agent{
@@ -80,8 +99,13 @@ func normalizeMode(raw string) string {
 	}
 }
 
-func (a *Agent) Name() string           { return "cursor" }
-func (a *Agent) CLIBinaryName() string  { return "agent" }
+func (a *Agent) Name() string { return "cursor" }
+func (a *Agent) CLIBinaryName() string {
+	if a.cmd != "" {
+		return a.cmd
+	}
+	return "agent"
+}
 func (a *Agent) CLIDisplayName() string { return "Cursor Agent" }
 
 func (a *Agent) SetWorkDir(dir string) {
