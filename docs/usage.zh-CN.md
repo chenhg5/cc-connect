@@ -690,7 +690,7 @@ cc-connect cron edit <job-id> <field> <value>   # 可改 cron_expr / prompt / en
 cc-connect cron del <job-id>
 ```
 
-可选：`--session-mode new-per-run` 每次触发使用新的 agent 会话（默认 `reuse` 与旧行为一致）。`--timeout-mins N` 设置单次调度最长等待分钟数（`0` 表示不限制；省略为 30 分钟）。
+可选：`--session-mode new-per-run` 每次触发使用新的 agent 会话（默认 `reuse` 与旧行为一致）；`--session-mode new-topic` 在此基础上每次触发先新建话题（飞书：先发一条消息拿到 root，再把会话锚定到该 root）。`--timeout-mins N` 设置单次调度最长等待分钟数（`0` 表示不限制；省略为 30 分钟）。
 
 ### 自然语言（Claude Code）
 

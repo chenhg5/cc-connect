@@ -413,6 +413,71 @@ func TestCronJob_UsesNewSessionPerRun(t *testing.T) {
 	}
 }
 
+func TestCronJob_UsesNewTopicPerRun(t *testing.T) {
+	for _, mode := range []string{"new_topic", "new-topic", "topic", "NEW_TOPIC"} {
+		j := &CronJob{SessionMode: mode}
+		if !j.UsesNewTopicPerRun() {
+			t.Errorf("UsesNewTopicPerRun(%q) = false", mode)
+		}
+		// A new topic always means a fresh session, otherwise the run would
+		// reuse the previous topic's conversation history.
+		if !j.UsesNewSessionPerRun() {
+			t.Errorf("UsesNewSessionPerRun(%q) = false, new_topic must imply a new session", mode)
+		}
+	}
+	for _, mode := range []string{"", "reuse", "new_per_run"} {
+		j := &CronJob{SessionMode: mode}
+		if j.UsesNewTopicPerRun() {
+			t.Errorf("UsesNewTopicPerRun(%q) = true, want false", mode)
+		}
+	}
+}
+
+func TestCronScheduler_AddJob_NormalizesNewTopicSessionMode(t *testing.T) {
+	dir := t.TempDir()
+	store, err := NewCronStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cs := NewCronScheduler(store)
+	job := &CronJob{
+		ID: "nt1", Project: "p", SessionKey: "test:1:1",
+		CronExpr: "0 6 * * *", Prompt: "hi", SessionMode: "new-topic",
+	}
+	if err := cs.AddJob(job); err != nil {
+		t.Fatal(err)
+	}
+	if job.SessionMode != "new_topic" {
+		t.Errorf("SessionMode = %q, want new_topic", job.SessionMode)
+	}
+	if !cs.UsesNewTopic(job) || !cs.UsesNewSession(job) {
+		t.Error("new_topic job must report topic + new session")
+	}
+}
+
+func TestCronScheduler_UsesNewTopic_GlobalDefault(t *testing.T) {
+	dir := t.TempDir()
+	store, err := NewCronStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cs := NewCronScheduler(store)
+
+	cs.SetDefaultSessionMode("new_topic")
+	job := &CronJob{SessionMode: ""}
+	if !cs.UsesNewTopic(job) {
+		t.Error("global new_topic + empty job: expected UsesNewTopic=true")
+	}
+	if !cs.UsesNewSession(job) {
+		t.Error("global new_topic + empty job: expected UsesNewSession=true")
+	}
+
+	job.SessionMode = "reuse"
+	if cs.UsesNewTopic(job) || cs.UsesNewSession(job) {
+		t.Error("per-job reuse must override the global new_topic default")
+	}
+}
+
 func TestCronJob_JSONLegacyUnmarshal(t *testing.T) {
 	raw := `{"id":"1","project":"p","session_key":"t:1:1","cron_expr":"0 6 * * *","prompt":"x","enabled":true}`
 	var j CronJob

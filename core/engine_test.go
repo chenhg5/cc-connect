@@ -106,6 +106,40 @@ func (p *recallCheckingPlatform) checkedReplyCtxs() []any {
 	return out
 }
 
+type stubCronTopicPlatform struct {
+	stubPlatformEngine
+	reconstructSessionKey string
+	started               bool
+	topicSessionKey       string
+	topicContent          string
+	startErr              error
+}
+
+func (p *stubCronTopicPlatform) ReconstructReplyCtx(sessionKey string) (any, error) {
+	p.reconstructSessionKey = sessionKey
+	return "base-rctx", nil
+}
+
+func (p *stubCronTopicPlatform) StartCronTopic(_ context.Context, sessionKey, content string) (string, any, error) {
+	p.started = true
+	p.topicSessionKey = sessionKey
+	p.topicContent = content
+	if p.startErr != nil {
+		return "", nil, p.startErr
+	}
+	return "test:chat-1:root:om_new", "topic-rctx", nil
+}
+
+type stubProactivePlatform struct {
+	stubPlatformEngine
+	reconstructSessionKey string
+}
+
+func (p *stubProactivePlatform) ReconstructReplyCtx(sessionKey string) (any, error) {
+	p.reconstructSessionKey = sessionKey
+	return "base-rctx", nil
+}
+
 type stubCronReplyTargetPlatform struct {
 	stubPlatformEngine
 	reconstructSessionKey string
@@ -10993,6 +11027,130 @@ func TestEngine_AddPlatform_Multiple(t *testing.T) {
 
 	if len(e.platforms) != 3 {
 		t.Fatalf("expected 3 platforms, got %d", len(e.platforms))
+	}
+}
+
+func TestExecuteCronJob_NewTopicPerRun(t *testing.T) {
+	dir := t.TempDir()
+	store, err := NewCronStore(dir)
+	if err != nil {
+		t.Fatalf("NewCronStore() error = %v", err)
+	}
+	scheduler := NewCronScheduler(store)
+
+	platform := &stubCronTopicPlatform{stubPlatformEngine: stubPlatformEngine{n: "test"}}
+	agent := &resultAgent{session: newResultAgentSession("topic result")}
+
+	e := NewEngine("test", agent, []Platform{platform}, "", LangEnglish)
+	defer e.cancel()
+	e.cronScheduler = scheduler
+
+	job := &CronJob{
+		ID:          "job-topic",
+		SessionKey:  "test:chat-1:root:om_old",
+		Prompt:      "summarize activity",
+		Description: "Daily summary",
+		SessionMode: "new_topic",
+	}
+	if err := store.Add(job); err != nil {
+		t.Fatalf("store.Add() error = %v", err)
+	}
+
+	if err := e.ExecuteCronJob(job); err != nil {
+		t.Fatalf("ExecuteCronJob() error = %v", err)
+	}
+	if !platform.started {
+		t.Fatal("StartCronTopic was not called")
+	}
+	if platform.topicSessionKey != "test:chat-1:root:om_old" {
+		t.Errorf("StartCronTopic sessionKey = %q, want the base session key", platform.topicSessionKey)
+	}
+	if platform.topicContent != "⏰ Daily summary" {
+		t.Errorf("StartCronTopic content = %q, want %q", platform.topicContent, "⏰ Daily summary")
+	}
+	// The topic root already carries the "⏰" notice, so only the agent result
+	// should be delivered.
+	if sent := platform.getSent(); len(sent) != 1 {
+		t.Fatalf("sent messages = %v, want only the agent result", sent)
+	}
+}
+
+func TestExecuteCronJob_NewTopicFallsBackWhenUnsupported(t *testing.T) {
+	dir := t.TempDir()
+	store, err := NewCronStore(dir)
+	if err != nil {
+		t.Fatalf("NewCronStore() error = %v", err)
+	}
+	scheduler := NewCronScheduler(store)
+
+	platform := &stubProactivePlatform{stubPlatformEngine: stubPlatformEngine{n: "test"}}
+	agent := &resultAgent{session: newResultAgentSession("fallback result")}
+
+	e := NewEngine("test", agent, []Platform{platform}, "", LangEnglish)
+	defer e.cancel()
+	e.cronScheduler = scheduler
+
+	job := &CronJob{
+		ID:          "job-topic-fallback",
+		SessionKey:  "test:chat-1:root:om_old",
+		Prompt:      "summarize activity",
+		Description: "Daily summary",
+		SessionMode: "new_topic",
+	}
+	if err := store.Add(job); err != nil {
+		t.Fatalf("store.Add() error = %v", err)
+	}
+
+	if err := e.ExecuteCronJob(job); err != nil {
+		t.Fatalf("ExecuteCronJob() error = %v", err)
+	}
+	// No topic support: the usual start notice plus the agent result.
+	if sent := platform.getSent(); len(sent) != 2 {
+		t.Fatalf("sent messages = %v, want start notice + result", sent)
+	}
+	if platform.reconstructSessionKey != "test:chat-1:root:om_old" {
+		t.Errorf("reconstruct sessionKey = %q, want the original key", platform.reconstructSessionKey)
+	}
+}
+
+func TestExecuteCronJob_NewTopicStartErrorFallsBack(t *testing.T) {
+	dir := t.TempDir()
+	store, err := NewCronStore(dir)
+	if err != nil {
+		t.Fatalf("NewCronStore() error = %v", err)
+	}
+	scheduler := NewCronScheduler(store)
+
+	platform := &stubCronTopicPlatform{
+		stubPlatformEngine: stubPlatformEngine{n: "test"},
+		startErr:           errors.New("topic api down"),
+	}
+	agent := &resultAgent{session: newResultAgentSession("fallback result")}
+
+	e := NewEngine("test", agent, []Platform{platform}, "", LangEnglish)
+	defer e.cancel()
+	e.cronScheduler = scheduler
+
+	job := &CronJob{
+		ID:          "job-topic-error",
+		SessionKey:  "test:chat-1:root:om_old",
+		Prompt:      "summarize activity",
+		Description: "Daily summary",
+		SessionMode: "new_topic",
+	}
+	if err := store.Add(job); err != nil {
+		t.Fatalf("store.Add() error = %v", err)
+	}
+
+	if err := e.ExecuteCronJob(job); err != nil {
+		t.Fatalf("ExecuteCronJob() error = %v", err)
+	}
+	sent := platform.getSent()
+	if len(sent) != 3 {
+		t.Fatalf("sent messages = %v, want fallback notice + start notice + result", sent)
+	}
+	if !strings.Contains(sent[0], "新建话题失败") {
+		t.Errorf("first message = %q, want a fallback notice", sent[0])
 	}
 }
 

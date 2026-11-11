@@ -31,7 +31,7 @@ type CronJob struct {
 	Enabled     bool      `json:"enabled"`
 	Silent      *bool     `json:"silent,omitempty"`       // suppress start notification; nil = use global default
 	Mute        bool      `json:"mute,omitempty"`         // suppress ALL messages (start + result); job runs silently
-	SessionMode string    `json:"session_mode,omitempty"` // "" or "reuse" = share active session; "new_per_run" = fresh session each run
+	SessionMode string    `json:"session_mode,omitempty"` // "" or "reuse" = share active session; "new_per_run" = fresh session each run; "new_topic" = fresh session in a new topic/thread each run
 	Mode        string    `json:"mode,omitempty"`         // permission mode override for this job; "" = use project default
 	TimeoutMins *int      `json:"timeout_mins,omitempty"` // nil = default 30m wait; 0 = no limit; >0 = minutes
 	CreatedAt   time.Time `json:"created_at"`
@@ -61,11 +61,19 @@ func (j *CronJob) ExecutionTimeout() time.Duration {
 
 // UsesNewSessionPerRun reports whether each cron run should use a new engine session
 // instead of reusing the active session for the session_key.
+// new_topic also implies a fresh session: each topic root gets its own session key.
 func (j *CronJob) UsesNewSessionPerRun() bool {
-	return NormalizeCronSessionMode(j.SessionMode) == "new_per_run"
+	mode := NormalizeCronSessionMode(j.SessionMode)
+	return mode == "new_per_run" || mode == "new_topic"
 }
 
-// NormalizeCronSessionMode maps CLI/API aliases to canonical values ("", "new_per_run").
+// UsesNewTopicPerRun reports whether each cron run should open a new topic/thread
+// (a fresh platform root message) before starting the agent session.
+func (j *CronJob) UsesNewTopicPerRun() bool {
+	return NormalizeCronSessionMode(j.SessionMode) == "new_topic"
+}
+
+// NormalizeCronSessionMode maps CLI/API aliases to canonical values ("", "new_per_run", "new_topic").
 // Returns the original string if unrecognized (caller should validate).
 func NormalizeCronSessionMode(s string) string {
 	s = strings.TrimSpace(s)
@@ -75,6 +83,8 @@ func NormalizeCronSessionMode(s string) string {
 		return ""
 	case "new_per_run", "new-per-run":
 		return "new_per_run"
+	case "new_topic", "new-topic", "topic":
+		return "new_topic"
 	default:
 		return s
 	}
@@ -91,8 +101,8 @@ func validateCronJob(j *CronJob) error {
 		return fmt.Errorf("session_key is required")
 	}
 	mode := NormalizeCronSessionMode(j.SessionMode)
-	if mode != "" && mode != "new_per_run" {
-		return fmt.Errorf("invalid session_mode %q (want reuse, new_per_run, or new-per-run)", j.SessionMode)
+	if mode != "" && mode != "new_per_run" && mode != "new_topic" {
+		return fmt.Errorf("invalid session_mode %q (want reuse, new_per_run, new_topic, or their dashed aliases)", j.SessionMode)
 	}
 	if j.Mode != "" {
 		switch j.Mode {
@@ -451,7 +461,16 @@ func (cs *CronScheduler) UsesNewSession(job *CronJob) bool {
 	if job.SessionMode != "" {
 		return job.UsesNewSessionPerRun()
 	}
-	return cs.defaultSessionMode == "new_per_run"
+	return cs.defaultSessionMode == "new_per_run" || cs.defaultSessionMode == "new_topic"
+}
+
+// UsesNewTopic returns whether the job should open a new topic/thread per run,
+// considering both the job-level setting and the global default.
+func (cs *CronScheduler) UsesNewTopic(job *CronJob) bool {
+	if job.SessionMode != "" {
+		return job.UsesNewTopicPerRun()
+	}
+	return cs.defaultSessionMode == "new_topic"
 }
 
 func (cs *CronScheduler) Start() error {
@@ -557,8 +576,8 @@ func (cs *CronScheduler) UpdateJob(id string, field string, value any) error {
 	if field == "session_mode" {
 		if v, ok := value.(string); ok && v != "" {
 			mode := NormalizeCronSessionMode(v)
-			if mode != "" && mode != "new_per_run" {
-				return fmt.Errorf("invalid session_mode %q (want reuse, new_per_run, or new-per-run)", v)
+			if mode != "" && mode != "new_per_run" && mode != "new_topic" {
+				return fmt.Errorf("invalid session_mode %q (want reuse, new_per_run, new_topic, or their dashed aliases)", v)
 			}
 		}
 	}

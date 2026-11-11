@@ -127,7 +127,11 @@
     "selectSessionKey": "Seleccionar sesión (vacío = predeterminada)",
     "taskType": "Tipo de tarea",
     "mode": "Modo de permisos",
-    "modeDefault": "Usar predeterminado del proyecto"
+    "modeDefault": "Usar predeterminado del proyecto",
+    "sessionMode": "Modo de sesión",
+    "sessionModeReuse": "Reutilizar sesión actual",
+    "sessionModeNewPerRun": "Nueva sesión en cada ejecución",
+    "sessionModeNewTopic": "Nuevo tema en cada ejecución"
   },
   "heartbeat": {
     "title": "Latido",

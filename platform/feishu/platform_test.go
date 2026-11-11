@@ -772,6 +772,12 @@ func TestBuildReplyMessageReqBody_SetsReplyInThreadFlag(t *testing.T) {
 			replyCtx:      replyContext{messageID: "om_reply"},
 			wantThreading: false,
 		},
+		{
+			name:          "cron new_topic forces a thread without any thread config",
+			platform:      &Platform{},
+			replyCtx:      replyContext{messageID: "om_root", sessionKey: "feishu:oc_chat:root:om_root", forceThread: true},
+			wantThreading: true,
+		},
 	}
 
 	for _, tt := range tests {
@@ -790,6 +796,23 @@ func TestBuildReplyMessageReqBody_SetsReplyInThreadFlag(t *testing.T) {
 				t.Fatalf("ReplyInThread = %v, want %v", got, tt.wantThreading)
 			}
 		})
+	}
+}
+
+func TestShouldUseThreadOrReplyAPI_ForceThreadOverridesNoReplyToTrigger(t *testing.T) {
+	p := &Platform{noReplyToTrigger: true}
+	if !p.shouldUseThreadOrReplyAPI(replyContext{messageID: "om_root", forceThread: true}) {
+		t.Error("forceThread rc must use the reply/thread API even when reply_to_trigger=false")
+	}
+	if p.shouldUseThreadOrReplyAPI(replyContext{messageID: "om_root"}) {
+		t.Error("plain rc should honour reply_to_trigger=false")
+	}
+}
+
+func TestStartCronTopic_NoNetwork(t *testing.T) {
+	p := &Platform{platformName: "feishu"}
+	if _, _, err := p.StartCronTopic(context.Background(), "", "x"); err == nil {
+		t.Fatal("expected error for empty session key")
 	}
 }
 

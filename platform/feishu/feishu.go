@@ -111,6 +111,10 @@ type replyContext struct {
 	messageID  string
 	chatID     string
 	sessionKey string
+	// forceThread keeps replies inside the message's thread even when
+	// thread_isolation/auto_thread are off (used by cron new_topic runs, where
+	// the freshly created root message must own the conversation).
+	forceThread bool
 }
 
 type Platform struct {
@@ -2702,6 +2706,7 @@ func (p *Platform) AfterReply(ctx context.Context, replyCtx any, content string)
 // interface, so a signature drift fails the build instead of silently no-op'ing
 // at the runtime type assertion in engine finalize.
 var _ core.PostReplyHook = (*Platform)(nil)
+var _ core.CronTopicStarter = (*Platform)(nil)
 
 func (p *Platform) SendImage(ctx context.Context, rctx any, img core.ImageAttachment) error {
 	rc, ok := rctx.(replyContext)
@@ -3305,6 +3310,9 @@ func (p *Platform) shouldReplyInThread(rc replyContext) bool {
 	if rc.messageID == "" {
 		return false
 	}
+	if rc.forceThread {
+		return true
+	}
 	if p.autoThread {
 		return true
 	}
@@ -3315,6 +3323,11 @@ func (p *Platform) shouldReplyInThread(rc replyContext) bool {
 func (p *Platform) shouldUseThreadOrReplyAPI(rc replyContext) bool {
 	if rc.messageID == "" {
 		return false
+	}
+	if rc.forceThread {
+		// A forced thread must use the Reply API; Create would drop the reply
+		// out of the topic.
+		return true
 	}
 	return !p.noReplyToTrigger
 }
@@ -3356,6 +3369,13 @@ func (p *Platform) replyMessage(ctx context.Context, rc replyContext, msgType, c
 }
 
 func (p *Platform) createMessage(ctx context.Context, chatID, msgType, content, op string) error {
+	_, _, err := p.createMessageReturningID(ctx, chatID, msgType, content, op)
+	return err
+}
+
+// createMessageReturningID posts a brand-new message and returns its message ID
+// and (when the chat is topic-enabled) the thread ID it belongs to.
+func (p *Platform) createMessageReturningID(ctx context.Context, chatID, msgType, content, op string) (messageID, threadID string, err error) {
 	req := larkim.NewCreateMessageReqBuilder().
 		ReceiveIdType(larkim.ReceiveIdTypeChatId).
 		Body(larkim.NewCreateMessageReqBodyBuilder().
@@ -3364,7 +3384,7 @@ func (p *Platform) createMessage(ctx context.Context, chatID, msgType, content, 
 			Content(content).
 			Build()).
 		Build()
-	return p.withTransientRetry(ctx, op, func() error {
+	err = p.withTransientRetry(ctx, op, func() error {
 		return p.withFreshTenantAccessTokenRetry(ctx, op, func(client *lark.Client, options ...larkcore.RequestOptionFunc) error {
 			resp, err := client.Im.Message.Create(ctx, req, options...)
 			if err != nil {
@@ -3373,9 +3393,53 @@ func (p *Platform) createMessage(ctx context.Context, chatID, msgType, content, 
 			if !resp.Success() {
 				return fmt.Errorf("%s: %s failed code=%d msg=%s", p.tag(), op, resp.Code, resp.Msg)
 			}
+			if resp.Data != nil {
+				messageID = stringValue(resp.Data.MessageId)
+				threadID = stringValue(resp.Data.ThreadId)
+			}
+			if messageID == "" {
+				return fmt.Errorf("%s: %s returned empty message id", p.tag(), op)
+			}
 			return nil
 		})
 	})
+	if err != nil {
+		return "", "", err
+	}
+	return messageID, threadID, nil
+}
+
+// StartCronTopic implements core.CronTopicStarter: a new root message is posted
+// into the chat and the returned session key is anchored to it, so cron replies
+// land inside that topic instead of the topic of the original session key.
+func (p *Platform) StartCronTopic(ctx context.Context, sessionKey, content string) (string, any, error) {
+	base, err := p.ReconstructReplyCtx(sessionKey)
+	if err != nil {
+		return "", nil, err
+	}
+	rc, ok := base.(replyContext)
+	if !ok || rc.chatID == "" {
+		return "", nil, fmt.Errorf("%s: cannot derive chat id from session key %q", p.tag(), sessionKey)
+	}
+
+	content = stripInternalTags(content)
+	msgType, msgBody := buildReplyContent(content)
+	messageID, threadID, err := p.createMessageReturningID(ctx, rc.chatID, msgType, msgBody, "cron_topic")
+	if err != nil {
+		return "", nil, err
+	}
+
+	newKey := fmt.Sprintf("%s:%s:root:%s", p.tag(), rc.chatID, messageID)
+	newRC := replyContext{
+		messageID:  messageID,
+		chatID:     rc.chatID,
+		sessionKey: newKey,
+		// Feishu only returns a thread id for chats that support topics; in
+		// plain chats fall back to the platform's normal reply rules.
+		forceThread: threadID != "",
+	}
+	slog.Info(p.tag()+": cron topic created", "chat_id", rc.chatID, "root_id", messageID, "thread_id", threadID)
+	return newKey, newRC, nil
 }
 
 func (p *Platform) withFreshTenantAccessTokenRetry(ctx context.Context, operation string, fn feishuRequestFunc) error {

@@ -166,13 +166,14 @@ interface JobForm {
   description: string;
   silent: boolean;
   enabled: boolean;
+  session_mode: string;
   mode: string;
   _type: 'prompt' | 'exec';
 }
 
 const emptyForm: JobForm = {
   project: '', session_key: '', cron_expr: '', prompt: '', exec: '',
-  description: '', silent: false, enabled: true, mode: '', _type: 'prompt',
+  description: '', silent: false, enabled: true, session_mode: '', mode: '', _type: 'prompt',
 };
 
 /* ── Main page ── */
@@ -244,6 +245,7 @@ export default function CronList() {
       description: job.description,
       silent: !!job.silent,
       enabled: job.enabled,
+      session_mode: job.session_mode || '',
       mode: job.mode || '',
       _type: job.exec ? 'exec' : 'prompt',
     });
@@ -265,6 +267,7 @@ export default function CronList() {
         if (form.session_key !== editJob.session_key) updates.session_key = form.session_key;
         if (form.silent !== !!editJob.silent) updates.silent = form.silent;
         if (form.enabled !== editJob.enabled) updates.enabled = form.enabled;
+        if ((form.session_mode || '') !== (editJob.session_mode || '')) updates.session_mode = form.session_mode;
         if ((form.mode || '') !== (editJob.mode || '')) updates.mode = form.mode;
         if (Object.keys(updates).length > 0) {
           await updateCronJob(editJob.id, updates);
@@ -346,6 +349,9 @@ export default function CronList() {
                   {describeCron(job.cron_expr)}
                 </span>
                 {job.silent && <Badge variant="default" className="text-[10px] px-1.5 py-0">silent</Badge>}
+                {job.session_mode === 'new_topic' && (
+                  <Badge variant="default" className="text-[10px] px-1.5 py-0">{t('cron.sessionModeNewTopic')}</Badge>
+                )}
                 <Badge variant="default" className="text-[10px] px-1.5 py-0">{job.mode || t('cron.modeDefault')}</Badge>
               </div>
 
@@ -495,6 +501,17 @@ export default function CronList() {
             onChange={v => setForm({ ...form, session_key: v })}
             options={sessionKeys.map(k => ({ value: k, label: k }))}
             placeholder={t('cron.selectSessionKey')}
+          />
+
+          <Select
+            label={t('cron.sessionMode')}
+            value={form.session_mode}
+            onChange={v => setForm({ ...form, session_mode: v })}
+            options={[
+              { value: '', label: t('cron.sessionModeReuse') },
+              { value: 'new_per_run', label: t('cron.sessionModeNewPerRun') },
+              { value: 'new_topic', label: t('cron.sessionModeNewTopic') },
+            ]}
           />
 
           <Select

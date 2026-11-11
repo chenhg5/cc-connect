@@ -778,7 +778,7 @@ cc-connect cron edit <job-id> <field> <value>   # e.g. cron_expr, prompt, enable
 cc-connect cron del <job-id>
 ```
 
-Optional: `--session-mode new-per-run` starts a fresh agent session on each run (default is `reuse`, same as before). `--timeout-mins N` sets how long the scheduler waits per run (`0` = no limit; omit = 30 minutes).
+Optional: `--session-mode new-per-run` starts a fresh agent session on each run (default is `reuse`, same as before). `--session-mode new-topic` additionally opens a new topic/thread for every run (Feishu: a new root message is posted first, then the session is anchored to it). `--timeout-mins N` sets how long the scheduler waits per run (`0` = no limit; omit = 30 minutes).
 
 ### Natural Language (Claude Code)
 

@@ -127,7 +127,11 @@
     "selectSessionKey": "Select session (empty for default)",
     "taskType": "Task type",
     "mode": "Permission mode",
-    "modeDefault": "Use project default"
+    "modeDefault": "Use project default",
+    "sessionMode": "Session mode",
+    "sessionModeReuse": "Reuse current session",
+    "sessionModeNewPerRun": "New session each run",
+    "sessionModeNewTopic": "New topic each run"
   },
   "heartbeat": {
     "title": "Heartbeat",

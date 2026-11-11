@@ -42,6 +42,18 @@ type CronReplyTargetResolver interface {
 	ResolveCronReplyTarget(sessionKey string, title string) (resolvedSessionKey string, replyCtx any, err error)
 }
 
+// CronTopicStarter is an optional interface for platforms that can open a brand
+// new conversation topic/thread per cron run (session_mode = "new_topic").
+//
+// The implementation posts a root message with content into the chat behind
+// sessionKey, then returns a session key anchored to that root plus a reply
+// context that keeps subsequent replies inside the new topic. Implementations
+// that cannot create topics should return ErrNotSupported so the engine can
+// fall back to session_mode = "new_per_run".
+type CronTopicStarter interface {
+	StartCronTopic(ctx context.Context, sessionKey string, content string) (newSessionKey string, replyCtx any, err error)
+}
+
 // SessionEnvInjector is an optional interface for agents that accept
 // per-session environment variables (e.g. CC_PROJECT, CC_SESSION_KEY).
 type SessionEnvInjector interface {
@@ -89,7 +101,8 @@ When the user asks you to do something on a schedule (e.g. "每天早上6点帮�
 Environment variables CC_PROJECT and CC_SESSION_KEY are already set, so you do NOT need to specify --project or --session-key.
 
 Optional flags:
-  --session-mode <mode>     reuse (default) or new-per-run (fresh session each trigger)
+  --session-mode <mode>     reuse (default), new-per-run (fresh session each trigger),
+                            or new-topic (fresh session in a new topic/thread each trigger)
   --timeout-mins <n>        max wait per run in minutes (default 30, 0 = unlimited)
   --exec <command>          run a shell command directly instead of --prompt
 
@@ -97,6 +110,7 @@ Examples:
   cc-connect cron add --cron "0 6 * * *" --prompt "Collect GitHub trending repos and send a summary" --desc "Daily GitHub Trending"
   cc-connect cron add --cron "0 9 * * 1" --prompt "Generate a weekly project status report" --desc "Weekly Report"
   cc-connect cron add --cron "*/2 * * * *" --exec "ipconfig" --session-mode new-per-run --desc "Every 2 min ipconfig"
+  cc-connect cron add --cron "0 9 * * *" --prompt "Daily report" --session-mode new-topic --desc "Daily report"
 
 You can also list, edit, or delete cron jobs:
   cc-connect cron list

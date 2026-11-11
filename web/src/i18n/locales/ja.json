@@ -127,7 +127,11 @@
     "selectSessionKey": "セッションを選択（空=デフォルト）",
     "taskType": "タスク種別",
     "mode": "権限モード",
-    "modeDefault": "プロジェクトのデフォルトを使用"
+    "modeDefault": "プロジェクトのデフォルトを使用",
+    "sessionMode": "セッションモード",
+    "sessionModeReuse": "現在のセッションを再利用",
+    "sessionModeNewPerRun": "実行ごとに新規セッション",
+    "sessionModeNewTopic": "実行ごとに新規トピック"
   },
   "heartbeat": {
     "title": "ハートビート",

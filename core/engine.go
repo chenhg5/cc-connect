@@ -1075,10 +1075,42 @@ func (e *Engine) ExecuteCronJob(job *CronJob) error {
 		return fmt.Errorf("platform %q does not support proactive messaging (cron)", platformName)
 	}
 
+	// session_mode = "new_topic": open a fresh topic/thread before the run so
+	// every trigger gets its own conversation instead of replying into the
+	// topic anchored by the original session key.
+	topicMode := job.UsesNewTopicPerRun()
+	if e.cronScheduler != nil && job.SessionMode == "" {
+		topicMode = e.cronScheduler.UsesNewTopic(job)
+	}
+
 	runSessionKey := sessionKey
 	var replyCtx any
 	var err error
-	if !job.Mute {
+	topicRootSent := false
+	fallbackNotice := ""
+	if !job.Mute && topicMode {
+		if starter, ok := targetPlatform.(CronTopicStarter); ok {
+			content := cronTopicRootContent(job, e.cronIsSilent(job))
+			newKey, newReplyCtx, topicErr := starter.StartCronTopic(e.ctx, sessionKey, content)
+			if topicErr == nil && newKey != "" && newReplyCtx != nil {
+				runSessionKey = newKey
+				replyCtx = newReplyCtx
+				topicRootSent = true
+			} else {
+				if topicErr == nil {
+					topicErr = fmt.Errorf("platform returned an incomplete topic target")
+				}
+				slog.Warn("cron: failed to start new topic, falling back to new_per_run",
+					"job", job.ID, "platform", platformName, "error", topicErr)
+				fallbackNotice = fmt.Sprintf("⚠️ 新建话题失败，已回退到原会话：%v", topicErr)
+			}
+		} else {
+			slog.Warn("cron: platform does not support new_topic, falling back to new_per_run",
+				"job", job.ID, "platform", platformName)
+		}
+	}
+
+	if replyCtx == nil && !job.Mute {
 		if resolver, ok := targetPlatform.(CronReplyTargetResolver); ok {
 			resolvedSessionKey, resolvedReplyCtx, err := resolver.ResolveCronReplyTarget(sessionKey, cronRunTitle(job))
 			if err != nil {
@@ -1108,24 +1140,17 @@ func (e *Engine) ExecuteCronJob(job *CronJob) error {
 		effectivePlatform = &mutePlatform{targetPlatform}
 	}
 
-	// Notify user that a cron job is executing (unless silent/muted)
+	if fallbackNotice != "" {
+		e.send(targetPlatform, replyCtx, fallbackNotice)
+	}
+
+	// Notify user that a cron job is executing (unless silent/muted).
+	// In new_topic mode the topic root message already carries this text.
 	// Note: this notification uses targetPlatform directly, not the tracking wrapper,
 	// so it won't count as a "meaningful delivery" for empty response detection.
-	if !job.Mute {
-		silent := false
-		if e.cronScheduler != nil {
-			silent = e.cronScheduler.IsSilent(job)
-		}
-		if !silent {
-			desc := job.Description
-			if desc == "" {
-				if job.IsShellJob() {
-					desc = truncateStr(job.Exec, 40)
-				} else {
-					desc = truncateStr(job.Prompt, 40)
-				}
-			}
-			e.send(targetPlatform, replyCtx, fmt.Sprintf("⏰ %s", desc))
+	if !job.Mute && !topicRootSent {
+		if !e.cronIsSilent(job) {
+			e.send(targetPlatform, replyCtx, fmt.Sprintf("⏰ %s", cronJobLabel(job)))
 		}
 	}
 
@@ -1234,6 +1259,37 @@ func (e *Engine) ExecuteCronJob(job *CronJob) error {
 		return fmt.Errorf("cron job %q produced an empty response", job.ID)
 	}
 	return nil
+}
+
+// cronIsSilent reports whether the job suppresses its start notification,
+// honouring the job-level setting and the scheduler's global default.
+func (e *Engine) cronIsSilent(job *CronJob) bool {
+	if e.cronScheduler != nil {
+		return e.cronScheduler.IsSilent(job)
+	}
+	return job.Silent != nil && *job.Silent
+}
+
+// cronJobLabel returns the short human label used in cron notifications.
+func cronJobLabel(job *CronJob) string {
+	if desc := strings.TrimSpace(job.Description); desc != "" {
+		return desc
+	}
+	if job.IsShellJob() {
+		return truncateStr(job.Exec, 40)
+	}
+	return truncateStr(job.Prompt, 40)
+}
+
+// cronTopicRootContent builds the root message that opens a new topic. When the
+// job is silent the "⏰" prefix is dropped, but the root message is still
+// required because it anchors the topic.
+func cronTopicRootContent(job *CronJob, silent bool) string {
+	label := cronJobLabel(job)
+	if silent {
+		return label
+	}
+	return "⏰ " + label
 }
 
 func cronRunTitle(job *CronJob) string {

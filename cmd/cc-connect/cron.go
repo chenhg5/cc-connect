@@ -554,7 +554,8 @@ Options:
       --prompt <text>        Task prompt (runs through agent)
       --exec <command>       Shell command (runs directly, mutually exclusive with --prompt)
       --desc <text>          Short description
-      --session-mode <mode>  reuse (default) or new-per-run — fresh agent session each run
+      --session-mode <mode>  reuse (default), new-per-run (fresh agent session each run)
+                             or new-topic (fresh session in a new topic/thread each run)
       --timeout-mins <n>     Max minutes to wait per run (0 = no limit; default 30 if omitted)
       --data-dir <path>      Data directory (default: ~/.cc-connect)
   -h, --help                 Show this help
@@ -578,7 +579,7 @@ Editable Fields (string):
   exec          Shell command (runs directly)
   work_dir      Working directory for exec
   description   Short description
-  session_mode  reuse or new_per_run
+  session_mode  reuse, new_per_run, or new_topic
 
 Editable Fields (bool: true/false):
   enabled       Enable or disable the task
