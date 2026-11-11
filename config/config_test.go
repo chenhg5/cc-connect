@@ -1790,6 +1790,33 @@ func TestLoad_ParsesResetOnIdleMins(t *testing.T) {
 	}
 }
 
+func TestLoad_ParsesIdleResetNotice(t *testing.T) {
+	configPath := writeConfigFixture(t, projectWithIdleResetNoticeOffFixture)
+
+	cfg, err := Load(configPath)
+	if err != nil {
+		t.Fatalf("Load returned error: %v", err)
+	}
+	if cfg.Projects[0].IdleResetNotice == nil {
+		t.Fatal("expected idle_reset_notice to be parsed")
+	}
+	if *cfg.Projects[0].IdleResetNotice {
+		t.Fatal("idle_reset_notice = true, want false")
+	}
+}
+
+func TestLoad_IdleResetNoticeUnsetStaysNil(t *testing.T) {
+	configPath := writeConfigFixture(t, projectWithResetOnIdleFixture)
+
+	cfg, err := Load(configPath)
+	if err != nil {
+		t.Fatalf("Load returned error: %v", err)
+	}
+	if got := cfg.Projects[0].IdleResetNotice; got != nil {
+		t.Fatalf("idle_reset_notice = %v, want nil when the key is not set", *got)
+	}
+}
+
 func TestLoad_RejectsNegativeResetOnIdleMins(t *testing.T) {
 	configPath := writeConfigFixture(t, projectWithNegativeResetOnIdleFixture)
 
@@ -2226,6 +2253,25 @@ const projectWithResetOnIdleFixture = `
 [[projects]]
 name = "beta"
 reset_on_idle_mins = 60
+
+[projects.agent]
+type = "codex"
+
+[projects.agent.options]
+work_dir = "/tmp/beta"
+
+[[projects.platforms]]
+type = "telegram"
+
+[projects.platforms.options]
+bot_token = "token_xxx"
+`
+
+const projectWithIdleResetNoticeOffFixture = `
+[[projects]]
+name = "beta"
+reset_on_idle_mins = 30
+idle_reset_notice = false
 
 [projects.agent]
 type = "codex"

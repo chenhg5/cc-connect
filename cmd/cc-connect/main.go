@@ -59,6 +59,13 @@ func resolveResetOnIdle(configured *int) (time.Duration, bool) {
 	return time.Duration(defaultResetOnIdleMins) * time.Minute, true
 }
 
+// resolveIdleResetNotice reports whether an idle rotation should post its
+// notices to the chat. Unset means yes, so existing configs keep their
+// behavior; only an explicit idle_reset_notice = false turns them off.
+func resolveIdleResetNotice(configured *bool) bool {
+	return configured == nil || *configured
+}
+
 // logSizeSource describes where the resolved log size came from, so the
 // caller can log it and operators can audit the active setting without
 // grepping systemd/launchd definitions.
@@ -716,6 +723,7 @@ func main() {
 		}
 		resetIdle, defaulted := resolveResetOnIdle(proj.ResetOnIdleMins)
 		engine.SetResetOnIdle(resetIdle)
+		engine.SetIdleResetNotice(resolveIdleResetNotice(proj.IdleResetNotice))
 		if defaulted {
 			slog.Info("project: reset_on_idle_mins not set, applying default — set reset_on_idle_mins = 0 to opt out, see docs/usage.md",
 				"project", proj.Name, "default_minutes", defaultResetOnIdleMins)
@@ -1852,6 +1860,7 @@ func reloadConfig(configPath, projName string, engine *core.Engine) (*core.Confi
 	}
 	resetIdle, defaulted := resolveResetOnIdle(proj.ResetOnIdleMins)
 	engine.SetResetOnIdle(resetIdle)
+	engine.SetIdleResetNotice(resolveIdleResetNotice(proj.IdleResetNotice))
 	if defaulted {
 		slog.Info("project: reset_on_idle_mins not set, applying default — set reset_on_idle_mins = 0 to opt out, see docs/usage.md",
 			"project", proj.Name, "default_minutes", defaultResetOnIdleMins)
