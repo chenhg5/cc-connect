@@ -1174,43 +1174,20 @@ OpenClaw 回复空消息几乎都是漏掉了配对步骤（issue #432）。在�
 原因之前，先重跑 `openclaw pair` 并在 UI 中重新授权一次。
 参考：<https://zhuanlan.zhihu.com/p/2005687480976970296>
 
-### 个人微信群聊 — 如何获取正确的 `chat_id`(issue #805)
+### 个人微信群聊不可行（issue #805 相关说明更正）
 
-个人微信（`weixin` 平台）支持群聊。要把机器人绑定到某个群，需要把
-`[[projects.platforms.options]]` 里的 `chat_id` 设置为**群聊 ID**，
-而不是个人用户 ID。群聊 ID 一定以 `@chatroom` 结尾，例如：
+个人微信（`weixin` / ilink）机器人**不是普通微信好友**，无法通过群
+「添加成员」搜索并拉入群聊，也没有「邀请机器人入群」API。因此
+**群聊在本通道上不可行**；请勿再按 `chat_id=…@chatroom` 或「把二维码
+发到群里当普通好友拉群」的方式期望跑通群聊。
 
-```toml
-[[projects.platforms]]
-type = "weixin"
+**推荐：**
 
-[projects.platforms.options]
-token = "ilink_bot_bearer_token"
-chat_id = "your_group_chat_id@chatroom"   # 群聊 ID 以 @chatroom 结尾
-```
+- 需要使用的人各自扫码 / 打开机器人链接，在**私聊**中使用。
+- 若必须群内 @ 机器人协作，改用飞书、钉钉、企业微信等支持群机器人
+  的平台（可与 `weixin` 同时挂在同一项目下）。
 
-**获取群聊 ID 的方法：**
-
-1. 启动 cc-connect，并让机器人加入目标群。
-2. 让群里任意已知允许的用户在群里发一条消息。
-3. 查看 cc-connect 日志，消息到达时会打印带 `@chatroom` 后缀的
-   `chat_id`。把那个值原样填到 `chat_id` 即可。
-
-把 `chat_id` 留空（或不写这个键）就表示响应机器人所在的所有聊天。
-填具体值则只响应那个群/个人。
-
-常见坑：
-
-- **「怎么把机器人加进群？」** 个人微信机器人没有"邀请机器人入群"
-  的 API；只能由已经扫码绑定 ilink 的微信号，在群里发起"添加"或把
-  机器人的二维码发到群里、让群里的人扫码添加。和把普通好友拉进群
-  一样。
-- **群里发消息机器人不响应** — 检查是否把 `chat_id` 绑到了别的用户/
-  群，或 `allow_from` 限制了别的用户，把当前用户也加入。
-- **私聊能回、群聊不回（或反之）** — 复制一份 `[[projects.platforms]]`
-  块，一份 `chat_id` 填群 ID、另一份留空，就能同时覆盖私聊和群聊。
-
-更多关于 `weixin` 平台的内容见 [docs/weixin.md](./weixin.md)。
+更多限制说明见 [docs/weixin.md](./weixin.md)。
 
 ### Telegram 代理 / 出站限制 (issue #245)
 
