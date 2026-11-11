@@ -4,10 +4,12 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/chenhg5/cc-connect/core"
@@ -82,6 +84,32 @@ func (a *Agent) desktopCall(ctx context.Context, args ...string) (json.RawMessag
 	cmd.Env = core.MergeEnv(os.Environ(), env)
 	output, err := cmd.Output()
 	if err != nil {
+		var exit *exec.ExitError
+		if errors.As(err, &exit) {
+			detail := string(exit.Stderr)
+			for i, masked := range core.RedactEnv(cmd.Env) {
+				if masked != cmd.Env[i] {
+					_, secret, _ := strings.Cut(cmd.Env[i], "=")
+					detail = core.RedactToken(detail, secret)
+				}
+			}
+			for i, masked := range core.RedactArgs(helper) {
+				if masked != helper[i] {
+					secret := helper[i]
+					if _, value, found := strings.Cut(secret, "="); found {
+						secret = value
+					}
+					detail = core.RedactToken(detail, secret)
+				}
+			}
+			detail = strings.Join(strings.Fields(detail), " ")
+			if runes := []rune(detail); len(runes) > 512 {
+				detail = string(runes[:512]) + "…"
+			}
+			if detail != "" {
+				return nil, fmt.Errorf("desktop helper failed; check the desktop before retrying: %w (%s)", err, detail)
+			}
+		}
 		return nil, fmt.Errorf("desktop helper failed; check the desktop before retrying: %w", err)
 	}
 	if !json.Valid(output) {

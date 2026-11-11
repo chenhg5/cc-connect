@@ -778,8 +778,8 @@ name = "my-backend"
 # shell = "/bin/fish"                        # Per-project shell override / 项目级 shell 覆盖
 # shell_profile = "source ~/.config/fish/config.fish"  # Per-project shell profile / 项目级 shell profile
 #
-# admin_from controls who can run privileged commands (/dir, /shell, /restart, /upgrade, /commands addexec, /cron addexec).
-# admin_from 控制谁可以执行特权命令（/dir, /shell, /restart, /upgrade, /commands addexec, /cron addexec）。
+# admin_from controls who can run privileged commands (/dir, /shell, /restart, /upgrade, /reply, /answer, /commands addexec, /cron addexec).
+# admin_from 控制谁可以执行特权命令（/dir, /shell, /restart, /upgrade, /reply, /answer, /commands addexec, /cron addexec）。
 #
 # admin_from must be defined at the [[projects]] level.
 # Do NOT put it under [projects.platforms.options], or it will be ignored.

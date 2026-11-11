@@ -194,6 +194,7 @@ type MsgKey string
 const (
 	MsgDesktopRequest            MsgKey = "desktop_request"
 	MsgDesktopUsage              MsgKey = "desktop_usage"
+	MsgDesktopTextOnly           MsgKey = "desktop_text_only"
 	MsgDesktopUnknown            MsgKey = "desktop_unknown"
 	MsgDesktopError              MsgKey = "desktop_error"
 	MsgDesktopQueued             MsgKey = "desktop_queued"
@@ -716,6 +717,13 @@ var messages = map[MsgKey]map[Language]string{
 		LangTraditionalChinese: "⏸ Codex 等待回答\nUUID：%s\n請求：%s\n\n%s\n\n/answer %s %s <答案>",
 		LangJapanese:           "⏸ Codex が入力を待っています\nUUID: %s\nリクエスト: %s\n\n%s\n\n/answer %s %s <回答>",
 		LangSpanish:            "⏸ Codex necesita tu respuesta\nUUID: %s\nSolicitud: %s\n\n%s\n\n/answer %s %s <respuesta>",
+	},
+	MsgDesktopTextOnly: {
+		LangEnglish:            "Desktop commands accept text only. Send attachments directly from the desktop.",
+		LangChinese:            "桌面命令仅支持文本，请在桌面直接发送附件。",
+		LangTraditionalChinese: "桌面命令僅支援文字，請在桌面直接傳送附件。",
+		LangJapanese:           "デスクトップコマンドはテキストのみ対応しています。添付ファイルはデスクトップから直接送信してください。",
+		LangSpanish:            "Los comandos de escritorio solo aceptan texto. Envíe los archivos adjuntos directamente desde el escritorio.",
 	},
 	MsgDesktopUsage: {
 		LangEnglish:            "Usage: /reply UUID [--queue|--now] <instruction> or /answer UUID REQUEST <answer>",

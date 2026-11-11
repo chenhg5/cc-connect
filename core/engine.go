@@ -1267,7 +1267,7 @@ func (e *Engine) SetAdminFrom(adminFrom string) {
 	shellDisabled := e.disabledCmds["shell"]
 	e.userRolesMu.Unlock()
 	if af == "" && !shellDisabled {
-		slog.Warn("admin_from is not set — privileged commands (/shell, /show, /dir, /restart, /upgrade) are blocked. "+
+		slog.Warn("admin_from is not set — privileged commands (/shell, /show, /dir, /restart, /upgrade, /reply, /answer) are blocked. "+
 			"Set admin_from in config to enable them, or use disabled_commands to hide them.",
 			"project", e.name)
 	}
@@ -1275,6 +1275,8 @@ func (e *Engine) SetAdminFrom(adminFrom string) {
 
 // privilegedCommands are commands that require admin_from authorization.
 var privilegedCommands = map[string]bool{
+	"reply":   true,
+	"answer":  true,
 	"shell":   true,
 	"show":    true,
 	"dir":     true,
@@ -3074,8 +3076,24 @@ func (e *Engine) handleMessage(p Platform, msg *Message) {
 	if strings.HasPrefix(content, "/") {
 		id := matchPrefix(strings.ToLower(strings.TrimPrefix(strings.Fields(content)[0], "/")), builtinCommands)
 		if id == "reply" || id == "answer" {
-			e.handleCommand(p, msg, content)
-			return
+			key := e.interactiveKeyForSessionKey(msg.SessionKey)
+			e.interactiveMu.Lock()
+			state := e.interactiveStates[key]
+			e.interactiveMu.Unlock()
+			questionContent := content
+			if state != nil {
+				_, sessions := e.sessionContextForKey(msg.SessionKey)
+				var handled bool
+				content, handled = e.handleAsyncUserInput(p, msg, content, key, sessions)
+				if handled || e.handlePendingPermission(p, msg, content, key) {
+					return
+				}
+			}
+			if content == questionContent {
+				e.handleCommand(p, msg, content)
+				return
+			}
+			msg.Content = content
 		}
 	}
 

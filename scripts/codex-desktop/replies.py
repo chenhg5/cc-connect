@@ -93,7 +93,7 @@ def drain(root=notify.ROOT, ipc_factory=human.IPC):
                       key=lambda pair: pair[1]['created'])
         seen = set()
         for path, job in jobs:
-            if job['mode'] == 'queue' and job['status'] in ('unknown', 'failed'):
+            if job['status'] in ('unknown', 'failed'):
                 if job.get('cwd') and not job.get('reported'):
                     report_failure(job, path, root)
                 continue

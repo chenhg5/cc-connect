@@ -640,6 +640,12 @@ func (a *Agent) WorkspaceAgentOptions() map[string]any {
 	if a.codexHome != "" {
 		opts["codex_home"] = a.codexHome
 	}
+	if len(a.desktopHelper) > 0 {
+		opts["desktop_helper"] = append([]string(nil), a.desktopHelper...)
+	}
+	if a.desktopStateDir != "" {
+		opts["desktop_state_dir"] = a.desktopStateDir
+	}
 	return opts
 }
 

@@ -1359,7 +1359,8 @@ func TestCUJ_A5_FileReachesAgent(t *testing.T) {
 		agent.mu.Lock()
 		n := len(agent.sessions)
 		agent.mu.Unlock()
-		if n > 0 {
+		// Wait for the reply and persistence to finish before TempDir cleanup.
+		if n > 0 && len(plat.getSent()) > 0 && !e.sessions.GetOrCreateActive(msg.SessionKey).Busy() {
 			return
 		}
 		select {
@@ -2825,10 +2826,11 @@ func (a *desktopCommandAgent) AnswerThreadRequest(_ context.Context, _ string, k
 }
 func TestCUJ_B12_DesktopCommandsUseRegisteredOwnerAndDestination(t *testing.T) {
 	env := newCUJEnv(t)
+	env.engine.SetAdminFrom("*")
 	a := &desktopCommandAgent{}
 	env.engine.agent = a
 	RegisterAgent("stub", func(map[string]any) (Agent, error) { return a, nil })
-	if err := env.engine.registerThreadNotification("test:alice", t.TempDir(), "thread"); err != nil {
+	if err := env.engine.registerThreadNotification("test:alice", t.TempDir(), "thread", 0); err != nil {
 		t.Fatal(err)
 	}
 	env.userSends("alice", `/reply thread keep  spaces and "quotes"`)
@@ -2853,8 +2855,8 @@ func TestCUJ_B12_DesktopCommandsUseRegisteredOwnerAndDestination(t *testing.T) {
 		t.Fatal("queue mode was not forwarded")
 	}
 	env.userSends("alice", "/reply thread --bad must not run")
-	if a.input == "must not run" {
-		t.Fatal("invalid mode dispatched")
+	if a.mode != "queue" || a.input != "--bad must not run" {
+		t.Fatal("leading option text was not preserved", a.input)
 	}
 	env.userSends("bob", "/reply thread leaked")
 	if !strings.Contains(strings.Join(env.plat.getSent(), "\n"), "UUID has not been notified") {

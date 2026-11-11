@@ -76,6 +76,20 @@ class ReplyTests(unittest.TestCase):
         self.drain()
         self.assertEqual(len(FakeIPC.sent), 1)
 
+    def test_now_lost_ack_reports_once_without_replay(self):
+        FakeIPC.failure = OSError('lost acknowledgement')
+        with self.assertRaises(OSError):
+            self.send('now')
+        FakeIPC.failure = None
+        self.drain()
+        notices = list((self.root / 'outbox').glob('*.json'))
+        self.assertEqual(len(notices), 1)
+        self.assertIn('no automatic replay', json.loads(notices[0].read_text())['notification'])
+        notices[0].unlink()
+        self.drain()
+        self.assertEqual(len(FakeIPC.sent), 1)
+        self.assertEqual(list((self.root / 'outbox').glob('*.json')), [])
+
     def test_queue_fifo_and_pending_questions_block_dispatch(self):
         self.send(message='incoming-1')
         self.send(message='incoming-2')
