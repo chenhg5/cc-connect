@@ -308,3 +308,49 @@ func TestBuildCardJSON_OversizedRowsFallBackToNativeTable(t *testing.T) {
 		t.Errorf("elements = %d (first %q), want one markdown element", len(c.Body.Elements), c.Body.Elements[0].Tag)
 	}
 }
+
+func TestBuildCardJSON_OversizedTableOnlyReplyFallsBack(t *testing.T) {
+	cell := strings.Repeat("长", 130)
+	var b strings.Builder
+	b.WriteString("| a | b | c | d |\n| - | - | - | - |\n")
+	for i := 0; i < 12; i++ {
+		fmt.Fprintf(&b, "| %s | %s | %s | %s |\n", cell, cell, cell, cell)
+	}
+	content := b.String()
+	if els := buildCardBodyElements(sanitizeCardMarkdownForCard(content)); len(els) != 1 || els[0]["tag"] != "column_set" {
+		t.Fatalf("precondition: want the table alone drawn as rows, got %d elements", len(els))
+	}
+	card := buildCardJSON(content)
+	c := decodeTestReplyCard(t, card)
+	if len(card) > maxRichCardJSONBytes || len(c.Body.Elements) != 1 || c.Body.Elements[0].Tag != "markdown" {
+		t.Errorf("card = %d bytes, first element %q; want the native Markdown table within the limit", len(card), c.Body.Elements[0].Tag)
+	}
+}
+
+func TestCardPlainText(t *testing.T) {
+	for in, want := range map[string]string{
+		"task_id":                      "task_id",
+		"p_99 *latency*":               "p_99 latency",
+		"**Bold** and ~~old~~":         "Bold and old",
+		"`file_name`":                  "file_name",
+		"[Docs](https://example.com)":  "Docs",
+		"<font color='red'>Red</font>": "Red",
+		"a * b":                        "a * b",
+	} {
+		if got := cardPlainText(in); got != want {
+			t.Errorf("cardPlainText(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+func TestSplitCardTableRow_UnpairedBacktick(t *testing.T) {
+	for in, want := range map[string][]string{
+		"| don`t | x | y |": {"don`t", "x", "y"},
+		"| `a|b` | c |":     {"`a|b`", "c"},
+		"| `a | b` ` | c |": {"`a | b` `", "c"},
+	} {
+		if got := splitCardTableRow(in); !reflect.DeepEqual(got, want) {
+			t.Errorf("splitCardTableRow(%q) = %q, want %q", in, got, want)
+		}
+	}
+}

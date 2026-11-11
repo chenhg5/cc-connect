@@ -4849,7 +4849,8 @@ func marshalReplyCard(body []map[string]any, withTail func([]map[string]any) []m
 		return b
 	}
 	b := marshal(body)
-	if len(b) > maxRichCardJSONBytes && len(body) > 1 {
+	transformed := len(body) != 1 || body[0]["tag"] != "markdown"
+	if len(b) > maxRichCardJSONBytes && transformed {
 		b = marshal([]map[string]any{{"tag": "markdown", "content": content}})
 	}
 	return string(b)

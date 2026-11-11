@@ -393,15 +393,28 @@ func foldCardCell(text string) (string, string, bool) {
 	return preview, rest, true
 }
 
-// cardPlainText drops link targets and Markdown markup.
+// cardPlainText drops link targets and paired Markdown markup; lone markers
+// such as the underscore in task_id stay.
 func cardPlainText(s string) string {
 	s = cardTextLinkPattern.ReplaceAllString(s, "$1")
-	return strings.TrimSpace(cardTextMarkupPattern.ReplaceAllString(s, ""))
+	s = cardPairedMarkupPattern.ReplaceAllStringFunc(s, func(m string) string {
+		sub := cardPairedMarkupPattern.FindStringSubmatch(m)
+		for _, g := range sub[1:] {
+			if g != "" {
+				return g
+			}
+		}
+		return ""
+	})
+	return strings.TrimSpace(cardHTMLTagPattern.ReplaceAllString(s, ""))
 }
 
 var (
 	cardTextLinkPattern   = regexp.MustCompile(`!?\[([^\]]*)\]\([^)]*\)`)
 	cardTextMarkupPattern = regexp.MustCompile("[*_`~]+|</?[a-zA-Z][^>]*>")
+	// Bold, strikethrough, inline code, then single-asterisk emphasis.
+	cardPairedMarkupPattern = regexp.MustCompile("\\*\\*(.+?)\\*\\*|~~(.+?)~~|`([^`]+)`|\\*([^*\\s][^*]*)\\*")
+	cardHTMLTagPattern      = regexp.MustCompile("</?[a-zA-Z][^>]*>")
 )
 
 // cardTextWidth estimates the rendered width of a Markdown cell in Latin
@@ -486,7 +499,8 @@ func splitCardTableRow(line string) []string {
 			cell.WriteByte('|')
 			i += 2
 			continue
-		case r == '`':
+		case r == '`' && (inCode || strings.IndexByte(line[i+1:], '`') >= 0):
+			// A backtick without a closing one is plain text, as in GFM.
 			inCode = !inCode
 		case r == '|' && !inCode:
 			cells = append(cells, cardTableCellText(cell.String()))
