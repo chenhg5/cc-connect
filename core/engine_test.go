@@ -9220,14 +9220,24 @@ func TestCmdCronExec_TriggersJob(t *testing.T) {
 				if sentContains(sent, "triggered") && sentContains(sent, "manual run complete") {
 					// RunJobNow runs the job asynchronously and its completion
 					// bookkeeping (MarkRun → store save) can land after the
-					// output is sent. Wait for the persisted last_run before
-					// returning, otherwise the late write races t.TempDir()
-					// removal and the test flakes with "crons: directory not
-					// empty". Observe the file, not the in-memory job: reading
-					// *CronJob.LastRun without the store lock races MarkRun.
+					// output is sent. Wait for it before returning, otherwise
+					// the late write races t.TempDir() removal and the test
+					// flakes with "crons: directory not empty". MarkRun sets
+					// LastRun and saves while holding store.mu, so reading it
+					// under that lock both avoids a data race on the field and
+					// proves the save has completed. (store.Get returns the
+					// shared *CronJob, so reading the field after Get returns
+					// is unsynchronized.)
 					for time.Now().Before(deadline) {
-						data, readErr := os.ReadFile(scheduler.Store().path)
-						if readErr == nil && strings.Contains(string(data), `"last_run"`) {
+						store.mu.Lock()
+						marked := false
+						for _, j := range store.jobs {
+							if j.ID == job.ID && !j.LastRun.IsZero() {
+								marked = true
+							}
+						}
+						store.mu.Unlock()
+						if marked {
 							return
 						}
 						time.Sleep(10 * time.Millisecond)

@@ -1718,6 +1718,12 @@ func TestAllowChat_FiltersGroupMessages(t *testing.T) {
 				t.Fatalf("newPlatform() error = %v", err)
 			}
 			ip := p.(*interactivePlatform)
+			// Seed the name caches so onMessage never calls the real Feishu
+			// API. Without this each case waits on a chat/user lookup that
+			// fails against the live endpoint, which takes 1.4-2s from
+			// GitHub's runners and raced the 2s delivery wait below.
+			ip.chatNameCache.Store(tt.chatID, "Test group")
+			ip.userNameCache.Store("ou_test", "Tester")
 
 			messageID := "om_test_" + tt.name
 			openID := "ou_test"
