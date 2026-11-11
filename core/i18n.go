@@ -253,6 +253,7 @@ const (
 	MsgListMore                  MsgKey = "list_more"
 	MsgListPageHint              MsgKey = "list_page_hint"
 	MsgListSwitchHint            MsgKey = "list_switch_hint"
+	MsgSessionReadOnly           MsgKey = "session_read_only"
 	MsgListError                 MsgKey = "list_error"
 	MsgHistoryEmpty              MsgKey = "history_empty"
 	MsgHistoryReadFailed         MsgKey = "history_read_failed"
@@ -1501,6 +1502,13 @@ var messages = map[MsgKey]map[Language]string{
 		LangTraditionalChinese: "\n`/switch <序號>` 切換會話",
 		LangJapanese:           "\n`/switch <番号>` でセッション切替",
 		LangSpanish:            "\n`/switch <número>` para cambiar sesión",
+	},
+	MsgSessionReadOnly: {
+		LangEnglish:            "Read-only · %s",
+		LangChinese:            "只读 · %s",
+		LangTraditionalChinese: "唯讀 · %s",
+		LangJapanese:           "読み取り専用 · %s",
+		LangSpanish:            "Solo lectura · %s",
 	},
 	MsgListError: {
 		LangEnglish:            "❌ Failed to list sessions: %v",

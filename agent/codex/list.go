@@ -38,12 +38,16 @@ func resolveCodexHomeDir(explicit string) string {
 	return filepath.Join(homeDir, ".codex")
 }
 
-// listCodexSessions scans the codex sessions directory for JSONL transcript
-// files whose cwd matches workDir.
+// listCodexSessions 扫描 Codex 会话记录；workDir 为空时列出所有工作目录的会话，
+// 非空时将其转换为绝对路径，并仅保留 cwd 匹配的会话。
 func listCodexSessions(workDir, codexHome string) ([]core.AgentSessionInfo, error) {
-	absWorkDir, err := filepath.Abs(workDir)
-	if err != nil {
-		absWorkDir = workDir
+	absWorkDir := workDir
+	if absWorkDir != "" {
+		var err error
+		absWorkDir, err = filepath.Abs(absWorkDir)
+		if err != nil {
+			absWorkDir = workDir
+		}
 	}
 
 	sessionsDir := filepath.Join(resolveCodexHomeDir(codexHome), "sessions")
@@ -79,7 +83,9 @@ func listCodexSessions(workDir, codexHome string) ([]core.AgentSessionInfo, erro
 				}
 				info.Summary = title
 			}
-			patchSessionSource(info.ID, codexHome)
+			if absWorkDir != "" {
+				patchSessionSource(info.ID, codexHome)
+			}
 			// Codex can split one logical session across multiple rollout files.
 			// Use the latest segment for time while keeping the earliest prompt as
 			// the stable fallback title.
@@ -257,6 +263,7 @@ func parseCodexSessionFile(path, filterCwd string) *core.AgentSessionInfo {
 		Summary:      summary,
 		MessageCount: msgCount,
 		ModifiedAt:   stat.ModTime(),
+		WorkDir:      sessionCwd,
 	}
 }
 

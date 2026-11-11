@@ -1409,6 +1409,79 @@ func TestCUJ_B1_NewCreatesIndependentSession(t *testing.T) {
 
 // CUJ-B2 · /list shows all sessions for the user.
 func TestCUJ_B2_ListShowsAllSessions(t *testing.T) {
+	t.Run("cross-project browsing keeps operations scoped", func(t *testing.T) {
+		env := newCUJEnv(t)
+		key := "test:browse"
+		local := []AgentSessionInfo{
+			{ID: "local-one", Summary: "Local one"},
+			{ID: "local-two", Summary: "Local two"},
+		}
+		foreign := AgentSessionInfo{ID: "foreign-session", Summary: "Foreign topic", WorkDir: "/other-project"}
+		agent := &stubSessionBrowser{
+			stubDeleteAgent: stubDeleteAgent{stubListAgent: stubListAgent{sessions: local}},
+			allSessions:     []AgentSessionInfo{foreign, local[1], local[0]},
+		}
+		env.engine.agent = agent
+		send := func(command, expected string) {
+			t.Helper()
+			env.plat.clearSent()
+			env.userSends("browse", command)
+			env.waitFor(command, 2*time.Second, func() bool { return env.sentContains(expected) })
+		}
+
+		send("/list", foreign.Summary)
+		list := env.lastSent()
+		if !strings.Contains(list, "**1.** Local one") || !strings.Contains(list, "**2.** Local two") || strings.Contains(list, "**3.**") {
+			t.Fatalf("list must preserve local operation indices: %s", list)
+		}
+		readOnly := env.engine.i18n.Tf(MsgSessionReadOnly, foreign.WorkDir)
+		if !strings.Contains(list, readOnly) || !strings.Contains(list, foreign.ID) {
+			t.Fatalf("foreign row must show its scope and ID: %s", list)
+		}
+		send("/search Foreign", readOnly)
+
+		active := env.activeSession(key).ID
+		send("/switch "+foreign.ID, env.engine.i18n.Tf(MsgSwitchNoMatch, foreign.ID))
+		send("/delete "+foreign.ID, env.engine.i18n.Tf(MsgSwitchNoMatch, foreign.ID))
+		send("/switch 3", env.engine.i18n.Tf(MsgSwitchNoMatch, "3"))
+		send("/delete 3", env.engine.i18n.Tf(MsgSwitchNoMatch, "3"))
+		if env.activeSession(key).ID != active || len(agent.deleted) != 0 {
+			t.Fatal("foreign session must not be switched to or deleted")
+		}
+
+		card, err := env.engine.renderListCard(key, 1)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !strings.Contains(card.RenderText(), readOnly) {
+			t.Fatal("card must show the foreign session as read-only")
+		}
+		for _, element := range card.Elements {
+			if row, ok := element.(CardListItem); ok && strings.Contains(row.Text, foreign.Summary) {
+				t.Fatal("foreign row must not offer a switch button")
+			}
+		}
+		env.engine.getOrCreateDeleteModeState(key, env.plat, "ctx-browse")
+		deleteCard := env.engine.renderDeleteModeCard(key).RenderText()
+		if !strings.Contains(deleteCard, local[0].Summary) || strings.Contains(deleteCard, foreign.Summary) {
+			t.Fatal("delete card must not offer foreign sessions")
+		}
+		env.engine.executeCardAction("/switch", foreign.ID, key)
+		env.engine.submitDeleteModeSelection(key, map[string]struct{}{foreign.ID: {}})
+		if env.activeSession(key).ID != active || len(agent.deleted) != 0 {
+			t.Fatal("card actions must reject foreign session IDs")
+		}
+
+		send("/switch 2", "Local two")
+		if env.activeSession(key).GetAgentSessionID() != local[1].ID {
+			t.Fatal("list index 2 must switch to the second local session")
+		}
+		send("/delete 1", "Local one")
+		if len(agent.deleted) != 1 || agent.deleted[0] != local[0].ID {
+			t.Fatalf("deleted = %v, want only the first local session", agent.deleted)
+		}
+	})
+
 	env := newCUJEnv(t)
 	key := "test:b2"
 	env.userSends("b2", "hi")

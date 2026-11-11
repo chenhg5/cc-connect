@@ -53,6 +53,114 @@ func TestAgentListSessions_ExcludesSubagentRollouts(t *testing.T) {
 	}
 }
 
+func TestAgentListSessions_ListAllWorkdirs(t *testing.T) {
+	codexHome := t.TempDir()
+	workDir := t.TempDir()
+	otherWorkDir := t.TempDir()
+
+	writeTestCodexRollout(t, codexHome, "rollout-main.jsonl", "main-session", workDir)
+	otherPath := writeTestCodexRollout(t, codexHome, "rollout-other.jsonl", "other-session", otherWorkDir)
+	otherBody, err := os.ReadFile(otherPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	otherBody = []byte(strings.Replace(string(otherBody), `"source":"vscode"`, `"source":"exec"`, 1))
+	if err := os.WriteFile(otherPath, otherBody, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	t.Chdir(workDir)
+	cmd, err := os.Executable()
+	if err != nil {
+		t.Fatalf("get test executable: %v", err)
+	}
+
+	tests := []struct {
+		name            string
+		workDir         string
+		listAllWorkdirs any
+		clearWorkDir    bool
+		wantIDs         []string
+	}{
+		{name: "enabled", workDir: workDir, listAllWorkdirs: true, wantIDs: []string{"main-session", "other-session"}},
+		{name: "disabled", workDir: workDir, listAllWorkdirs: false, wantIDs: []string{"main-session"}},
+		{name: "unset", workDir: workDir, wantIDs: []string{"main-session"}},
+		{name: "disabled with default workdir", listAllWorkdirs: false, wantIDs: []string{"main-session"}},
+		{name: "enabled after empty workdir update", workDir: workDir, listAllWorkdirs: true, clearWorkDir: true, wantIDs: []string{"main-session", "other-session"}},
+		{name: "disabled after empty workdir update", workDir: workDir, listAllWorkdirs: false, clearWorkDir: true, wantIDs: []string{"main-session"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			opts := map[string]any{"work_dir": tt.workDir, "codex_home": codexHome, "cmd": []string{cmd}}
+			if tt.listAllWorkdirs != nil {
+				opts["list_all_workdirs"] = tt.listAllWorkdirs
+			}
+			backend, err := New(opts)
+			if err != nil {
+				t.Fatalf("New() error: %v", err)
+			}
+			agent := backend.(*Agent)
+			if tt.clearWorkDir {
+				agent.SetWorkDir("")
+			}
+			sessions, err := agent.ListSessions(context.Background())
+			if err != nil {
+				t.Fatalf("ListSessions() error: %v", err)
+			}
+			if len(sessions) != 1 || sessions[0].ID != "main-session" {
+				t.Fatalf("ListSessions() = %#v, want only the current project's session", sessions)
+			}
+			sessions, err = agent.ListAllSessions(context.Background())
+			if err != nil {
+				t.Fatalf("ListAllSessions() error: %v", err)
+			}
+			if len(sessions) != len(tt.wantIDs) {
+				t.Fatalf("ListAllSessions() returned %d sessions, want %d", len(sessions), len(tt.wantIDs))
+			}
+
+			got := map[string]bool{}
+			for _, session := range sessions {
+				got[session.ID] = true
+				if session.ID == "other-session" && session.WorkDir != otherWorkDir {
+					t.Fatalf("session.WorkDir = %q, want %q", session.WorkDir, otherWorkDir)
+				}
+			}
+			for _, want := range tt.wantIDs {
+				if !got[want] {
+					t.Fatalf("ListAllSessions() missing session %q; got %#v", want, got)
+				}
+			}
+		})
+	}
+	unchangedBody, err := os.ReadFile(otherPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(unchangedBody) != string(otherBody) {
+		t.Fatal("browsing changed another project's session file")
+	}
+}
+
+func TestListCodexSessions_EmptyWorkDirDoesNotFilterByProcessDir(t *testing.T) {
+	codexHome := t.TempDir()
+	sessionWorkDir := t.TempDir()
+	processWorkDir := t.TempDir()
+	writeTestCodexRollout(t, codexHome, "rollout-session.jsonl", "all-workdirs-session", sessionWorkDir)
+
+	t.Chdir(processWorkDir)
+
+	sessions, err := listCodexSessions("", codexHome)
+	if err != nil {
+		t.Fatalf("listCodexSessions() error: %v", err)
+	}
+	if len(sessions) != 1 {
+		t.Fatalf("listCodexSessions() returned %d sessions, want 1", len(sessions))
+	}
+	if sessions[0].ID != "all-workdirs-session" {
+		t.Fatalf("listCodexSessions()[0].ID = %q, want all-workdirs-session", sessions[0].ID)
+	}
+}
+
 func TestAgentListSessions_ExcludesSubagentRolloutWithCopiedParentMeta(t *testing.T) {
 	workDir := t.TempDir()
 	codexHome := t.TempDir()
@@ -400,4 +508,26 @@ func TestAgentListSessions_UsesFirstUserPromptWhenIndexTitleMissing(t *testing.T
 	if sessions[0].Summary != "第一句稳定标题" {
 		t.Fatalf("ListSessions()[0].Summary = %q, want first user prompt", sessions[0].Summary)
 	}
+}
+
+func writeTestCodexRollout(t *testing.T, codexHome, name, sessionID, workDir string) string {
+	t.Helper()
+
+	sessionsDir := filepath.Join(codexHome, "sessions", "2026", "08", "31")
+	if err := os.MkdirAll(sessionsDir, 0o755); err != nil {
+		t.Fatalf("create sessions directory: %v", err)
+	}
+
+	workDirJSON, err := json.Marshal(workDir)
+	if err != nil {
+		t.Fatalf("encode work directory: %v", err)
+	}
+
+	body := `{"type":"session_meta","payload":{"id":"` + sessionID + `","cwd":` + string(workDirJSON) + `,"source":"vscode"}}` + "\n" +
+		`{"type":"response_item","payload":{"role":"user","content":[{"type":"input_text","text":"test prompt"}]}}` + "\n"
+	path := filepath.Join(sessionsDir, name)
+	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+		t.Fatalf("write rollout %s: %v", name, err)
+	}
+	return path
 }

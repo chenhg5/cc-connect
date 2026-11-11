@@ -647,6 +647,16 @@ func (a *stubDeleteAgent) DeleteSession(_ context.Context, sessionID string) err
 	return nil
 }
 
+type stubSessionBrowser struct {
+	stubDeleteAgent
+	allSessions []AgentSessionInfo
+}
+
+// ListAllSessions 返回包含只读跨项目条目的测试浏览范围。
+func (a *stubSessionBrowser) ListAllSessions(_ context.Context) ([]AgentSessionInfo, error) {
+	return a.allSessions, nil
+}
+
 // waitDeleteModePhase polls the delete-mode state for the given session key
 // until it reaches the target phase or the timeout expires.
 func waitDeleteModePhase(t *testing.T, e *Engine, sessionKey, targetPhase string) {
