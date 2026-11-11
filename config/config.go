@@ -727,6 +727,14 @@ func expandHomeInConfig(cfg *Config) {
 				proj.Agent.Options["work_dir"] = expandLeadingHome(s, home)
 			}
 		}
+		// codex_home is a path like work_dir: expand "~" so that
+		// `codex_home = "~/.codex-cc-connect"` means the same as the
+		// absolute path (issue #1909).
+		if v, ok := proj.Agent.Options["codex_home"]; ok {
+			if s, ok := v.(string); ok {
+				proj.Agent.Options["codex_home"] = expandLeadingHome(s, home)
+			}
+		}
 	}
 }
 

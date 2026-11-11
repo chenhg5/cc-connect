@@ -9,6 +9,28 @@ import (
 	"strings"
 )
 
+// ensureCodexHomeDir creates the configured CODEX_HOME directory.
+//
+// The Codex CLI refuses to start when CODEX_HOME points at a path that does
+// not exist ("Error finding codex home: CODEX_HOME points to ... but that
+// path does not exist") and reports it as a raw CLI error the user sees
+// verbatim. Creating the directory here keeps that failure inside cc-connect,
+// with a message that names the option and the path.
+//
+// The provider path already creates the directory; this covers the
+// subscription-login path, where no provider is configured and therefore
+// nothing else creates it.
+func ensureCodexHomeDir(codexHome string) error {
+	home := strings.TrimSpace(codexHome)
+	if home == "" {
+		return nil
+	}
+	if err := os.MkdirAll(home, 0o755); err != nil {
+		return fmt.Errorf("codex: codex_home %q: cannot create the directory: %w", home, err)
+	}
+	return nil
+}
+
 // ensureCodexProviderConfig writes or updates a [model_providers.<name>] section
 // in $CODEX_HOME/config.toml so that Codex CLI can use the provider's wire_api
 // and http_headers settings.
