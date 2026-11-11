@@ -1485,6 +1485,148 @@ func TestProcessInteractiveEvents_BareNoReplyWithToolsStaysSilent(t *testing.T) 
 	}
 }
 
+// TestProcessInteractiveEvents_ThinkingBoundaryBareNoReplyDeliversBodyOnce is
+// the regression for the shape with no tool call at all: the body is flushed by
+// a thinking boundary, then a bare NO_REPLY closes the turn. The body was already
+// delivered at that boundary, so the turn must stay silent — a second delivery
+// here is the duplicate the review reproduced — while history still records the
+// body instead of collapsing to the marker.
+func TestProcessInteractiveEvents_ThinkingBoundaryBareNoReplyDeliversBodyOnce(t *testing.T) {
+	p := &stubPlatformEngine{n: "telegram"}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	e.SetDisplayConfig(DisplayCfg{ThinkingMessages: true, ThinkingMaxLen: 300, ToolMaxLen: 500, ToolMessages: true})
+
+	sessionKey := "telegram:user-thinking-noreply"
+	session := e.sessions.GetOrCreateActive(sessionKey)
+	agentSession := newControllableSession("s-thinking-noreply")
+	state := &interactiveState{
+		agentSession: agentSession,
+		platform:     p,
+		replyCtx:     "ctx-thinking-noreply",
+	}
+	e.interactiveStates[sessionKey] = state
+
+	const body = "报告正文ABC"
+	agentSession.events <- Event{Type: EventText, Content: body}
+	agentSession.events <- Event{Type: EventThinking, Content: "thinking..."}
+	agentSession.events <- Event{Type: EventResult, Content: "NO_REPLY", Done: true}
+	e.processInteractiveEvents(state, session, e.sessions, sessionKey, "m-thinking-noreply", time.Now(), nil, nil, state.replyCtx, 0)
+
+	sent := p.getSent()
+	deliveries := 0
+	for _, msg := range sent {
+		if strings.Contains(msg, "NO_REPLY") {
+			t.Fatalf("NO_REPLY marker leaked to the platform: %q (all sent = %#v)", msg, sent)
+		}
+		if strings.Contains(msg, body) {
+			deliveries++
+		}
+	}
+	if deliveries != 1 {
+		t.Fatalf("body delivered %d times, want exactly 1 (all sent = %#v)", deliveries, sent)
+	}
+
+	history := session.GetHistory(0)
+	if len(history) == 0 {
+		t.Fatal("history is empty, want the assistant turn recorded")
+	}
+	last := history[len(history)-1]
+	if last.Content != body {
+		t.Fatalf("history = %q, want the committed body %q", last.Content, body)
+	}
+}
+
+// TestProcessInteractiveEvents_AbnormalCloseThinkingBoundaryDeliversBodyOnce
+// is the channel-close counterpart: the same text + thinking-boundary shape with
+// a trailing marker chunk and no EventResult. The boundary delivery is the only
+// delivery, and history records the body without the marker.
+func TestProcessInteractiveEvents_AbnormalCloseThinkingBoundaryDeliversBodyOnce(t *testing.T) {
+	p := &stubPlatformEngine{n: "telegram"}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	e.SetDisplayConfig(DisplayCfg{ThinkingMessages: true, ThinkingMaxLen: 300, ToolMaxLen: 500, ToolMessages: true})
+
+	sessionKey := "telegram:user-abnormal-thinking"
+	session := e.sessions.GetOrCreateActive(sessionKey)
+	agentSession := newControllableSession("s-abnormal-thinking")
+	state := &interactiveState{
+		agentSession: agentSession,
+		platform:     p,
+		replyCtx:     "ctx-abnormal-thinking",
+	}
+	e.interactiveStates[sessionKey] = state
+
+	const body = "报告正文ABC"
+	agentSession.events <- Event{Type: EventText, Content: body}
+	agentSession.events <- Event{Type: EventThinking, Content: "thinking..."}
+	agentSession.events <- Event{Type: EventText, Content: "NO_REPLY"}
+	_ = agentSession.Close()
+
+	e.processInteractiveEvents(state, session, e.sessions, sessionKey, "m-abnormal-thinking", time.Now(), nil, nil, state.replyCtx, 0)
+
+	sent := p.getSent()
+	deliveries := 0
+	for _, msg := range sent {
+		if strings.Contains(msg, "NO_REPLY") {
+			t.Fatalf("NO_REPLY marker leaked to the platform on abnormal close: %q (all sent = %#v)", msg, sent)
+		}
+		if strings.Contains(msg, body) {
+			deliveries++
+		}
+	}
+	if deliveries != 1 {
+		t.Fatalf("body delivered %d times, want exactly 1 (all sent = %#v)", deliveries, sent)
+	}
+
+	history := session.GetHistory(0)
+	if len(history) == 0 {
+		t.Fatal("history is empty, want the assistant turn recorded")
+	}
+	last := history[len(history)-1]
+	if strings.Contains(last.Content, "NO_REPLY") {
+		t.Fatalf("history persisted the raw NO_REPLY marker: %q", last.Content)
+	}
+	if !strings.Contains(last.Content, body) {
+		t.Fatalf("history lost the body: %q", last.Content)
+	}
+}
+
+// TestProcessInteractiveEvents_TrailingMarkerHistoryMatchesDelivery pins the
+// history contract for the trailing-marker shape: a turn that delivers text
+// records the delivered (marker-stripped) text, the same rule the committed-body
+// case and the abnormal-close path follow.
+func TestProcessInteractiveEvents_TrailingMarkerHistoryMatchesDelivery(t *testing.T) {
+	p := &stubPlatformEngine{n: "telegram"}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	e.SetDisplayConfig(DisplayCfg{ThinkingMessages: true, ThinkingMaxLen: 300, ToolMaxLen: 500, ToolMessages: true})
+
+	sessionKey := "telegram:user-trailing-history"
+	session := e.sessions.GetOrCreateActive(sessionKey)
+	agentSession := newControllableSession("s-trailing-history")
+	state := &interactiveState{
+		agentSession: agentSession,
+		platform:     p,
+		replyCtx:     "ctx-trailing-history",
+	}
+	e.interactiveStates[sessionKey] = state
+
+	agentSession.events <- Event{Type: EventText, Content: "先行说明。"}
+	agentSession.events <- Event{Type: EventThinking, Content: "thinking..."}
+	agentSession.events <- Event{Type: EventResult, Content: "结尾一句 NO_REPLY", Done: true}
+	e.processInteractiveEvents(state, session, e.sessions, sessionKey, "m-trailing-history", time.Now(), nil, nil, state.replyCtx, 0)
+
+	history := session.GetHistory(0)
+	if len(history) == 0 {
+		t.Fatal("history is empty, want the assistant turn recorded")
+	}
+	last := history[len(history)-1]
+	if strings.Contains(last.Content, "NO_REPLY") {
+		t.Fatalf("history kept the marker: %q", last.Content)
+	}
+	if last.Content != "结尾一句" {
+		t.Fatalf("history = %q, want the delivered text", last.Content)
+	}
+}
+
 // TestProcessInteractiveEvents_AbnormalCloseStripsNoReplyMarker covers the
 // channel-close path: the agent process dies after committing visible text, a
 // tool call and a trailing NO_REPLY continuation, with no EventResult. The

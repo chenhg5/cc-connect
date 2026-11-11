@@ -6361,25 +6361,25 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			// Detect NO_REPLY marker on the base response (before indicators/footer are appended).
 			// Four cases:
 			//   1. bare marker with committed text           → marker only closes the trailing
-			//                                                  continuation; the committed body
-			//                                                  is the turn response
+			//                                                  continuation; history records the
+			//                                                  committed body, the turn stays silent
 			//   2. bare marker, nothing committed            → fully silent
 			//   3. trailing marker with non-empty reasoning  → strip marker, deliver reasoning
 			//   4. trailing marker with empty strip result   → fully silent
-			// History records the ORIGINAL baseResponse so the agent retains context of its own
-			// decision; only the outbound platform text gets rewritten/suppressed.
+			// History contract, shared with the abnormal-close path: a turn that delivers
+			// text records what the user saw (marker stripped); a fully silent turn keeps
+			// the raw marker so the agent retains context of its own decision. The committed
+			// body in case 1 was already delivered at its boundary, so it is recorded but
+			// never sent again.
 			isSilent := isSilentReply(baseResponse)
+			historyText := baseResponse
 			if isSilent && committedText != "" {
 				// Case 1: event.Content only carries the last assistant segment
-				// ("NO_REPLY"). Suppressing the turn here would drop the body the
-				// user already saw and collapse history to the marker.
-				baseResponse = committedText
-				cleanResponse = committedText
-				isSilent = false
+				// ("NO_REPLY"). The body before the boundary is already on screen, so
+				// the outbound turn stays silent; only history needs repairing, since
+				// collapsing it to the marker loses what the agent said.
+				historyText = committedText
 			}
-
-			session.AddHistory("assistant", baseResponse)
-			sessions.Save()
 
 			if !isSilent {
 				if stripped, ok := stripTrailingSilent(baseResponse); ok {
@@ -6388,9 +6388,13 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 					} else {
 						baseResponse = stripped
 						cleanResponse = stripped
+						historyText = stripped
 					}
 				}
 			}
+
+			session.AddHistory("assistant", historyText)
+			sessions.Save()
 
 			if !isSilent {
 				e.hooks.Emit(HookEvent{
@@ -6899,6 +6903,7 @@ channelClosed:
 		// chunk, so a trailing bare-marker segment is dropped first; a marker
 		// embedded in the last chunk is then caught by the trailing-marker strip.
 		fullResponse := joinTextParts(textParts)
+		rawResponse := fullResponse
 		silentTurn := strings.TrimSpace(fullResponse) == ""
 		if !silentTurn {
 			if stripped, ok := stripTrailingSilent(fullResponse); ok {
@@ -6912,8 +6917,10 @@ channelClosed:
 		if silentTurn {
 			// Nothing but the marker: stay silent, and keep the raw marker in
 			// history so the agent retains context of its own decision — the same
-			// contract the normal completion path applies.
-			fullResponse = strings.Join(textParts, "")
+			// contract the normal completion path applies. An abnormal close with
+			// no text at all is treated the same way, so it emits no
+			// HookEventMessageSent: there is no delivered message to report.
+			fullResponse = rawResponse
 		}
 
 		session.AddHistory("assistant", fullResponse)
@@ -6936,21 +6943,29 @@ channelClosed:
 			Content:    fullResponse,
 		})
 
-		if toolCount > 0 && segmentStart > 0 {
-			sp.discard()
+		// Only what the last flush boundary has not already surfaced is unsent:
+		// every thinking / permission / tool boundary delivered textParts before
+		// segmentStart, so re-sending them would duplicate the turn.
+		undelivered := fullResponse
+		if segmentStart > 0 {
+			undelivered = ""
 			if segmentStart < len(textParts) {
-				unsent := joinTextParts(textParts[segmentStart:])
+				undelivered = joinTextParts(textParts[segmentStart:])
 				// The remainder is raw agent text, so it can still carry the
 				// trailing NO_REPLY marker (fullResponse was stripped above, but
 				// this slice is what actually gets sent). Never leak the marker.
-				if stripped, ok := stripTrailingSilent(unsent); ok {
-					unsent = strings.TrimRight(stripped, " \t\r\n")
+				if stripped, ok := stripTrailingSilent(undelivered); ok {
+					undelivered = strings.TrimRight(stripped, " \t\r\n")
 				}
-				if unsent != "" {
-					for _, chunk := range SplitMessageCodeFenceAware(unsent, maxPlatformMessageLen) {
-						if err := sendWorkspaceWithError(p, replyCtx, chunk); err != nil {
-							return
-						}
+			}
+		}
+
+		if segmentStart > 0 {
+			sp.discard()
+			if undelivered != "" {
+				for _, chunk := range SplitMessageCodeFenceAware(undelivered, maxPlatformMessageLen) {
+					if err := sendWorkspaceWithError(p, replyCtx, chunk); err != nil {
+						return
 					}
 				}
 			}
