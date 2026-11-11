@@ -52,20 +52,20 @@ func normalizeAPIURL(raw string) (string, error) {
 		// The wrapped url.Error, and some of its inner errors (e.g. an invalid
 		// escape or port), quote parts of the value, so they are dropped too.
 		return "", fmt.Errorf("slack: invalid base_url %q (details omitted: "+
-			"the host part is masked because it may contain credentials)", redactAuthority(raw))
+			"the host part is masked because it may contain credentials)", logSafe(raw))
 	}
 	if u.User != nil {
 		// Don't echo the value: it would put the credentials in the logs.
 		return "", fmt.Errorf("slack: base_url must not contain user info (user:password@)")
 	}
 	if u.Scheme != "https" && u.Scheme != "http" {
-		return "", fmt.Errorf("slack: base_url %q must use http or https", raw)
+		return "", fmt.Errorf("slack: base_url %q must use http or https", logSafe(raw))
 	}
 	if u.Host == "" {
-		return "", fmt.Errorf("slack: base_url %q has no host", raw)
+		return "", fmt.Errorf("slack: base_url %q has no host", logSafe(raw))
 	}
 	if u.RawQuery != "" || u.Fragment != "" {
-		return "", fmt.Errorf("slack: base_url %q must not contain a query or fragment", raw)
+		return "", fmt.Errorf("slack: base_url %q must not contain a query or fragment", logSafe(raw))
 	}
 
 	switch path := u.Path; {
@@ -77,7 +77,7 @@ func normalizeAPIURL(raw string) (string, error) {
 		}
 	default:
 		return "", fmt.Errorf("slack: base_url %q must be the Web API root ending in /api/ "+
-			"(e.g. https://slack-gov.com/api/) or a bare host", raw)
+			"(e.g. https://slack-gov.com/api/); a bare host gets /api/ appended", logSafe(raw))
 	}
 	u.RawPath = ""
 
@@ -86,7 +86,7 @@ func normalizeAPIURL(raw string) (string, error) {
 	case isLoopbackHost(host):
 	case u.Scheme == "http":
 		slog.Warn("slack: base_url uses plain http to a non-loopback host; "+
-			"the bot and app tokens will be sent unencrypted", "base_url", raw)
+			"the bot and app tokens will be sent unencrypted", "host", host)
 	case !isKnownSlackHost(host):
 		slog.Warn("slack: base_url host is not a Slack domain; the bot and app tokens "+
 			"will be sent to it, so check it is the GovSlack or relay endpoint you intend",
@@ -105,6 +105,24 @@ func isKnownSlackHost(host string) bool {
 		}
 	}
 	return false
+}
+
+// logSafe returns a version of a base_url value that is safe to put in an
+// error or a log line. Every error path goes through it, because a value can
+// fail validation while carrying a secret: in the authority (user:secret@...,
+// or an opaque "token:secret@host" with no scheme) or in the query
+// (?token=...). The query and fragment are dropped entirely, then the
+// authority is masked.
+func logSafe(raw string) string {
+	s, cut := raw, false
+	if i := strings.IndexAny(s, "?#"); i >= 0 {
+		s, cut = s[:i], true
+	}
+	s = redactAuthority(s)
+	if cut {
+		s += "?<omitted>"
+	}
+	return s
 }
 
 // redactAuthority masks the part of an unparseable URL that may hold
