@@ -4831,21 +4831,27 @@ type feishuPreviewHandle struct {
 // Card font is inherently smaller than Post/Text — this is a Feishu platform limitation.
 func buildCardJSON(content string) string {
 	content = sanitizeCardMarkdownForCard(content)
-	card := map[string]any{
-		"schema": "2.0",
-		"config": map[string]any{
-			"width_mode": "fill",
-		},
-		"body": map[string]any{
-			"elements": []map[string]any{
-				{
-					"tag":     "markdown",
-					"content": content,
-				},
-			},
-		},
+	return marshalReplyCard(buildCardBodyElements(content), func(body []map[string]any) []map[string]any {
+		return body
+	}, content)
+}
+
+// marshalReplyCard builds a full-width reply card from the body elements and
+// what follows them. If drawing the tables as rows makes the card too large,
+// the body falls back to one markdown element with native tables.
+func marshalReplyCard(body []map[string]any, withTail func([]map[string]any) []map[string]any, content string) string {
+	marshal := func(body []map[string]any) []byte {
+		b, _ := json.Marshal(map[string]any{
+			"schema": "2.0",
+			"config": map[string]any{"width_mode": "fill"},
+			"body":   map[string]any{"elements": withTail(body)},
+		})
+		return b
 	}
-	b, _ := json.Marshal(card)
+	b := marshal(body)
+	if len(b) > maxRichCardJSONBytes && len(body) > 1 {
+		b = marshal([]map[string]any{{"tag": "markdown", "content": content}})
+	}
 	return string(b)
 }
 
@@ -4859,31 +4865,15 @@ func buildCardJSONWithStatusFooter(content, footer string) string {
 	segments := sanitizeCardMarkdownSegmentsForCard([]string{content, footer})
 	content = segments[0]
 	footer = segments[1]
-	elements := []map[string]any{
-		{
-			"tag":     "markdown",
-			"content": content,
-		},
-		{
-			"tag": "hr",
-		},
-		{
-			"tag":       "markdown",
-			"content":   footer,
-			"text_size": "notation",
-		},
-	}
-	card := map[string]any{
-		"schema": "2.0",
-		"config": map[string]any{
-			"width_mode": "fill",
-		},
-		"body": map[string]any{
-			"elements": elements,
-		},
-	}
-	b, _ := json.Marshal(card)
-	return string(b)
+	return marshalReplyCard(buildCardBodyElements(content), func(body []map[string]any) []map[string]any {
+		return append(body,
+			map[string]any{"tag": "hr"},
+			map[string]any{
+				"tag":       "markdown",
+				"content":   footer,
+				"text_size": "notation",
+			})
+	}, content)
 }
 
 func isZhLikeProgressLang(lang string) bool {
