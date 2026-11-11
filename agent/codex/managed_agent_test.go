@@ -438,6 +438,20 @@ func TestManagedTransportConfigIsSeparateAndOptIn(t *testing.T) {
 	}
 }
 
+// TestManagedTransportRejectsIgnoredPermissionProfile prevents owned-process
+// permission configuration from being silently ignored by the shared transport.
+func TestManagedTransportRejectsIgnoredPermissionProfile(t *testing.T) {
+	_, err := New(map[string]any{
+		"cmd":                  os.Args[0],
+		"backend":              "app_server",
+		"app_server_transport": "managed_daemon",
+		"permission_profile":   "chat-workspace",
+	})
+	if err == nil || !strings.Contains(err.Error(), "permission_profile") {
+		t.Fatalf("New() error = %v, want permission_profile configuration error", err)
+	}
+}
+
 func TestDaemonDiscoveryIsPassive(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("shell script")

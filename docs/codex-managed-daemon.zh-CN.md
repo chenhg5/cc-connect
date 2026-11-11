@@ -43,7 +43,7 @@ daemon_enable_delete = true
 | `daemon_enable_async_questions` | `true` | 是否接收可通过 steer 回答的异步提示。 |
 | `daemon_enable_delete` | `true` | 是否允许 `/delete` 通过 daemon 删除 thread。 |
 
-托管模式不接受 `env` 和 `app_server_url`；凭据、Provider 和进程环境需要在 daemon 中配置。接入已有 thread 时，该 thread 自身的 model、Provider、审批策略和 sandbox 设置会保留；`model`、`mode`、`reasoning_effort`、`provider` 只用于新建 thread。
+托管模式不接受 `env`、`app_server_url` 和 `permission_profile`；凭据、Provider、进程环境和命名权限配置需要在 daemon 中配置。接入已有 thread 时，该 thread 自身的 model、Provider、审批策略和 sandbox 设置会保留；`model`、`mode`、`reasoning_effort`、`provider` 只用于新建 thread。
 
 新建 thread 时，省略 `mode`、设为空字符串或设为 `"default"` 会跟随 daemon 的有效权限默认值，包括 sandbox/权限 profile、审批策略和审批者；CC-Connect 不发送这些覆盖参数。只有显式设置 `mode`（例如 `suggest`、`full-auto`）时才应用 CC-Connect 的模式映射。`CODEX_HOME/config.toml` 是 Codex 的共享配置，并非 TUI 专用；daemon 使用其启动时选择的 `CODEX_HOME` 和配置层，CC-Connect 的 `codex_home` 不会重新配置已经运行的 daemon。
 

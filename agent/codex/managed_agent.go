@@ -82,9 +82,9 @@ func parseManagedOptions(opts map[string]any) (managedOptions, error) {
 			return config, fmt.Errorf("codex: daemon_reconnect_attempts must be between 0 and 10")
 		}
 	}
-	for _, key := range []string{"env", "app_server_url"} {
+	for _, key := range []string{"env", "app_server_url", "permission_profile"} {
 		if _, exists := opts[key]; exists {
-			return config, fmt.Errorf("codex: %s is for owned processes; managed_daemon owns its environment and endpoint", key)
+			return config, fmt.Errorf("codex: %s is for owned processes; managed_daemon owns its environment, endpoint and permission profiles", key)
 		}
 	}
 	return config, nil

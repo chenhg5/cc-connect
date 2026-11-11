@@ -41,7 +41,7 @@ daemon_enable_delete = true
 | `daemon_enable_async_questions` | `true` | Receive advisory questions answered through steer. |
 | `daemon_enable_delete` | `true` | Allow `/delete` to delete threads through the daemon. |
 
-Managed mode rejects `env` and `app_server_url`. Configure credentials, providers and process environment in the daemon. Attached threads retain their own model, provider, approval and sandbox settings; `model`, `mode`, `reasoning_effort` and `provider` configure new threads only.
+Managed mode rejects `env`, `app_server_url` and `permission_profile`. Configure credentials, providers, process environment and named permission profiles in the daemon. Attached threads retain their own model, provider, approval and sandbox settings; `model`, `mode`, `reasoning_effort` and `provider` configure new threads only.
 
 For new threads, omitting `mode`, setting it to an empty string or setting `mode = "default"` inherits the daemon's effective permission defaults, including its sandbox/permission profile, approval policy and reviewer. CC-Connect sends no overrides for these settings. An explicit `mode` such as `suggest` or `full-auto` still applies CC-Connect's mode mapping. `CODEX_HOME/config.toml` is shared Codex configuration, not a TUI-only file. The daemon uses the `CODEX_HOME` and configuration layers selected at its own startup; CC-Connect's `codex_home` does not reconfigure an already-running daemon.
 
