@@ -16,6 +16,10 @@ type desktopAnswerOwner interface {
 	AnswerThreadRequest(context.Context, string, string, string) error
 }
 
+type desktopProgressReader interface {
+	ThreadProgress(context.Context, string) (json.RawMessage, error)
+}
+
 // Split only routing fields; preserve quotes, JSON, whitespace and newlines in the answer.
 func desktopFields(raw string, count int) ([]string, string) {
 	fields := make([]string, 0, count)
@@ -70,6 +74,8 @@ func (e *Engine) cmdDesktop(p Platform, msg *Message, command, raw string) {
 	validator, validatable := e.agent.(desktopThreadValidator)
 	supported := false
 	switch command {
+	case "progress":
+		_, supported = e.agent.(desktopProgressReader)
 	case "reply":
 		_, supported = e.agent.(desktopReplyOwner)
 	case "answer":
@@ -88,9 +94,7 @@ func (e *Engine) cmdDesktop(p Platform, msg *Message, command, raw string) {
 	if err == nil {
 		switch command {
 		case "progress":
-			if reader, ok := agent.(interface {
-				ThreadProgress(context.Context, string) (json.RawMessage, error)
-			}); ok {
+			if reader, ok := agent.(desktopProgressReader); ok {
 				var data json.RawMessage
 				data, err = reader.ThreadProgress(e.ctx, id)
 				if err == nil {

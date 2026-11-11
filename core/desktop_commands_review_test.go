@@ -4,6 +4,7 @@ import (
 	"context"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestDesktopCommandsRequireAdmin(t *testing.T) {
@@ -69,7 +70,7 @@ func (a *desktopRejectingAgent) ValidateDesktopThreadAt(id, directory string) er
 }
 
 func TestDesktopCommandsPreflightBeforeCreatingWorkspace(t *testing.T) {
-	for _, command := range []string{"/reply thread text", "/answer thread request text"} {
+	for _, command := range []string{"/reply thread text", "/answer thread request text", "/progress thread"} {
 		for _, unsupported := range []bool{false, true} {
 			env := newCUJEnv(t)
 			a := &desktopRejectingAgent{}
@@ -115,5 +116,27 @@ func TestDesktopCommandsRespectPendingAsyncInput(t *testing.T) {
 	sent := env.plat.getSent()
 	if !strings.Contains(sent[len(sent)-1], "Next action?") {
 		t.Fatal("question acknowledgement missing", sent)
+	}
+}
+
+func TestDesktopProgressRejectsAttachmentsAndExpiredRoute(t *testing.T) {
+	env := newCUJEnv(t)
+	a := &desktopProgressAgent{}
+	env.engine.agent = a
+	RegisterAgent("stub", func(map[string]any) (Agent, error) { return a, nil })
+	expiry := time.Now().Unix() + 2
+	if err := env.engine.registerThreadNotification("test:alice", t.TempDir(), "thread", expiry); err != nil {
+		t.Fatal(err)
+	}
+	env.engine.ReceiveMessage(env.plat, &Message{SessionKey: "test:alice", UserID: "alice", Content: "/progress thread", Images: []ImageAttachment{{}}, ReplyCtx: "ctx"})
+	sent := env.plat.getSent()
+	if len(sent) == 0 || !strings.Contains(sent[len(sent)-1], "text only") || a.calls != 0 || env.engine.workspacePool != nil {
+		t.Fatal("progress discarded attachments or initialized a workspace", sent)
+	}
+	time.Sleep(time.Until(time.Unix(expiry, 0).Add(20 * time.Millisecond)))
+	env.userSends("alice", "/progress thread")
+	sent = env.plat.getSent()
+	if a.calls != 0 || !strings.Contains(sent[len(sent)-1], "UUID has not been notified") || env.engine.workspacePool != nil {
+		t.Fatal("expired progress route retained access", sent)
 	}
 }
