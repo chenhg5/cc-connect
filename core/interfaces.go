@@ -603,6 +603,16 @@ type WorkDirSwitcher interface {
 	GetWorkDir() string
 }
 
+// SessionWorkDirProvider resolves a saved conversation's working directory
+// without starting its agent process or changing the project's default.
+// providerName is the conversation's saved provider; an empty name uses the
+// agent's current provider. Implementations must not change the active provider.
+// An empty directory means the project default applies. A lookup error must
+// be reported instead of running a command in a different directory.
+type SessionWorkDirProvider interface {
+	GetSessionWorkDir(ctx context.Context, sessionID, providerName string) (string, error)
+}
+
 // AgentOptsProvider is an optional interface for agents that need to carry
 // their full configuration options when the engine clones a per-workspace
 // agent instance in multi-workspace mode. The engine merges the returned map
