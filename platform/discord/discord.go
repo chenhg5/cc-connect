@@ -916,14 +916,20 @@ func (p *Platform) handleComponentInteraction(s *discordgo.Session, i *discordgo
 	}
 
 	origText := ""
+	echo := "> " + command
 	if i.Message != nil {
 		origText = i.Message.Content
+		if strings.HasPrefix(data.CustomID, "askq:") {
+			if label := discordButtonLabel(i.Message.Components, data.CustomID); label != "" {
+				echo = "✅ " + label
+			}
+		}
 	}
 	emptyComponents := []discordgo.MessageComponent{}
 	if err := s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
 		Type: discordgo.InteractionResponseUpdateMessage,
 		Data: &discordgo.InteractionResponseData{
-			Content:    origText + "\n\n> " + command,
+			Content:    origText + "\n\n" + echo,
 			Components: emptyComponents,
 		},
 	}); err != nil {
@@ -960,6 +966,10 @@ func discordComponentCommand(customID string) (command string, isPermissionRespo
 	if command, found := strings.CutPrefix(customID, "cmd:"); found && command != "" {
 		return command, false, true
 	}
+	// AskUserQuestion option: the engine parses the raw askq: value itself (#2157).
+	if strings.HasPrefix(customID, "askq:") {
+		return customID, false, true
+	}
 	if action, found := strings.CutPrefix(customID, "perm:"); found {
 		switch action {
 		case "allow", "deny":
@@ -969,6 +979,33 @@ func discordComponentCommand(customID string) (command string, isPermissionRespo
 		}
 	}
 	return "", false, false
+}
+
+// discordButtonLabel returns the label of the button whose custom ID matches,
+// so the acknowledgement can show the chosen option instead of its raw value.
+func discordButtonLabel(components []discordgo.MessageComponent, customID string) string {
+	for _, c := range components {
+		var children []discordgo.MessageComponent
+		switch v := c.(type) {
+		case *discordgo.ActionsRow:
+			children = v.Components
+		case discordgo.ActionsRow:
+			children = v.Components
+		}
+		for _, child := range children {
+			switch b := child.(type) {
+			case *discordgo.Button:
+				if b.CustomID == customID {
+					return b.Label
+				}
+			case discordgo.Button:
+				if b.CustomID == customID {
+					return b.Label
+				}
+			}
+		}
+	}
+	return ""
 }
 
 func (p *Platform) Reply(ctx context.Context, rctx any, content string) error {
