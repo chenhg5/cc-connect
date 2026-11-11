@@ -31,16 +31,17 @@ func init() {
 //   - "plan":     --mode plan (read-only analysis)
 //   - "ask":      --mode ask (Q&A style, read-only)
 type Agent struct {
-	workDir      string
-	model        string
-	mode         string
-	cmd          string   // CLI binary name, default "agent"
-	cliExtraArgs []string // extra args from cmd after the binary name
-	configEnv    []string // env vars from [projects.agent.options.env]
-	providers    []core.ProviderConfig
-	activeIdx    int
-	sessionEnv   []string
-	mu           sync.RWMutex
+	instructionsFile string
+	workDir          string
+	model            string
+	mode             string
+	cmd              string   // CLI binary name, default "agent"
+	cliExtraArgs     []string // extra args from cmd after the binary name
+	configEnv        []string // env vars from [projects.agent.options.env]
+	providers        []core.ProviderConfig
+	activeIdx        int
+	sessionEnv       []string
+	mu               sync.RWMutex
 }
 
 func New(opts map[string]any) (core.Agent, error) {
@@ -48,6 +49,7 @@ func New(opts map[string]any) (core.Agent, error) {
 	if workDir == "" {
 		workDir = "."
 	}
+	instructionsFile, _ := opts["instructions_file"].(string)
 	model, _ := opts["model"].(string)
 	mode, _ := opts["mode"].(string)
 	mode = normalizeMode(mode)
@@ -57,13 +59,14 @@ func New(opts map[string]any) (core.Agent, error) {
 	}
 
 	return &Agent{
-		workDir:      workDir,
-		model:        model,
-		mode:         mode,
-		cmd:          cmd,
-		cliExtraArgs: extraArgs,
-		configEnv:    core.ParseConfigEnv(opts),
-		activeIdx:    -1,
+		instructionsFile: instructionsFile,
+		workDir:          workDir,
+		model:            model,
+		mode:             mode,
+		cmd:              cmd,
+		cliExtraArgs:     extraArgs,
+		configEnv:        core.ParseConfigEnv(opts),
+		activeIdx:        -1,
 	}, nil
 }
 
@@ -129,7 +132,8 @@ func (a *Agent) AvailableModels(ctx context.Context) []core.ModelOption {
 	if models := fetchModelsFromAgentCLI(ctx, cmd, extraEnv); len(models) > 0 {
 		return models
 	}
-	return cursorFallbackModels()
+	slog.Warn("cursor: model discovery failed; no model list is available")
+	return nil
 }
 
 // fetchModelsFromAgentCLI runs `agent models` and parses the output.
@@ -173,16 +177,6 @@ func fetchModelsFromAgentCLI(ctx context.Context, cmd string, extraEnv []string)
 	return models
 }
 
-func cursorFallbackModels() []core.ModelOption {
-	return []core.ModelOption{
-		{Name: "claude-sonnet-4-20250514", Desc: "Claude Sonnet 4"},
-		{Name: "claude-opus-4-20250514", Desc: "Claude Opus 4"},
-		{Name: "gpt-4o", Desc: "GPT-4o"},
-		{Name: "gemini-2.5-pro", Desc: "Gemini 2.5 Pro"},
-		{Name: "cursor-small", Desc: "Cursor Small (fast)"},
-	}
-}
-
 func (a *Agent) SetSessionEnv(env []string) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
@@ -196,6 +190,7 @@ func (a *Agent) StartSession(ctx context.Context, sessionID string) (core.AgentS
 	cmd := a.cmd
 	extraArgs := append([]string{}, a.cliExtraArgs...)
 	workDir := a.workDir
+	instructionsFile := a.instructionsFile
 	extraEnv := append([]string(nil), a.configEnv...)
 	extraEnv = append(extraEnv, a.providerEnvLocked()...)
 	extraEnv = append(extraEnv, a.sessionEnv...)
@@ -206,7 +201,7 @@ func (a *Agent) StartSession(ctx context.Context, sessionID string) (core.AgentS
 	}
 	a.mu.RUnlock()
 
-	return newCursorSession(ctx, cmd, extraArgs, workDir, model, mode, sessionID, extraEnv)
+	return newCursorSession(ctx, cmd, extraArgs, workDir, model, mode, sessionID, extraEnv, instructionsFile)
 }
 
 // ListSessions reads sessions from Cursor Agent CLI chat storage.
