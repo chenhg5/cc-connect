@@ -478,6 +478,19 @@ func TestCronScheduler_UsesNewTopic_GlobalDefault(t *testing.T) {
 	}
 }
 
+func TestValidateCronSessionMode(t *testing.T) {
+	for _, mode := range []string{"", "reuse", "new_per_run", "new-per-run", "new_topic", "new-topic", "topic", "NEW_TOPIC"} {
+		if err := ValidateCronSessionMode(mode); err != nil {
+			t.Errorf("ValidateCronSessionMode(%q) = %v, want nil", mode, err)
+		}
+	}
+	for _, mode := range []string{"new_topics", "fresh", "new topic", "new_topic_per_run"} {
+		if err := ValidateCronSessionMode(mode); err == nil {
+			t.Errorf("ValidateCronSessionMode(%q) = nil, want error", mode)
+		}
+	}
+}
+
 func TestCronJob_JSONLegacyUnmarshal(t *testing.T) {
 	raw := `{"id":"1","project":"p","session_key":"t:1:1","cron_expr":"0 6 * * *","prompt":"x","enabled":true}`
 	var j CronJob

@@ -90,6 +90,16 @@ func NormalizeCronSessionMode(s string) string {
 	}
 }
 
+// ValidateCronSessionMode reports whether s is a recognized session mode or
+// alias. The empty string means "reuse" and is valid.
+func ValidateCronSessionMode(s string) error {
+	switch NormalizeCronSessionMode(s) {
+	case "", "new_per_run", "new_topic":
+		return nil
+	}
+	return fmt.Errorf("invalid session_mode %q (want reuse, new_per_run, new_topic, or their dashed aliases)", s)
+}
+
 func validateCronJob(j *CronJob) error {
 	// SessionKey anchors the cron execution to a platform (ExecuteCronJob
 	// derives platformName from the prefix before ":"). Without it the job
@@ -100,9 +110,8 @@ func validateCronJob(j *CronJob) error {
 	if strings.TrimSpace(j.SessionKey) == "" {
 		return fmt.Errorf("session_key is required")
 	}
-	mode := NormalizeCronSessionMode(j.SessionMode)
-	if mode != "" && mode != "new_per_run" && mode != "new_topic" {
-		return fmt.Errorf("invalid session_mode %q (want reuse, new_per_run, new_topic, or their dashed aliases)", j.SessionMode)
+	if err := ValidateCronSessionMode(j.SessionMode); err != nil {
+		return err
 	}
 	if j.Mode != "" {
 		switch j.Mode {
@@ -575,9 +584,8 @@ func (cs *CronScheduler) UpdateJob(id string, field string, value any) error {
 	// Validate session_mode if updating session_mode field
 	if field == "session_mode" {
 		if v, ok := value.(string); ok && v != "" {
-			mode := NormalizeCronSessionMode(v)
-			if mode != "" && mode != "new_per_run" && mode != "new_topic" {
-				return fmt.Errorf("invalid session_mode %q (want reuse, new_per_run, new_topic, or their dashed aliases)", v)
+			if err := ValidateCronSessionMode(v); err != nil {
+				return err
 			}
 		}
 	}

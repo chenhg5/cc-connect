@@ -790,8 +790,11 @@ func main() {
 		if cfg.Cron.Silent != nil && *cfg.Cron.Silent {
 			cronSched.SetDefaultSilent(true)
 		}
-		if cfg.Cron.SessionMode != "" {
-			cronSched.SetDefaultSessionMode(cfg.Cron.SessionMode)
+		if mode, err := resolveCronDefaultSessionMode(cfg.Cron.SessionMode); err != nil {
+			slog.Warn("cron: ignoring invalid [cron].session_mode, falling back to reuse",
+				"value", cfg.Cron.SessionMode, "error", err)
+		} else if mode != "" {
+			cronSched.SetDefaultSessionMode(mode)
 		}
 		for i, e := range engines {
 			cronSched.RegisterEngine(cfg.Projects[i].Name, e)
@@ -1767,6 +1770,20 @@ func convertCoreModels(ms []core.ModelOption) []config.ProviderModelConfig {
 		out[i] = config.ProviderModelConfig{Model: m.Name, Alias: m.Alias}
 	}
 	return out
+}
+
+// resolveCronDefaultSessionMode validates [cron].session_mode. An empty value
+// means "reuse". Unrecognized values return an error so the caller can warn and
+// fall back to reuse instead of silently ignoring the setting.
+func resolveCronDefaultSessionMode(raw string) (string, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return "", nil
+	}
+	if err := core.ValidateCronSessionMode(raw); err != nil {
+		return "", err
+	}
+	return raw, nil
 }
 
 func buildHeartbeatConfig(hc config.HeartbeatConfig) core.HeartbeatConfig {
