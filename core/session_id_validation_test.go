@@ -8,7 +8,7 @@ import (
 // validatingAgent wraps a controllableAgent and adds an opt-in
 // SessionIDValidator so we can pin the engine's behavior for issue #599:
 // when the stored session ID is rejected by the agent, the engine must
-// start a fresh session instead of resuming the wrong one.
+// stop sending instead of resuming the wrong one or replacing the selection.
 type validatingAgent struct {
 	controllableAgent
 	validateFunc func(ctx context.Context, sessionID string) bool
@@ -23,37 +23,25 @@ func (a *validatingAgent) ValidateSessionID(ctx context.Context, sessionID strin
 
 var _ SessionIDValidator = (*validatingAgent)(nil)
 
-// TestIssue599_InvalidSessionIDClearedBeforeResume pins the regression for
-// cross-project session leakage: when the agent rejects the stored
-// session ID, the engine must clear the ID and call StartSession with
-// "" (fresh start) rather than passing the bad ID through.
-func TestIssue599_InvalidSessionIDClearedBeforeResume(t *testing.T) {
-	var startedWith string
-	sess := newControllableSession("fresh-id")
-	agent := &validatingAgent{
-		controllableAgent: controllableAgent{nextSession: sess},
-		validateFunc: func(_ context.Context, sessionID string) bool {
-			// Reject whatever ID the Session carries — simulate a
-			// cross-project leak.
-			return false
-		},
+// Rejecting a session still prevents cross-project leakage, but must not
+// discard the selected context by silently starting a different conversation.
+func TestIssue599_InvalidSessionIDBlocksSendAndRetainsSelection(t *testing.T) {
+	calls := 0
+	agent := &validatingAgent{validateFunc: func(context.Context, string) bool { return false }}
+	agent.startSessionFn = func(context.Context, string) (AgentSession, error) {
+		calls++
+		return newControllableSession("fresh-id"), nil
 	}
-	agent.startSessionFn = func(_ context.Context, sessionID string) (AgentSession, error) {
-		startedWith = sessionID
-		return sess, nil
-	}
-
 	p := &stubPlatformEngine{n: "test"}
 	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
-	key := "test:user1"
-
-	// Simulate a stored cross-project session ID.
+	defer e.cancel()
 	s := &Session{AgentSessionID: "leaked-id-from-other-project"}
-
-	e.getOrCreateInteractiveStateWith(key, p, "ctx", s, e.sessions, nil, "")
-
-	if startedWith != "" {
-		t.Errorf("StartSession called with %q, want \"\" (fresh start; leaked id must NOT be passed through)", startedWith)
+	state := e.getOrCreateInteractiveStateWith("test:user1", p, "ctx", s, e.sessions, nil, "")
+	if calls != 0 || state.agentSession != nil || state.startupError == "" {
+		t.Fatalf("invalid session must block startup: calls=%d, error=%q", calls, state.startupError)
+	}
+	if s.GetAgentSessionID() != "leaked-id-from-other-project" {
+		t.Fatal("validation failure discarded the selected session")
 	}
 }
 

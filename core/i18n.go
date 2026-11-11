@@ -543,9 +543,15 @@ const (
 	MsgDeleteModeDeletingBody   MsgKey = "delete_mode_deleting_body"
 	MsgDeleteModeMissingSession MsgKey = "delete_mode_missing_session"
 
-	MsgSwitchSuccess   MsgKey = "switch_success"
-	MsgSwitchNoMatch   MsgKey = "switch_no_match"
-	MsgSwitchNoSession MsgKey = "switch_no_session"
+	MsgSwitchSuccess            MsgKey = "switch_success"
+	MsgSwitchNoMatch            MsgKey = "switch_no_match"
+	MsgSwitchNoSession          MsgKey = "switch_no_session"
+	MsgSessionResumeFailed      MsgKey = "session_resume_failed"
+	MsgSessionResumeRejected    MsgKey = "session_resume_rejected"
+	MsgSwitchResumePending      MsgKey = "switch_resume_pending"
+	MsgSwitchLatestMessage      MsgKey = "switch_latest_message"
+	MsgSwitchPreviewUnavailable MsgKey = "switch_preview_unavailable"
+	MsgSwitchPreviewEmpty       MsgKey = "switch_preview_empty"
 
 	MsgCommandTimeout MsgKey = "command_timeout"
 
@@ -776,11 +782,11 @@ var messages = map[MsgKey]map[Language]string{
 		LangSpanish:            "⚠️ Advertencia: no se pudo confirmar que el proceso en segundo plano de la sesión detenida haya finalizado. Podría seguir en ejecución usando sus credenciales anteriores.",
 	},
 	MsgSessionResumeUnsafe: {
-		LangEnglish:            "⚠️ The previous process could not be confirmed stopped, so this conversation was NOT resumed — a brand-new session was started instead (earlier context is not carried over). This avoids two agents acting on the same conversation.",
-		LangChinese:            "⚠️ 上一个进程未能确认已停止，因此没有续接原会话，已为你开启全新会话（此前上下文未带入）。这是为了避免两个智能体同时操作同一个会话。",
-		LangTraditionalChinese: "⚠️ 上一個行程未能確認已停止，因此沒有續接原會話，已為你開啟全新會話（先前上下文未帶入）。這是為了避免兩個智能體同時操作同一個會話。",
-		LangJapanese:           "⚠️ 前のプロセスの停止を確認できなかったため、会話を再開せず新しいセッションを開始しました（以前の文脈は引き継がれません）。同じ会話を2つのエージェントが操作するのを防ぐためです。",
-		LangSpanish:            "⚠️ No se pudo confirmar que el proceso anterior se detuviera, así que no se reanudó esta conversación: se inició una sesión nueva (sin el contexto anterior). Así se evita que dos agentes actúen sobre la misma conversación.",
+		LangEnglish:            "⚠️ Cannot safely resume session %s: the previous process could not be confirmed stopped. Your selection is retained and this message was not sent. Resolve the running process first, or use /new to explicitly start without the earlier context.",
+		LangChinese:            "⚠️ 无法安全恢复会话 %s：上一个进程未能确认已停止。已保留原会话，本次消息未发送。请先处理仍在运行的进程；如需放弃续接上下文，请明确使用 /new 新开会话。",
+		LangTraditionalChinese: "⚠️ 無法安全恢復會話 %s：上一個行程未能確認已停止。已保留原會話，本次訊息未傳送。請先處理仍在執行的行程；如需放棄續接上下文，請明確使用 /new 開啟新會話。",
+		LangJapanese:           "⚠️ セッション %s を安全に再開できません。前のプロセスの停止を確認できませんでした。選択は保持され、このメッセージは送信されていません。実行中のプロセスを確認するか、以前の文脈を引き継がず開始する場合は /new を使用してください。",
+		LangSpanish:            "⚠️ No se puede reanudar de forma segura la sesión %s: no se confirmó la parada del proceso anterior. Se conserva la selección y el mensaje no se envió. Resuelva el proceso activo o use /new para empezar explícitamente sin el contexto anterior.",
 	},
 	MsgSessionCancelled: {
 		LangEnglish:            "Session cancelled. Ready for new instructions.",
@@ -3284,6 +3290,48 @@ var messages = map[MsgKey]map[Language]string{
 		LangTraditionalChinese: "✅ 已切換到：%s（%s，%d 則訊息）",
 		LangJapanese:           "✅ 切り替え：%s（%s、%d件）",
 		LangSpanish:            "✅ Cambiado a: %s (%s, %d mensajes)",
+	},
+	MsgSessionResumeFailed: {
+		LangEnglish:            "⚠️ Could not resume session %s. Your selection and history are retained; this message was not sent. Resolve the issue and resend, or use /new to explicitly start without the earlier context.\nReason: %s",
+		LangChinese:            "⚠️ 无法恢复会话 %s。已保留原会话和历史，本次消息未发送。请处理问题后重新发送；如需不带此前上下文重新开始，请明确使用 /new。\n原因：%s",
+		LangTraditionalChinese: "⚠️ 無法恢復會話 %s。已保留原會話和歷史，本次訊息未傳送。請處理問題後重新傳送；如需不帶先前上下文重新開始，請明確使用 /new。\n原因：%s",
+		LangJapanese:           "⚠️ セッション %s を再開できませんでした。選択と履歴は保持され、メッセージは未送信です。問題を解決して再送するか、以前の文脈なしで開始する場合は /new を使用してください。\n理由: %s",
+		LangSpanish:            "⚠️ No se pudo reanudar la sesión %s. Se conservan la selección y el historial; el mensaje no se envió. Resuelva el problema y reenvíelo, o use /new para empezar sin el contexto anterior.\nMotivo: %s",
+	},
+	MsgSessionResumeRejected: {
+		LangEnglish:            "⚠️ Session %s could not be validated for this workspace. Your selection is retained and this message was not sent. Check the workspace and session, or use /new to explicitly start without the earlier context.",
+		LangChinese:            "⚠️ 无法确认会话 %s 属于当前工作区。已保留原会话，本次消息未发送。请检查工作区和会话；如需不带此前上下文重新开始，请明确使用 /new。",
+		LangTraditionalChinese: "⚠️ 無法確認會話 %s 屬於目前工作區。已保留原會話，本次訊息未傳送。請檢查工作區和會話；如需不帶先前上下文重新開始，請明確使用 /new。",
+		LangJapanese:           "⚠️ セッション %s が現在のワークスペースに属することを確認できません。選択は保持され、メッセージは未送信です。ワークスペースとセッションを確認するか、以前の文脈なしで開始する場合は /new を使用してください。",
+		LangSpanish:            "⚠️ No se pudo validar la sesión %s para este espacio de trabajo. Se conserva la selección y el mensaje no se envió. Compruebe el espacio y la sesión, o use /new para empezar sin el contexto anterior.",
+	},
+	MsgSwitchResumePending: {
+		LangEnglish:            "The selected conversation will be resumed before your next message is sent. This preview does not confirm backend availability. If resume fails, the selection is retained and sending stops.",
+		LangChinese:            "将在发送下一条消息前恢复所选会话。此预览不代表后端已成功恢复；恢复失败时会保留原会话并停止发送。",
+		LangTraditionalChinese: "將在傳送下一則訊息前恢復所選會話。此預覽不代表後端已成功恢復；恢復失敗時會保留原會話並停止傳送。",
+		LangJapanese:           "次のメッセージの送信前に選択した会話を再開します。このプレビューはバックエンドの再開成功を意味しません。再開できない場合は選択を保持し、送信を停止します。",
+		LangSpanish:            "La conversación seleccionada se reanudará antes de enviar su próximo mensaje. Esta vista previa no confirma la disponibilidad del backend. Si falla, se conserva la selección y se detiene el envío.",
+	},
+	MsgSwitchLatestMessage: {
+		LangEnglish:            "Latest message · %s %s\n%s",
+		LangChinese:            "最近一条消息 · %s %s\n%s",
+		LangTraditionalChinese: "最近一則訊息 · %s %s\n%s",
+		LangJapanese:           "最新のメッセージ · %s %s\n%s",
+		LangSpanish:            "Último mensaje · %s %s\n%s",
+	},
+	MsgSwitchPreviewUnavailable: {
+		LangEnglish:            "⚠️ The latest message could not be read. The selection is saved; this does not confirm whether the conversation can be resumed.",
+		LangChinese:            "⚠️ 暂时无法读取最近一条消息。已保存会话选择，但尚未确认能否恢复会话。",
+		LangTraditionalChinese: "⚠️ 暫時無法讀取最近一則訊息。已儲存會話選擇，但尚未確認能否恢復會話。",
+		LangJapanese:           "⚠️ 最新のメッセージを読み取れませんでした。選択は保存されていますが、会話を再開できるかは未確認です。",
+		LangSpanish:            "⚠️ No se pudo leer el último mensaje. La selección se guardó, pero aún no se ha confirmado si la conversación puede reanudarse.",
+	},
+	MsgSwitchPreviewEmpty: {
+		LangEnglish:            "No message is available to preview for this conversation.",
+		LangChinese:            "此会话暂无可预览的消息。",
+		LangTraditionalChinese: "此會話暫無可預覽的訊息。",
+		LangJapanese:           "この会話にはプレビューできるメッセージがありません。",
+		LangSpanish:            "Esta conversación no tiene mensajes disponibles para la vista previa.",
 	},
 	MsgSwitchNoMatch: {
 		LangEnglish:            "❌ No session matching %q",

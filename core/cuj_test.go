@@ -455,6 +455,10 @@ func (env *cujEnv) activeSession(sessionKey string) *Session {
 // ===========================================================================
 
 func TestCUJ_B3_SwitchPreservesHistoryEndToEnd(t *testing.T) {
+	t.Run("failed_resume_retains_selection", testCUJSwitchResumeFailure)
+	t.Run("failed_resume_terminates_queued_messages", testCUJResumeFailureTerminatesQueuedMessages)
+	t.Run("new_preserves_failed_resume_across_reload", testCUJNewAfterFailedResume)
+	t.Run("card_switch_confirms_stable_target", testCUJSwitchStableCard)
 	env := newCUJEnv(t)
 	key := "test:alice"
 
