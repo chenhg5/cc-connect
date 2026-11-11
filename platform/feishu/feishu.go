@@ -3477,7 +3477,7 @@ func (p *Platform) formatMergeForwardTree(parentID, resourceMessageID string, ch
 			}
 			if err := json.Unmarshal([]byte(content), &fileBody); err == nil && fileBody.FileKey != "" {
 				if files == nil {
-					sb.WriteString(fmt.Sprintf("%s[%s] %s: [file: %s]\n", indent, ts, senderName, fileBody.FileName))
+					fmt.Fprintf(sb, "%s[%s] %s: [file: %s]\n", indent, ts, senderName, fileBody.FileName)
 					continue
 				}
 				// Forwarded file resources belong to the outer container, including
