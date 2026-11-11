@@ -1302,8 +1302,11 @@ app_secret = "your-feishu-app-secret"
 # bot_token = "xoxb-your-bot-token"
 # app_token = "xapp-your-app-level-token"
 # base_url = "https://slack-gov.com/api/"  # Optional Web API root (default https://slack.com/api/), e.g. GovSlack
-#                                          # or a Slack-compatible relay; Socket Mode follows it too. Tokens are sent
-#                                          # there, so use https. / 可选：Slack Web API 地址（GovSlack、兼容中转等），Socket Mode 同样走这里
+#                                          # or a Slack-compatible relay; Socket Mode follows it too. A bare host gets
+#                                          # /api/ appended; any other path must end in /api/. Tokens are sent there,
+#                                          # so use https; a host outside slack.com / slack-gov.com logs a warning.
+#                                          # 可选：Slack Web API 地址（GovSlack、兼容中转等），Socket Mode 同样走这里；
+#                                          # 只写域名会自动补 /api/，其他路径必须以 /api/ 结尾；非 Slack 域名会在启动时警告
 # allow_from = "*"  # Allowed Slack user IDs / 允许的 Slack 用户 ID
 # share_session_in_channel = false  # If true, all users in a channel share one agent session / 频道共享会话
 # session_scope = "user"  # Session granularity: "user" (default, per channel+user) |
