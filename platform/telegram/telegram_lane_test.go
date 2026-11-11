@@ -78,9 +78,79 @@ func laneTestCallbackUpdate(updateID int64, chatID int64, userID int64) *models.
 }
 
 // TestProcessUpdate_StuckCommandDoesNotBlockLaterMessages is the regression
-// test for issue #2015: a built-in command that hangs must not prevent later
-// messages of the same session from being processed.
+// test for issue #2015: a built-in command that hangs must not stop the bot
+// from taking further updates.
+//
+// The test pins the *lane*, not the stall budget:
+//
+//   - the stall budget is left at its default (60s), far beyond this test, so
+//     it cannot be what releases the session — only the lane can;
+//   - the update dispatch must not block: the polling worker hands every
+//     update to the lane and returns, so a stuck command cannot stop the bot
+//     from receiving the next ones;
+//   - the later message keeps its place in the session: it is not handled
+//     while the command is stuck, and it is delivered once the command
+//     returns.
+//
+// With the lane removed the dispatch blocks inside the stuck handler, the
+// polling worker never returns, and this test fails.
 func TestProcessUpdate_StuckCommandDoesNotBlockLaterMessages(t *testing.T) {
+	handled := make(chan string, 4)
+	release := make(chan struct{})
+	var releaseOnce sync.Once
+	releaseStuck := func() { releaseOnce.Do(func() { close(release) }) }
+	t.Cleanup(releaseStuck)
+
+	// The default stall budget (60s) is deliberately left in place: it is far
+	// beyond this test, so it cannot release the session on its own.
+	p := &Platform{}
+	p.handler = func(_ core.Platform, msg *core.Message) {
+		if msg.Content == "/usage" {
+			<-release
+			return
+		}
+		handled <- msg.Content
+	}
+
+	ctx := context.Background()
+	// The poller is the Telegram polling worker: it hands every update to the
+	// lane and returns, so one stuck command cannot block the next update.
+	pollDone := lanePoll(ctx, p,
+		laneTestUpdate(1, "/usage", 100, 7),
+		laneTestUpdate(2, "later", 100, 7),
+	)
+
+	select {
+	case <-pollDone:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the stuck command blocked the update dispatch: the polling loop would stop receiving updates")
+	}
+
+	// The later message keeps its place in the session: it is queued behind
+	// the stuck command, not handled alongside it.
+	select {
+	case got := <-handled:
+		t.Fatalf("the later message was handled (%q) while the command was still stuck", got)
+	case <-time.After(200 * time.Millisecond):
+	}
+
+	// Once the stuck command returns, the lane moves on and the later
+	// message is delivered.
+	releaseStuck()
+	select {
+	case got := <-handled:
+		if got != "later" {
+			t.Fatalf("handled content = %q, want %q", got, "later")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("the later message was never delivered")
+	}
+}
+
+// TestProcessUpdate_StuckHandlerIsAbandonedAfterStallBudget covers the other
+// half of the contract: when the stall budget expires, the lane gives up on
+// the stuck handler and moves on, so the rest of the session is still served.
+func TestProcessUpdate_StuckHandlerIsAbandonedAfterStallBudget(t *testing.T) {
 	handled := make(chan string, 4)
 	release := make(chan struct{})
 	t.Cleanup(func() { close(release) })
@@ -95,8 +165,6 @@ func TestProcessUpdate_StuckCommandDoesNotBlockLaterMessages(t *testing.T) {
 	}
 
 	ctx := context.Background()
-	// The first update hangs like the /usage command did; the second one
-	// must still be processed.
 	lanePoll(ctx, p,
 		laneTestUpdate(1, "/usage", 100, 7),
 		laneTestUpdate(2, "later", 100, 7),
@@ -108,7 +176,7 @@ func TestProcessUpdate_StuckCommandDoesNotBlockLaterMessages(t *testing.T) {
 			t.Fatalf("handled content = %q, want %q", got, "later")
 		}
 	case <-time.After(5 * time.Second):
-		t.Fatal("a stuck command prevented a later message of the same session from being processed")
+		t.Fatal("the stall budget did not release the session")
 	}
 }
 
