@@ -4834,7 +4834,7 @@ func buildCardJSON(content string) string {
 	card := map[string]any{
 		"schema": "2.0",
 		"config": map[string]any{
-			"wide_screen_mode": true,
+			"width_mode": "fill",
 		},
 		"body": map[string]any{
 			"elements": []map[string]any{
@@ -4876,7 +4876,7 @@ func buildCardJSONWithStatusFooter(content, footer string) string {
 	card := map[string]any{
 		"schema": "2.0",
 		"config": map[string]any{
-			"wide_screen_mode": true,
+			"width_mode": "fill",
 		},
 		"body": map[string]any{
 			"elements": elements,

@@ -266,6 +266,42 @@ func TestRenderCardMap_InjectsSessionKeyIntoCallbacks(t *testing.T) {
 	}
 }
 
+func TestBuildMarkdownCardJSON_FillsAvailableWidth(t *testing.T) {
+	const content = "| Item | Description |\n| --- | --- |\n| Width | Fill the available space |"
+	for _, tt := range []struct {
+		name string
+		card string
+	}{
+		{"plain", buildCardJSON(content)},
+		{"with footer", buildCardJSONWithStatusFooter(content, "Status")},
+		{"empty footer", buildCardJSONWithStatusFooter(content, "")},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			var card struct {
+				Schema string `json:"schema"`
+				Config struct {
+					WidthMode string `json:"width_mode"`
+				} `json:"config"`
+				Body struct {
+					Elements []struct {
+						Tag     string `json:"tag"`
+						Content string `json:"content"`
+					} `json:"elements"`
+				} `json:"body"`
+			}
+			if err := json.Unmarshal([]byte(tt.card), &card); err != nil {
+				t.Fatalf("decode card: %v", err)
+			}
+			if card.Schema != "2.0" || card.Config.WidthMode != "fill" {
+				t.Errorf("schema = %q, width_mode = %q; want 2.0 and fill", card.Schema, card.Config.WidthMode)
+			}
+			if len(card.Body.Elements) == 0 || card.Body.Elements[0].Tag != "markdown" || card.Body.Elements[0].Content != content {
+				t.Errorf("expected the original Markdown table, got %#v", card.Body.Elements)
+			}
+		})
+	}
+}
+
 func TestBuildCardJSONWithStatusFooter(t *testing.T) {
 	body := "Hello world"
 	footer := "Opus 4.7 · ↑ 1 ↓ 168 · 4%\n~/path/to/ws"
