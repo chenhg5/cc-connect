@@ -160,7 +160,7 @@ func TestFetchSingleMessage_QuotedForwardDoesNotDownloadFiles(t *testing.T) {
 			writeJSON(t, w, map[string]any{"code": 0, "expire": 7200, "tenant_access_token": "test-quote-token"})
 		case r.URL.Path == "/open-apis/im/v1/messages/om_root":
 			writeJSON(t, w, map[string]any{"code": 0, "data": map[string]any{"items": items}})
-		case r.URL.Path == "/open-apis/im/v1/messages/om_image/resources/img_quote":
+		case r.URL.Path == "/open-apis/im/v1/messages/om_root/resources/img_quote":
 			imageDownloads.Add(1)
 			if r.URL.Query().Get("type") != "image" {
 				t.Errorf("image resource type = %q, want image", r.URL.Query().Get("type"))

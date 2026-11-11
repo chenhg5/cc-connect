@@ -3378,6 +3378,7 @@ func replaceMentions(text string, mentions []*larkim.Mention) string {
 }
 
 // formatMergeForwardTree recursively formats the sub-message tree.
+// Resource downloads use the outer container ID, even for nested forwards.
 // A nil files collector keeps file names in the text without downloading files.
 func (p *Platform) formatMergeForwardTree(parentID, resourceMessageID string, childrenMap map[string][]*larkim.Message, nameMap map[string]string, sb *strings.Builder, images *[]core.ImageAttachment, files *[]core.FileAttachment, depth int) {
 	if depth > 10 {
@@ -3436,7 +3437,7 @@ func (p *Platform) formatMergeForwardTree(parentID, resourceMessageID string, ch
 			if post == nil {
 				post = &postLang{}
 			}
-			textParts, postImages := p.extractPostParts(msgID, post)
+			textParts, postImages := p.extractPostParts(resourceMessageID, post)
 			if files != nil {
 				postAttachments, notices := p.downloadPostFiles(resourceMessageID, post.Files, strings.Join(textParts, "\n"))
 				*files = append(*files, postAttachments...)
@@ -3460,7 +3461,7 @@ func (p *Platform) formatMergeForwardTree(parentID, resourceMessageID string, ch
 				ImageKey string `json:"image_key"`
 			}
 			if err := json.Unmarshal([]byte(content), &imgBody); err == nil && imgBody.ImageKey != "" {
-				imgData, mimeType, err := p.downloadImage(msgID, imgBody.ImageKey)
+				imgData, mimeType, err := p.downloadImage(resourceMessageID, imgBody.ImageKey)
 				if err != nil {
 					slog.Error(p.tag()+": download merge_forward image failed", "error", err)
 					sb.WriteString(fmt.Sprintf("%s[%s] %s: [image - download failed]\n", indent, ts, senderName))
