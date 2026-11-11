@@ -91,3 +91,46 @@ func TestProviderPresetsIncludesCloudGPU(t *testing.T) {
 		t.Fatal("cloudgpu should support opencode")
 	}
 }
+
+func TestProviderPresetsIncludesStandardCompute(t *testing.T) {
+	body, err := os.ReadFile("../provider-presets.json")
+	if err != nil {
+		t.Fatalf("read provider-presets.json: %v", err)
+	}
+
+	var presets ProviderPresetsResponse
+	if err := json.Unmarshal(body, &presets); err != nil {
+		t.Fatalf("parse provider-presets.json: %v", err)
+	}
+
+	var sc *ProviderPreset
+	for i := range presets.Providers {
+		if presets.Providers[i].Name == "standardcompute" {
+			sc = &presets.Providers[i]
+			break
+		}
+	}
+	if sc == nil {
+		t.Fatal("standardcompute preset not found")
+	}
+	if sc.InviteURL != "" {
+		t.Fatalf("standardcompute invite_url = %q, want empty", sc.InviteURL)
+	}
+
+	codex := sc.AgentConfig("codex")
+	if codex == nil {
+		t.Fatal("standardcompute codex config missing")
+	}
+	if codex.BaseURL != "https://api.stdcmpt.com/v1" {
+		t.Fatalf("codex base_url = %q", codex.BaseURL)
+	}
+	if codex.Model != "StandardCompute" {
+		t.Fatalf("codex model = %q", codex.Model)
+	}
+	if codex.CodexConfig == nil || codex.CodexConfig.WireAPI != "responses" {
+		t.Fatalf("codex_config = %#v", codex.CodexConfig)
+	}
+	if !sc.SupportsAgent("opencode") {
+		t.Fatal("standardcompute should support opencode")
+	}
+}
