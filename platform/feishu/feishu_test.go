@@ -748,6 +748,103 @@ func TestOnMessageDropsUnauthorizedOverheardGroupMessage(t *testing.T) {
 	}
 }
 
+// Several platform entries can share one Feishu app, and each receives the
+// same message event. An entry must not reply "unauthorized" to a message
+// outside its allow_chat / group_only scope, because another entry may own
+// that chat and answer it normally.
+func TestOnMessageSilentForOutOfScopeUnauthorizedSender(t *testing.T) {
+	const appID = "cli_out_of_scope"
+	const appSecret = "secret-out-of-scope"
+	const botOpenID = "ou_bot"
+
+	cases := []struct {
+		name      string
+		chatType  string
+		chatID    string
+		allowChat string
+		groupOnly bool
+	}{
+		{name: "group not in allow_chat", chatType: "group", chatID: "oc_other", allowChat: "oc_mine"},
+		{name: "p2p with group_only", chatType: "p2p", chatID: "oc_p2p", groupOnly: true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			apiCalls := make(chan string, 4)
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				if r.URL.Path == "/open-apis/auth/v3/tenant_access_token/internal" {
+					writeJSON(t, w, map[string]any{
+						"code":                0,
+						"msg":                 "success",
+						"expire":              7200,
+						"tenant_access_token": "tenant-token",
+					})
+					return
+				}
+				apiCalls <- r.URL.Path
+				writeJSON(t, w, map[string]any{"code": 0, "msg": "success"})
+			}))
+			defer srv.Close()
+
+			p := &Platform{
+				platformName: "feishu",
+				domain:       srv.URL,
+				appID:        appID,
+				appSecret:    appSecret,
+				allowFrom:    "ou_allowed",
+				allowChat:    tc.allowChat,
+				groupOnly:    tc.groupOnly,
+				botOpenID:    botOpenID,
+				dedup:        &core.MessageDedup{},
+				client: lark.NewClient(appID, appSecret,
+					lark.WithOpenBaseUrl(srv.URL),
+					lark.WithHttpClient(srv.Client()),
+				),
+				handler: func(core.Platform, *core.Message) {
+					t.Error("handler should not run for out-of-scope message")
+				},
+			}
+
+			msgType := "text"
+			senderType := "user"
+			content := `{"text":"@_user_1 hello"}`
+			createTime := strconv.FormatInt(time.Now().UnixMilli(), 10)
+			err := p.onMessage(context.Background(), &larkim.P2MessageReceiveV1{
+				Event: &larkim.P2MessageReceiveV1Data{
+					Sender: &larkim.EventSender{
+						SenderId:   &larkim.UserId{OpenId: stringPtr("ou_blocked")},
+						SenderType: &senderType,
+					},
+					Message: &larkim.EventMessage{
+						MessageId:   stringPtr("om_out_of_scope"),
+						ChatId:      stringPtr(tc.chatID),
+						ChatType:    &tc.chatType,
+						MessageType: &msgType,
+						Content:     &content,
+						CreateTime:  &createTime,
+						Mentions: []*larkim.MentionEvent{
+							{
+								Key:  stringPtr("@_user_1"),
+								Id:   &larkim.UserId{OpenId: stringPtr(botOpenID)},
+								Name: stringPtr("bot"),
+							},
+						},
+					},
+				},
+			})
+			if err != nil {
+				t.Fatalf("onMessage() error = %v", err)
+			}
+
+			select {
+			case path := <-apiCalls:
+				t.Fatalf("unexpected API call %s, want silent drop", path)
+			case <-time.After(300 * time.Millisecond):
+			}
+		})
+	}
+}
+
 func TestIsMessageRecalledDetectsWithdrawnMessageFromGetAPI(t *testing.T) {
 	const appID = "cli_recall_probe"
 	const appSecret = "secret-recall-probe"

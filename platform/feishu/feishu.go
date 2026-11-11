@@ -1849,25 +1849,30 @@ func (p *Platform) onMessage(ctx context.Context, event *larkim.P2MessageReceive
 		}
 	}
 
-	if !core.AllowList(p.allowFrom, userID) {
-		slog.Debug(p.tag()+": message from unauthorized user", "user", userID)
-		// Announce the rejection only when the sender deliberately addressed
-		// the bot (p2p chat or explicit @mention). Group messages merely
-		// overheard via group_reply_all are dropped silently — replying to
-		// every unauthorized group member would flood the chat, and the
-		// unauthorized-chat branch below is silent for the same reason.
-		if chatType != "group" || isBotMentioned(msg.Mentions, p.getBotOpenID()) {
-			p.replyUnauthorizedAccess(ctx, replyContext{messageID: messageID, chatID: chatID, sessionKey: sessionKey})
-		}
-		return nil
-	}
-
+	// Check the chat scope (allow_chat / group_only) before allow_from.
+	// Several platform entries can share one Feishu app and all receive the
+	// same event. An entry must stay silent for chats it does not own;
+	// replying "unauthorized" there would duplicate the answer of the entry
+	// that does own the chat.
 	if chatType == "group" && !core.AllowList(p.allowChat, chatID) {
 		slog.Debug(p.tag()+": message from unauthorized chat", "chat_id", chatID)
 		return nil
 	}
 	if chatType != "group" && p.groupOnly {
 		slog.Debug(p.tag()+": p2p message skipped (group_only=true)", "chat_type", chatType)
+		return nil
+	}
+
+	if !core.AllowList(p.allowFrom, userID) {
+		slog.Debug(p.tag()+": message from unauthorized user", "user", userID)
+		// Announce the rejection only when the sender deliberately addressed
+		// the bot (p2p chat or explicit @mention). Group messages merely
+		// overheard via group_reply_all are dropped silently — replying to
+		// every unauthorized group member would flood the chat, and the
+		// unauthorized-chat branch above is silent for the same reason.
+		if chatType != "group" || isBotMentioned(msg.Mentions, p.getBotOpenID()) {
+			p.replyUnauthorizedAccess(ctx, replyContext{messageID: messageID, chatID: chatID, sessionKey: sessionKey})
+		}
 		return nil
 	}
 
