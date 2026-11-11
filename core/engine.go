@@ -4435,6 +4435,12 @@ func (e *Engine) getOrCreateInteractiveStateWith(sessionKey string, p Platform, 
 	// is unbound, force a fresh start instead of attaching to whichever CLI
 	// conversation happens to be "latest" in this workspace.
 	startSessionID := session.GetAgentSessionID()
+	// resumeReason explains why the agent session is (not) resumed. It is
+	// logged together with the spawn so an operator can tell a plain fresh
+	// session from a lost conversation — the difference between "there was
+	// nothing to resume" and "the previous process could not be confirmed
+	// dead" (issue #2209).
+	resumeReason := "no saved agent session id"
 	// Cross-project session leakage guard (issue #599): if a session ID was
 	// inherited from a different project's workspace (e.g. another
 	// cc-connect project that happens to share a Session row), the agent
@@ -4447,6 +4453,7 @@ func (e *Engine) getOrCreateInteractiveStateWith(sessionKey string, p Platform, 
 			session.SetAgentSessionID("", agent.Name())
 			sessions.Save()
 			startSessionID = ""
+			resumeReason = "session id belongs to another project"
 		}
 	}
 	// Refuse to resume when the previous process could not be confirmed dead
@@ -4459,7 +4466,11 @@ func (e *Engine) getOrCreateInteractiveStateWith(sessionKey string, p Platform, 
 		session.SetAgentSessionID("", agent.Name())
 		sessions.Save()
 		startSessionID = ""
+		resumeReason = "previous agent process not confirmed dead"
 		e.send(p, replyCtx, e.i18n.T(MsgSessionResumeUnsafe))
+	}
+	if startSessionID != "" {
+		resumeReason = "resumed"
 	}
 
 	isResume := startSessionID != ""
@@ -4469,6 +4480,7 @@ func (e *Engine) getOrCreateInteractiveStateWith(sessionKey string, p Platform, 
 	if err != nil {
 		// If resume/continue failed, try a fresh session as fallback.
 		if startSessionID != "" {
+			resumeReason = "resume failed, falling back to a fresh session"
 			slog.Error("session resume failed, falling back to fresh session",
 				"session_key", sessionKey, "failed_session_id", startSessionID,
 				"error", err, "elapsed", startElapsed)
@@ -4541,7 +4553,7 @@ func (e *Engine) getOrCreateInteractiveStateWith(sessionKey string, p Platform, 
 	state = newState
 	e.interactiveStates[sessionKey] = state
 
-	slog.Info("session spawned", "session_key", sessionKey, "agent_session", session.GetAgentSessionID(), "is_resume", isResume, "elapsed", startElapsed)
+	slog.Info("session spawned", "session_key", sessionKey, "agent_session", session.GetAgentSessionID(), "is_resume", isResume, "resume_reason", resumeReason, "elapsed", startElapsed)
 
 	e.hooks.Emit(HookEvent{
 		Event:      HookEventSessionStarted,
