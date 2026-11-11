@@ -91,3 +91,44 @@ func TestProviderPresetsIncludesCloudGPU(t *testing.T) {
 		t.Fatal("cloudgpu should support opencode")
 	}
 }
+
+func TestProviderPresetsIncludesOpper(t *testing.T) {
+	body, err := os.ReadFile("../provider-presets.json")
+	if err != nil {
+		t.Fatalf("read provider-presets.json: %v", err)
+	}
+
+	var presets ProviderPresetsResponse
+	if err := json.Unmarshal(body, &presets); err != nil {
+		t.Fatalf("parse provider-presets.json: %v", err)
+	}
+
+	var opper *ProviderPreset
+	for i := range presets.Providers {
+		if presets.Providers[i].Name == "opper" {
+			opper = &presets.Providers[i]
+			break
+		}
+	}
+	if opper == nil {
+		t.Fatal("opper preset not found")
+	}
+	if opper.InviteURL != "" {
+		t.Fatalf("opper invite_url = %q, want empty", opper.InviteURL)
+	}
+
+	claude := opper.AgentConfig("claudecode")
+	if claude == nil {
+		t.Fatal("opper claudecode config missing")
+	}
+	if claude.BaseURL != "https://api.opper.ai/v3/compat" {
+		t.Fatalf("claudecode base_url = %q", claude.BaseURL)
+	}
+	if claude.Model != "claude-sonnet-4-6" {
+		t.Fatalf("claudecode model = %q", claude.Model)
+	}
+
+	if !opper.SupportsAgent("opencode") {
+		t.Fatal("opper should support opencode")
+	}
+}
