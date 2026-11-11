@@ -8451,11 +8451,22 @@ func TestCmdCronExec_TriggersJob(t *testing.T) {
 					// bookkeeping (MarkRun → store save) can land after the
 					// output is sent. Wait for it before returning, otherwise
 					// the late write races t.TempDir() removal and the test
-					// flakes with "crons: directory not empty". LastRun is
-					// set under the same store lock as the save, so observing
-					// it means the write has completed.
+					// flakes with "crons: directory not empty". MarkRun sets
+					// LastRun and saves while holding store.mu, so reading it
+					// under that lock both avoids a data race on the field and
+					// proves the save has completed. (store.Get returns the
+					// shared *CronJob, so reading the field after Get returns
+					// is unsynchronized.)
 					for time.Now().Before(deadline) {
-						if j := store.Get(job.ID); j != nil && !j.LastRun.IsZero() {
+						store.mu.Lock()
+						marked := false
+						for _, j := range store.jobs {
+							if j.ID == job.ID && !j.LastRun.IsZero() {
+								marked = true
+							}
+						}
+						store.mu.Unlock()
+						if marked {
 							return
 						}
 						time.Sleep(5 * time.Millisecond)
