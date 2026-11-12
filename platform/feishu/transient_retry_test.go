@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"syscall"
 	"testing"
@@ -190,7 +191,7 @@ func TestReplyRetriesOnTransientNetworkError(t *testing.T) {
 				if err != nil {
 					t.Fatalf("hijack failed: %v", err)
 				}
-				conn.Close()
+				_ = conn.Close()
 				return
 			}
 			// 3rd call succeeds
@@ -257,7 +258,7 @@ func TestCreateMessageRetriesOnTransientNetworkError(t *testing.T) {
 				if err != nil {
 					t.Fatalf("hijack failed: %v", err)
 				}
-				conn.Close()
+				_ = conn.Close()
 				return
 			}
 			writeJSON(t, w, map[string]any{
@@ -381,7 +382,7 @@ func TestPatchMessageRetriesOnTransientError(t *testing.T) {
 				if err != nil {
 					t.Fatalf("hijack failed: %v", err)
 				}
-				conn.Close()
+				_ = conn.Close()
 				return
 			}
 			writeJSON(t, w, map[string]any{
@@ -571,5 +572,190 @@ func TestPatchMessageRetriesInternalServerError(t *testing.T) {
 				t.Fatalf("error = %v, calls = %d; want error %v and calls %d", err, calls.Load(), tt.wantErr, tt.wantCalls)
 			}
 		})
+	}
+}
+
+// ─── Preview start idempotency ─────────────────────────────────────────────
+
+// TestPreviewStartRetriesReuseUUID verifies every retry of one preview send
+// carries the same Feishu idempotency key. Without it, a retry after a reply
+// that Feishu already delivered (e.g. code=2200 with the message actually
+// posted) creates a second card, and the engine's streaming-card fallback
+// then starts a second progress card for the same turn.
+func TestPreviewStartRetriesReuseUUID(t *testing.T) {
+	const appID = "cli_preview_uuid"
+	const appSecret = "secret"
+
+	var (
+		mu        sync.Mutex
+		sentUUIDs []string
+		replyCall atomic.Int32
+	)
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.URL.Path == "/open-apis/auth/v3/tenant_access_token/internal":
+			writeJSON(t, w, map[string]any{
+				"code":                0,
+				"msg":                 "success",
+				"expire":              7200,
+				"tenant_access_token": "valid-token",
+			})
+		case strings.HasSuffix(r.URL.Path, "/reply"):
+			raw, _ := io.ReadAll(r.Body)
+			var body struct {
+				UUID string `json:"uuid"`
+			}
+			_ = json.Unmarshal(raw, &body)
+			mu.Lock()
+			sentUUIDs = append(sentUUIDs, body.UUID)
+			mu.Unlock()
+			if replyCall.Add(1) == 1 {
+				// Simulate a response we never read although the request
+				// reached Feishu (the code=2200-but-delivered case).
+				hj, ok := w.(http.Hijacker)
+				if !ok {
+					t.Fatalf("response writer does not support hijacking")
+				}
+				conn, _, err := hj.Hijack()
+				if err != nil {
+					t.Fatalf("hijack failed: %v", err)
+				}
+				_ = conn.Close()
+				return
+			}
+			writeJSON(t, w, map[string]any{
+				"code": 0,
+				"msg":  "success",
+				"data": map[string]any{"message_id": "om_preview_ok"},
+			})
+		default:
+			t.Fatalf("unexpected path %s", r.URL.Path)
+		}
+	}))
+	defer srv.Close()
+
+	p := &Platform{
+		platformName:       "feishu",
+		domain:             srv.URL,
+		appID:              appID,
+		appSecret:          appSecret,
+		useInteractiveCard: true,
+		client: lark.NewClient(appID, appSecret,
+			lark.WithOpenBaseUrl(srv.URL),
+			lark.WithHttpClient(srv.Client()),
+		),
+		replayClient: lark.NewClient(appID, appSecret,
+			lark.WithEnableTokenCache(false),
+			lark.WithOpenBaseUrl(srv.URL),
+			lark.WithHttpClient(srv.Client()),
+		),
+	}
+
+	handle, err := p.SendPreviewStart(context.Background(), replyContext{messageID: "om_root", chatID: "oc_chat"}, "hello")
+	if err != nil {
+		t.Fatalf("SendPreviewStart() error = %v", err)
+	}
+	if h, ok := handle.(*feishuPreviewHandle); !ok || h.messageID != "om_preview_ok" {
+		t.Fatalf("handler = %#v, want messageID om_preview_ok", handle)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(sentUUIDs) < 2 {
+		t.Fatalf("reply attempts = %d, want >= 2 (initial + retry)", len(sentUUIDs))
+	}
+	if sentUUIDs[0] == "" {
+		t.Fatal("preview reply carried no uuid")
+	}
+	for i, u := range sentUUIDs {
+		if u != sentUUIDs[0] {
+			t.Fatalf("attempt %d uuid = %q, want %q (retries must reuse one idempotency key)", i, u, sentUUIDs[0])
+		}
+	}
+}
+
+// TestPreviewStartRetriesInternalErrorWithUUID covers the incident shape where
+// Feishu answers code=2200 (internal error) although the message may already
+// be in the chat. 2200 must be treated as retryable so the send can recover
+// the message id instead of giving up and letting the engine open a second
+// progress card; every attempt must carry the same uuid.
+func TestPreviewStartRetriesInternalErrorWithUUID(t *testing.T) {
+	const appID = "cli_preview_uuid_2200"
+	const appSecret = "secret"
+
+	var (
+		mu        sync.Mutex
+		sentUUIDs []string
+		replyCall atomic.Int32
+	)
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.URL.Path == "/open-apis/auth/v3/tenant_access_token/internal":
+			writeJSON(t, w, map[string]any{
+				"code":                0,
+				"msg":                 "success",
+				"expire":              7200,
+				"tenant_access_token": "valid-token",
+			})
+		case strings.HasSuffix(r.URL.Path, "/reply"):
+			raw, _ := io.ReadAll(r.Body)
+			var body struct {
+				UUID string `json:"uuid"`
+			}
+			_ = json.Unmarshal(raw, &body)
+			mu.Lock()
+			sentUUIDs = append(sentUUIDs, body.UUID)
+			mu.Unlock()
+			if replyCall.Add(1) == 1 {
+				writeJSON(t, w, map[string]any{"code": 2200, "msg": "internal error"})
+				return
+			}
+			writeJSON(t, w, map[string]any{
+				"code": 0,
+				"msg":  "success",
+				"data": map[string]any{"message_id": "om_preview_2200_ok"},
+			})
+		default:
+			t.Fatalf("unexpected path %s", r.URL.Path)
+		}
+	}))
+	defer srv.Close()
+
+	p := &Platform{
+		platformName:       "feishu",
+		domain:             srv.URL,
+		appID:              appID,
+		appSecret:          appSecret,
+		useInteractiveCard: true,
+		client: lark.NewClient(appID, appSecret,
+			lark.WithOpenBaseUrl(srv.URL),
+			lark.WithHttpClient(srv.Client()),
+		),
+		replayClient: lark.NewClient(appID, appSecret,
+			lark.WithEnableTokenCache(false),
+			lark.WithOpenBaseUrl(srv.URL),
+			lark.WithHttpClient(srv.Client()),
+		),
+	}
+
+	handle, err := p.SendPreviewStart(context.Background(), replyContext{messageID: "om_root", chatID: "oc_chat"}, "hello")
+	if err != nil {
+		t.Fatalf("SendPreviewStart() error = %v (2200 must be retried)", err)
+	}
+	if h, ok := handle.(*feishuPreviewHandle); !ok || h.messageID != "om_preview_2200_ok" {
+		t.Fatalf("handler = %#v, want messageID om_preview_2200_ok", handle)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(sentUUIDs) != 2 {
+		t.Fatalf("reply attempts = %d, want 2 (2200 then success)", len(sentUUIDs))
+	}
+	if sentUUIDs[0] == "" || sentUUIDs[0] != sentUUIDs[1] {
+		t.Fatalf("uuids = %q, want one non-empty uuid reused", sentUUIDs)
 	}
 }

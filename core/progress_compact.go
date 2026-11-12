@@ -267,7 +267,7 @@ func BuildStreamingCardPayload(thinking string, stepTexts []string, tools []card
 	}
 	payload := ProgressCardPayload{
 		Version:   2,
-		Agent:     strings.TrimSpace(agent),
+		Agent:     normalizeProgressAgentLabel(agent),
 		Lang:      string(lang),
 		State:     state,
 		Items:     cleaned,
