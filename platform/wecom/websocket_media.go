@@ -7,6 +7,7 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"fmt"
+	"html"
 	"io"
 	"log/slog"
 	"net/http"
@@ -14,6 +15,7 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+	"unicode"
 
 	"github.com/chenhg5/cc-connect/core"
 )
@@ -21,10 +23,17 @@ import (
 // Max download size for WeCom WS image/file payloads (matches OpenClaw default).
 const wecomWSMediaMaxBytes = 20 << 20
 
+// Quoted files start unavailable and are named only after a successful download.
+// This also covers callbacks with no file object or URL, which skip downloading.
+const wsQuotedFileUnavailable = "[file unavailable: quoted attachment could not be retrieved]"
+
 // wsMediaRef is an encrypted download URL plus optional AES key (base64) from the WS protocol.
 type wsMediaRef struct {
 	URL    string
 	Aeskey string
+	// markerSlot is the one-based index of this file's quoted "[file]" marker in
+	// content; zero means no marker. Images keep their plain "[image]" marker.
+	markerSlot int
 }
 
 // wsMsgCallbackBodyWS is the full callback body for media-capable parsing (embedded in main struct).
@@ -79,6 +88,25 @@ func (p wsInboundParts) hasMedia() bool {
 	return len(p.images) > 0 || len(p.files) > 0
 }
 
+// nameFileMarker replaces an unavailable marker with the downloaded file's name.
+// The name identifies attachment metadata, not necessarily the final disk path:
+// agents may sanitize filenames or add suffixes to avoid collisions.
+// Escape control and HTML-special characters for display; leave metadata intact.
+func (p *wsInboundParts) nameFileMarker(ref wsMediaRef, fileName string) {
+	if ref.markerSlot <= 0 || ref.markerSlot > len(p.content) {
+		return
+	}
+	var display strings.Builder
+	for _, r := range fileName {
+		if unicode.IsControl(r) {
+			fmt.Fprintf(&display, "\\u%04x", r)
+		} else {
+			display.WriteRune(r)
+		}
+	}
+	p.content[ref.markerSlot-1] = "[file: " + html.EscapeString(display.String()) + "]"
+}
+
 func formatWSQuotedContent(parts wsInboundParts) string {
 	if len(parts.content) == 0 {
 		return ""
@@ -105,11 +133,13 @@ func wsCollectInboundParts(body *wsMsgCallbackBody) (current, quoted wsInboundPa
 		}
 	}
 	appendFile := func(parts *wsInboundParts, url, aeskey string, marker bool) {
-		if url != "" {
-			parts.files = append(parts.files, wsMediaRef{URL: url, Aeskey: aeskey})
-		}
+		ref := wsMediaRef{URL: url, Aeskey: aeskey}
 		if marker {
-			parts.content = append(parts.content, "[file]")
+			parts.content = append(parts.content, wsQuotedFileUnavailable)
+			ref.markerSlot = len(parts.content)
+		}
+		if url != "" {
+			parts.files = append(parts.files, ref)
 		}
 	}
 	walkMixed := func(parts *wsInboundParts, m *wsMixedBlock, markers bool) {
@@ -132,7 +162,7 @@ func wsCollectInboundParts(body *wsMsgCallbackBody) (current, quoted wsInboundPa
 				if item.File != nil {
 					appendFile(parts, item.File.URL, item.File.Aeskey, markers)
 				} else if markers {
-					parts.content = append(parts.content, "[file]")
+					parts.content = append(parts.content, wsQuotedFileUnavailable)
 				}
 			}
 		}
@@ -163,7 +193,7 @@ func wsCollectInboundParts(body *wsMsgCallbackBody) (current, quoted wsInboundPa
 			if q.File != nil {
 				appendFile(&quoted, q.File.URL, q.File.Aeskey, true)
 			} else {
-				quoted.content = append(quoted.content, "[file]")
+				quoted.content = append(quoted.content, wsQuotedFileUnavailable)
 			}
 		case "mixed":
 			walkMixed(&quoted, q.Mixed, true)
@@ -399,8 +429,8 @@ func (p *WSPlatform) deliverWSMediaInbound(body *wsMsgCallbackBody, sessionKey, 
 		}
 	}
 
-	downloadFiles := func(refs []wsMediaRef) {
-		for _, f := range refs {
+	downloadFiles := func(parts *wsInboundParts) {
+		for _, f := range parts.files {
 			buf, fn, err := downloadWeComWSMedia(ctx, f.URL, f.Aeskey)
 			if err != nil {
 				slog.Error("wecom-ws: download file failed", "error", err)
@@ -412,14 +442,15 @@ func (p *WSPlatform) deliverWSMediaInbound(body *wsMsgCallbackBody, sessionKey, 
 			}
 			mt := wecomInboundFileMime(base, buf)
 			fileAtts = append(fileAtts, core.FileAttachment{MimeType: mt, Data: buf, FileName: base})
+			parts.nameFileMarker(f, base)
 			slog.Info("wecom-ws: file downloaded", "bytes", len(buf), "mime", mt, "name", base)
 		}
 	}
 
 	downloadImages(quoted.images)
 	downloadImages(current.images)
-	downloadFiles(quoted.files)
-	downloadFiles(current.files)
+	downloadFiles(&quoted)
+	downloadFiles(&current)
 
 	content := strings.Join(current.content, "\n")
 	content = stripWeComAtMentions(content, p.botID, body.AibotID)
