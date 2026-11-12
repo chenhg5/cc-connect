@@ -24,6 +24,7 @@ import (
 
 	"github.com/chenhg5/cc-connect/core"
 
+	"github.com/google/uuid"
 	lark "github.com/larksuite/oapi-sdk-go/v3"
 	larkcore "github.com/larksuite/oapi-sdk-go/v3/core"
 	larkevent "github.com/larksuite/oapi-sdk-go/v3/event"
@@ -4361,9 +4362,18 @@ func (p *Platform) sendNewMessageToChat(ctx context.Context, rc replyContext, ms
 }
 
 func (p *Platform) buildReplyMessageReqBody(rc replyContext, msgType, content string) *larkim.ReplyMessageReqBody {
+	return p.buildReplyMessageReqBodyWithUUID(rc, msgType, content, "")
+}
+
+// buildReplyMessageReqBodyWithUUID builds a reply body carrying a Feishu
+// idempotency key when idempotencyKey is non-empty.
+func (p *Platform) buildReplyMessageReqBodyWithUUID(rc replyContext, msgType, content, idempotencyKey string) *larkim.ReplyMessageReqBody {
 	body := larkim.NewReplyMessageReqBodyBuilder().
 		MsgType(msgType).
 		Content(content)
+	if idempotencyKey != "" {
+		body.Uuid(idempotencyKey)
+	}
 	if p.shouldReplyInThread(rc) {
 		body.ReplyInThread(true)
 	}
@@ -5447,6 +5457,14 @@ func (p *Platform) SendPreviewStart(ctx context.Context, rctx any, content strin
 		return nil, fmt.Errorf("%s: chatID is empty", p.tag())
 	}
 
+	// One idempotency key for every attempt of this send. Feishu accepts the
+	// same Uuid at most once per hour, so a transport-level retry after a
+	// response we could not read does not post a second card when the first
+	// attempt already reached the chat. Without it, a "code=2200 internal
+	// error" reply that in fact delivered the message made the engine mark
+	// the streaming card as failed and start a second progress card.
+	previewUUID := uuid.NewString()
+
 	// Card 2.0 path: engine passes a pre-built rich card JSON; pass it through.
 	var cardJSON string
 	var sendContent string // what goes into the Im.Message.Create / Reply content field
@@ -5474,7 +5492,7 @@ func (p *Platform) SendPreviewStart(ctx context.Context, rctx any, content strin
 	if p.shouldUseThreadOrReplyAPI(rc) {
 		req := larkim.NewReplyMessageReqBuilder().
 			MessageId(rc.messageID).
-			Body(p.buildReplyMessageReqBody(rc, larkim.MsgTypeInteractive, sendContent)).
+			Body(p.buildReplyMessageReqBodyWithUUID(rc, larkim.MsgTypeInteractive, sendContent, previewUUID)).
 			Build()
 		var resp *larkim.ReplyMessageResp
 		if err := p.withTransientRetry(ctx, "send preview", func() error {
@@ -5485,7 +5503,13 @@ func (p *Platform) SendPreviewStart(ctx context.Context, rctx any, content strin
 					return fmt.Errorf("%s: send preview (reply): %w", p.tag(), err)
 				}
 				if !resp.Success() {
-					return fmt.Errorf("%s: send preview (reply) code=%d msg=%s", p.tag(), resp.Code, resp.Msg)
+					// Code 2200 is Feishu's "internal error" and may be
+					// returned after the message was already delivered.
+					// Typing it as a card API error makes it retryable, and
+					// the retry reuses previewUUID so a delivered message is
+					// not posted twice.
+					return fmt.Errorf("%s: send preview (reply): %w", p.tag(),
+						classifyFeishuCardAPIError("send preview (reply)", resp.Code, resp.Msg))
 				}
 				return nil
 			})
@@ -5502,6 +5526,7 @@ func (p *Platform) SendPreviewStart(ctx context.Context, rctx any, content strin
 				ReceiveId(chatID).
 				MsgType(larkim.MsgTypeInteractive).
 				Content(sendContent).
+				Uuid(previewUUID).
 				Build()).
 			Build()
 		var resp *larkim.CreateMessageResp
@@ -5513,7 +5538,11 @@ func (p *Platform) SendPreviewStart(ctx context.Context, rctx any, content strin
 					return fmt.Errorf("%s: send preview: %w", p.tag(), err)
 				}
 				if !resp.Success() {
-					return fmt.Errorf("%s: send preview code=%d msg=%s", p.tag(), resp.Code, resp.Msg)
+					// See the reply branch above: 2200 is ambiguous (the
+					// message may already exist), so retry under the same
+					// previewUUID.
+					return fmt.Errorf("%s: send preview: %w", p.tag(),
+						classifyFeishuCardAPIError("send preview", resp.Code, resp.Msg))
 				}
 				return nil
 			})

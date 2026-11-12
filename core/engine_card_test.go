@@ -185,7 +185,7 @@ func TestBuildStreamingCardPayload(t *testing.T) {
 	if !ok {
 		t.Fatalf("payload did not parse back")
 	}
-	if payload.Agent != "opencode" || payload.Lang != string(LangChinese) {
+	if payload.Agent != "OpenCode" || payload.Lang != string(LangChinese) {
 		t.Errorf("payload meta = %q/%q", payload.Agent, payload.Lang)
 	}
 	if payload.State != ProgressCardStateRunning {
@@ -227,6 +227,29 @@ func TestBuildStreamingCardPayload_EmptyItems(t *testing.T) {
 	}
 	if payload.State != ProgressCardStateCompleted {
 		t.Errorf("payload state = %q, want completed", payload.State)
+	}
+}
+
+// TestBuildStreamingCardPayload_NormalizesAgentLabel verifies the streaming
+// card carries the same display label as the compact progress card, so a
+// single turn cannot show "opencode" and "OpenCode" on two cards.
+func TestBuildStreamingCardPayload_NormalizesAgentLabel(t *testing.T) {
+	tests := []struct{ agent, want string }{
+		{"opencode", "OpenCode"},
+		{"claude-code", "CC"},
+		{"codex", "Codex"},
+		{"gemini", "Gemini"},
+		{"", "Agent"},
+	}
+	for _, tt := range tests {
+		got := BuildStreamingCardPayload("", nil, nil, "答复", tt.agent, LangChinese, ProgressCardStateRunning)
+		payload, ok := ParseProgressCardPayload(got)
+		if !ok {
+			t.Fatalf("agent %q: payload did not parse back", tt.agent)
+		}
+		if payload.Agent != tt.want {
+			t.Errorf("agent %q: payload.Agent = %q, want %q", tt.agent, payload.Agent, tt.want)
+		}
 	}
 }
 
