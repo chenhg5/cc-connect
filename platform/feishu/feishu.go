@@ -2759,7 +2759,9 @@ func (p *Platform) fetchSingleMessage(ctx context.Context, messageID string) *ch
 		// set the engine watermark before the async merge_forward dispatch
 		// finishes, causing the standalone forward event to be dropped as
 		// stale. Without this expansion the agent only sees "[merge_forward]".
-		text, images, _ = p.parseMergeForward(messageID)
+		// Quoted-forward files are not delivered here. Do not download and
+		// discard their bytes before the quoted-file authorization gates.
+		text, images, _ = p.parseMergeForwardContent(messageID, false)
 		if text == "" {
 			text = "[merge_forward]"
 		}
@@ -3300,6 +3302,10 @@ func extractCardListItems(itemsRaw json.RawMessage, parts *[]string) {
 // GET /open-apis/im/v1/messages/{message_id} API, then formats them into
 // readable text. Returns combined text, images, and files from the sub-messages.
 func (p *Platform) parseMergeForward(rootMessageID string) (string, []core.ImageAttachment, []core.FileAttachment) {
+	return p.parseMergeForwardContent(rootMessageID, true)
+}
+
+func (p *Platform) parseMergeForwardContent(rootMessageID string, includeFiles bool) (string, []core.ImageAttachment, []core.FileAttachment) {
 	resp, err := p.client.Im.Message.Get(context.Background(),
 		larkim.NewGetMessageReqBuilder().
 			MessageId(rootMessageID).
@@ -3349,9 +3355,13 @@ func (p *Platform) parseMergeForward(rootMessageID string) (string, []core.Image
 
 	var allImages []core.ImageAttachment
 	var allFiles []core.FileAttachment
+	var files *[]core.FileAttachment
+	if includeFiles {
+		files = &allFiles
+	}
 	var sb strings.Builder
 	sb.WriteString("<forwarded_messages>\n")
-	p.formatMergeForwardTree(rootMessageID, childrenMap, nameMap, &sb, &allImages, &allFiles, 0)
+	p.formatMergeForwardTree(rootMessageID, rootMessageID, childrenMap, nameMap, &sb, &allImages, files, 0)
 	sb.WriteString("</forwarded_messages>")
 
 	return sb.String(), allImages, allFiles
@@ -3368,7 +3378,9 @@ func replaceMentions(text string, mentions []*larkim.Mention) string {
 }
 
 // formatMergeForwardTree recursively formats the sub-message tree.
-func (p *Platform) formatMergeForwardTree(parentID string, childrenMap map[string][]*larkim.Message, nameMap map[string]string, sb *strings.Builder, images *[]core.ImageAttachment, files *[]core.FileAttachment, depth int) {
+// Resource downloads use the outer container ID, even for nested forwards.
+// A nil files collector keeps file names in the text without downloading files.
+func (p *Platform) formatMergeForwardTree(parentID, resourceMessageID string, childrenMap map[string][]*larkim.Message, nameMap map[string]string, sb *strings.Builder, images *[]core.ImageAttachment, files *[]core.FileAttachment, depth int) {
 	if depth > 10 {
 		sb.WriteString(strings.Repeat("    ", depth) + "[nested forwarding truncated]\n")
 		return
@@ -3425,10 +3437,16 @@ func (p *Platform) formatMergeForwardTree(parentID string, childrenMap map[strin
 			if post == nil {
 				post = &postLang{}
 			}
-			textParts, postImages := p.extractPostParts(msgID, post)
-			postAttachments, notices := p.downloadPostFiles(msgID, post.Files, strings.Join(textParts, "\n"))
-			*files = append(*files, postAttachments...)
-			textParts = append(textParts, notices...)
+			textParts, postImages := p.extractPostParts(resourceMessageID, post)
+			if files != nil {
+				postAttachments, notices := p.downloadPostFiles(resourceMessageID, post.Files, strings.Join(textParts, "\n"))
+				*files = append(*files, postAttachments...)
+				textParts = append(textParts, notices...)
+			} else {
+				for _, file := range post.Files {
+					textParts = append(textParts, fmt.Sprintf("[file: %s]", file.FileName))
+				}
+			}
 			*images = append(*images, postImages...)
 			text := replaceMentions(strings.Join(textParts, "\n"), item.Mentions)
 			if text != "" {
@@ -3443,7 +3461,7 @@ func (p *Platform) formatMergeForwardTree(parentID string, childrenMap map[strin
 				ImageKey string `json:"image_key"`
 			}
 			if err := json.Unmarshal([]byte(content), &imgBody); err == nil && imgBody.ImageKey != "" {
-				imgData, mimeType, err := p.downloadImage(msgID, imgBody.ImageKey)
+				imgData, mimeType, err := p.downloadImage(resourceMessageID, imgBody.ImageKey)
 				if err != nil {
 					slog.Error(p.tag()+": download merge_forward image failed", "error", err)
 					sb.WriteString(fmt.Sprintf("%s[%s] %s: [image - download failed]\n", indent, ts, senderName))
@@ -3459,7 +3477,13 @@ func (p *Platform) formatMergeForwardTree(parentID string, childrenMap map[strin
 				FileName string `json:"file_name"`
 			}
 			if err := json.Unmarshal([]byte(content), &fileBody); err == nil && fileBody.FileKey != "" {
-				fileData, err := p.downloadResource(msgID, fileBody.FileKey, "file")
+				if files == nil {
+					fmt.Fprintf(sb, "%s[%s] %s: [file: %s]\n", indent, ts, senderName, fileBody.FileName)
+					continue
+				}
+				// Forwarded file resources belong to the outer container, including
+				// files reached through nested merge_forward messages.
+				fileData, err := p.downloadResource(resourceMessageID, fileBody.FileKey, "file")
 				if err != nil {
 					slog.Error(p.tag()+": download merge_forward file failed", "error", err)
 					sb.WriteString(fmt.Sprintf("%s[%s] %s: [file: %s - download failed]\n", indent, ts, senderName, fileBody.FileName))
@@ -3472,7 +3496,7 @@ func (p *Platform) formatMergeForwardTree(parentID string, childrenMap map[strin
 
 		case "merge_forward":
 			sb.WriteString(fmt.Sprintf("%s[%s] %s: [forwarded messages]\n", indent, ts, senderName))
-			p.formatMergeForwardTree(msgID, childrenMap, nameMap, sb, images, files, depth+1)
+			p.formatMergeForwardTree(msgID, resourceMessageID, childrenMap, nameMap, sb, images, files, depth+1)
 
 		default:
 			if describesFeishuMessageType(msgType) {
