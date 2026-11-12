@@ -202,7 +202,7 @@ make build EXCLUDE=discord,dingtalk,qq,qqbot,line
 go build -tags 'no_discord no_dingtalk no_qq no_qqbot no_line' ./cmd/cc-connect
 ```
 
-Available tags: `no_acp`, `no_claudecode`, `no_codex`, `no_cursor`, `no_gemini`,
+Available tags: `no_acp`, `no_claudecode`, `no_codex`, `no_cursor`, `no_gemini`, `no_grokbot`,
 `no_iflow`, `no_opencode`, `no_qoder`, `no_feishu`, `no_telegram`,
 `no_discord`, `no_slack`, `no_dingtalk`, `no_wecom`, `no_weixin`, `no_qq`, `no_qqbot`,
 `no_line`, `no_weibo`, `no_matrix`, `no_webex`, `no_tuitui`.
@@ -227,11 +227,12 @@ Available tags: `no_acp`, `no_claudecode`, `no_codex`, `no_cursor`, `no_gemini`,
 
 ## Adding a New Agent
 
-1. Create `agent/newagent/newagent.go`
-2. Implement `core.Agent` and `core.AgentSession` interfaces
-3. Register in `init()`: `core.RegisterAgent("newagent", factory)`
-4. Create `cmd/cc-connect/plugin_agent_newagent.go` with `//go:build !no_newagent` tag
-5. Add `newagent` to `ALL_AGENTS` in `Makefile`
-6. Optionally implement `AgentDoctorInfo` for `cc-connect doctor` support
-7. Add config example in `config.example.toml`
-8. Add unit tests
+1. Create `agent/newagent/` and implement `core.Agent` plus `core.AgentSession` (`Send`, `RespondPermission`, `Events`, `CurrentSessionID`, `Alive`, `Close`). Keep the adapter thin: reuse `core.SaveFilesToDisk`, `AppendImageRefs`, `AppendFileRefs`, and `RedactToken` instead of inventing a parallel attachment path.
+2. Register in `init()`: `core.RegisterAgent("newagent", New)`. `New` receives `map[string]any` from `[projects.agent.options]`.
+3. Add `cmd/cc-connect/plugin_agent_newagent.go` with `//go:build !no_newagent`.
+4. Add `newagent` to every `ALL_AGENTS` assignment in the `Makefile`, and add `no_newagent` to the build-tag list in this file.
+5. Add a commented example to `config.example.toml`.
+6. Document it: `docs/newagent.md` and, when the change is user-facing, `docs/newagent.zh-CN.md`. Update the agent tables in `README.md` and `README.zh-CN.md`, and add an Unreleased note in `CHANGELOG.md`.
+7. Add unit tests that mock the external process or HTTP endpoint. Run `go test ./agent/newagent/`.
+8. Optionally implement `AgentDoctorInfo`, `DoctorChecker`, `WorkDirSwitcher`, and the other optional interfaces in `core/interfaces.go`. An empty `CLIBinaryName()` tells `cc-connect doctor` there is no local binary to look up.
+9. Do not hardcode the new agent name in `core/`. User-facing strings go through `core/i18n.go` (EN, ZH, ZH-TW, JA, ES). Do not put API keys in config examples or logs.

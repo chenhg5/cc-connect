@@ -516,6 +516,13 @@ type Event struct {
 	Metadata                 map[string]any // optional metadata from agent (e.g. compaction_continue)
 	Synthetic                bool           // true if this is a synthetic/generated message (not from real user)
 	ModelSwitch              *ModelSwitch   // populated for EventModelSwitch
+	// Images and Files are optional attachments produced with this event,
+	// normally on a terminal EventResult. The engine forwards them through
+	// ImageSender and FileSender after the text reply. They are dropped when
+	// attachment send is disabled or the platform does not implement the
+	// matching sender.
+	Images []ImageAttachment
+	Files  []FileAttachment
 }
 
 // HistoryEntry is one turn in a conversation.

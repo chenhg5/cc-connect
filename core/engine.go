@@ -5236,6 +5236,7 @@ func (e *Engine) runUnsolicitedReader(ctx context.Context, cancel context.Cancel
 						e.send(p, replyCtx, chunk)
 					}
 				}
+				e.noteUndeliveredMedia(p, replyCtx, e.deliverTurnMedia(p, replyCtx, event.Images, event.Files))
 
 				// Safety note: concurrent writes to session.History by the
 				// unsolicited reader and a foreground turn cannot overlap.
@@ -6229,6 +6230,8 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			} else if fullResponse == "" && len(textParts) > 0 {
 				fullResponse = strings.Join(textParts, "")
 			}
+			hasTurnMedia := len(event.Images) > 0 || len(event.Files) > 0
+			suppressTurnMedia := false
 			if fullResponse == "" {
 				state.mu.Lock()
 				cancelled := state.turnCancelled
@@ -6240,7 +6243,8 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 					// the /stop ack already told the user. Reuses the NO_REPLY
 					// silent-delivery path so no "(empty response)" noise is sent.
 					fullResponse = "NO_REPLY"
-				} else {
+					suppressTurnMedia = true
+				} else if !hasTurnMedia {
 					fullResponse = e.i18n.T(MsgEmptyResponse)
 				}
 			}
@@ -6360,6 +6364,11 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 						cleanResponse = stripped
 					}
 				}
+			}
+			// An image-only reply has no text bubble. Marking it silent skips the
+			// "(empty response)" placeholder; the attachments are sent below.
+			if !isSilent && hasTurnMedia && !suppressTurnMedia && strings.TrimSpace(baseResponse) == "" {
+				isSilent = true
 			}
 
 			if !isSilent {
@@ -6580,6 +6589,10 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				if !sendChunksWithStatusFooter(e.ctx, p, replyCtx, fullResponse, statusFooter, sendWorkspaceWithError) {
 					return
 				}
+			}
+
+			if hasTurnMedia && !suppressTurnMedia {
+				e.noteUndeliveredMedia(p, replyCtx, e.deliverTurnMedia(p, replyCtx, event.Images, event.Files))
 			}
 
 			if elapsed := time.Since(replyStart); elapsed >= slowPlatformSend {

@@ -90,22 +90,40 @@ func RunDoctorChecks(ctx context.Context, agent Agent, platforms []Platform) []D
 	return results
 }
 
-func agentCLIInfo(agent Agent) (bin, label string) {
+// agentCLIInfo reports the local executable used by doctor, if any.
+// hasCLI is false when the agent implements AgentDoctorInfo and returns an
+// empty binary name — webhook and HTTP agents have nothing to look up in PATH.
+func agentCLIInfo(agent Agent) (bin, label string, hasCLI bool) {
 	if info, ok := agent.(AgentDoctorInfo); ok {
-		bin = info.CLIBinaryName()
-		label = info.CLIDisplayName()
+		bin = strings.TrimSpace(info.CLIBinaryName())
+		label = strings.TrimSpace(info.CLIDisplayName())
+		if bin == "" {
+			if label == "" {
+				label = agent.Name()
+			}
+			return "", label, false
+		}
+		if label == "" {
+			label = bin
+		}
+		return bin, label, true
 	}
-	if bin == "" {
-		bin = agent.Name()
+	name := agent.Name()
+	if name == "" {
+		name = "agent"
 	}
-	if label == "" {
-		label = bin
-	}
-	return bin, label
+	return name, name, true
 }
 
 func checkAgentBinary(ctx context.Context, agent Agent) []DoctorCheckResult {
-	bin, _ := agentCLIInfo(agent)
+	bin, label, hasCLI := agentCLIInfo(agent)
+	if !hasCLI {
+		return []DoctorCheckResult{{
+			Name:   fmt.Sprintf("Agent CLI (%s)", label),
+			Status: DoctorPass,
+			Detail: "not a local CLI",
+		}}
+	}
 
 	path, err := exec.LookPath(bin)
 	if err != nil {
@@ -134,7 +152,10 @@ func checkAgentBinary(ctx context.Context, agent Agent) []DoctorCheckResult {
 }
 
 func checkAgentAuth(ctx context.Context, agent Agent) []DoctorCheckResult {
-	bin, label := agentCLIInfo(agent)
+	bin, label, hasCLI := agentCLIInfo(agent)
+	if !hasCLI {
+		return nil
+	}
 	return checkCLIAuth(ctx, bin, []string{"--version"}, label)
 }
 
