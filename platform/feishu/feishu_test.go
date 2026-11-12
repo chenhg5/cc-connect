@@ -748,6 +748,103 @@ func TestOnMessageDropsUnauthorizedOverheardGroupMessage(t *testing.T) {
 	}
 }
 
+// Several platform entries can share one Feishu app, and each receives the
+// same message event. An entry must not reply "unauthorized" to a message
+// outside its allow_chat / group_only scope, because another entry may own
+// that chat and answer it normally.
+func TestOnMessageSilentForOutOfScopeUnauthorizedSender(t *testing.T) {
+	const appID = "cli_out_of_scope"
+	const appSecret = "secret-out-of-scope"
+	const botOpenID = "ou_bot"
+
+	cases := []struct {
+		name      string
+		chatType  string
+		chatID    string
+		allowChat string
+		groupOnly bool
+	}{
+		{name: "group not in allow_chat", chatType: "group", chatID: "oc_other", allowChat: "oc_mine"},
+		{name: "p2p with group_only", chatType: "p2p", chatID: "oc_p2p", groupOnly: true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			apiCalls := make(chan string, 4)
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				if r.URL.Path == "/open-apis/auth/v3/tenant_access_token/internal" {
+					writeJSON(t, w, map[string]any{
+						"code":                0,
+						"msg":                 "success",
+						"expire":              7200,
+						"tenant_access_token": "tenant-token",
+					})
+					return
+				}
+				apiCalls <- r.URL.Path
+				writeJSON(t, w, map[string]any{"code": 0, "msg": "success"})
+			}))
+			defer srv.Close()
+
+			p := &Platform{
+				platformName: "feishu",
+				domain:       srv.URL,
+				appID:        appID,
+				appSecret:    appSecret,
+				allowFrom:    "ou_allowed",
+				allowChat:    tc.allowChat,
+				groupOnly:    tc.groupOnly,
+				botOpenID:    botOpenID,
+				dedup:        &core.MessageDedup{},
+				client: lark.NewClient(appID, appSecret,
+					lark.WithOpenBaseUrl(srv.URL),
+					lark.WithHttpClient(srv.Client()),
+				),
+				handler: func(core.Platform, *core.Message) {
+					t.Error("handler should not run for out-of-scope message")
+				},
+			}
+
+			msgType := "text"
+			senderType := "user"
+			content := `{"text":"@_user_1 hello"}`
+			createTime := strconv.FormatInt(time.Now().UnixMilli(), 10)
+			err := p.onMessage(context.Background(), &larkim.P2MessageReceiveV1{
+				Event: &larkim.P2MessageReceiveV1Data{
+					Sender: &larkim.EventSender{
+						SenderId:   &larkim.UserId{OpenId: stringPtr("ou_blocked")},
+						SenderType: &senderType,
+					},
+					Message: &larkim.EventMessage{
+						MessageId:   stringPtr("om_out_of_scope"),
+						ChatId:      stringPtr(tc.chatID),
+						ChatType:    &tc.chatType,
+						MessageType: &msgType,
+						Content:     &content,
+						CreateTime:  &createTime,
+						Mentions: []*larkim.MentionEvent{
+							{
+								Key:  stringPtr("@_user_1"),
+								Id:   &larkim.UserId{OpenId: stringPtr(botOpenID)},
+								Name: stringPtr("bot"),
+							},
+						},
+					},
+				},
+			})
+			if err != nil {
+				t.Fatalf("onMessage() error = %v", err)
+			}
+
+			select {
+			case path := <-apiCalls:
+				t.Fatalf("unexpected API call %s, want silent drop", path)
+			case <-time.After(300 * time.Millisecond):
+			}
+		})
+	}
+}
+
 func TestIsMessageRecalledDetectsWithdrawnMessageFromGetAPI(t *testing.T) {
 	const appID = "cli_recall_probe"
 	const appSecret = "secret-recall-probe"
@@ -977,7 +1074,7 @@ func TestExtractPostParts_Markdown(t *testing.T) {
 func TestParsePostContent_FlatFormat(t *testing.T) {
 	p := &Platform{}
 	raw := `{"title":"test","content":[[{"tag":"text","text":"hello"}]]}`
-	texts, _ := p.parsePostContent("", raw)
+	texts, _ := p.extractPostParts("", mustParsePost(t, p, raw))
 	if len(texts) != 2 || texts[0] != "test" || texts[1] != "hello" {
 		t.Errorf("unexpected result: %v", texts)
 	}
@@ -986,7 +1083,7 @@ func TestParsePostContent_FlatFormat(t *testing.T) {
 func TestParsePostContent_LangKeyedFormat(t *testing.T) {
 	p := &Platform{}
 	raw := `{"zh_cn":{"title":"标题","content":[[{"tag":"text","text":"内容"}]]}}`
-	texts, _ := p.parsePostContent("", raw)
+	texts, _ := p.extractPostParts("", mustParsePost(t, p, raw))
 	if len(texts) != 2 || texts[0] != "标题" || texts[1] != "内容" {
 		t.Errorf("unexpected result: %v", texts)
 	}
@@ -994,9 +1091,8 @@ func TestParsePostContent_LangKeyedFormat(t *testing.T) {
 
 func TestParsePostContent_InvalidJSON(t *testing.T) {
 	p := &Platform{}
-	texts, images := p.parsePostContent("", "not json")
-	if texts != nil || images != nil {
-		t.Errorf("expected nil results for invalid json")
+	if post := p.parsePostBody("not json"); post != nil {
+		t.Errorf("expected nil post for invalid json, got %#v", post)
 	}
 }
 
@@ -1660,6 +1756,176 @@ func TestNewPlatform_RequireMentionTrueDoesNotForceGroupReplyAll(t *testing.T) {
 	}
 	if fp.groupReplyAll {
 		t.Error("require_mention=true should leave groupReplyAll=false, but it is true")
+	}
+}
+
+func TestOnMessageSkipWhenMentionOthers(t *testing.T) {
+	botMention := &larkim.MentionEvent{
+		Key: strPtr("@_user_1"), Id: &larkim.UserId{OpenId: strPtr("ou_bot")}, Name: strPtr("Bot"),
+	}
+	otherMention := &larkim.MentionEvent{
+		Key: strPtr("@_user_2"), Id: &larkim.UserId{OpenId: strPtr("ou_other")}, Name: strPtr("Other"),
+	}
+	scenarios := []struct {
+		name           string
+		chatType       string
+		text           string
+		mentions       []*larkim.MentionEvent
+		wantContent    string
+		unknownContent string
+	}{
+		{"other only", "group", "@_user_2 hello", []*larkim.MentionEvent{otherMention}, "@Other hello", "@Other hello"},
+		{"self only", "group", "@_user_1 hello", []*larkim.MentionEvent{botMention}, "hello", "@Bot hello"},
+		{"both", "group", "@_user_1 @_user_2 hello", []*larkim.MentionEvent{botMention, otherMention}, "@Other hello", "@Bot @Other hello"},
+		{"no mention", "group", "hello", nil, "hello", "hello"},
+		// Feishu represents @all in content, with an empty Mentions list.
+		{"all", "group", "@_all hello", nil, "@_all hello", "@_all hello"},
+		{"private other", "p2p", "@_user_2 hello", []*larkim.MentionEvent{otherMention}, "@Other hello", "@Other hello"},
+		{"private no mention", "p2p", "hello", nil, "hello", "hello"},
+	}
+	configs := []struct {
+		name       string
+		all        bool
+		skip       bool
+		alias      bool
+		unknownBot bool
+		want       [7]bool
+	}{
+		{"reply all skip on", true, true, false, false, [7]bool{false, true, true, true, true, true, true}},
+		{"reply all skip off", true, false, false, false, [7]bool{true, true, true, true, true, true, true}},
+		{"mention required skip on", false, true, false, false, [7]bool{false, true, true, false, false, true, true}},
+		{"mention required skip off", false, false, false, false, [7]bool{false, true, true, false, false, true, true}},
+		{"require mention false skip on", false, true, true, false, [7]bool{false, true, true, true, true, true, true}},
+		{"require mention false skip off", false, false, true, false, [7]bool{true, true, true, true, true, true, true}},
+		{"unknown identity skip on", true, true, false, true, [7]bool{false, false, false, true, true, true, true}},
+		{"unknown identity skip off", true, false, false, true, [7]bool{true, true, true, true, true, true, true}},
+	}
+
+	for _, cfg := range configs {
+		t.Run(cfg.name, func(t *testing.T) {
+			for i, tc := range scenarios {
+				t.Run(tc.name, func(t *testing.T) {
+					srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+						t.Errorf("unexpected API request: %s %s", r.Method, r.URL.Path)
+						http.Error(w, "unexpected API request", http.StatusInternalServerError)
+					}))
+					defer srv.Close()
+					opts := map[string]any{
+						"app_id":                   "cli_skip_mentions",
+						"app_secret":               "test-secret",
+						"group_reply_all":          cfg.all,
+						"skip_when_mention_others": cfg.skip,
+					}
+					if cfg.alias {
+						opts["require_mention"] = false
+					}
+					platform, err := newPlatform("feishu", srv.URL, opts)
+					if err != nil {
+						t.Fatalf("newPlatform() error = %v", err)
+					}
+					p := extractBasePlatform(platform)
+					if p == nil {
+						t.Fatal("expected a Feishu platform")
+					}
+					p.client = lark.NewClient("cli_skip_mentions", "test-secret",
+						lark.WithOpenBaseUrl(srv.URL), lark.WithHttpClient(srv.Client()))
+					if !cfg.unknownBot {
+						p.botOpenID = "ou_bot"
+					}
+					p.userNameCache.Store("ou_user", "User")
+					p.chatNameCache.Store("oc_chat", "Chat")
+					received := make(chan *core.Message, 1)
+					p.handler = func(_ core.Platform, msg *core.Message) { received <- msg }
+					content, err := json.Marshal(map[string]string{"text": tc.text})
+					if err != nil {
+						t.Fatalf("marshal content: %v", err)
+					}
+					event := &larkim.P2MessageReceiveV1{
+						Event: &larkim.P2MessageReceiveV1Data{
+							Sender: &larkim.EventSender{
+								SenderId: &larkim.UserId{OpenId: strPtr("ou_user")}, SenderType: strPtr("user"),
+							},
+							Message: &larkim.EventMessage{
+								MessageId: strPtr("om_skip_mentions"), ChatId: strPtr("oc_chat"),
+								ChatType: strPtr(tc.chatType), MessageType: strPtr("text"),
+								Content: strPtr(string(content)), Mentions: tc.mentions,
+								CreateTime: strPtr(strconv.FormatInt(time.Now().Add(time.Second).UnixMilli(), 10)),
+							},
+						},
+					}
+					if err := p.onMessage(context.Background(), event); err != nil {
+						t.Fatalf("onMessage() error = %v", err)
+					}
+					if !cfg.want[i] {
+						select {
+						case msg := <-received:
+							t.Fatalf("filtered message reached handler: %+v", msg)
+						case <-time.After(300 * time.Millisecond):
+						}
+						return
+					}
+					select {
+					case msg := <-received:
+						wantContent := tc.wantContent
+						if cfg.unknownBot {
+							wantContent = tc.unknownContent
+						}
+						if msg.Content != wantContent {
+							t.Errorf("Content = %q, want %q", msg.Content, wantContent)
+						}
+						if msg.MessageID != "om_skip_mentions" || msg.SessionKey != "feishu:oc_chat:ou_user" || msg.UserID != "ou_user" {
+							t.Errorf("unexpected dispatched message identity: %+v", msg)
+						}
+					case <-time.After(2 * time.Second):
+						t.Fatal("timed out waiting for handler dispatch")
+					}
+				})
+			}
+		})
+	}
+}
+
+func TestShouldSkipMentionedOthers(t *testing.T) {
+	tests := []struct {
+		name       string
+		chatType   string
+		all        bool
+		skip       bool
+		mentions   int
+		botMention bool
+		want       bool
+	}{
+		{"group mentions other", "group", true, true, 1, false, true},
+		{"group mentions bot", "group", true, true, 1, true, false},
+		{"group mentions both", "group", true, true, 2, true, false},
+		{"group no mention", "group", true, true, 0, false, false},
+		{"all message has no mention", "group", true, true, 0, false, false},
+		{"option disabled", "group", true, false, 1, false, false},
+		{"group reply all disabled", "group", false, true, 1, false, false},
+		{"private chat", "p2p", true, true, 1, false, false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := shouldSkipMentionedOthers(tc.chatType, tc.all, tc.skip, tc.mentions, tc.botMention); got != tc.want {
+				t.Fatalf("shouldSkipMentionedOthers() = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestNewPlatform_SkipWhenMentionOthers(t *testing.T) {
+	p, err := newPlatform("feishu", lark.FeishuBaseUrl, map[string]any{
+		"app_id":                   "cli_test",
+		"app_secret":               "secret",
+		"group_reply_all":          true,
+		"skip_when_mention_others": true,
+	})
+	if err != nil {
+		t.Fatalf("newPlatform error: %v", err)
+	}
+	fp := extractBasePlatform(p)
+	if fp == nil || !fp.skipWhenMentionOthers {
+		t.Fatal("skip_when_mention_others should be enabled")
 	}
 }
 
@@ -2440,7 +2706,7 @@ func TestFlushImageBatchForSession_NoBatchIsSafe(t *testing.T) {
 func TestParsePostFiles_FlatFormat(t *testing.T) {
 	p := &Platform{platformName: "feishu"}
 	raw := `{"title":"","content":[[{"tag":"text","text":"按这个表里的字段,重新填充"}]],"files":[{"file_key":"file_v3_0015o_b1621303","file_name":"Huidive -询盘跟进表.xlsx","is_folder":false}]}`
-	got := p.parsePostFiles(raw)
+	got := mustParsePost(t, p, raw).Files
 	if len(got) != 1 {
 		t.Fatalf("len(files) = %d, want 1", len(got))
 	}
@@ -2458,7 +2724,7 @@ func TestParsePostFiles_FlatFormat(t *testing.T) {
 func TestParsePostFiles_LangKeyedFormat(t *testing.T) {
 	p := &Platform{platformName: "feishu"}
 	raw := `{"zh_cn":{"title":"","content":[[{"tag":"text","text":"看这个"}]],"files":[{"file_key":"file_lang_k","file_name":"LANG.pdf"}]}}`
-	got := p.parsePostFiles(raw)
+	got := mustParsePost(t, p, raw).Files
 	if len(got) != 1 {
 		t.Fatalf("len(files) = %d, want 1", len(got))
 	}
@@ -2473,7 +2739,7 @@ func TestParsePostFiles_LangKeyedFormat(t *testing.T) {
 func TestParsePostFiles_NoFiles(t *testing.T) {
 	p := &Platform{platformName: "feishu"}
 	raw := `{"title":"","content":[[{"tag":"text","text":"just text, no files"}]]}`
-	if got := p.parsePostFiles(raw); len(got) != 0 {
+	if got := mustParsePost(t, p, raw).Files; len(got) != 0 {
 		t.Fatalf("len(files) = %d, want 0", len(got))
 	}
 }

@@ -35,7 +35,8 @@ import (
 	larkws "github.com/larksuite/oapi-sdk-go/v3/ws"
 )
 
-// sanitizingLogger wraps a logger and masks sensitive URL parameters.
+// sanitizingLogger masks sensitive URL parameters and respects the application log level.
+// The WebSocket SDK does not apply WithLogLevel to a custom logger.
 type sanitizingLogger struct {
 	inner larkcore.Logger
 }
@@ -71,7 +72,11 @@ func (l *sanitizingLogger) sanitize(s string) string {
 	return s
 }
 
+// Debug forwards sanitized SDK messages only when the application enables this level.
 func (l *sanitizingLogger) Debug(ctx context.Context, args ...interface{}) {
+	if !slog.Default().Enabled(ctx, slog.LevelDebug) {
+		return
+	}
 	for _, arg := range args {
 		s, ok := arg.(string)
 		if !ok {
@@ -85,15 +90,27 @@ func (l *sanitizingLogger) Debug(ctx context.Context, args ...interface{}) {
 	l.inner.Debug(ctx, l.maskURL(args...)...)
 }
 
+// Info forwards sanitized SDK messages only when the application enables this level.
 func (l *sanitizingLogger) Info(ctx context.Context, args ...interface{}) {
+	if !slog.Default().Enabled(ctx, slog.LevelInfo) {
+		return
+	}
 	l.inner.Info(ctx, l.maskURL(args...)...)
 }
 
+// Warn forwards sanitized SDK messages only when the application enables this level.
 func (l *sanitizingLogger) Warn(ctx context.Context, args ...interface{}) {
+	if !slog.Default().Enabled(ctx, slog.LevelWarn) {
+		return
+	}
 	l.inner.Warn(ctx, l.maskURL(args...)...)
 }
 
+// Error forwards sanitized SDK messages only when the application enables this level.
 func (l *sanitizingLogger) Error(ctx context.Context, args ...interface{}) {
+	if !slog.Default().Enabled(ctx, slog.LevelError) {
+		return
+	}
 	l.inner.Error(ctx, l.maskURL(args...)...)
 }
 
@@ -131,6 +148,7 @@ type Platform struct {
 	allowChat                  string
 	groupOnly                  bool
 	groupReplyAll              bool
+	skipWhenMentionOthers      bool
 	respondToAtEveryoneAndHere bool
 	shareSessionInChannel      bool
 	threadIsolation            bool
@@ -367,6 +385,7 @@ func newPlatform(name, domain string, opts map[string]any) (core.Platform, error
 	allowChat, _ := opts["allow_chat"].(string)
 	groupOnly, _ := opts["group_only"].(bool)
 	groupReplyAll, _ := opts["group_reply_all"].(bool)
+	skipWhenMentionOthers, _ := opts["skip_when_mention_others"].(bool)
 	// require_mention = false is equivalent to group_reply_all = true:
 	// both mean "respond to all group messages without needing an @mention".
 	if v, ok := opts["require_mention"].(bool); ok && !v {
@@ -486,6 +505,7 @@ func newPlatform(name, domain string, opts map[string]any) (core.Platform, error
 		allowChat:                  allowChat,
 		groupOnly:                  groupOnly,
 		groupReplyAll:              groupReplyAll,
+		skipWhenMentionOthers:      skipWhenMentionOthers,
 		respondToAtEveryoneAndHere: respondToAtEveryoneAndHere,
 		shareSessionInChannel:      shareSessionInChannel,
 		threadIsolation:            threadIsolation,
@@ -698,7 +718,7 @@ func (p *Platform) startWebSocketMode() error {
 	p.mu.Unlock()
 
 	go func() {
-		if err := p.wsClient.Start(ctx); err != nil {
+		if err := p.wsClient.Start(ctx); err != nil && !errors.Is(err, context.Canceled) {
 			slog.Error(p.tag()+": websocket error", "error", err)
 		}
 	}()
@@ -901,12 +921,10 @@ func (p *Platform) onCardAction(event *callback.CardActionTriggerEvent) (*callba
 		}
 
 		rctx := replyContext{messageID: messageID, chatID: chatID, sessionKey: sessionKey}
-		go p.dispatchCoreMessage(&core.Message{
+		p.dispatchCardActionMessage(chatID, &core.Message{
 			SessionKey:           sessionKey,
 			Platform:             p.platformName,
 			UserID:               userID,
-			UserName:             p.resolveUserName(userID),
-			ChatName:             p.resolveChatName(chatID),
 			Content:              responseText,
 			ReplyCtx:             rctx,
 			IsPermissionResponse: true,
@@ -933,12 +951,10 @@ func (p *Platform) onCardAction(event *callback.CardActionTriggerEvent) (*callba
 	// askq: — AskUserQuestion option selected, forward as user message
 	if strings.HasPrefix(actionVal, "askq:") {
 		rctx := replyContext{messageID: messageID, chatID: chatID, sessionKey: sessionKey}
-		go p.dispatchCoreMessage(&core.Message{
+		p.dispatchCardActionMessage(chatID, &core.Message{
 			SessionKey: sessionKey,
 			Platform:   p.platformName,
 			UserID:     userID,
-			UserName:   p.resolveUserName(userID),
-			ChatName:   p.resolveChatName(chatID),
 			Content:    actionVal,
 			ReplyCtx:   rctx,
 		})
@@ -968,12 +984,10 @@ func (p *Platform) onCardAction(event *callback.CardActionTriggerEvent) (*callba
 
 		slog.Info(p.tag()+": card action dispatched as command", "cmd", cmdText, "user", userID)
 
-		go p.dispatchCoreMessage(&core.Message{
+		p.dispatchCardActionMessage(chatID, &core.Message{
 			SessionKey: sessionKey,
 			Platform:   p.platformName,
 			UserID:     userID,
-			UserName:   p.resolveUserName(userID),
-			ChatName:   p.resolveChatName(chatID),
 			Content:    cmdText,
 			ReplyCtx:   rctx,
 		})
@@ -1163,7 +1177,7 @@ func (p *Platform) IsMessageRecalled(ctx context.Context, rctx any) (bool, error
 
 	req := larkim.NewGetMessageReqBuilder().
 		MessageId(messageID).
-		UserIdType(larkim.UserIdTypeGetMessageOpenId).
+		UserIdType(larkim.UserIdTypeOpenId).
 		Build()
 
 	var resp *larkim.GetMessageResp
@@ -1209,6 +1223,22 @@ func isMessageWithdrawnError(err error) bool {
 		return false
 	}
 	return isMessageWithdrawnCode(0, err.Error())
+}
+
+// dispatchCardActionMessage forwards a card button action to the engine. The
+// name lookups are network calls, so they run inside the goroutine: as
+// arguments of a go statement they would be evaluated synchronously and hold
+// the card callback past Feishu's response window.
+//
+// Like the message path (dispatchMessageWithHistory), the goroutine has no
+// recover. The callback has already been answered when it runs, so Feishu will
+// not redeliver the action.
+func (p *Platform) dispatchCardActionMessage(chatID string, msg *core.Message) {
+	go func() {
+		msg.UserName = p.resolveUserName(msg.UserID)
+		msg.ChatName = p.resolveChatName(chatID)
+		p.dispatchCoreMessage(msg)
+	}()
 }
 
 func (p *Platform) dispatchCoreMessage(msg *core.Message) {
@@ -1755,6 +1785,7 @@ func (p *Platform) onMessage(ctx context.Context, event *larkim.P2MessageReceive
 		"parent_id", stringValue(msg.ParentId),
 		"mentions", mentionCount,
 		"group_reply_all", p.groupReplyAll,
+		"skip_when_mention_others", p.skipWhenMentionOthers,
 		"thread_isolation", p.threadIsolation,
 	)
 
@@ -1765,6 +1796,16 @@ func (p *Platform) onMessage(ctx context.Context, event *larkim.P2MessageReceive
 	filterActive := botOpenID != "" || p.IsGroupFilterDegraded()
 	botMentioned := botOpenID != "" && isBotMentioned(msg.Mentions, botOpenID)
 	atEveryone := p.respondToAtEveryoneAndHere && msg.Content != nil && strings.Contains(*msg.Content, "@_all")
+
+	// When group_reply_all is enabled, optionally let another bot own messages
+	// that explicitly mention someone else. An empty botOpenID is deliberately
+	// fail-closed here: enabling this option while bot discovery is unavailable
+	// drops all mentioned group messages rather than letting this bot compete.
+	if shouldSkipMentionedOthers(chatType, p.groupReplyAll, p.skipWhenMentionOthers, len(msg.Mentions), botMentioned) {
+		slog.Debug(p.tag()+": skipping group message that mentions others only",
+			"chat_id", chatID, "message_id", messageID)
+		return nil
+	}
 
 	// With history sharing enabled, observe ordinary text/post messages only
 	// after the chat-level allow list has admitted the chat. Do this before the
@@ -1822,25 +1863,30 @@ func (p *Platform) onMessage(ctx context.Context, event *larkim.P2MessageReceive
 		}
 	}
 
-	if !core.AllowList(p.allowFrom, userID) {
-		slog.Debug(p.tag()+": message from unauthorized user", "user", userID)
-		// Announce the rejection only when the sender deliberately addressed
-		// the bot (p2p chat or explicit @mention). Group messages merely
-		// overheard via group_reply_all are dropped silently — replying to
-		// every unauthorized group member would flood the chat, and the
-		// unauthorized-chat branch below is silent for the same reason.
-		if chatType != "group" || isBotMentioned(msg.Mentions, p.getBotOpenID()) {
-			p.replyUnauthorizedAccess(ctx, replyContext{messageID: messageID, chatID: chatID, sessionKey: sessionKey})
-		}
-		return nil
-	}
-
+	// Check the chat scope (allow_chat / group_only) before allow_from.
+	// Several platform entries can share one Feishu app and all receive the
+	// same event. An entry must stay silent for chats it does not own;
+	// replying "unauthorized" there would duplicate the answer of the entry
+	// that does own the chat.
 	if chatType == "group" && !core.AllowList(p.allowChat, chatID) {
 		slog.Debug(p.tag()+": message from unauthorized chat", "chat_id", chatID)
 		return nil
 	}
 	if chatType != "group" && p.groupOnly {
 		slog.Debug(p.tag()+": p2p message skipped (group_only=true)", "chat_type", chatType)
+		return nil
+	}
+
+	if !core.AllowList(p.allowFrom, userID) {
+		slog.Debug(p.tag()+": message from unauthorized user", "user", userID)
+		// Announce the rejection only when the sender deliberately addressed
+		// the bot (p2p chat or explicit @mention). Group messages merely
+		// overheard via group_reply_all are dropped silently — replying to
+		// every unauthorized group member would flood the chat, and the
+		// unauthorized-chat branch above is silent for the same reason.
+		if chatType != "group" || isBotMentioned(msg.Mentions, p.getBotOpenID()) {
+			p.replyUnauthorizedAccess(ctx, replyContext{messageID: messageID, chatID: chatID, sessionKey: sessionKey})
+		}
 		return nil
 	}
 
@@ -1889,6 +1935,10 @@ func (p *Platform) onMessage(ctx context.Context, event *larkim.P2MessageReceive
 	go p.dispatchMessageWithHistory(ctx, msgType, content, mentions, messageID, sessionKey, userID, chatID, rctx, parentID, createTimeMs, groupHistoryCtx)
 
 	return nil
+}
+
+func shouldSkipMentionedOthers(chatType string, groupReplyAll, skipWhenMentionOthers bool, mentionCount int, botMentioned bool) bool {
+	return chatType == "group" && groupReplyAll && skipWhenMentionOthers && mentionCount > 0 && !botMentioned
 }
 
 func (p *Platform) replyUnauthorizedAccess(ctx context.Context, rctx replyContext) {
@@ -2066,33 +2116,16 @@ func (p *Platform) dispatchMessageWithHistory(ctx context.Context, msgType, cont
 		})
 
 	case "post":
-		textParts, images := p.parsePostContent(messageID, content, mentions...)
-		text := stripMentions(strings.Join(textParts, "\n"), mentions, p.getBotOpenID())
-		// Top-level files[] of a rich-text post message were silently dropped
-		// before #1884 — the user could attach a file alongside text and the
-		// bot would only ever see the text. Reuse the existing file download
-		// helper to pull each non-folder attachment and surface it to the agent.
-		var postFiles []core.FileAttachment
-		for _, pf := range p.parsePostFiles(content) {
-			if pf.FileKey == "" || pf.IsFolder {
-				continue
-			}
-			fileData, err := p.downloadResource(messageID, pf.FileKey, "file")
-			if err != nil {
-				slog.Error(p.tag()+": download post file failed",
-					"error", err,
-					"file_key", pf.FileKey,
-					"file_name", pf.FileName,
-				)
-				continue
-			}
-			postFiles = append(postFiles, core.FileAttachment{
-				MimeType: detectMimeType(fileData),
-				Data:     fileData,
-				FileName: pf.FileName,
-			})
+		post := p.parsePostBody(content)
+		if post == nil {
+			post = &postLang{}
 		}
-		if text == "" && historyText == "" && len(images) == 0 && len(postFiles) == 0 && quoted.text == "" && len(quoted.images) == 0 {
+		textParts, images := p.extractPostParts(messageID, post, mentions...)
+		files, notices := p.downloadPostFiles(messageID, post.Files, strings.Join(textParts, "\n"))
+		textParts = append(textParts, notices...)
+		files = append(files, p.downloadQuotedFiles(ctx, p.filterQuotedFilesForUser(quoted.files, mentions, userID))...)
+		text := stripMentions(strings.Join(textParts, "\n"), mentions, p.getBotOpenID())
+		if text == "" && historyText == "" && len(images) == 0 && len(files) == 0 && quoted.text == "" && len(quoted.images) == 0 {
 			return
 		}
 		// Flush any image batch buffered earlier in this session (#1686 P1-B).
@@ -2101,7 +2134,7 @@ func (p *Platform) dispatchMessageWithHistory(ctx context.Context, msgType, cont
 			SessionKey: sessionKey, Platform: p.platformName,
 			MessageID: messageID,
 			UserID:    userID, UserName: userName, ChatName: chatName,
-			Content: text, ExtraContent: quoted.text, Images: append(quoted.images, images...), Files: postFiles,
+			Content: text, ExtraContent: quoted.text, Images: append(quoted.images, images...), Files: files,
 			ReplyCtx:          rctx,
 			UserMessageTimeMs: createTimeMs,
 		})
@@ -2125,7 +2158,7 @@ func (p *Platform) dispatchMessageWithHistory(ctx context.Context, msgType, cont
 			return
 		}
 		slog.Debug(p.tag()+": file downloaded", "file_name", fileBody.FileName, "size", len(fileData))
-		mimeType := detectMimeType(fileData)
+		mimeType := http.DetectContentType(fileData)
 		// Flush any image batch buffered earlier in this session (#1686 P1-B).
 		p.flushImageBatchForSession(sessionKey)
 		dispatchCore(&core.Message{
@@ -2275,6 +2308,11 @@ func (p *Platform) dispatchMessageWithHistory(ctx context.Context, msgType, cont
 	}
 }
 
+// nameLookupTimeout bounds the display-name lookups that run before an inbound
+// message reaches the engine. The SDK client has no request timeout, so without
+// it a request on a dead keep-alive connection blocks the message forever.
+var nameLookupTimeout = 5 * time.Second
+
 // resolveUserName fetches a user's display name via the Contact API, with caching.
 func (p *Platform) resolveUserName(openID string) string {
 	if !isValidFeishuLookupID(openID) {
@@ -2283,13 +2321,15 @@ func (p *Platform) resolveUserName(openID string) string {
 	if cached, ok := p.userNameCache.Load(openID); ok {
 		return cached.(string)
 	}
-	resp, err := p.client.Contact.User.Get(context.Background(),
+	ctx, cancel := context.WithTimeout(context.Background(), nameLookupTimeout)
+	defer cancel()
+	resp, err := p.client.Contact.User.Get(ctx,
 		larkcontact.NewGetUserReqBuilder().
 			UserId(openID).
 			UserIdType("open_id").
 			Build())
 	if err != nil {
-		slog.Debug(p.tag()+": resolve user name failed", "open_id", openID, "error", err)
+		slog.Warn(p.tag()+": resolve user name failed", "open_id", openID, "error", err)
 		return openID
 	}
 	if !resp.Success() || resp.Data == nil || resp.Data.User == nil || resp.Data.User.Name == nil {
@@ -2353,19 +2393,23 @@ func (p *Platform) resolveChatName(chatID string) string {
 	if cached, ok := p.chatNameCache.Load(chatID); ok {
 		return cached.(string)
 	}
-	resp, err := p.client.Im.Chat.Get(context.Background(),
+	ctx, cancel := context.WithTimeout(context.Background(), nameLookupTimeout)
+	defer cancel()
+	resp, err := p.client.Im.Chat.Get(ctx,
 		larkim.NewGetChatReqBuilder().ChatId(chatID).Build())
 	if err != nil {
-		slog.Debug(p.tag()+": resolve chat name failed", "chat_id", chatID, "error", err)
+		slog.Warn(p.tag()+": resolve chat name failed", "chat_id", chatID, "error", err)
 		return chatID
 	}
-	if !resp.Success() || resp.Data == nil || resp.Data.Name == nil {
+	if !resp.Success() || resp.Data == nil {
 		slog.Debug(p.tag()+": resolve chat name: no data", "chat_id", chatID, "code", resp.Code)
 		return chatID
 	}
-	name := *resp.Data.Name
-	if name == "" {
-		return chatID
+	// p2p chats have no name. That answer is final, so cache the fallback too;
+	// otherwise every DM repeats this request before it can be dispatched.
+	name := chatID
+	if resp.Data.Name != nil && *resp.Data.Name != "" {
+		name = *resp.Data.Name
 	}
 	p.chatNameCache.Store(chatID, name)
 	return name
@@ -2656,9 +2700,22 @@ func (p *Platform) fetchSingleMessage(ctx context.Context, messageID string) *ch
 			text = replaceMentions(textBody.Text, item.Mentions)
 		}
 	case "post":
-		textParts, postImages := p.parsePostContent(messageID, content)
+		post := p.parsePostBody(content)
+		if post == nil {
+			post = &postLang{}
+		}
+		textParts, postImages := p.extractPostParts(messageID, post)
 		text = replaceMentions(strings.Join(textParts, "\n"), item.Mentions)
 		images = postImages
+		// Keep post files lazy, with the same mention/sender privacy gates as standalone quoted files.
+		for _, file := range post.Files {
+			if file.FileKey != "" && !file.IsFolder {
+				files = append(files, quotedFileMeta{fileKey: file.FileKey, fileName: file.FileName, messageID: messageID, senderID: item.Sender.ID})
+			}
+		}
+		if text == "" && len(files) > 0 {
+			text = "[file]"
+		}
 		if text == "" && len(images) > 0 {
 			text = "[image]"
 		}
@@ -2720,7 +2777,9 @@ func (p *Platform) fetchSingleMessage(ctx context.Context, messageID string) *ch
 		// set the engine watermark before the async merge_forward dispatch
 		// finishes, causing the standalone forward event to be dropped as
 		// stale. Without this expansion the agent only sees "[merge_forward]".
-		text, images, _ = p.parseMergeForward(messageID)
+		// Quoted-forward files are not delivered here. Do not download and
+		// discard their bytes before the quoted-file authorization gates.
+		text, images, _ = p.parseMergeForwardContent(messageID, false)
 		if text == "" {
 			text = "[merge_forward]"
 		}
@@ -2864,8 +2923,13 @@ func extractPostPlainText(content string) string {
 	if err := json.Unmarshal([]byte(content), &post); err != nil || len(post.Content) == 0 {
 		var localeWrapper map[string]json.RawMessage
 		if err2 := json.Unmarshal([]byte(content), &localeWrapper); err2 == nil {
-			for _, v := range localeWrapper {
-				if err3 := json.Unmarshal(v, &post); err3 == nil && len(post.Content) > 0 {
+			keys := make([]string, 0, len(localeWrapper))
+			for k := range localeWrapper {
+				keys = append(keys, k)
+			}
+			sort.Strings(keys)
+			for _, k := range keys {
+				if err3 := json.Unmarshal(localeWrapper[k], &post); err3 == nil && len(post.Content) > 0 {
 					break
 				}
 			}
@@ -2957,14 +3021,13 @@ func extractInteractiveCardText(content string) string {
 	// Schema 2.0: body may use property.elements (standard) or direct elements (simplified).
 	if raw, ok := card["body"]; ok {
 		var body struct {
-			Tag      string            `json:"tag"`
 			Elements []json.RawMessage `json:"elements"`
 			Property struct {
 				Elements []json.RawMessage `json:"elements"`
 			} `json:"property"`
 		}
 		if json.Unmarshal(raw, &body) == nil {
-			if body.Tag == "body" && len(body.Property.Elements) > 0 {
+			if len(body.Property.Elements) > 0 {
 				extractCardElements(body.Property.Elements, &parts)
 			} else if len(body.Elements) > 0 {
 				extractCardElements(body.Elements, &parts)
@@ -3003,15 +3066,7 @@ func extractInteractiveCardText(content string) string {
 				_ = json.Unmarshal(raw, &elements)
 			}
 		}
-		for _, raw := range elements {
-			var elem struct {
-				Tag  string `json:"tag"`
-				Text string `json:"text"`
-			}
-			if json.Unmarshal(raw, &elem) == nil && elem.Tag == "text" && strings.TrimSpace(elem.Text) != "" {
-				parts = append(parts, elem.Text)
-			}
-		}
+		extractCardElements(elements, &parts)
 	}
 
 	if len(parts) == 0 {
@@ -3026,10 +3081,21 @@ func extractInteractiveCardText(content string) string {
 func extractCardElements(elements []json.RawMessage, parts *[]string) {
 	for _, raw := range elements {
 		var elem struct {
-			Tag      string `json:"tag"`
-			Content  string `json:"content"`
+			Tag       string          `json:"tag"`
+			Content   string          `json:"content"`
+			Text      json.RawMessage `json:"text"`
+			Href      string          `json:"href"`
+			URL       string          `json:"url"`
+			Behaviors json.RawMessage `json:"behaviors"`
+			MultiURL  *struct {
+				URL        string `json:"url"`
+				PCURL      string `json:"pc_url"`
+				AndroidURL string `json:"android_url"`
+				IOSURL     string `json:"ios_url"`
+			} `json:"multi_url"`
 			Property struct {
 				Content   string            `json:"content"`
+				URL       cardLinkURL       `json:"url"`
 				Contents  json.RawMessage   `json:"contents"`
 				Language  string            `json:"language"`
 				Elements  []json.RawMessage `json:"elements"`
@@ -3038,36 +3104,94 @@ func extractCardElements(elements []json.RawMessage, parts *[]string) {
 				Columns   json.RawMessage   `json:"columns"`
 				Rows      json.RawMessage   `json:"rows"`
 				Behaviors json.RawMessage   `json:"behaviors"`
+				Actions   json.RawMessage   `json:"actions"`
 			} `json:"property"`
 		}
 		if json.Unmarshal(raw, &elem) != nil {
 			continue
 		}
+		if len(elem.Property.Text) == 0 {
+			elem.Property.Text = elem.Text
+		}
+		if len(elem.Property.Behaviors) == 0 {
+			elem.Property.Behaviors = elem.Behaviors
+		}
+		if elem.Property.Content == "" {
+			elem.Property.Content = elem.Content
+		}
 		switch elem.Tag {
+		case "a", "link":
+			label := elem.Property.Content
+			if label == "" {
+				label = cardTextContent(elem.Property.Text)
+			}
+			if label == "" {
+				label = cardTextContent(elem.Text)
+			}
+			url := string(elem.Property.URL)
+			if url == "" {
+				url = elem.Href
+			}
+			if url == "" {
+				url = elem.URL
+			}
+			if url == "" && elem.MultiURL != nil {
+				url = elem.MultiURL.URL
+				if url == "" {
+					url = elem.MultiURL.PCURL
+				}
+				if url == "" {
+					url = elem.MultiURL.AndroidURL
+				}
+				if url == "" {
+					url = elem.MultiURL.IOSURL
+				}
+			}
+			switch {
+			case label != "" && url != "":
+				// Avoid double-wrapping labels that are already markdown links.
+				if strings.HasPrefix(label, "[") && strings.Contains(label, "](") {
+					*parts = append(*parts, label)
+				} else {
+					*parts = append(*parts, cardMarkdownLink(label, url))
+				}
+			case label != "":
+				*parts = append(*parts, label)
+			case url != "":
+				*parts = append(*parts, url)
+			}
 		case "button":
 			// Extract button label text and open_url from behaviors.
 			label := elem.Property.Content
 			if label == "" {
-				// label may be in property.text.property.content
-				var textElem struct {
-					Property struct {
-						Content string `json:"content"`
-					} `json:"property"`
-				}
-				if json.Unmarshal(elem.Property.Text, &textElem) == nil {
-					label = textElem.Property.Content
-				}
+				label = cardTextContent(elem.Property.Text)
+			}
+			if len(elem.Property.Behaviors) == 0 {
+				elem.Property.Behaviors = elem.Property.Actions
 			}
 			var openURL string
 			if len(elem.Property.Behaviors) > 0 {
 				var behaviors []struct {
-					Type string `json:"type"`
-					URL  string `json:"url"`
+					Type       string `json:"type"`
+					URL        string `json:"url"`
+					DefaultURL string `json:"default_url"`
+					Action     struct {
+						URL string `json:"url"`
+					} `json:"action"`
 				}
 				if json.Unmarshal(elem.Property.Behaviors, &behaviors) == nil {
 					for _, b := range behaviors {
-						if b.Type == "open_url" && b.URL != "" {
+						if b.Type == "open_url" || b.Type == "openUrl" {
 							openURL = b.URL
+							if openURL == "" {
+								openURL = b.DefaultURL
+							}
+							if openURL == "" {
+								openURL = b.Action.URL
+							}
+							if openURL == "" {
+								continue
+							}
 							break
 						}
 					}
@@ -3121,15 +3245,8 @@ func extractCardElements(elements []json.RawMessage, parts *[]string) {
 			if content != "" {
 				*parts = append(*parts, content)
 			}
-			if len(elem.Property.Text) > 0 {
-				var textElem struct {
-					Property struct {
-						Content string `json:"content"`
-					} `json:"property"`
-				}
-				if json.Unmarshal(elem.Property.Text, &textElem) == nil && textElem.Property.Content != "" {
-					*parts = append(*parts, textElem.Property.Content)
-				}
+			if c := cardTextContent(elem.Property.Text); c != "" {
+				*parts = append(*parts, c)
 			}
 		}
 		if len(elem.Property.Elements) > 0 {
@@ -3203,6 +3320,10 @@ func extractCardListItems(itemsRaw json.RawMessage, parts *[]string) {
 // GET /open-apis/im/v1/messages/{message_id} API, then formats them into
 // readable text. Returns combined text, images, and files from the sub-messages.
 func (p *Platform) parseMergeForward(rootMessageID string) (string, []core.ImageAttachment, []core.FileAttachment) {
+	return p.parseMergeForwardContent(rootMessageID, true)
+}
+
+func (p *Platform) parseMergeForwardContent(rootMessageID string, includeFiles bool) (string, []core.ImageAttachment, []core.FileAttachment) {
 	resp, err := p.client.Im.Message.Get(context.Background(),
 		larkim.NewGetMessageReqBuilder().
 			MessageId(rootMessageID).
@@ -3252,9 +3373,13 @@ func (p *Platform) parseMergeForward(rootMessageID string) (string, []core.Image
 
 	var allImages []core.ImageAttachment
 	var allFiles []core.FileAttachment
+	var files *[]core.FileAttachment
+	if includeFiles {
+		files = &allFiles
+	}
 	var sb strings.Builder
 	sb.WriteString("<forwarded_messages>\n")
-	p.formatMergeForwardTree(rootMessageID, childrenMap, nameMap, &sb, &allImages, &allFiles, 0)
+	p.formatMergeForwardTree(rootMessageID, rootMessageID, childrenMap, nameMap, &sb, &allImages, files, 0)
 	sb.WriteString("</forwarded_messages>")
 
 	return sb.String(), allImages, allFiles
@@ -3271,7 +3396,9 @@ func replaceMentions(text string, mentions []*larkim.Mention) string {
 }
 
 // formatMergeForwardTree recursively formats the sub-message tree.
-func (p *Platform) formatMergeForwardTree(parentID string, childrenMap map[string][]*larkim.Message, nameMap map[string]string, sb *strings.Builder, images *[]core.ImageAttachment, files *[]core.FileAttachment, depth int) {
+// Resource downloads use the outer container ID, even for nested forwards.
+// A nil files collector keeps file names in the text without downloading files.
+func (p *Platform) formatMergeForwardTree(parentID, resourceMessageID string, childrenMap map[string][]*larkim.Message, nameMap map[string]string, sb *strings.Builder, images *[]core.ImageAttachment, files *[]core.FileAttachment, depth int) {
 	if depth > 10 {
 		sb.WriteString(strings.Repeat("    ", depth) + "[nested forwarding truncated]\n")
 		return
@@ -3324,7 +3451,20 @@ func (p *Platform) formatMergeForwardTree(parentID string, childrenMap map[strin
 			}
 
 		case "post":
-			textParts, postImages := p.parsePostContent(msgID, content)
+			post := p.parsePostBody(content)
+			if post == nil {
+				post = &postLang{}
+			}
+			textParts, postImages := p.extractPostParts(resourceMessageID, post)
+			if files != nil {
+				postAttachments, notices := p.downloadPostFiles(resourceMessageID, post.Files, strings.Join(textParts, "\n"))
+				*files = append(*files, postAttachments...)
+				textParts = append(textParts, notices...)
+			} else {
+				for _, file := range post.Files {
+					textParts = append(textParts, fmt.Sprintf("[file: %s]", file.FileName))
+				}
+			}
 			*images = append(*images, postImages...)
 			text := replaceMentions(strings.Join(textParts, "\n"), item.Mentions)
 			if text != "" {
@@ -3339,7 +3479,7 @@ func (p *Platform) formatMergeForwardTree(parentID string, childrenMap map[strin
 				ImageKey string `json:"image_key"`
 			}
 			if err := json.Unmarshal([]byte(content), &imgBody); err == nil && imgBody.ImageKey != "" {
-				imgData, mimeType, err := p.downloadImage(msgID, imgBody.ImageKey)
+				imgData, mimeType, err := p.downloadImage(resourceMessageID, imgBody.ImageKey)
 				if err != nil {
 					slog.Error(p.tag()+": download merge_forward image failed", "error", err)
 					sb.WriteString(fmt.Sprintf("%s[%s] %s: [image - download failed]\n", indent, ts, senderName))
@@ -3355,12 +3495,18 @@ func (p *Platform) formatMergeForwardTree(parentID string, childrenMap map[strin
 				FileName string `json:"file_name"`
 			}
 			if err := json.Unmarshal([]byte(content), &fileBody); err == nil && fileBody.FileKey != "" {
-				fileData, err := p.downloadResource(msgID, fileBody.FileKey, "file")
+				if files == nil {
+					fmt.Fprintf(sb, "%s[%s] %s: [file: %s]\n", indent, ts, senderName, fileBody.FileName)
+					continue
+				}
+				// Forwarded file resources belong to the outer container, including
+				// files reached through nested merge_forward messages.
+				fileData, err := p.downloadResource(resourceMessageID, fileBody.FileKey, "file")
 				if err != nil {
 					slog.Error(p.tag()+": download merge_forward file failed", "error", err)
 					sb.WriteString(fmt.Sprintf("%s[%s] %s: [file: %s - download failed]\n", indent, ts, senderName, fileBody.FileName))
 				} else {
-					mt := detectMimeType(fileData)
+					mt := http.DetectContentType(fileData)
 					*files = append(*files, core.FileAttachment{MimeType: mt, Data: fileData, FileName: fileBody.FileName})
 					sb.WriteString(fmt.Sprintf("%s[%s] %s: [file: %s]\n", indent, ts, senderName, fileBody.FileName))
 				}
@@ -3368,7 +3514,7 @@ func (p *Platform) formatMergeForwardTree(parentID string, childrenMap map[strin
 
 		case "merge_forward":
 			sb.WriteString(fmt.Sprintf("%s[%s] %s: [forwarded messages]\n", indent, ts, senderName))
-			p.formatMergeForwardTree(msgID, childrenMap, nameMap, sb, images, files, depth+1)
+			p.formatMergeForwardTree(msgID, resourceMessageID, childrenMap, nameMap, sb, images, files, depth+1)
 
 		default:
 			if describesFeishuMessageType(msgType) {
@@ -3547,13 +3693,13 @@ func detectFeishuFileType(mimeType, fileName string) string {
 	name := strings.ToLower(fileName)
 	switch {
 	case mimeType == "application/pdf" || strings.HasSuffix(name, ".pdf"):
-		return larkim.FileTypePdf
+		return larkim.CreateFileFileTypePdf
 	case strings.HasSuffix(name, ".doc") || strings.HasSuffix(name, ".docx"):
-		return larkim.FileTypeDoc
+		return larkim.CreateFileFileTypeDoc
 	case strings.HasSuffix(name, ".xls") || strings.HasSuffix(name, ".xlsx") || strings.HasSuffix(name, ".csv"):
-		return larkim.FileTypeXls
+		return larkim.CreateFileFileTypeXls
 	case strings.HasSuffix(name, ".ppt") || strings.HasSuffix(name, ".pptx"):
-		return larkim.FileTypePpt
+		return larkim.CreateFileFileTypePpt
 	// Feishu's file API only has "mp4" as the video type. We map all common
 	// video MIME types and extensions to FileTypeMp4 so the message renders
 	// as a native video player bubble rather than a generic file download.
@@ -3563,19 +3709,19 @@ func detectFeishuFileType(mimeType, fileName string) string {
 		strings.HasSuffix(name, ".mp4") || strings.HasSuffix(name, ".mov") ||
 		strings.HasSuffix(name, ".avi") || strings.HasSuffix(name, ".m4v") ||
 		strings.HasSuffix(name, ".mkv") || strings.HasSuffix(name, ".webm"):
-		return larkim.FileTypeMp4
+		return larkim.CreateFileFileTypeMp4
 	case mimeType == "audio/ogg" || mimeType == "audio/opus" || mimeType == "application/ogg" || strings.HasSuffix(name, ".ogg") || strings.HasSuffix(name, ".opus"):
-		return larkim.FileTypeOpus
+		return larkim.CreateFileFileTypeOpus
 	default:
-		return larkim.FileTypeStream
+		return larkim.CreateFileFileTypeStream
 	}
 }
 
 func detectFeishuFileMessageType(fileType string) string {
 	switch fileType {
-	case larkim.FileTypeOpus:
+	case larkim.CreateFileFileTypeOpus:
 		return larkim.MsgTypeAudio
-	case larkim.FileTypeMp4:
+	case larkim.CreateFileFileTypeMp4:
 		return larkim.MsgTypeMedia
 	default:
 		return larkim.MsgTypeFile
@@ -3634,7 +3780,7 @@ func detectMimeType(data []byte) string {
 		if string(data[:4]) == "GIF8" {
 			return "image/gif"
 		}
-		if string(data[:4]) == "RIFF" && string(data[8:12]) == "WEBP" {
+		if len(data) >= 12 && string(data[:4]) == "RIFF" && string(data[8:12]) == "WEBP" {
 			return "image/webp"
 		}
 	}
@@ -4089,7 +4235,7 @@ func (p *Platform) downloadQuotedFiles(ctx context.Context, metas []quotedFileMe
 			continue
 		}
 		out = append(out, core.FileAttachment{
-			MimeType: detectMimeType(data),
+			MimeType: http.DetectContentType(data),
 			Data:     data,
 			FileName: m.fileName,
 		})
@@ -4245,7 +4391,7 @@ func (p *Platform) replyMessage(ctx context.Context, rc replyContext, msgType, c
 
 func (p *Platform) createMessage(ctx context.Context, chatID, msgType, content, op string) error {
 	req := larkim.NewCreateMessageReqBuilder().
-		ReceiveIdType(larkim.ReceiveIdTypeChatId).
+		ReceiveIdType(larkim.CreateMessageV1ReceiveIDTypeChatId).
 		Body(larkim.NewCreateMessageReqBodyBuilder().
 			ReceiveId(chatID).
 			MsgType(msgType).
@@ -4727,21 +4873,28 @@ type feishuPreviewHandle struct {
 // Card font is inherently smaller than Post/Text — this is a Feishu platform limitation.
 func buildCardJSON(content string) string {
 	content = sanitizeCardMarkdownForCard(content)
-	card := map[string]any{
-		"schema": "2.0",
-		"config": map[string]any{
-			"wide_screen_mode": true,
-		},
-		"body": map[string]any{
-			"elements": []map[string]any{
-				{
-					"tag":     "markdown",
-					"content": content,
-				},
-			},
-		},
+	return marshalReplyCard(buildCardBodyElements(content), func(body []map[string]any) []map[string]any {
+		return body
+	}, content)
+}
+
+// marshalReplyCard builds a full-width reply card from the body elements and
+// what follows them. If drawing the tables as rows makes the card too large,
+// the body falls back to one markdown element with native tables.
+func marshalReplyCard(body []map[string]any, withTail func([]map[string]any) []map[string]any, content string) string {
+	marshal := func(body []map[string]any) []byte {
+		b, _ := json.Marshal(map[string]any{
+			"schema": "2.0",
+			"config": map[string]any{"width_mode": "fill"},
+			"body":   map[string]any{"elements": withTail(body)},
+		})
+		return b
 	}
-	b, _ := json.Marshal(card)
+	b := marshal(body)
+	transformed := len(body) != 1 || body[0]["tag"] != "markdown"
+	if len(b) > maxRichCardJSONBytes && transformed {
+		b = marshal([]map[string]any{{"tag": "markdown", "content": content}})
+	}
 	return string(b)
 }
 
@@ -4755,31 +4908,15 @@ func buildCardJSONWithStatusFooter(content, footer string) string {
 	segments := sanitizeCardMarkdownSegmentsForCard([]string{content, footer})
 	content = segments[0]
 	footer = segments[1]
-	elements := []map[string]any{
-		{
-			"tag":     "markdown",
-			"content": content,
-		},
-		{
-			"tag": "hr",
-		},
-		{
-			"tag":       "markdown",
-			"content":   footer,
-			"text_size": "notation",
-		},
-	}
-	card := map[string]any{
-		"schema": "2.0",
-		"config": map[string]any{
-			"wide_screen_mode": true,
-		},
-		"body": map[string]any{
-			"elements": elements,
-		},
-	}
-	b, _ := json.Marshal(card)
-	return string(b)
+	return marshalReplyCard(buildCardBodyElements(content), func(body []map[string]any) []map[string]any {
+		return append(body,
+			map[string]any{"tag": "hr"},
+			map[string]any{
+				"tag":       "markdown",
+				"content":   footer,
+				"text_size": "notation",
+			})
+	}, content)
 }
 
 func isZhLikeProgressLang(lang string) bool {
@@ -5129,10 +5266,13 @@ func progressPanelTitle(label string, count int, lang string) string {
 	return label
 }
 
-func buildProgressPanel(title string, expanded bool, elements []map[string]any) map[string]any {
+// Panels always start collapsed. Every card update re-sends the whole card, so
+// an expanded flag would re-open the panels on each refresh and make the text
+// below them jump while the turn is running.
+func buildProgressPanel(title string, elements []map[string]any) map[string]any {
 	return map[string]any{
 		"tag":              "collapsible_panel",
-		"expanded":         expanded,
+		"expanded":         false,
 		"background_color": "grey",
 		"header": map[string]any{
 			"title": map[string]any{"tag": "plain_text", "content": title},
@@ -5152,26 +5292,23 @@ func buildProgressPanelElements(items []core.ProgressCardEntry, lang string) []m
 	return elements
 }
 
-func appendProgressGroupedElements(elements []map[string]any, items []core.ProgressCardEntry, lang string, running bool) []map[string]any {
+func appendProgressGroupedElements(elements []map[string]any, items []core.ProgressCardEntry, lang string) []map[string]any {
 	reasoning, tools, others := splitProgressItemsByLane(items)
 	if len(reasoning) > 0 {
 		elements = append(elements, buildProgressPanel(
 			progressPanelTitle("Reasoning", len(reasoning), lang),
-			running,
 			buildProgressPanelElements(reasoning, lang),
 		))
 	}
 	if len(tools) > 0 {
 		elements = append(elements, buildProgressPanel(
 			progressPanelTitle("Tools", len(tools), lang),
-			running,
 			buildProgressPanelElements(tools, lang),
 		))
 	}
 	if len(others) > 0 {
 		elements = append(elements, buildProgressPanel(
 			progressPanelTitle("Updates", len(others), lang),
-			running,
 			buildProgressPanelElements(others, lang),
 		))
 	}
@@ -5186,7 +5323,6 @@ func buildProgressCardJSONFromPayload(payload *core.ProgressCardPayload) string 
 
 	agent := progressAgentLabel(payload.Agent)
 	title, template, footer := progressStateMeta(payload.State, payload.Lang, agent)
-	running := payload.State == core.ProgressCardStateRunning
 
 	elements := make([]map[string]any, 0, len(items)+3)
 	if payload.Truncated {
@@ -5206,7 +5342,7 @@ func buildProgressCardJSONFromPayload(payload *core.ProgressCardPayload) string 
 		elements = append(elements, map[string]any{"tag": "hr"})
 	}
 
-	elements = appendProgressGroupedElements(elements, items, payload.Lang, running)
+	elements = appendProgressGroupedElements(elements, items, payload.Lang)
 	if footer != "" {
 		elements = append(elements, map[string]any{"tag": "hr"})
 		elements = append(elements, map[string]any{
@@ -5329,7 +5465,7 @@ func (p *Platform) SendPreviewStart(ctx context.Context, rctx any, content strin
 		}
 	} else {
 		req := larkim.NewCreateMessageReqBuilder().
-			ReceiveIdType(larkim.ReceiveIdTypeChatId).
+			ReceiveIdType(larkim.CreateMessageV1ReceiveIDTypeChatId).
 			Body(larkim.NewCreateMessageReqBodyBuilder().
 				ReceiveId(chatID).
 				MsgType(larkim.MsgTypeInteractive).
@@ -5693,7 +5829,7 @@ func (p *Platform) SendAudio(ctx context.Context, rctx any, audio []byte, format
 		return p.withFreshTenantAccessTokenRetry(ctx, "upload audio", func(client *lark.Client, options ...larkcore.RequestOptionFunc) error {
 			req := larkim.NewCreateFileReqBuilder().
 				Body(larkim.NewCreateFileReqBodyBuilder().
-					FileType(larkim.FileTypeOpus).
+					FileType(larkim.CreateFileFileTypeOpus).
 					FileName("tts_audio.opus").
 					File(bytes.NewReader(audio)).
 					Build()).
@@ -5768,7 +5904,7 @@ func (p *Platform) SendVideo(ctx context.Context, rctx any, video []byte, format
 		return p.withFreshTenantAccessTokenRetry(ctx, "upload video", func(client *lark.Client, options ...larkcore.RequestOptionFunc) error {
 			req := larkim.NewCreateFileReqBuilder().
 				Body(larkim.NewCreateFileReqBodyBuilder().
-					FileType(larkim.FileTypeMp4).
+					FileType(larkim.CreateFileFileTypeMp4).
 					FileName(fileName).
 					File(bytes.NewReader(video)).
 					Build()).
@@ -5824,42 +5960,30 @@ type postLang struct {
 	Files   []postFile      `json:"files"`
 }
 
-// parsePostContent handles both formats of feishu post content:
-// 1. {"title":"...", "content":[[...]]}  (receive event)
-// 2. {"zh_cn":{"title":"...", "content":[[...]]}}  (some SDK versions)
-func (p *Platform) parsePostContent(messageID, raw string, mentions ...*larkim.MentionEvent) ([]string, []core.ImageAttachment) {
-	// try flat format first
-	var flat postLang
-	if err := json.Unmarshal([]byte(raw), &flat); err == nil && flat.Content != nil {
-		return p.extractPostParts(messageID, &flat, mentions...)
-	}
-	// try language-keyed format
-	var langMap map[string]postLang
-	if err := json.Unmarshal([]byte(raw), &langMap); err == nil {
-		for _, lang := range langMap {
-			return p.extractPostParts(messageID, &lang, mentions...)
-		}
-	}
-	slog.Error(p.tag()+": failed to parse post content", "raw", raw)
-	return nil, nil
-}
-
-// parsePostFiles extracts the top-level file attachments of a rich-text (post)
-// message, handling the same two content shapes as parsePostContent. Returns
-// nil when neither shape carries a files array. See issue #1884 — the post
-// body's top-level files[] was silently dropped before this helper existed.
-func (p *Platform) parsePostFiles(raw string) []postFile {
+// parsePostBody decodes a feishu post body once, handling both formats:
+// 1. {"title":"...", "content":[[...]], "files":[...]}  (receive event)
+// 2. {"zh_cn":{"title":"...", "content":[[...]]}}       (some SDK versions)
+// A locale-keyed body picks the first locale in sorted key order, so the text
+// and the files[] handed to the agent always come from the same locale (Go
+// randomizes map iteration, so two independent range loops could disagree).
+// Returns nil when the body is neither shape.
+func (p *Platform) parsePostBody(raw string) *postLang {
 	var flat postLang
 	if err := json.Unmarshal([]byte(raw), &flat); err == nil && (flat.Content != nil || flat.Files != nil) {
-		return flat.Files
+		return &flat
 	}
 	var langMap map[string]postLang
-	if err := json.Unmarshal([]byte(raw), &langMap); err == nil {
-		for _, lang := range langMap {
-			return lang.Files
-		}
+	if err := json.Unmarshal([]byte(raw), &langMap); err != nil || len(langMap) == 0 {
+		slog.Error(p.tag()+": failed to parse post content", "raw", raw)
+		return nil
 	}
-	return nil
+	keys := make([]string, 0, len(langMap))
+	for k := range langMap {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	lang := langMap[keys[0]]
+	return &lang
 }
 
 func (p *Platform) extractPostParts(messageID string, post *postLang, mentions ...*larkim.MentionEvent) ([]string, []core.ImageAttachment) {
@@ -7300,10 +7424,11 @@ func richPanelElements(steps []core.ToolStep, emptyText string) []map[string]any
 	return elements
 }
 
-func buildRichPanel(title string, expanded bool, elements []map[string]any) map[string]any {
+// buildRichPanel panels start collapsed for the same reason as buildProgressPanel.
+func buildRichPanel(title string, elements []map[string]any) map[string]any {
 	return map[string]any{
 		"tag":              "collapsible_panel",
-		"expanded":         expanded,
+		"expanded":         false,
 		"background_color": "grey",
 		"header": map[string]any{
 			"title": map[string]any{"tag": "plain_text", "content": title},
@@ -7369,19 +7494,17 @@ func buildRichCardJSONBytes(status core.CardStatus, steps []core.ToolStep, markd
 	if len(reasoningSteps) > 0 {
 		panelMaps = append(panelMaps, buildRichPanel(
 			richLaneTitle("Reasoning", len(reasoningSteps)),
-			streaming,
 			richPanelElements(reasoningSteps, "Thinking..."),
 		))
 	}
 	if len(toolSteps) > 0 {
 		panelMaps = append(panelMaps, buildRichPanel(
 			richLaneTitle("Tools", len(toolSteps)),
-			streaming,
 			richPanelElements(toolSteps, "No tool steps"),
 		))
 	}
 	if len(panelMaps) == 0 && streaming {
-		panelMaps = append(panelMaps, buildRichPanel("Reasoning", true, richPanelElements(nil, "Thinking...")))
+		panelMaps = append(panelMaps, buildRichPanel("Reasoning", richPanelElements(nil, "Thinking...")))
 	}
 
 	markdownMap := map[string]any{

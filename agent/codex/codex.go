@@ -22,7 +22,7 @@ func init() {
 	core.RegisterAgent("codex", New)
 }
 
-// Agent drives OpenAI Codex CLI using `codex exec --json`.
+// Agent drives OpenAI Codex CLI through exec or app-server.
 //
 // `codex exec` has no approval IPC, so approvals are not interactive on the
 // exec backend. To get interactive approvals, switch to backend="app_server".
@@ -52,8 +52,10 @@ type Agent struct {
 	configEnv              []string // env vars from [projects.agent.options.env] — persists across SetSessionEnv calls
 	sessionEnv             []string
 	mu                     sync.RWMutex
+	permissionProfile      string
 }
 
+// New validates the Codex adapter options and resolves its CLI.
 func New(opts map[string]any) (core.Agent, error) {
 	workDir, _ := opts["work_dir"].(string)
 	if workDir == "" {
@@ -80,6 +82,19 @@ func New(opts map[string]any) (core.Agent, error) {
 	mode = normalizeMode(mode)
 	backend = normalizeBackend(backend)
 	appServerURL = normalizeAppServerURL(appServerURL)
+
+	var permissionProfile string
+	if raw, exists := opts["permission_profile"]; exists {
+		var ok bool
+		permissionProfile, ok = raw.(string)
+		if !ok || strings.TrimSpace(permissionProfile) == "" {
+			return nil, fmt.Errorf("codex: permission_profile must be a non-empty string")
+		}
+		permissionProfile = strings.TrimSpace(permissionProfile)
+		if backend != "app_server" {
+			return nil, fmt.Errorf("codex: permission_profile requires backend=app_server")
+		}
+	}
 
 	cmd, cliExtraArgs := core.ParseCmdOpts(opts, "")
 
@@ -124,6 +139,7 @@ func New(opts map[string]any) (core.Agent, error) {
 		cliExtraArgs:           cliExtraArgs,
 		configEnv:              configEnv,
 		activeIdx:              -1,
+		permissionProfile:      permissionProfile,
 	}, nil
 }
 
@@ -266,6 +282,12 @@ func (a *Agent) configuredModels() []core.ModelOption {
 }
 
 func (a *Agent) AvailableModels(ctx context.Context) []core.ModelOption {
+	a.mu.RLock()
+	minimaxModels := core.GetMiniMaxProviderModels(a.providers, a.activeIdx)
+	a.mu.RUnlock()
+	if len(minimaxModels) > 0 {
+		return minimaxModels
+	}
 	if models := readCodexModelCatalog(); len(models) > 0 {
 		return models
 	}
@@ -531,6 +553,7 @@ func (a *Agent) SetSessionEnv(env []string) {
 	a.sessionEnv = env
 }
 
+// StartSession starts or resumes a session using the configured backend and permissions.
 func (a *Agent) StartSession(ctx context.Context, sessionID string) (core.AgentSession, error) {
 	a.mu.Lock()
 	mode := a.mode
@@ -538,6 +561,7 @@ func (a *Agent) StartSession(ctx context.Context, sessionID string) (core.AgentS
 	reasoningEffort := a.reasoningEffort
 	backend := a.backend
 	appServerURL := a.appServerURL
+	permissionProfile := a.permissionProfile
 	codexHome := a.codexHome
 	systemPrompt := a.systemPrompt
 	appendPrompt := a.appendPrompt
@@ -572,7 +596,7 @@ func (a *Agent) StartSession(ctx context.Context, sessionID string) (core.AgentS
 	}
 
 	if backend == "app_server" {
-		return newAppServerSession(ctx, cliBin, cliExtraArgs, appServerURL, workDir, model, reasoningEffort, mode, sessionID, baseURL, provName, extraEnv, codexHome, systemPrompt, appendPrompt)
+		return newAppServerSession(ctx, cliBin, cliExtraArgs, appServerURL, workDir, model, reasoningEffort, mode, sessionID, baseURL, provName, extraEnv, codexHome, systemPrompt, appendPrompt, permissionProfile)
 	}
 	if codexHome != "" {
 		extraEnv = append(extraEnv, "CODEX_HOME="+codexHome)
@@ -623,6 +647,7 @@ func (a *Agent) GetMode() string {
 	return a.mode
 }
 
+// WorkspaceAgentOptions preserves backend and permission settings for derived workspaces.
 func (a *Agent) WorkspaceAgentOptions() map[string]any {
 	a.mu.RLock()
 	defer a.mu.RUnlock()
@@ -642,6 +667,9 @@ func (a *Agent) WorkspaceAgentOptions() map[string]any {
 	}
 	if a.appServerURL != "" {
 		opts["app_server_url"] = a.appServerURL
+	}
+	if a.permissionProfile != "" {
+		opts["permission_profile"] = a.permissionProfile
 	}
 	if a.codexHome != "" {
 		opts["codex_home"] = a.codexHome

@@ -148,6 +148,40 @@ jobs:
       - name: Run smoke tests
         run: go test -v -tags=smoke,no_web ./tests/e2e/...
 
+  blackbox-smoke:
+    # Real cc-connect binary driven over its bridge, real Claude Code and
+    # Codex CLIs, scripted fake model (tests/blackbox/fakemodel): no model
+    # key needed.
+    # Report-only while the suite settles; drop continue-on-error to gate.
+    runs-on: ubuntu-latest
+    needs: unit-test
+    continue-on-error: true
+    env:
+      CLAUDE_CODE_VERSION: '2.1.317'
+      CODEX_VERSION: '0.166.0'
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: 'go.mod'
+          cache: true
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Install agent CLIs
+        run: npm install -g "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}" "@openai/codex@${CODEX_VERSION}"
+
+      # Same fail-closed target the release gate runs: a missing agent CLI
+      # fails the job instead of skipping its scenarios.
+      - name: Run release smoke
+        run: make test-release-smoke
+
   regression-test:
     runs-on: ubuntu-latest
     needs: smoke-test
