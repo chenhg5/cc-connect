@@ -9,6 +9,7 @@ import (
 	"net/url"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/chenhg5/cc-connect/core"
 	larkcore "github.com/larksuite/oapi-sdk-go/v3/core"
@@ -287,11 +288,9 @@ func (p *Platform) replyDocumentComment(ctx context.Context, rc documentReplyCon
 	if whole {
 		text = core.NewI18n(core.DetectLanguage(text)).Tf(core.MsgDocumentCommentReference, rc.commentID, text)
 	}
-	// Split on Unicode code points to stay within the comment length limit.
-	runes := []rune(strings.TrimSpace(text))
-	for len(runes) > 0 {
-		n := min(4000, len(runes))
-		chunk := html.EscapeString(string(runes[:n]))
+	// Bound the escaped payload, retaining raw chunks so element splitting
+	// below can never separate an HTML entity or a Unicode character.
+	for _, chunk := range splitDocumentCommentText(strings.TrimSpace(text), 4000) {
 		var replyID string
 		if whole {
 			replyID, err = p.addDocumentComment(ctx, rc, chunk)
@@ -299,25 +298,40 @@ func (p *Platform) replyDocumentComment(ctx context.Context, rc documentReplyCon
 				return err
 			}
 		} else {
-			replyID, err = p.createDocumentReply(ctx, rc, chunk)
+			replyID, err = p.createDocumentReply(ctx, rc, html.EscapeString(chunk))
 			if err != nil {
 				return err
 			}
 		}
 		slog.Info(p.tag()+": document comment replied", "file_token", rc.fileToken, "comment_id", rc.commentID, "reply_id", replyID, "whole", whole)
-		runes = runes[n:]
 	}
 	return nil
+}
+
+// splitDocumentCommentText returns raw chunks whose HTML-escaped forms fit
+// within maxChars Unicode code points (callers use limits of 1000 or 4000).
+func splitDocumentCommentText(text string, maxChars int) []string {
+	var chunks []string
+	start, size := 0, 0
+	for i, r := range text {
+		n := utf8.RuneCountInString(html.EscapeString(string(r)))
+		if size+n > maxChars {
+			chunks = append(chunks, text[start:i])
+			start, size = i, 0
+		}
+		size += n
+	}
+	if start < len(text) {
+		chunks = append(chunks, text[start:])
+	}
+	return chunks
 }
 
 func (p *Platform) addDocumentComment(ctx context.Context, rc documentReplyContext, text string) (string, error) {
 	// The SDK does not wrap create_v2; the same client manages credentials and tenant tokens.
 	var elements []map[string]string
-	runes := []rune(text)
-	for len(runes) > 0 {
-		n := min(1000, len(runes))
-		elements = append(elements, map[string]string{"type": "text", "text": string(runes[:n])})
-		runes = runes[n:]
+	for _, chunk := range splitDocumentCommentText(text, 1000) {
+		elements = append(elements, map[string]string{"type": "text", "text": html.EscapeString(chunk)})
 	}
 	resp, err := p.client.Post(ctx, "/open-apis/drive/v1/files/"+url.PathEscape(rc.fileToken)+"/new_comments", map[string]any{"file_type": rc.fileType, "reply_elements": elements}, larkcore.AccessTokenTypeTenant)
 	if err != nil {

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"html"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -52,9 +53,70 @@ func TestDocumentCommentFiltering(t *testing.T) {
 			case "nil_event":
 				e = nil
 			}
-			// A nil client ensures filtering happens before any API request.
+			// Filtering is synchronous; no rejected event may consume dedup state.
+			p.documentDedup = core.NewMessageDedup(time.Minute)
 			if err := p.onDocumentComment(context.Background(), e); err != nil {
 				t.Fatal(err)
+			}
+			if p.documentDedup.IsDuplicate("docx:doc1:comment1:reply1") {
+				t.Fatal("filtered event entered document dispatch")
+			}
+		})
+	}
+}
+
+func TestDocumentCommentAllowFromBlocksDispatch(t *testing.T) {
+	for _, allowFrom := range []string{"ou_author", "ou_other,ou_author", "*"} {
+		t.Run(allowFrom, func(t *testing.T) {
+			var calls atomic.Int32
+			delivered := make(chan *core.Message, 2)
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				calls.Add(1)
+				w.Header().Set("Content-Type", "application/json")
+				switch r.URL.Path {
+				case "/open-apis/auth/v3/tenant_access_token/internal":
+					_, _ = io.WriteString(w, `{"code":0,"tenant_access_token":"allow-from-token","expire":7200}`)
+				case "/open-apis/drive/v1/files/doc1/comments/batch_query":
+					_, _ = io.WriteString(w, `{"code":0,"data":{"items":[{"comment_id":"comment1","is_solved":false}]}}`)
+				case "/open-apis/drive/v1/files/doc1/comments/comment1/replies":
+					_, _ = fmt.Fprintf(w, `{"code":0,"data":{"items":[{"reply_id":"reply1","user_id":"ou_author","create_time":%d,"content":{"elements":[{"type":"text_run","text_run":{"text":"explain this document"}}]}}],"has_more":false}}`, time.Now().Unix())
+				case "/open-apis/docx/v1/documents/doc1/raw_content":
+					_, _ = io.WriteString(w, `{"code":0,"data":{"content":"document body"}}`)
+				default:
+					t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
+					w.WriteHeader(http.StatusNotFound)
+				}
+			}))
+			defer srv.Close()
+			p := &Platform{
+				enableDocumentComments: true, botOpenID: "ou_bot", allowFrom: "ou_denied",
+				documentDedup: core.NewMessageDedup(time.Minute),
+				client:        lark.NewClient("cli_allow_from_"+allowFrom, "secret", lark.WithOpenBaseUrl(srv.URL)),
+				handler:       func(_ core.Platform, m *core.Message) { delivered <- m },
+			}
+			if err := p.onDocumentComment(context.Background(), documentEvent(t)); err != nil {
+				t.Fatal(err)
+			}
+			select {
+			case m := <-delivered:
+				t.Fatalf("unauthorized comment reached the agent: %+v", m)
+			case <-time.After(150 * time.Millisecond):
+			}
+			if calls.Load() != 0 {
+				t.Fatalf("unauthorized comment made %d API calls", calls.Load())
+			}
+			// The same event must work once permitted: denial must not mark it seen.
+			p.allowFrom = allowFrom
+			if err := p.onDocumentComment(context.Background(), documentEvent(t)); err != nil {
+				t.Fatal(err)
+			}
+			select {
+			case m := <-delivered:
+				if m.UserID != "ou_author" || m.Content != "explain this document" {
+					t.Fatalf("wrong dispatched comment: %+v", m)
+				}
+			case <-time.After(3 * time.Second):
+				t.Fatal("authorized comment did not reach the agent")
 			}
 		})
 	}
@@ -239,5 +301,83 @@ func TestDocumentWholeCommentUsesNewCommentAPI(t *testing.T) {
 	}
 	if created.Load() != 1 {
 		t.Fatal("未创建全文答复")
+	}
+}
+
+func TestDocumentCommentEscapedReplyBudget(t *testing.T) {
+	for _, whole := range []bool{false, true} {
+		t.Run(fmt.Sprintf("whole=%t", whole), func(t *testing.T) {
+			var replies []string
+			var decoded strings.Builder
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				switch {
+				case strings.Contains(r.URL.Path, "tenant_access_token"):
+					_, _ = io.WriteString(w, `{"code":0,"tenant_access_token":"budget-token","expire":7200}`)
+				case strings.HasSuffix(r.URL.Path, "/batch_query"):
+					_, _ = fmt.Fprintf(w, `{"code":0,"data":{"items":[{"comment_id":"comment1","is_whole":%t,"is_solved":false}]}}`, whole)
+				case r.Method == http.MethodPost:
+					var parts []string
+					if whole {
+						if r.URL.Path != "/open-apis/drive/v1/files/doc1/new_comments" {
+							t.Errorf("whole answer used wrong endpoint: %s", r.URL.Path)
+						}
+						var body struct {
+							Elements []struct {
+								Text string `json:"text"`
+							} `json:"reply_elements"`
+						}
+						if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+							t.Error(err)
+						}
+						for _, element := range body.Elements {
+							if len([]rune(element.Text)) > 1000 {
+								t.Errorf("escaped element exceeds 1000 runes: %d", len([]rune(element.Text)))
+							}
+							parts = append(parts, element.Text)
+						}
+					} else {
+						if r.URL.Path != "/open-apis/drive/v1/files/doc1/comments/comment1/replies" {
+							t.Errorf("inline answer used wrong endpoint: %s", r.URL.Path)
+						}
+						var body struct {
+							Content *larkdrive.ReplyContent `json:"content"`
+						}
+						if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+							t.Error(err)
+						}
+						for _, element := range body.Content.Elements {
+							parts = append(parts, stringValue(element.TextRun.Text))
+						}
+					}
+					replies = append(replies, strings.Join(parts, ""))
+					for _, part := range parts {
+						decoded.WriteString(html.UnescapeString(part))
+					}
+					_, _ = io.WriteString(w, `{"code":0,"data":{"reply_id":"answer1"}}`)
+				default:
+					t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
+					w.WriteHeader(http.StatusNotFound)
+				}
+			}))
+			defer srv.Close()
+			p := &Platform{client: lark.NewClient(fmt.Sprintf("cli_budget_%t", whole), "secret", lark.WithOpenBaseUrl(srv.URL))}
+			answer := strings.Repeat("<&>\"'中文😀", 1500)
+			if err := p.replyDocumentComment(context.Background(), documentReplyContext{fileType: "docx", fileToken: "doc1", commentID: "comment1"}, answer); err != nil {
+				t.Fatal(err)
+			}
+			for i, reply := range replies {
+				if n := len([]rune(reply)); n == 0 || n > 4000 {
+					t.Errorf("reply %d has %d escaped runes; want 1..4000", i, n)
+				}
+			}
+			want := answer
+			if whole {
+				want = core.NewI18n(core.DetectLanguage(answer)).Tf(core.MsgDocumentCommentReference, "comment1", answer)
+			}
+			if decoded.String() != want {
+				t.Fatal("reply splitting corrupted Unicode text or split an HTML entity between elements")
+			}
+		})
 	}
 }

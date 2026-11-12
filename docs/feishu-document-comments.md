@@ -46,7 +46,10 @@ document comment because the event has no IM chat ID.
   are ignored. A new mention in the same thread remains a new turn.
 - Sessions are isolated by application, resource type, resource token and comment
   ID: `<platform>:doc:<app_id>:<file_type>:<file_token>:<comment_id>`. Workspace
-  bindings also preserve the comment thread's scope.
+  bindings also preserve the comment thread's scope. All authorized participants
+  in one comment thread share its agent session and conversation history; the
+  user ID is deliberately not part of the key. Use separate comment threads
+  when participants must not share an agent conversation.
 - Docx content is read within the configured prompt budget. Sheets preview the
   header and rows near the quoted cell. If sheet positioning metadata is absent,
   a single-sheet workbook can be resolved automatically; a multi-sheet workbook
@@ -57,19 +60,39 @@ document comment because the event has no IM chat ID.
   as context instead of dropping an otherwise readable comment.
 - Inline answers are written to the original comment thread. Feishu does not
   permit threaded replies to whole-document comments; those answers are new
-  whole-document comments on the same resource, prefixed with the original
-  comment ID. They are associated answers, not inline replies.
+  top-level whole-document comments on the same resource, prefixed with the original
+  comment ID. They are associated answers, not inline replies. The source
+  comment remains unresolved: posting an answer does not mean the author's
+  request has been satisfied. Review the answer and resolve the original
+  comment manually when appropriate.
 - This entry point exposes final text output only. IM cards, tool output and
   routine intermediate agent text are not posted as document replies. Normal
   IM display settings are preserved. Progress receipts and business task-state
   integrations are outside this feature.
+- The existing `banned_words` policy checks the triggering author's text only.
+  Quotes, earlier replies (including other authors' text) and resource previews
+  are reference context and are not scanned by this filter. A reference label
+  does not enforce a content policy; do not rely on `banned_words` to exclude
+  words from the full agent input.
+
+The final-only wrapper applies to inbound comment turns. It does not implement
+reply-context reconstruction. Existing cron, webhook and relay routes resolve
+the registered Feishu platform instead, which can reconstruct document session
+keys. They bypass the wrapper, so the inbound final-only guarantee does not
+cover proactive agent runs; those journeys are not validated by this feature.
 
 All API calls use the existing application client, including its configured
 Feishu/Lark base URL and tenant-token handling. Unicode answers are split into
-bounded replies. Comment state is checked again before sending, and read/write
-errors are logged. A readable comment may receive an error reply; if the comment
-channel is also inaccessible, the error is logged without silently switching to
-a private-message channel.
+replies of at most 4,000 Unicode code points after HTML escaping; whole-document
+text elements are also bounded to 1,000 escaped code points. Splitting preserves
+HTML entities and Unicode characters. Comment state is checked again before
+sending, and read/write errors are logged. A readable comment may receive an
+error reply; if the comment channel is also inaccessible, the error is logged
+without silently switching to a private-message channel.
+
+Adapter failures before engine dispatch currently use an English notice. The
+adapter does not receive the engine's configured conversation language; normal
+engine responses retain their existing language behavior.
 
 ## Validation
 

@@ -1,6 +1,7 @@
 package core
 
 import (
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -34,6 +35,9 @@ func TestCUJ_H6_FinalReplyOnlyDoesNotChangeIM(t *testing.T) {
 		}
 	}
 	env.waitFor("首轮结束", 3*time.Second, func() bool { return len(env.activeSession("test:doc:1").GetHistory(0)) >= 2 })
+	if got := env.plat.getSent(); !slices.Equal(got, []string{"最终答复"}) {
+		t.Fatalf("comment must receive exactly one final answer: %v", got)
+	}
 	// A follow-up uses the same isolated conversation without changing output policy.
 	env.agent.mu.Lock()
 	as := env.agent.sessions[0]
@@ -45,6 +49,9 @@ func TestCUJ_H6_FinalReplyOnlyDoesNotChangeIM(t *testing.T) {
 	env.waitFor("follow-up reply", 3*time.Second, func() bool {
 		return len(env.activeSession("test:doc:1").GetHistory(0)) >= 4 && len(env.plat.getSent()) >= 2
 	})
+	if got := env.plat.getSent(); !slices.Equal(got, []string{"最终答复", "最终答复"}) {
+		t.Fatalf("each comment turn must receive exactly one final answer: %v", got)
+	}
 	env.plat.clearSent()
 	env.agent.mu.Lock()
 	env.agent.nextSessionEvents = events
