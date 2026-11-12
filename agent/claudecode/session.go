@@ -341,6 +341,10 @@ func (cs *claudeSession) handleReadLoopLine(line string) {
 	case "control_cancel_request":
 		requestID, _ := raw["request_id"].(string)
 		slog.Debug("claudeSession: permission cancelled", "request_id", requestID)
+	case "control_response":
+		// Reply to a client-initiated control_request (e.g. interrupt).
+		requestID, _ := raw["request_id"].(string)
+		slog.Debug("claudeSession: control response", "request_id", requestID, "response", raw["response"])
 	}
 }
 
@@ -615,6 +619,30 @@ func extFromMime(mime string) string {
 	default:
 		return ".png"
 	}
+}
+
+// Interrupt asks Claude Code to abandon the in-flight turn through the
+// control protocol (control_request/interrupt). The process stays alive, so
+// the conversation context is preserved and the next message continues on the
+// same session. The CLI answers with a control_response and terminates the
+// running tool, then emits a result with subtype error_during_execution.
+func (cs *claudeSession) Interrupt(reason string) error {
+	if !cs.alive.Load() {
+		return fmt.Errorf("session process is not running")
+	}
+	if reason == "" {
+		reason = "user requested stop"
+	}
+	reqID := fmt.Sprintf("cc-interrupt-%d", time.Now().UnixNano())
+	slog.Info("claudeSession: sending interrupt", "request_id", reqID, "reason", reason)
+	return cs.writeJSON(map[string]any{
+		"type":       "control_request",
+		"request_id": reqID,
+		"request": map[string]any{
+			"subtype": "interrupt",
+			"reason":  reason,
+		},
+	})
 }
 
 // RespondPermission writes a control_response to the Claude process stdin.

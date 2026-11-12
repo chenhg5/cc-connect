@@ -327,6 +327,13 @@ type interactiveState struct {
 	lastAutoCompressTokens int
 	currentModel           string // model the live agent process was spawned with (model router)
 
+	// interruptedByUser is set when the user asked to stop the in-flight turn.
+	// The agent ends the turn with an exception-style result; the event loop
+	// treats that result as a user cancel instead of a failure.
+	interruptedByUser bool
+	interruptedAt     time.Time
+	turnActive        bool // true while a turn (or a queued turn) is in flight
+
 	// Unsolicited event reader: a background goroutine that consumes agent
 	// events between user-initiated turns (e.g. background task completions).
 	// Cancel unsolicitedCancel to stop the reader; wait on unsolicitedDone
@@ -1803,8 +1810,16 @@ func (e *Engine) handleMessageRecall(p Platform, msg *Message) {
 	}
 
 	if sessionKey, ok := e.findCurrentMessageSession(messageID); ok {
+		if e.interruptInteractiveTurn(sessionKey, "trigger message recalled") {
+			slog.Info("active message recalled; turn interrupted",
+				"platform", p.Name(),
+				"msg_id", messageID,
+				"session", sessionKey,
+			)
+			return
+		}
 		if e.stopInteractiveSessionSilently(sessionKey) {
-			slog.Info("active message recalled; session stopped",
+			slog.Info("active message recalled; session stopped (hard)",
 				"platform", p.Name(),
 				"msg_id", messageID,
 				"session", sessionKey,
@@ -1920,8 +1935,16 @@ func (e *Engine) stopCurrentMessageIfRecalled(sessionKey string) bool {
 	if !recalled {
 		return false
 	}
+	if e.interruptInteractiveTurn(sessionKey, "trigger message recalled") {
+		slog.Info("active message recalled by fallback probe; turn interrupted",
+			"platform", platform.Name(),
+			"msg_id", messageID,
+			"session", sessionKey,
+		)
+		return true
+	}
 	if e.stopInteractiveSessionSilently(sessionKey) {
-		slog.Info("active message recalled by fallback probe; session stopped",
+		slog.Info("active message recalled by fallback probe; session stopped (hard)",
 			"platform", platform.Name(),
 			"msg_id", messageID,
 			"session", sessionKey,
@@ -2673,6 +2696,14 @@ func (e *Engine) processInteractiveMessageWith(p Platform, msg *Message, session
 		agentOverride = agent
 	}
 	state := e.getOrCreateInteractiveStateWith(interactiveKey, p, msg.ReplyCtx, session, sessions, agentOverride, ccSessionKey)
+	state.mu.Lock()
+	state.turnActive = true
+	state.mu.Unlock()
+	defer func() {
+		state.mu.Lock()
+		state.turnActive = false
+		state.mu.Unlock()
+	}()
 	if targetModel != "" {
 		state.mu.Lock()
 		state.currentModel = targetModel
@@ -4197,6 +4228,21 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			state.mu.Lock()
 			state.eventsNeedResync = false
 			state.mu.Unlock()
+
+			// A user-requested interrupt ends the turn with an exception-style
+			// result and no assistant text. Surface it as a cancel instead of an
+			// empty/failed response, and clear the flag for the next turn.
+			if state != nil {
+				state.mu.Lock()
+				interrupted := state.interruptedByUser
+				if interrupted {
+					state.interruptedByUser = false
+				}
+				state.mu.Unlock()
+				if interrupted && strings.TrimSpace(event.Content) == "" {
+					event.Content = e.i18n.T(MsgExecutionStopped)
+				}
+			}
 
 			fullResponse := event.Content
 			// When tool progress is hidden, segmentStart stays 0 and textParts
@@ -8195,6 +8241,21 @@ func (e *Engine) cmdTTS(p Platform, msg *Message, args []string) {
 
 func (e *Engine) cmdStop(p Platform, msg *Message) {
 	iKey := e.interactiveKeyForSessionKey(msg.SessionKey)
+
+	// Preferred path: interrupt the in-flight turn (milliseconds, keeps the
+	// process and context alive). Falls back to a hard stop for agents that
+	// cannot interrupt.
+	if e.interruptInteractiveTurn(iKey, "user /stop") {
+		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgExecutionStopped))
+		return
+	}
+	if found := e.findInteractiveKeyForSession(msg.SessionKey); found != "" && found != iKey {
+		if e.interruptInteractiveTurn(found, "user /stop") {
+			e.reply(p, msg.ReplyCtx, e.i18n.T(MsgExecutionStopped))
+			return
+		}
+	}
+
 	if !e.stopInteractiveSession(iKey, p, msg.ReplyCtx) {
 		// Fallback: try suffix scan in case interactiveKeyForSessionKey
 		// resolved a different key than the one used to store the state
@@ -8209,6 +8270,43 @@ func (e *Engine) cmdStop(p Platform, msg *Message) {
 		return
 	}
 	e.reply(p, msg.ReplyCtx, e.i18n.T(MsgExecutionStopped))
+}
+
+// interruptInteractiveTurn asks the agent to abandon the in-flight turn while
+// keeping the process (and its conversation context) alive. Returns false when
+// there is no active turn or the agent does not support interruption, so
+// callers can fall back to a hard stop.
+func (e *Engine) interruptInteractiveTurn(sessionKey, reason string) bool {
+	e.interactiveMu.Lock()
+	state, ok := e.interactiveStates[sessionKey]
+	e.interactiveMu.Unlock()
+	if !ok || state == nil {
+		return false
+	}
+
+	state.mu.Lock()
+	as := state.agentSession
+	active := state.turnActive
+	interrupter, canInterrupt := as.(SessionInterrupter)
+	if as == nil || !active || !canInterrupt {
+		state.mu.Unlock()
+		return false
+	}
+	// Mark before sending: the interrupted turn ends with an exception-style
+	// result, which must be attributed to a user cancel, not a failure.
+	state.interruptedByUser = true
+	state.interruptedAt = time.Now()
+	state.mu.Unlock()
+
+	if err := interrupter.Interrupt(reason); err != nil {
+		state.mu.Lock()
+		state.interruptedByUser = false
+		state.mu.Unlock()
+		slog.Warn("interrupt failed; falling back to hard stop", "session", sessionKey, "error", err)
+		return false
+	}
+	slog.Info("interactive turn interrupted", "session", sessionKey, "reason", reason)
+	return true
 }
 
 func (e *Engine) stopInteractiveSession(sessionKey string, quietPlatform Platform, quietReplyCtx any) bool {

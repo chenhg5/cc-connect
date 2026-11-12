@@ -324,6 +324,16 @@ type AgentSession interface {
 	Close() error
 }
 
+// SessionInterrupter is an optional interface for agent sessions that can
+// abort the in-flight turn without terminating the underlying process.
+// Implementations must keep the process (and its conversation context) alive
+// so the next message can continue on the same session.
+type SessionInterrupter interface {
+	// Interrupt asks the agent to abandon the current turn. reason is
+	// forwarded to the agent for logging/diagnostics and may be empty.
+	Interrupt(reason string) error
+}
+
 // PermissionResult represents the user's decision on a permission request.
 type PermissionResult struct {
 	Behavior     string         `json:"behavior"`               // "allow" or "deny"
