@@ -71,6 +71,21 @@ jobs:
           go install github.com/rhysd/actionlint/cmd/actionlint@v1.7.8
           "$(go env GOPATH)/bin/actionlint" -color
 
+  windows-codex-test:
+    runs-on: windows-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: 'go.mod'
+          cache: true
+
+      - name: Run Windows process cleanup tests
+        run: go test ./agent/codex/ ./internal/taskkill/ -count=1 -timeout=5m -v
+
   unit-test:
     runs-on: ubuntu-latest
     needs: lint
