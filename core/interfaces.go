@@ -334,6 +334,15 @@ type SessionInterrupter interface {
 	Interrupt(reason string) error
 }
 
+// TaskCardSender is an optional interface for platforms that can post a
+// long-lived progress card and patch it in place afterwards. The engine uses
+// it to keep one live card per turn (elapsed time, current step, queue,
+// stop button). Platforms without it keep the plain-text behavior.
+type TaskCardSender interface {
+	SendTaskCard(ctx context.Context, replyCtx any, card *Card) (handle any, err error)
+	UpdateTaskCard(ctx context.Context, handle any, card *Card) error
+}
+
 // PermissionResult represents the user's decision on a permission request.
 type PermissionResult struct {
 	Behavior     string         `json:"behavior"`               // "allow" or "deny"

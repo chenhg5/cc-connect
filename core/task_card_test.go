@@ -1,0 +1,147 @@
+package core
+
+import (
+	"context"
+	"strings"
+	"sync"
+	"testing"
+	"time"
+)
+
+type taskCardStubPlatform struct {
+	stubPlatformEngine
+	mu      sync.Mutex
+	sends   []*Card
+	updates []*Card
+	failSend bool
+}
+
+func (p *taskCardStubPlatform) SendTaskCard(_ context.Context, _ any, card *Card) (any, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.failSend {
+		return nil, context.DeadlineExceeded
+	}
+	p.sends = append(p.sends, card)
+	return "handle-1", nil
+}
+
+func (p *taskCardStubPlatform) UpdateTaskCard(_ context.Context, _ any, card *Card) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.updates = append(p.updates, card)
+	return nil
+}
+
+func (p *taskCardStubPlatform) last() *Card {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if n := len(p.updates); n > 0 {
+		return p.updates[n-1]
+	}
+	if n := len(p.sends); n > 0 {
+		return p.sends[n-1]
+	}
+	return nil
+}
+
+func cardBody(t *testing.T, card *Card) string {
+	t.Helper()
+	if card == nil || len(card.Elements) == 0 {
+		t.Fatal("card has no elements")
+	}
+	md, ok := card.Elements[0].(CardMarkdown)
+	if !ok {
+		t.Fatalf("first element is %T, want CardMarkdown", card.Elements[0])
+	}
+	return md.Content
+}
+
+func hasStopButton(card *Card) bool {
+	for _, el := range card.Elements {
+		if actions, ok := el.(CardActions); ok && len(actions.Buttons) > 0 {
+			return actions.Buttons[0].Value == "cmd:/stop"
+		}
+	}
+	return false
+}
+
+func TestTurnCard_RendersRunningStateWithStopButton(t *testing.T) {
+	e := NewEngine("test", &resultAgent{session: newResultAgentSession("ok")}, []Platform{&stubPlatformEngine{n: "test"}}, "", LangChinese)
+	t.Cleanup(e.cancel)
+	p := &taskCardStubPlatform{stubPlatformEngine: stubPlatformEngine{n: "feishu"}}
+
+	tc := newTurnCard(e, p, "ctx")
+	if tc == nil {
+		t.Fatal("newTurnCard() = nil, want a card for a TaskCardSender platform")
+	}
+	tc.Start()
+	defer tc.Finish(taskCardDone, "")
+
+	card := p.last()
+	if card == nil || card.Header == nil {
+		t.Fatal("no card sent on start")
+	}
+	if !strings.Contains(card.Header.Title, "正在处理") {
+		t.Fatalf("header = %q, want running title", card.Header.Title)
+	}
+	if body := cardBody(t, card); !strings.Contains(body, "当前步骤") {
+		t.Fatalf("body = %q, want current step line", body)
+	}
+	if !hasStopButton(card) {
+		t.Fatal("running card must expose the stop button")
+	}
+}
+
+func TestTurnCard_ReflectsStepQueueAndFinish(t *testing.T) {
+	e := NewEngine("test", &resultAgent{session: newResultAgentSession("ok")}, []Platform{&stubPlatformEngine{n: "test"}}, "", LangChinese)
+	t.Cleanup(e.cancel)
+	p := &taskCardStubPlatform{stubPlatformEngine: stubPlatformEngine{n: "feishu"}}
+
+	tc := newTurnCard(e, p, "ctx")
+	tc.Start()
+
+	tc.SetStep("Bash · grep booking_check_fail_rate")
+	tc.SetQueue([]string{"快点", "帮我看下 XX 订单"})
+	// Throttled refreshes may be skipped within the 1.5s window; force one so
+	// the assertions see the latest state.
+	tc.render(true)
+
+	card := p.last()
+	body := cardBody(t, card)
+	if !strings.Contains(body, "grep booking_check_fail_rate") {
+		t.Fatalf("body = %q, want current step", body)
+	}
+	if !strings.Contains(body, "排队中 (2)") {
+		t.Fatalf("body = %q, want queue header", body)
+	}
+	if !strings.Contains(body, "2. 帮我看下 XX 订单") {
+		t.Fatalf("body = %q, want queued item", body)
+	}
+
+	tc.Finish(taskCardDone, "")
+	final := p.last()
+	if final.Header == nil || !strings.Contains(final.Header.Title, "已完成") {
+		t.Fatalf("final header = %+v, want done title", final.Header)
+	}
+	if hasStopButton(final) {
+		t.Fatal("finished card must not keep the stop button")
+	}
+}
+
+func TestTurnCard_NilForUnsupportedPlatform(t *testing.T) {
+	e := NewEngine("test", &resultAgent{session: newResultAgentSession("ok")}, []Platform{&stubPlatformEngine{n: "test"}}, "", LangChinese)
+	t.Cleanup(e.cancel)
+	if tc := newTurnCard(e, &stubPlatformEngine{n: "plain"}, "ctx"); tc != nil {
+		t.Fatal("newTurnCard() != nil for a platform without TaskCardSender")
+	}
+}
+
+func TestFormatCardElapsed(t *testing.T) {
+	cases := map[int]string{5: "0:05", 192: "3:12", 3730: "1:02:10"}
+	for secs, want := range cases {
+		if got := formatCardElapsed(time.Duration(secs) * time.Second); got != want {
+			t.Errorf("formatCardElapsed(%ds) = %q, want %q", secs, got, want)
+		}
+	}
+}

@@ -333,6 +333,7 @@ type interactiveState struct {
 	interruptedByUser bool
 	interruptedAt     time.Time
 	turnActive        bool // true while a turn (or a queued turn) is in flight
+	taskCard          *turnCard // live progress card for the current turn (nil when unsupported)
 
 	// Unsolicited event reader: a background goroutine that consumes agent
 	// events between user-initiated turns (e.g. background task completions).
@@ -2331,6 +2332,7 @@ func (e *Engine) queueMessageForBusySession(p Platform, msg *Message, interactiv
 		"user", msg.UserName,
 		"queue_depth", queueDepth,
 	)
+	e.syncTaskCardQueue(state)
 	e.reply(p, msg.ReplyCtx, e.i18n.T(MsgMessageQueued))
 	return true
 }
@@ -2704,6 +2706,21 @@ func (e *Engine) processInteractiveMessageWith(p Platform, msg *Message, session
 		state.turnActive = false
 		state.mu.Unlock()
 	}()
+
+	// Live task card: one card per turn that keeps ticking while the agent is
+	// silent (elapsed time + current step + queue + stop button).
+	taskCard := newTurnCard(e, p, msg.ReplyCtx)
+	if taskCard != nil {
+		state.mu.Lock()
+		state.taskCard = taskCard
+		state.mu.Unlock()
+		taskCard.Start()
+		e.syncTaskCardQueue(state)
+		defer func() {
+			// No-op when a terminal state was already rendered (stop/failure).
+			taskCard.Finish(taskCardDone, "")
+		}()
+	}
 	if targetModel != "" {
 		state.mu.Lock()
 		state.currentModel = targetModel
@@ -3656,6 +3673,11 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 	//   - compact/card progress style with visible thinking/tool already posts
 	//     a progress card via cp → skip (that card is the "processing" signal).
 	shouldStartLoading := e.display.CardMode != "rich"
+	if stateTaskCard(state) != nil {
+		// The live task card is the progress signal; a second spinner would
+		// just add noise.
+		shouldStartLoading = false
+	}
 	if shouldStartLoading {
 		if style := progressStyleForTarget(state.platform, state.replyCtx); style == progressStyleCompact || style == progressStyleCard {
 			if e.display.ThinkingMessages || e.display.ToolMessages {
@@ -3724,6 +3746,9 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			}
 			continue
 		case <-idleCh:
+			if tc := stateTaskCard(state); tc != nil {
+				tc.Finish(taskCardFailed, "")
+			}
 			slog.Error("agent session idle timeout: no events for too long, killing session",
 				"session_key", sessionKey, "timeout", e.eventIdleTimeout, "elapsed", time.Since(turnStart))
 			cp.Finalize(ProgressCardStateFailed)
@@ -3887,6 +3912,9 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 
 		case EventToolUse:
 			toolCount++
+			if tc := stateTaskCard(state); tc != nil {
+				tc.SetStep(taskCardStepText(event.ToolName, event.ToolInput))
+			}
 			if hasRichCard {
 				// When tool messages are suppressed, skip card updates on tool events.
 				if !e.display.ToolMessages {
@@ -4241,6 +4269,11 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				state.mu.Unlock()
 				if interrupted && strings.TrimSpace(event.Content) == "" {
 					event.Content = e.i18n.T(MsgExecutionStopped)
+				}
+				if interrupted {
+					if tc := stateTaskCard(state); tc != nil {
+						tc.Finish(taskCardStopped, "")
+					}
 				}
 			}
 
@@ -4815,6 +4848,12 @@ func (e *Engine) drainPendingMessages(state *interactiveState, session *Session,
 		state.currentMessageID = queued.messageID
 		state.fromVoice = queued.fromVoice
 		state.mu.Unlock()
+
+		// Queue shrank: refresh the card and reset the step for the new turn.
+		e.syncTaskCardQueue(state)
+		if tc := stateTaskCard(state); tc != nil {
+			tc.SetStep("")
+		}
 
 		e.i18n.DetectAndSet(queued.content)
 		prompt := e.buildSenderPrompt(queued.content, queued.userID, queued.userName, queued.msgPlatform, queued.msgSessionKey, queued.channelKey)
@@ -8304,6 +8343,9 @@ func (e *Engine) interruptInteractiveTurn(sessionKey, reason string) bool {
 		state.mu.Unlock()
 		slog.Warn("interrupt failed; falling back to hard stop", "session", sessionKey, "error", err)
 		return false
+	}
+	if tc := stateTaskCard(state); tc != nil {
+		tc.Finish(taskCardStopped, e.i18n.T(MsgExecutionStopped))
 	}
 	slog.Info("interactive turn interrupted", "session", sessionKey, "reason", reason)
 	return true

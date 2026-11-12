@@ -170,6 +170,14 @@ const (
 	MsgToolResultFmtOk           MsgKey = "tool_result_fmt_ok"
 	MsgToolResultFmtFailed       MsgKey = "tool_result_fmt_failed"
 	MsgExecutionStopped          MsgKey = "execution_stopped"
+	MsgTaskCardRunning           MsgKey = "task_card_running"
+	MsgTaskCardDone              MsgKey = "task_card_done"
+	MsgTaskCardStopped           MsgKey = "task_card_stopped"
+	MsgTaskCardFailed            MsgKey = "task_card_failed"
+	MsgTaskCardPreparing         MsgKey = "task_card_preparing"
+	MsgTaskCardStep              MsgKey = "task_card_step"
+	MsgTaskCardQueue             MsgKey = "task_card_queue"
+	MsgTaskCardStopBtn           MsgKey = "task_card_stop_btn"
 	MsgNoExecution               MsgKey = "no_execution"
 	MsgPreviousProcessing        MsgKey = "previous_processing"
 	MsgQueueFull                 MsgKey = "queue_full"
@@ -694,6 +702,62 @@ var messages = map[MsgKey]map[Language]string{
 		LangTraditionalChinese: "⏹ 執行已停止。",
 		LangJapanese:           "⏹ 実行を停止しました。",
 		LangSpanish:            "⏹ Ejecución detenida.",
+	},
+	MsgTaskCardRunning: {
+		LangEnglish:            "⏳ Working · %s",
+		LangChinese:            "⏳ 正在处理 · %s",
+		LangTraditionalChinese: "⏳ 正在處理 · %s",
+		LangJapanese:           "⏳ 実行中 · %s",
+		LangSpanish:            "⏳ Trabajando · %s",
+	},
+	MsgTaskCardDone: {
+		LangEnglish:            "✅ Done · %s",
+		LangChinese:            "✅ 已完成 · 用时 %s",
+		LangTraditionalChinese: "✅ 已完成 · 用時 %s",
+		LangJapanese:           "✅ 完了 · %s",
+		LangSpanish:            "✅ Terminado · %s",
+	},
+	MsgTaskCardStopped: {
+		LangEnglish:            "⏹ Stopped · %s",
+		LangChinese:            "⏹ 已停止 · 用时 %s",
+		LangTraditionalChinese: "⏹ 已停止 · 用時 %s",
+		LangJapanese:           "⏹ 停止しました · %s",
+		LangSpanish:            "⏹ Detenido · %s",
+	},
+	MsgTaskCardFailed: {
+		LangEnglish:            "❌ Failed · %s",
+		LangChinese:            "❌ 出错了 · 用时 %s",
+		LangTraditionalChinese: "❌ 出錯了 · 用時 %s",
+		LangJapanese:           "❌ 失敗しました · %s",
+		LangSpanish:            "❌ Error · %s",
+	},
+	MsgTaskCardPreparing: {
+		LangEnglish:            "Preparing",
+		LangChinese:            "准备中",
+		LangTraditionalChinese: "準備中",
+		LangJapanese:           "準備中",
+		LangSpanish:            "Preparando",
+	},
+	MsgTaskCardStep: {
+		LangEnglish:            "Current step: %s",
+		LangChinese:            "当前步骤：%s",
+		LangTraditionalChinese: "當前步驟：%s",
+		LangJapanese:           "現在のステップ：%s",
+		LangSpanish:            "Paso actual: %s",
+	},
+	MsgTaskCardQueue: {
+		LangEnglish:            "📋 Queued (%d)",
+		LangChinese:            "📋 排队中 (%d)",
+		LangTraditionalChinese: "📋 排隊中 (%d)",
+		LangJapanese:           "📋 待機中 (%d)",
+		LangSpanish:            "📋 En cola (%d)",
+	},
+	MsgTaskCardStopBtn: {
+		LangEnglish:            "⏹ Stop",
+		LangChinese:            "⏹ 停止当前",
+		LangTraditionalChinese: "⏹ 停止當前",
+		LangJapanese:           "⏹ 停止",
+		LangSpanish:            "⏹ Detener",
 	},
 	MsgNoExecution: {
 		LangEnglish:            "No execution in progress.",

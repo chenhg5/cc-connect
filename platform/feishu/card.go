@@ -462,3 +462,65 @@ func renderCard(card *core.Card, sessionKey string) string {
 	}
 	return string(b)
 }
+
+// feishuTaskCardHandle identifies a live task card so it can be patched later.
+type feishuTaskCardHandle struct {
+	messageID  string
+	chatID     string
+	sessionKey string
+}
+
+// SendTaskCard posts a progress card and returns a handle for in-place updates.
+func (p *interactivePlatform) SendTaskCard(ctx context.Context, rctx any, card *core.Card) (any, error) {
+	rc, ok := rctx.(replyContext)
+	if !ok {
+		return nil, fmt.Errorf("%s: invalid reply context type %T", p.tag(), rctx)
+	}
+
+	cardJSON := renderCard(card, rc.sessionKey)
+	var msgID string
+	var err error
+	if p.shouldUseThreadOrReplyAPI(rc) {
+		msgID, err = p.replyMessageReturningID(ctx, rc, larkim.MsgTypeInteractive, cardJSON)
+	} else {
+		if rc.chatID == "" {
+			return nil, fmt.Errorf("%s: chatID is empty, cannot send task card", p.tag())
+		}
+		msgID, _, err = p.createMessageReturningID(ctx, rc.chatID, larkim.MsgTypeInteractive, cardJSON, "task card")
+	}
+	if err != nil {
+		return nil, err
+	}
+	if msgID == "" {
+		return nil, fmt.Errorf("%s: task card message id is empty", p.tag())
+	}
+	return &feishuTaskCardHandle{messageID: msgID, chatID: rc.chatID, sessionKey: rc.sessionKey}, nil
+}
+
+// UpdateTaskCard patches a previously sent task card in place.
+func (p *interactivePlatform) UpdateTaskCard(ctx context.Context, handle any, card *core.Card) error {
+	h, ok := handle.(*feishuTaskCardHandle)
+	if !ok {
+		return fmt.Errorf("%s: invalid task card handle %T", p.tag(), handle)
+	}
+
+	cardJSON := renderCard(card, h.sessionKey)
+	req := larkim.NewPatchMessageReqBuilder().
+		MessageId(h.messageID).
+		Body(larkim.NewPatchMessageReqBodyBuilder().
+			Content(cardJSON).
+			Build()).
+		Build()
+	return p.withTransientRetry(ctx, "update task card", func() error {
+		return p.withFreshTenantAccessTokenRetry(ctx, "update task card", func(client *lark.Client, options ...larkcore.RequestOptionFunc) error {
+			resp, err := client.Im.Message.Patch(ctx, req, options...)
+			if err != nil {
+				return fmt.Errorf("%s: update task card: %w", p.tag(), err)
+			}
+			if !resp.Success() {
+				return fmt.Errorf("%s: update task card code=%d msg=%s", p.tag(), resp.Code, resp.Msg)
+			}
+			return nil
+		})
+	})
+}

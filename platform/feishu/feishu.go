@@ -3368,6 +3368,32 @@ func (p *Platform) replyMessage(ctx context.Context, rc replyContext, msgType, c
 	})
 }
 
+// replyMessageReturningID posts a reply and returns the new message ID so the
+// caller can patch it later (used by the live task card).
+func (p *Platform) replyMessageReturningID(ctx context.Context, rc replyContext, msgType, content string) (string, error) {
+	req := larkim.NewReplyMessageReqBuilder().
+		MessageId(rc.messageID).
+		Body(p.buildReplyMessageReqBody(rc, msgType, content)).
+		Build()
+	var msgID string
+	err := p.withTransientRetry(ctx, "reply", func() error {
+		return p.withFreshTenantAccessTokenRetry(ctx, "reply", func(client *lark.Client, options ...larkcore.RequestOptionFunc) error {
+			resp, err := client.Im.Message.Reply(ctx, req, options...)
+			if err != nil {
+				return fmt.Errorf("%s: reply api call: %w", p.tag(), err)
+			}
+			if !resp.Success() {
+				return fmt.Errorf("%s: reply failed code=%d msg=%s", p.tag(), resp.Code, resp.Msg)
+			}
+			if resp.Data != nil {
+				msgID = stringValue(resp.Data.MessageId)
+			}
+			return nil
+		})
+	})
+	return msgID, err
+}
+
 func (p *Platform) createMessage(ctx context.Context, chatID, msgType, content, op string) error {
 	_, _, err := p.createMessageReturningID(ctx, chatID, msgType, content, op)
 	return err
