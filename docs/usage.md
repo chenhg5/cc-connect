@@ -164,7 +164,7 @@ prepends a UTF-8 file to each prompt, including resumed turns. The file is read 
 every turn so edits take effect without restarting the agent. An unreadable file rejects
 the turn explicitly. Leave it unset to keep the existing prompt behavior.
 
-`/memory` reads and appends `<work_dir>/AGENTS.md`, which the Cursor CLI loads on every session. `/cron setup` writes the same file. Cursor has no user-level memory file, so `/memory global` is unsupported.
+`/memory` reads and appends `<work_dir>/AGENTS.md`, which the Cursor CLI loads on every session. `/cron setup` writes the same file. If you set `instructions_file`, point it at that same `AGENTS.md`; `/memory` still writes `<work_dir>/AGENTS.md` when the two paths differ. Cursor has no user-level memory file, so `/memory global` is unsupported.
 
 ### Gemini CLI Modes
 

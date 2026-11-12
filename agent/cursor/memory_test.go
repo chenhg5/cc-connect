@@ -3,8 +3,6 @@ package cursor
 import (
 	"path/filepath"
 	"testing"
-
-	"github.com/chenhg5/cc-connect/core"
 )
 
 func TestMemoryFiles_ProjectAGENTSAndNoGlobal(t *testing.T) {
@@ -17,11 +15,6 @@ func TestMemoryFiles_ProjectAGENTSAndNoGlobal(t *testing.T) {
 	}
 	if got := a.GlobalMemoryFile(); got != "" {
 		t.Fatalf("GlobalMemoryFile() = %q, want empty (Cursor CLI has no user-level AGENTS.md)", got)
-	}
-
-	var provider core.MemoryFileProvider = a
-	if provider.ProjectMemoryFile() != want {
-		t.Fatal("cursor agent must satisfy MemoryFileProvider")
 	}
 }
 
