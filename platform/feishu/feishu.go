@@ -140,6 +140,7 @@ type Platform struct {
 	appSecret                  string
 	progressStyle              string
 	useInteractiveCard         bool
+	cardAnimation              bool // native typewriter animation on rich cards; default true
 	self                       core.Platform
 	reactionEmoji              string
 	ackEmoji                   string
@@ -441,6 +442,18 @@ func newPlatform(name, domain string, opts map[string]any) (core.Platform, error
 	if v, ok := opts["enable_feishu_card"].(bool); ok {
 		useInteractiveCard = v
 	}
+	// Native typewriter animation on rich cards. When disabled the platform
+	// skips the cardkit-v1 streaming-text API and renders every card with
+	// config.streaming_mode = false; the body is then refreshed by whole-card
+	// Patches instead of per-character increments.
+	cardAnimation := true
+	if raw, ok := opts["cc_card_animation"]; ok {
+		v, isBool := raw.(bool)
+		if !isBool {
+			return nil, fmt.Errorf("%s: invalid cc_card_animation %v (want bool)", name, raw)
+		}
+		cardAnimation = v
+	}
 
 	imageBatchWindow := defaultImageBatchWindow
 	if raw, ok := opts["image_batch_window_ms"]; ok {
@@ -498,6 +511,7 @@ func newPlatform(name, domain string, opts map[string]any) (core.Platform, error
 		appSecret:                  appSecret,
 		progressStyle:              progressStyle,
 		useInteractiveCard:         useInteractiveCard,
+		cardAnimation:              cardAnimation,
 		reactionEmoji:              reactionEmoji,
 		ackEmoji:                   ackEmoji,
 		doneEmoji:                  doneEmoji,
@@ -5425,7 +5439,16 @@ func (p *Platform) SendPreviewStart(ctx context.Context, rctx any, content strin
 		// Im.Message.Reply and Im.Message.Create accept the {type:card,data:{card_id}}
 		// content schema (verified by direct API call); skipping Reply mode would
 		// disable cardkit-v1 streaming on every @-mention turn (the dominant case).
-		if id, err := p.createCardEntity(ctx, cardJSON); err == nil {
+		//
+		// With cardAnimation off we deliberately skip the cardkit entity: a
+		// card_id-backed card is always in streaming mode, and Feishu renders
+		// streaming text with a typewriter animation. Sending the card inline
+		// instead keeps the rich card layout, and the engine refreshes it with
+		// whole-card Patches (no per-character typewriter).
+		if !p.cardAnimation {
+			cardJSON = disableCardStreamingMode(cardJSON)
+			sendContent = cardJSON
+		} else if id, err := p.createCardEntity(ctx, cardJSON); err == nil {
 			cardID = id
 			sendContent = fmt.Sprintf(`{"type":"card","data":{"card_id":"%s"}}`, id)
 		} else {
@@ -5682,7 +5705,7 @@ func (p *Platform) patchCardMessage(ctx context.Context, messageID, cardJSON str
 			Content(cardJSON).
 			Build()).
 		Build()
-	return p.withTransientRetry(ctx, "patch message", func() error {
+	err := p.withTransientRetry(ctx, "patch message", func() error {
 		return p.withFreshTenantAccessTokenRetry(ctx, "patch message", func(client *lark.Client, options ...larkcore.RequestOptionFunc) error {
 			resp, err := client.Im.Message.Patch(ctx, req, options...)
 			if err != nil {
@@ -5694,6 +5717,10 @@ func (p *Platform) patchCardMessage(ctx context.Context, messageID, cardJSON str
 			return nil
 		})
 	})
+	if err != nil && errors.Is(err, errFeishuCardRateLimited) {
+		slog.Warn(p.tag()+": patch message rate limited", "message_id", messageID)
+	}
+	return err
 }
 
 // updateCardEntity performs a full-card replacement on a cardkit-v1 entity via
@@ -7307,6 +7334,26 @@ func isCardJSON(content string) bool {
 	return strings.Contains(content, `"schema"`) && strings.Contains(content, `"body"`)
 }
 
+// disableCardStreamingMode turns off the card's streaming_mode flag so Feishu
+// renders the text without the typewriter animation. Best-effort: on any
+// unmarshal error the original card JSON is returned unchanged.
+func disableCardStreamingMode(cardJSON string) string {
+	var card map[string]any
+	if err := json.Unmarshal([]byte(cardJSON), &card); err != nil {
+		return cardJSON
+	}
+	cfg, ok := card["config"].(map[string]any)
+	if !ok {
+		return cardJSON
+	}
+	cfg["streaming_mode"] = false
+	out, err := json.Marshal(card)
+	if err != nil {
+		return cardJSON
+	}
+	return string(out)
+}
+
 // buildCardJSONWithStatus builds a Feishu card JSON with a colored header
 // reflecting the given status. Used as a fallback when rich-card assembly fails.
 func buildCardJSONWithStatus(content string, status core.CardStatus) string {
@@ -7669,7 +7716,14 @@ func splitMarkdownByTables(md string, maxTables int) []string {
 // statusFooter (multi-line, '\n'-separated) and passes it through; the renderer
 // splits it back into one dim notation block per line.
 func (p *Platform) BuildRichCard(status core.CardStatus, title string, steps []core.ToolStep, markdown string, streaming bool, statusFooter string) string {
-	return buildRichCard(status, title, steps, markdown, streaming, statusFooter)
+	card := buildRichCard(status, title, steps, markdown, streaming, statusFooter)
+	if !p.cardAnimation {
+		// The switch has to hold for the card's whole lifetime, not just its
+		// creation: the engine rebuilds every mid-turn frame with
+		// streaming=true, so an update would otherwise re-arm the typewriter.
+		card = disableCardStreamingMode(card)
+	}
+	return card
 }
 
 // SplitMarkdownByTables implements core.MarkdownTableSplitter.

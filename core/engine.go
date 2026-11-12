@@ -6039,12 +6039,15 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 								if !streamed {
 									card := buildResolvedRichCard(CardStatusWorking, "", toolSteps, partialText, true, e.composeRichStatusFooter(true, turnStart, e.agent, state.agentSession, state.workspaceDir))
 									if updater, ok := p.(MessageUpdater); ok {
-										if err := updater.UpdateMessage(e.ctx, cardMessageID, card); err == nil {
-											lastRichCardUpdate = time.Now()
-											lastRichCardLen = len(partialText)
-										} else {
+										if err := updater.UpdateMessage(e.ctx, cardMessageID, card); err != nil {
 											slog.Debug("rich card: failed to update text card", "platform", p.Name(), "error", err)
 										}
+										// Advance the throttle even on failure: the next frame
+										// carries the full accumulated text, so skipping one
+										// costs nothing, while retrying on every text event
+										// turns a persistent error into a request storm.
+										lastRichCardUpdate = time.Now()
+										lastRichCardLen = len(partialText)
 									}
 								}
 							}

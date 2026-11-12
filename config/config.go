@@ -203,6 +203,7 @@ type DisplayConfig struct {
 	ShowContextIndicator *bool   `toml:"show_context_indicator"` // whether [ctx: ~N%] suffix is shown; default true
 	ReplyFooter          *bool   `toml:"reply_footer"`           // whether Codex-like footer is shown; default true
 	HideAgentFooter      *bool   `toml:"hide_agent_footer"`      // strip agent-emitted model/token footer lines; default false
+	CardAnimation        *bool   `toml:"card_animation"`         // rich card typewriter animation; default true. false = text appears at once
 }
 
 // StreamPreviewConfig controls real-time streaming preview in IM.
@@ -1058,6 +1059,28 @@ func EffectiveCardMode(cfg *Config, proj *ProjectConfig) string {
 		}
 	}
 	return "legacy"
+}
+
+// EffectiveCardAnimation reports whether rich cards should use the native
+// typewriter animation. Per-project override wins over the global [display]
+// block; default is true (animation on).
+//
+// When false, the Feishu platform skips the cardkit-v1 streaming-text API and
+// renders every card with config.streaming_mode = false. The per-character
+// typewriter is gone and the body is refreshed by whole-card Patches instead.
+// Takes effect only when card_mode = "rich".
+func EffectiveCardAnimation(cfg *Config, proj *ProjectConfig) bool {
+	var projDisp *DisplayConfig
+	if proj != nil {
+		projDisp = proj.Display
+	}
+	if projDisp != nil && projDisp.CardAnimation != nil {
+		return *projDisp.CardAnimation
+	}
+	if cfg.Display.CardAnimation != nil {
+		return *cfg.Display.CardAnimation
+	}
+	return true
 }
 
 // validatePermissive is like validate but skips the "at least one platform"
