@@ -474,7 +474,7 @@ func (sp *streamPreview) finish(finalText, statusFooter string) bool {
 	// via SendPreviewStart (first flush), we must still call UpdateMessage
 	// because it may apply different formatting (e.g. Markdown→HTML for
 	// Telegram).
-	if finalText == sp.lastSentText && sp.lastSentViaUpdate && statusFooter == "" {
+	if finalText == sp.lastSentText && sp.lastSentViaUpdate && !wantsFinalReplyFooter(sp.platform, statusFooter) {
 		slog.Debug("stream preview finish: text unchanged and no footer, skipping",
 			"text_len", len(finalText))
 		return true
@@ -490,7 +490,7 @@ func (sp *streamPreview) finish(finalText, statusFooter string) bool {
 
 	// Prefer the structured-footer path when the platform supports it, so the
 	// footer renders with small/dim styling separate from the response body.
-	if statusFooter != "" {
+	if wantsFinalReplyFooter(sp.platform, statusFooter) {
 		if sfu, ok := sp.platform.(StatusFooterUpdater); ok {
 			if err := sfu.UpdateMessageWithStatusFooter(sp.ctx, sp.previewMsgID, finalText, statusFooter); err == nil {
 				slog.Debug("stream preview finish: success via UpdateMessageWithStatusFooter")

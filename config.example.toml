@@ -1123,6 +1123,17 @@ app_secret = "your-feishu-app-secret"
 #                              # 都是独立事件，cc-connect 会在窗口内将它们合并成一条多图消息再分发；如果你的
 #                              # 网络或设备发送间隔超过 500ms 且仍被拆成多轮，可调高（如 800–1200ms）；如果
 #                              # 只是单图发送，希望响应更快，也可以适当调低。
+# turn_feedback_exec = "my-feedback-cmd"  # Optional: end each final reply card with 👍/👎 + comment and
+#                              # overall result buttons (成功/失败/终止). A click runs this command with
+#                              # --message <id> plus --verdict up|down / --comment <text> / --outcome
+#                              # success|fail|cancelled, and --operator <open_id>. Empty (default): no controls.
+#                              # 可选：在每轮最终回复卡片末尾加 👍/👎 + 意见框和整体结果按钮；点击时执行该命令。默认不开启。
+# turn_feedback_gate = "/path/to/turn-feedback-gate"      # File containing "off" hides 👍/👎 + comment (re-read per reply)
+#                              # 文件内容为 off 时隐藏 👍/👎 与意见框（每次回复重新读取）
+# result_feedback_gate = "/path/to/result-feedback-gate"  # File containing "off" hides the result buttons; unset: follows turn_feedback_gate
+#                              # 文件内容为 off 时隐藏整体结果按钮；未配置时跟随 turn_feedback_gate
+# turn_feedback_state = "/path/to/turn-feedback.json"     # Remembers the cards so a click (even after restart) redraws the last choice
+#                              # 记住带反馈控件的卡片，点击后（含重启后）重绘并高亮上次的选择
 
 # Lark (International Version) / Lark 国际版
 # Lark now supports WebSocket long-connection too; webhook mode is only needed

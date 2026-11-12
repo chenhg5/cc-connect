@@ -218,6 +218,20 @@ type Platform struct {
 	richCardImageFailed     map[string]struct{}
 	richCardImageUploadFunc func(context.Context, string) (string, error)
 
+	// Turn feedback controls under each final reply (see turn_feedback.go).
+	turnFeedbackExec  string
+	turnFeedbackGate  string
+	resultGate        string                                 // "" keeps the result buttons with the 👍 / 👎
+	turnFeedbackRun   func(sessionKey string, args []string) // test seam; nil runs turnFeedbackExec
+	turnFeedbackOnce  sync.Once
+	turnFeedbackQueue chan func() // clicks, submitted one at a time in order
+	// The last reply card sent per session, which the controls are patched
+	// onto when a turn's answer went out before its last tool call.
+	lastReplyMu    sync.Mutex
+	lastReplyCards map[string]lastReplyCard
+	// Reply cards carrying the controls, to redraw with the last choice.
+	feedbackCards feedbackCards
+
 	// imageBatch coalesces consecutive image messages from the same session
 	// arriving within imageBatchWindow. Without this, sending N images in rapid
 	// succession from the Feishu mobile client (which posts each as a separate
@@ -441,6 +455,10 @@ func newPlatform(name, domain string, opts map[string]any) (core.Platform, error
 	if v, ok := opts["enable_feishu_card"].(bool); ok {
 		useInteractiveCard = v
 	}
+	turnFeedbackExec, _ := opts["turn_feedback_exec"].(string)
+	turnFeedbackGate, _ := opts["turn_feedback_gate"].(string)
+	resultFeedbackGate, _ := opts["result_feedback_gate"].(string)
+	turnFeedbackState, _ := opts["turn_feedback_state"].(string)
 
 	imageBatchWindow := defaultImageBatchWindow
 	if raw, ok := opts["image_batch_window_ms"]; ok {
@@ -525,6 +543,10 @@ func newPlatform(name, domain string, opts map[string]any) (core.Platform, error
 		resourceDownloadHTTP:       &http.Client{Timeout: 60 * time.Second},
 		resourceChunkSize:          resourceChunkSize,
 		resourceMaxBytes:           defaultResourceMaxBytes,
+		turnFeedbackExec:           strings.TrimSpace(turnFeedbackExec),
+		turnFeedbackGate:           strings.TrimSpace(turnFeedbackGate),
+		resultGate:                 strings.TrimSpace(resultFeedbackGate),
+		feedbackCards:              feedbackCards{path: strings.TrimSpace(turnFeedbackState)},
 	}
 	if !useInteractiveCard {
 		base.self = base
@@ -975,6 +997,14 @@ func (p *Platform) onCardAction(event *callback.CardActionTriggerEvent) (*callba
 				Data: renderCardMap(cb.Build(), sessionKey),
 			},
 		}, nil
+	}
+
+	// fb: — 👍 / 👎 / comment / result under a final reply: run the feedback
+	// command on its own and answer with a toast; nothing reaches the
+	// conversation.
+	if strings.HasPrefix(actionVal, turnFeedbackActionPrefix) {
+		return p.onTurnFeedback(strings.TrimPrefix(actionVal, turnFeedbackActionPrefix),
+			event.Event.Action.FormValue, sessionKey, messageID, userID), nil
 	}
 
 	// cmd: — async command dispatch, with optional in-place card replacement
@@ -3533,12 +3563,7 @@ func (p *Platform) Reply(ctx context.Context, rctx any, content string) error {
 	}
 
 	content = p.resolveMentionsInContent(ctx, rc.chatID, content)
-	msgType, msgBody := buildReplyContent(content)
-
-	if !p.shouldUseThreadOrReplyAPI(rc) {
-		return p.sendNewMessageToChat(ctx, rc, msgType, msgBody)
-	}
-	return p.replyMessage(ctx, rc, msgType, msgBody)
+	return p.sendReplyContent(ctx, rc, content, p.shouldUseThreadOrReplyAPI(rc))
 }
 
 // Send sends a message. When the original message ID is available, the message
@@ -3555,8 +3580,7 @@ func (p *Platform) Send(ctx context.Context, rctx any, content string) error {
 	}
 
 	content = p.resolveMentionsInContent(ctx, rc.chatID, content)
-	msgType, msgBody := buildReplyContent(content)
-	return p.sendNewMessageToChat(ctx, rc, msgType, msgBody)
+	return p.sendReplyContent(ctx, rc, content, false)
 }
 
 // SendWithStatusFooter implements core.StatusFooterSender: send a reply with
@@ -3572,19 +3596,40 @@ func (p *Platform) SendWithStatusFooter(ctx context.Context, rctx any, content, 
 	}
 	// Resolve mentions first so we can detect whether a real @mention is
 	content = p.resolveMentionsInContent(ctx, rc.chatID, content)
-	if strings.TrimSpace(footer) == "" || strings.Contains(content, `<at user_id=`) || strings.Contains(content, `<at id=`) {
+	feedback, sections := p.turnFeedbackElement(rc.sessionKey)
+	if (strings.TrimSpace(footer) == "" && feedback == nil) || hasResolvedMention(content) {
 		if strings.TrimSpace(footer) != "" {
 			content += "\n\n" + footer
 		}
-		return p.Send(ctx, rctx, content)
+		if err := p.Send(ctx, rctx, content); err != nil {
+			return err
+		}
+		// A mention keeps the answer text, which cannot carry the
+		// controls: they follow as a card of their own.
+		if feedback != nil {
+			if err := p.sendFeedbackControls(ctx, rc, feedback, sections); err != nil {
+				slog.Warn(p.tag()+": turn feedback controls not sent under a mention reply", "error", err)
+			}
+		}
+		return nil
 	}
 	processedBody := sanitizeMarkdownURLs(preprocessFeishuMarkdown(content))
 	processedFooter := sanitizeMarkdownURLs(preprocessFeishuMarkdown(footer))
-	cardJSON := buildCardJSONWithStatusFooter(processedBody, processedFooter)
-	if p.shouldUseThreadOrReplyAPI(rc) {
-		return p.replyMessage(ctx, rc, larkim.MsgTypeInteractive, cardJSON)
+	cardJSON := buildFinalReplyCardJSON(processedBody, processedFooter, feedback)
+	// The final reply carries its own controls; nothing earlier is patched.
+	p.rememberReplyCard(rc.sessionKey, "", "")
+	if feedback == nil {
+		if p.shouldUseThreadOrReplyAPI(rc) {
+			return p.replyMessage(ctx, rc, larkim.MsgTypeInteractive, cardJSON)
+		}
+		return p.sendNewMessageToChat(ctx, rc, larkim.MsgTypeInteractive, cardJSON)
 	}
-	return p.sendNewMessageToChat(ctx, rc, larkim.MsgTypeInteractive, cardJSON)
+	messageID, err := p.sendCardID(ctx, rc, cardJSON)
+	if err == nil {
+		p.feedbackCards.remember(messageID, rc.sessionKey, processedBody, processedFooter, sections)
+		slog.Info(p.tag()+": final reply carries turn feedback controls", "session", rc.sessionKey, "message_id", messageID)
+	}
+	return err
 }
 
 func (p *Platform) SendImage(ctx context.Context, rctx any, img core.ImageAttachment) error {
@@ -4371,11 +4416,18 @@ func (p *Platform) buildReplyMessageReqBody(rc replyContext, msgType, content st
 }
 
 func (p *Platform) replyMessage(ctx context.Context, rc replyContext, msgType, content string) error {
+	_, err := p.replyMessageID(ctx, rc, msgType, content)
+	return err
+}
+
+// replyMessageID is replyMessage that also returns the new message's id.
+func (p *Platform) replyMessageID(ctx context.Context, rc replyContext, msgType, content string) (string, error) {
 	req := larkim.NewReplyMessageReqBuilder().
 		MessageId(rc.messageID).
 		Body(p.buildReplyMessageReqBody(rc, msgType, content)).
 		Build()
-	return p.withTransientRetry(ctx, "reply", func() error {
+	var messageID string
+	err := p.withTransientRetry(ctx, "reply", func() error {
 		return p.withFreshTenantAccessTokenRetry(ctx, "reply", func(client *lark.Client, options ...larkcore.RequestOptionFunc) error {
 			resp, err := client.Im.Message.Reply(ctx, req, options...)
 			if err != nil {
@@ -4384,12 +4436,22 @@ func (p *Platform) replyMessage(ctx context.Context, rc replyContext, msgType, c
 			if !resp.Success() {
 				return fmt.Errorf("%s: reply failed code=%d msg=%s", p.tag(), resp.Code, resp.Msg)
 			}
+			if resp.Data != nil && resp.Data.MessageId != nil {
+				messageID = *resp.Data.MessageId
+			}
 			return nil
 		})
 	})
+	return messageID, err
 }
 
 func (p *Platform) createMessage(ctx context.Context, chatID, msgType, content, op string) error {
+	_, err := p.createMessageID(ctx, chatID, msgType, content, op)
+	return err
+}
+
+// createMessageID is createMessage that also returns the new message's id.
+func (p *Platform) createMessageID(ctx context.Context, chatID, msgType, content, op string) (string, error) {
 	req := larkim.NewCreateMessageReqBuilder().
 		ReceiveIdType(larkim.CreateMessageV1ReceiveIDTypeChatId).
 		Body(larkim.NewCreateMessageReqBodyBuilder().
@@ -4398,7 +4460,8 @@ func (p *Platform) createMessage(ctx context.Context, chatID, msgType, content, 
 			Content(content).
 			Build()).
 		Build()
-	return p.withTransientRetry(ctx, op, func() error {
+	var messageID string
+	err := p.withTransientRetry(ctx, op, func() error {
 		return p.withFreshTenantAccessTokenRetry(ctx, op, func(client *lark.Client, options ...larkcore.RequestOptionFunc) error {
 			resp, err := client.Im.Message.Create(ctx, req, options...)
 			if err != nil {
@@ -4407,9 +4470,13 @@ func (p *Platform) createMessage(ctx context.Context, chatID, msgType, content, 
 			if !resp.Success() {
 				return fmt.Errorf("%s: %s failed code=%d msg=%s", p.tag(), op, resp.Code, resp.Msg)
 			}
+			if resp.Data != nil && resp.Data.MessageId != nil {
+				messageID = *resp.Data.MessageId
+			}
 			return nil
 		})
 	})
+	return messageID, err
 }
 
 func (p *Platform) withFreshTenantAccessTokenRetry(ctx context.Context, operation string, fn feishuRequestFunc) error {
@@ -4862,6 +4929,7 @@ type feishuPreviewHandle struct {
 	mu          sync.Mutex
 	messageID   string
 	chatID      string
+	sessionKey  string // the conversation, for controls the final reply carries
 	cardID      string // cardkit-v1 entity id (empty = no streaming text path)
 	sequence    int    // cardkit-v1 streaming text monotonic counter (++ before use; first call = 1)
 	status      core.CardStatus
@@ -4902,20 +4970,40 @@ func marshalReplyCard(body []map[string]any, withTail func([]map[string]any) []m
 // markdown element followed by a small/dim status-footer markdown element
 // (Lark `text_size: "notation"`). Empty footer falls through to buildCardJSON.
 func buildCardJSONWithStatusFooter(content, footer string) string {
-	if strings.TrimSpace(footer) == "" {
+	return buildFinalReplyCardJSON(content, footer, nil)
+}
+
+// buildFinalReplyCardJSON is buildCardJSONWithStatusFooter with an optional
+// element after the footer: the turn feedback form, when it is on.
+func buildFinalReplyCardJSON(content, footer string, feedback map[string]any) string {
+	if strings.TrimSpace(footer) == "" && feedback == nil {
 		return buildCardJSON(content)
+	}
+	if strings.TrimSpace(content) == "" && strings.TrimSpace(footer) == "" {
+		// The controls on their own, under an answer that could not take them.
+		b, _ := json.Marshal(map[string]any{
+			"schema": "2.0",
+			"config": map[string]any{"width_mode": "fill"},
+			"body":   map[string]any{"elements": []map[string]any{feedback}},
+		})
+		return string(b)
 	}
 	segments := sanitizeCardMarkdownSegmentsForCard([]string{content, footer})
 	content = segments[0]
 	footer = segments[1]
 	return marshalReplyCard(buildCardBodyElements(content), func(body []map[string]any) []map[string]any {
-		return append(body,
-			map[string]any{"tag": "hr"},
-			map[string]any{
+		elements := append(body, map[string]any{"tag": "hr"})
+		if strings.TrimSpace(footer) != "" {
+			elements = append(elements, map[string]any{
 				"tag":       "markdown",
 				"content":   footer,
 				"text_size": "notation",
 			})
+		}
+		if feedback != nil {
+			elements = append(elements, feedback)
+		}
+		return elements
 	}, content)
 }
 
@@ -5497,7 +5585,13 @@ func (p *Platform) SendPreviewStart(ctx context.Context, rctx any, content strin
 		return nil, fmt.Errorf("%s: send preview: no message ID returned", p.tag())
 	}
 
-	return &feishuPreviewHandle{messageID: msgID, chatID: chatID, cardID: cardID}, nil
+	handle := &feishuPreviewHandle{messageID: msgID, chatID: chatID, sessionKey: rc.sessionKey, cardID: cardID}
+	if !isCardJSON(content) {
+		if _, progress := core.ParseProgressCardPayload(content); !progress {
+			p.rememberPreviewCard(handle, sanitizeMarkdownURLs(content))
+		}
+	}
+	return handle, nil
 }
 
 // createCardEntity calls the cardkit-v1 Create Card Entity API
@@ -5631,6 +5725,9 @@ func (p *Platform) UpdateMessage(ctx context.Context, previewHandle any, content
 			processed = preprocessFeishuMarkdown(content)
 		}
 		cardJSON = buildCardJSON(sanitizeMarkdownURLs(processed))
+		// A text preview is what an answer streamed before a tool call
+		// stays as; the turn's feedback controls may be patched onto it.
+		p.rememberPreviewCard(h, sanitizeMarkdownURLs(processed))
 	}
 	// Route card-entity-bound messages to cardkit-v1 full-card update API.
 	// Im.Message.Patch on entity-referenced messages is silently no-op for the
@@ -5652,10 +5749,15 @@ func (p *Platform) UpdateMessageWithStatusFooter(ctx context.Context, previewHan
 	if !p.useInteractiveCard {
 		return core.ErrNotSupported
 	}
-	if strings.TrimSpace(footer) == "" {
+	h, ok := previewHandle.(*feishuPreviewHandle)
+	var feedback map[string]any
+	var sections feedbackSections
+	if ok {
+		feedback, sections = p.turnFeedbackElement(h.sessionKey)
+	}
+	if strings.TrimSpace(footer) == "" && feedback == nil {
 		return p.UpdateMessage(ctx, previewHandle, content)
 	}
-	h, ok := previewHandle.(*feishuPreviewHandle)
 	if !ok {
 		return fmt.Errorf("%s: invalid preview handle type %T", p.tag(), previewHandle)
 	}
@@ -5664,7 +5766,12 @@ func (p *Platform) UpdateMessageWithStatusFooter(ctx context.Context, previewHan
 	// resolve since the matching Send path resolves on the chat-thread API.
 	processedBody := sanitizeMarkdownURLs(preprocessFeishuMarkdown(content))
 	processedFooter := sanitizeMarkdownURLs(preprocessFeishuMarkdown(footer))
-	cardJSON := buildCardJSONWithStatusFooter(processedBody, processedFooter)
+	cardJSON := buildFinalReplyCardJSON(processedBody, processedFooter, feedback)
+	if feedback != nil {
+		p.rememberReplyCard(h.sessionKey, "", "")
+		p.feedbackCards.remember(h.messageID, h.sessionKey, processedBody, processedFooter, sections)
+		slog.Info(p.tag()+": final reply carries turn feedback controls", "session", h.sessionKey, "message_id", h.messageID)
+	}
 	// Same card-entity routing as UpdateMessage above.
 	h.mu.Lock()
 	cardID := h.cardID

@@ -6505,6 +6505,11 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 					cardMessageID = nil
 				}
 				slog.Info("silent reply suppressed", "session", session.ID)
+				// Silent only at the end: the answer went out before the
+				// last tool call, and that is what the controls rate.
+				if !hasRichCard && segmentStart > 0 {
+					attachTurnFeedback(e.ctx, p, replyCtx)
+				}
 			} else if hasRichCard {
 				parts := []string{fullResponse}
 				if splitter, ok := p.(MarkdownTableSplitter); ok {
@@ -6556,13 +6561,17 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				// only send the unsent remainder. When tool progress is hidden, tool events don't surface
 				// side-channel messages and segmentStart stays 0, so keep normal finalize flow.
 				sp.discard()
+				unsent := ""
 				if segmentStart < len(textParts) {
-					unsent := strings.Join(textParts[segmentStart:], "")
-					if unsent != "" {
-						if !sendChunksWithStatusFooter(e.ctx, p, replyCtx, unsent, statusFooter, sendWorkspaceWithError) {
-							return
-						}
+					unsent = strings.Join(textParts[segmentStart:], "")
+				}
+				if unsent != "" {
+					if !sendChunksWithStatusFooter(e.ctx, p, replyCtx, unsent, statusFooter, sendWorkspaceWithError) {
+						return
 					}
+				} else {
+					// The answer went out before the last tool call.
+					attachTurnFeedback(e.ctx, p, replyCtx)
 				}
 			} else if suppressDuplicate {
 				sp.discard()
@@ -6571,6 +6580,8 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 					if !sendChunksWithStatusFooter(e.ctx, p, replyCtx, metaOnly, statusFooter, sendWorkspaceWithError) {
 						return
 					}
+				} else {
+					attachTurnFeedback(e.ctx, p, replyCtx)
 				}
 				slog.Debug("EventResult: suppressed duplicate side-channel text", "response_len", len(fullResponse))
 			} else if sp.finish(fullResponse, statusFooter) {
@@ -8465,7 +8476,7 @@ func sendChunksWithStatusFooter(ctx context.Context, p Platform, replyCtx any, b
 	chunks := SplitMessageCodeFenceAware(body, maxPlatformMessageLen)
 	for i, chunk := range chunks {
 		isLast := i == len(chunks)-1
-		if isLast && statusFooter != "" {
+		if isLast && wantsFinalReplyFooter(p, statusFooter) {
 			if sfs, ok := p.(StatusFooterSender); ok {
 				if err := sfs.SendWithStatusFooter(ctx, replyCtx, chunk, statusFooter); err == nil {
 					continue

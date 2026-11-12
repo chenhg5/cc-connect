@@ -3,6 +3,7 @@ package core
 import (
 	"context"
 	"errors"
+	"log/slog"
 	"time"
 )
 
@@ -271,6 +272,45 @@ type StatusFooterSender interface {
 // content + structured status footer block.
 type StatusFooterUpdater interface {
 	UpdateMessageWithStatusFooter(ctx context.Context, replyCtx any, content, footer string) error
+}
+
+// TurnFeedbackPlatform is an optional Platform extension for platforms that
+// end a turn's final reply with feedback controls (e.g. 👍 / 👎 and a comment
+// box). The controls are rendered where the status footer is, so while it
+// reports true the final reply takes the status-footer path even when there
+// is no footer text.
+type TurnFeedbackPlatform interface {
+	TurnFeedbackEnabled() bool
+}
+
+// TurnFeedbackAttacher is the counterpart of TurnFeedbackPlatform for a
+// turn whose answer already went out before its last tool call, so no final
+// reply is left to carry the controls: the platform attaches them to what
+// was sent last, or right under it.
+type TurnFeedbackAttacher interface {
+	AttachTurnFeedback(ctx context.Context, replyCtx any) error
+}
+
+// attachTurnFeedback gives such a turn its controls, when the platform has
+// them on.
+func attachTurnFeedback(ctx context.Context, p any, replyCtx any) {
+	a, ok := p.(TurnFeedbackAttacher)
+	if !ok || !wantsFinalReplyFooter(p, "") {
+		return
+	}
+	if err := a.AttachTurnFeedback(ctx, replyCtx); err != nil {
+		slog.Warn("turn feedback controls not attached", "error", err)
+	}
+}
+
+// wantsFinalReplyFooter reports whether a final reply must go through the
+// status-footer path: there is a footer to render, or feedback controls.
+func wantsFinalReplyFooter(p any, statusFooter string) bool {
+	if statusFooter != "" {
+		return true
+	}
+	tf, ok := p.(TurnFeedbackPlatform)
+	return ok && tf.TurnFeedbackEnabled()
 }
 
 // ProgressStyleProvider is an optional interface for platforms that expose

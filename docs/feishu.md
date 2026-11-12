@@ -443,6 +443,43 @@ BOT-B 机器人会收到飞书 @ 事件并被触发。
 
 ---
 
+## 回复反馈控件（`turn_feedback_exec`）
+
+开启后，每轮对话的最终回复卡片末尾会带上一个表单，用户无需打断对话即可对每条答复打分：
+
+- **👍 有用 / 👎 没用** 与一个选填的意见框（「提交意见」按钮）；
+- **任务整体结果评价**：成功 / 失败 / 终止。
+
+### 配置
+
+```toml
+[projects.platforms.options]
+turn_feedback_exec   = "my-feedback-cmd"               # 必填：点击时执行的命令；为空（默认）则不显示控件
+turn_feedback_gate   = "/path/to/turn-feedback-gate"   # 可选：文件内容为 off 时隐藏 👍/👎 与意见框
+result_feedback_gate = "/path/to/result-feedback-gate" # 可选：文件内容为 off 时隐藏整体结果按钮；未配置时跟随 turn_feedback_gate
+turn_feedback_state  = "/path/to/turn-feedback.json"   # 可选：记住带控件的卡片，点击后重绘并高亮上次的选择（重启后仍有效）
+```
+
+点击时 cc-connect 以独立参数（不经过 shell）执行：
+
+```bash
+my-feedback-cmd --message <回复消息 id> --verdict up|down [--comment <意见>] --operator <open_id>
+my-feedback-cmd --message <回复消息 id> --comment <意见> --operator <open_id>      # 仅提交意见
+my-feedback-cmd --message <回复消息 id> --outcome success|fail|cancelled --operator <open_id>
+```
+
+环境变量 `CC_SESSION_KEY` 为该回复所属会话。整体结果按钮的命令若在 stdout 输出 JSON `{"score_card": <卡片>}`，该卡片会被发到同一会话（话题）中。
+
+### 注意事项
+
+- 需要 `enable_feishu_card = true`（默认）并订阅 `card.action.trigger` 回调；点击同样受 `allow_from` 限制。
+- 点击只回一个 toast，不会发消息到会话，也不会触发新一轮对话；多次点击按顺序逐个执行（命令超时 30 秒）。
+- 纯文本回复仍以文本发送；带真实 @ 的回复也保持文本，控件以一张独立小卡片紧跟其后。
+- 如果答复在最后一次工具调用之前已经发出（之后没有新的文字），控件会补到那张卡片上，或作为独立卡片发在其下方。
+- 两个 gate 文件每次发送最终回复时重新读取，可在不重启的情况下开关；文件不存在视为开启。
+
+---
+
 ## 常见问题
 
 ### Q: 长连接和 Webhook 有什么区别？
