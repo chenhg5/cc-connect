@@ -248,6 +248,27 @@ func (a *Agent) SkillDirs() []string {
 	return dirs
 }
 
+// ── MemoryFileProvider implementation ─────────────────────────
+//
+// Cursor Agent loads <work_dir>/AGENTS.md on every session (alongside
+// CLAUDE.md and .cursor/rules). It does not load a user-level AGENTS.md:
+// account rules live in Cursor settings, and ~/.cursor/rules is a directory
+// of rule files rather than one memory file. GlobalMemoryFile stays empty so
+// /memory global reports that global memory is unsupported.
+
+func (a *Agent) ProjectMemoryFile() string {
+	workDir := a.GetWorkDir()
+	absDir, err := filepath.Abs(workDir)
+	if err != nil {
+		absDir = workDir
+	}
+	return filepath.Join(absDir, "AGENTS.md")
+}
+
+func (a *Agent) GlobalMemoryFile() string { return "" }
+
+var _ core.MemoryFileProvider = (*Agent)(nil)
+
 // ── ContextCompressor implementation ──────────────────────────
 
 func (a *Agent) CompressCommand() string { return "" }
