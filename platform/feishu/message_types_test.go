@@ -6,6 +6,8 @@ import (
 	"net/http/httptest"
 	"strconv"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -27,6 +29,181 @@ func pinFeishuDisplayLocation(t *testing.T) {
 	old := feishuDisplayLocation
 	feishuDisplayLocation = time.FixedZone("UTC+8", 8*60*60)
 	t.Cleanup(func() { feishuDisplayLocation = old })
+}
+
+// The fixture rejects resource requests that use a child message ID (234003).
+func TestParseMergeForward_DownloadsFilesThroughOuterContainer(t *testing.T) {
+	for _, nested := range []bool{false, true} {
+		name := "top_level"
+		if nested {
+			name = "nested"
+		}
+		t.Run(name, func(t *testing.T) {
+			item := func(id, parent, kind, content string) map[string]any {
+				return map[string]any{
+					"message_id": id, "upper_message_id": parent, "msg_type": kind,
+					"body": map[string]any{"content": content},
+				}
+			}
+			items := []map[string]any{
+				item("om_root", "", "merge_forward", ""),
+				item("om_top_file", "om_root", "file", `{"file_key":"fk_top","file_name":"top.txt"}`),
+			}
+			wantFiles := map[string]string{"top.txt": "top-file-bytes"}
+			if nested {
+				items = append(items,
+					item("om_nested", "om_root", "merge_forward", ""),
+					item("om_nested_file", "om_nested", "file", `{"file_key":"fk_nested","file_name":"nested.txt"}`),
+				)
+				wantFiles["nested.txt"] = "nested-file-bytes"
+			}
+			var mu sync.Mutex
+			var resourcePaths []string
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				switch {
+				case r.URL.Path == "/open-apis/auth/v3/tenant_access_token/internal":
+					w.Header().Set("Content-Type", "application/json")
+					writeJSON(t, w, map[string]any{"code": 0, "expire": 7200, "tenant_access_token": "test-forward-token"})
+				case r.URL.Path == "/open-apis/im/v1/messages/om_root":
+					w.Header().Set("Content-Type", "application/json")
+					writeJSON(t, w, map[string]any{"code": 0, "data": map[string]any{"items": items}})
+				case strings.Contains(r.URL.Path, "/resources/"):
+					mu.Lock()
+					resourcePaths = append(resourcePaths, r.URL.Path)
+					mu.Unlock()
+					if !strings.HasPrefix(r.URL.Path, "/open-apis/im/v1/messages/om_root/resources/") {
+						w.WriteHeader(http.StatusBadRequest)
+						writeJSON(t, w, map[string]any{"code": 234003, "msg": "File not in msg"})
+						return
+					}
+					if r.URL.Query().Get("type") != "file" {
+						t.Errorf("resource type = %q, want file", r.URL.Query().Get("type"))
+					}
+					var body string
+					switch r.URL.Path {
+					case "/open-apis/im/v1/messages/om_root/resources/fk_top":
+						body = "top-file-bytes"
+					case "/open-apis/im/v1/messages/om_root/resources/fk_nested":
+						body = "nested-file-bytes"
+					default:
+						t.Errorf("unexpected resource path %s", r.URL.Path)
+						w.WriteHeader(http.StatusNotFound)
+						return
+					}
+					if _, err := w.Write([]byte(body)); err != nil {
+						t.Errorf("write resource: %v", err)
+					}
+				default:
+					t.Errorf("unexpected path %s", r.URL.Path)
+					w.WriteHeader(http.StatusNotFound)
+				}
+			}))
+			defer srv.Close()
+			p := newTestPlatformForDownload(srv.URL, 8*1024*1024, 512*1024*1024)
+			p.client = lark.NewClient("test-forward-client", "unused",
+				lark.WithEnableTokenCache(false), lark.WithOpenBaseUrl(srv.URL), lark.WithHttpClient(srv.Client()))
+			text, images, files := p.parseMergeForward("om_root")
+			if strings.Contains(text, "download failed") {
+				t.Errorf("forwarded text = %q, want no download failure", text)
+			}
+			if len(images) != 0 || len(files) != len(wantFiles) {
+				t.Errorf("attachments = %d images, %d files; want 0 images, %d files", len(images), len(files), len(wantFiles))
+			}
+			for _, file := range files {
+				want, ok := wantFiles[file.FileName]
+				if !ok || string(file.Data) != want {
+					t.Errorf("file %q bytes = %q, want %q", file.FileName, file.Data, want)
+				}
+				delete(wantFiles, file.FileName)
+			}
+			if len(wantFiles) != 0 {
+				t.Errorf("missing files: %v", wantFiles)
+			}
+			mu.Lock()
+			defer mu.Unlock()
+			if len(resourcePaths) == 0 {
+				t.Fatal("no resource requests")
+			}
+			for _, path := range resourcePaths {
+				if !strings.HasPrefix(path, "/open-apis/im/v1/messages/om_root/resources/") {
+					t.Errorf("resource path = %q, want outer container om_root", path)
+				}
+			}
+		})
+	}
+}
+
+func TestFetchSingleMessage_QuotedForwardDoesNotDownloadFiles(t *testing.T) {
+	var downloads atomic.Int32
+	var imageDownloads atomic.Int32
+	imageData := []byte{0x89, 'P', 'N', 'G', '\r', '\n', 0x1a, '\n'}
+	item := func(id, parent, kind, content string) map[string]any {
+		return map[string]any{
+			"message_id": id, "upper_message_id": parent, "msg_type": kind,
+			"body": map[string]any{"content": content},
+		}
+	}
+	items := []map[string]any{
+		item("om_root", "", "merge_forward", ""),
+		item("om_file", "om_root", "file", `{"file_key":"fk_top","file_name":"top.txt"}`),
+		item("om_post", "om_root", "post", `{"files":[{"file_key":"fk_post","file_name":"top.csv"}]}`),
+		item("om_nested", "om_root", "merge_forward", ""),
+		item("om_nested_text", "om_nested", "text", `{"text":"forwarded context"}`),
+		item("om_nested_file", "om_nested", "file", `{"file_key":"fk_nested","file_name":"nested.txt"}`),
+		item("om_nested_post", "om_nested", "post", `{"files":[{"file_key":"fk_nested_post","file_name":"nested.csv"}]}`),
+		item("om_image", "om_root", "image", `{"image_key":"img_quote"}`),
+	}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case strings.Contains(r.URL.Path, "tenant_access_token"):
+			writeJSON(t, w, map[string]any{"code": 0, "expire": 7200, "tenant_access_token": "test-quote-token"})
+		case r.URL.Path == "/open-apis/im/v1/messages/om_root":
+			writeJSON(t, w, map[string]any{"code": 0, "data": map[string]any{"items": items}})
+		case r.URL.Path == "/open-apis/im/v1/messages/om_root/resources/img_quote":
+			imageDownloads.Add(1)
+			if r.URL.Query().Get("type") != "image" {
+				t.Errorf("image resource type = %q, want image", r.URL.Query().Get("type"))
+			}
+			w.Header().Set("Content-Type", "image/png")
+			if _, err := w.Write(imageData); err != nil {
+				t.Errorf("write image: %v", err)
+			}
+		case strings.Contains(r.URL.Path, "/resources/"):
+			downloads.Add(1)
+			if _, err := w.Write([]byte("file bytes")); err != nil {
+				t.Errorf("write resource: %v", err)
+			}
+		default:
+			t.Errorf("unexpected request: %s", r.URL.Path)
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+	p := newTestPlatformForDownload(srv.URL, 8*1024*1024, 512*1024*1024)
+	p.client = lark.NewClient("test-quote-client", "unused",
+		lark.WithEnableTokenCache(false), lark.WithOpenBaseUrl(srv.URL), lark.WithHttpClient(srv.Client()))
+	msg := p.fetchSingleMessage(context.Background(), "om_root")
+	if msg == nil {
+		t.Fatal("quoted forward context was dropped")
+	}
+	for _, want := range []string{"top.txt", "top.csv", "nested.txt", "nested.csv", "forwarded context"} {
+		if !strings.Contains(msg.text, want) {
+			t.Errorf("quoted text = %q, want %q", msg.text, want)
+		}
+	}
+	if len(msg.files) != 0 {
+		t.Fatalf("quoted forward delivered %d files, want none", len(msg.files))
+	}
+	if len(msg.images) != 1 || string(msg.images[0].Data) != string(imageData) {
+		t.Errorf("quoted image changed: %+v", msg.images)
+	}
+	if got := imageDownloads.Load(); got != 1 {
+		t.Errorf("image requests = %d, want 1", got)
+	}
+	if got := downloads.Load(); got != 0 {
+		t.Errorf("quoted forward made %d file resource requests, want none", got)
+	}
 }
 
 func TestDescribeFeishuMessage(t *testing.T) {
@@ -219,7 +396,7 @@ func TestFormatMergeForwardTree_DescribesUnhandledTypes(t *testing.T) {
 		item("om_4", "audio", `{"file_key":"file_v3","duration":2000}`),
 	}}
 	var sb strings.Builder
-	(&Platform{platformName: "feishu"}).formatMergeForwardTree("om_root", children, map[string]string{"ou_alice": "Alice"}, &sb, new([]core.ImageAttachment), new([]core.FileAttachment), 0)
+	(&Platform{platformName: "feishu"}).formatMergeForwardTree("om_root", "om_root", children, map[string]string{"ou_alice": "Alice"}, &sb, new([]core.ImageAttachment), new([]core.FileAttachment), 0)
 	out := sb.String()
 	for _, want := range []string{
 		"Alice: " + videoChatText + "\n",

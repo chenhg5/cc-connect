@@ -72,10 +72,13 @@ func New(opts map[string]any) (core.Platform, error) {
 	if botToken == "" || appToken == "" {
 		return nil, fmt.Errorf("slack: bot_token and app_token are required")
 	}
-	baseURL, _ := opts["base_url"].(string)
-	apiURL, err := normalizeAPIURL(baseURL)
+	apiURL, err := apiURLOption(opts)
 	if err != nil {
 		return nil, err
+	}
+	if apiURL != "" {
+		// Log where both tokens will go, so a typo in base_url is visible.
+		slog.Info("slack: using custom Web API root", "base_url", apiURL)
 	}
 	scope := normalizeSessionScope(opts["session_scope"], shareSessionInChannel)
 	if scope == "thread" {

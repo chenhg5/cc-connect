@@ -148,6 +148,7 @@ type Platform struct {
 	allowChat                  string
 	groupOnly                  bool
 	groupReplyAll              bool
+	skipWhenMentionOthers      bool
 	respondToAtEveryoneAndHere bool
 	shareSessionInChannel      bool
 	threadIsolation            bool
@@ -384,6 +385,7 @@ func newPlatform(name, domain string, opts map[string]any) (core.Platform, error
 	allowChat, _ := opts["allow_chat"].(string)
 	groupOnly, _ := opts["group_only"].(bool)
 	groupReplyAll, _ := opts["group_reply_all"].(bool)
+	skipWhenMentionOthers, _ := opts["skip_when_mention_others"].(bool)
 	// require_mention = false is equivalent to group_reply_all = true:
 	// both mean "respond to all group messages without needing an @mention".
 	if v, ok := opts["require_mention"].(bool); ok && !v {
@@ -503,6 +505,7 @@ func newPlatform(name, domain string, opts map[string]any) (core.Platform, error
 		allowChat:                  allowChat,
 		groupOnly:                  groupOnly,
 		groupReplyAll:              groupReplyAll,
+		skipWhenMentionOthers:      skipWhenMentionOthers,
 		respondToAtEveryoneAndHere: respondToAtEveryoneAndHere,
 		shareSessionInChannel:      shareSessionInChannel,
 		threadIsolation:            threadIsolation,
@@ -1782,6 +1785,7 @@ func (p *Platform) onMessage(ctx context.Context, event *larkim.P2MessageReceive
 		"parent_id", stringValue(msg.ParentId),
 		"mentions", mentionCount,
 		"group_reply_all", p.groupReplyAll,
+		"skip_when_mention_others", p.skipWhenMentionOthers,
 		"thread_isolation", p.threadIsolation,
 	)
 
@@ -1792,6 +1796,16 @@ func (p *Platform) onMessage(ctx context.Context, event *larkim.P2MessageReceive
 	filterActive := botOpenID != "" || p.IsGroupFilterDegraded()
 	botMentioned := botOpenID != "" && isBotMentioned(msg.Mentions, botOpenID)
 	atEveryone := p.respondToAtEveryoneAndHere && msg.Content != nil && strings.Contains(*msg.Content, "@_all")
+
+	// When group_reply_all is enabled, optionally let another bot own messages
+	// that explicitly mention someone else. An empty botOpenID is deliberately
+	// fail-closed here: enabling this option while bot discovery is unavailable
+	// drops all mentioned group messages rather than letting this bot compete.
+	if shouldSkipMentionedOthers(chatType, p.groupReplyAll, p.skipWhenMentionOthers, len(msg.Mentions), botMentioned) {
+		slog.Debug(p.tag()+": skipping group message that mentions others only",
+			"chat_id", chatID, "message_id", messageID)
+		return nil
+	}
 
 	// With history sharing enabled, observe ordinary text/post messages only
 	// after the chat-level allow list has admitted the chat. Do this before the
@@ -1921,6 +1935,10 @@ func (p *Platform) onMessage(ctx context.Context, event *larkim.P2MessageReceive
 	go p.dispatchMessageWithHistory(ctx, msgType, content, mentions, messageID, sessionKey, userID, chatID, rctx, parentID, createTimeMs, groupHistoryCtx)
 
 	return nil
+}
+
+func shouldSkipMentionedOthers(chatType string, groupReplyAll, skipWhenMentionOthers bool, mentionCount int, botMentioned bool) bool {
+	return chatType == "group" && groupReplyAll && skipWhenMentionOthers && mentionCount > 0 && !botMentioned
 }
 
 func (p *Platform) replyUnauthorizedAccess(ctx context.Context, rctx replyContext) {
@@ -2759,7 +2777,9 @@ func (p *Platform) fetchSingleMessage(ctx context.Context, messageID string) *ch
 		// set the engine watermark before the async merge_forward dispatch
 		// finishes, causing the standalone forward event to be dropped as
 		// stale. Without this expansion the agent only sees "[merge_forward]".
-		text, images, _ = p.parseMergeForward(messageID)
+		// Quoted-forward files are not delivered here. Do not download and
+		// discard their bytes before the quoted-file authorization gates.
+		text, images, _ = p.parseMergeForwardContent(messageID, false)
 		if text == "" {
 			text = "[merge_forward]"
 		}
@@ -3300,6 +3320,10 @@ func extractCardListItems(itemsRaw json.RawMessage, parts *[]string) {
 // GET /open-apis/im/v1/messages/{message_id} API, then formats them into
 // readable text. Returns combined text, images, and files from the sub-messages.
 func (p *Platform) parseMergeForward(rootMessageID string) (string, []core.ImageAttachment, []core.FileAttachment) {
+	return p.parseMergeForwardContent(rootMessageID, true)
+}
+
+func (p *Platform) parseMergeForwardContent(rootMessageID string, includeFiles bool) (string, []core.ImageAttachment, []core.FileAttachment) {
 	resp, err := p.client.Im.Message.Get(context.Background(),
 		larkim.NewGetMessageReqBuilder().
 			MessageId(rootMessageID).
@@ -3349,9 +3373,13 @@ func (p *Platform) parseMergeForward(rootMessageID string) (string, []core.Image
 
 	var allImages []core.ImageAttachment
 	var allFiles []core.FileAttachment
+	var files *[]core.FileAttachment
+	if includeFiles {
+		files = &allFiles
+	}
 	var sb strings.Builder
 	sb.WriteString("<forwarded_messages>\n")
-	p.formatMergeForwardTree(rootMessageID, childrenMap, nameMap, &sb, &allImages, &allFiles, 0)
+	p.formatMergeForwardTree(rootMessageID, rootMessageID, childrenMap, nameMap, &sb, &allImages, files, 0)
 	sb.WriteString("</forwarded_messages>")
 
 	return sb.String(), allImages, allFiles
@@ -3368,7 +3396,9 @@ func replaceMentions(text string, mentions []*larkim.Mention) string {
 }
 
 // formatMergeForwardTree recursively formats the sub-message tree.
-func (p *Platform) formatMergeForwardTree(parentID string, childrenMap map[string][]*larkim.Message, nameMap map[string]string, sb *strings.Builder, images *[]core.ImageAttachment, files *[]core.FileAttachment, depth int) {
+// Resource downloads use the outer container ID, even for nested forwards.
+// A nil files collector keeps file names in the text without downloading files.
+func (p *Platform) formatMergeForwardTree(parentID, resourceMessageID string, childrenMap map[string][]*larkim.Message, nameMap map[string]string, sb *strings.Builder, images *[]core.ImageAttachment, files *[]core.FileAttachment, depth int) {
 	if depth > 10 {
 		sb.WriteString(strings.Repeat("    ", depth) + "[nested forwarding truncated]\n")
 		return
@@ -3425,10 +3455,16 @@ func (p *Platform) formatMergeForwardTree(parentID string, childrenMap map[strin
 			if post == nil {
 				post = &postLang{}
 			}
-			textParts, postImages := p.extractPostParts(msgID, post)
-			postAttachments, notices := p.downloadPostFiles(msgID, post.Files, strings.Join(textParts, "\n"))
-			*files = append(*files, postAttachments...)
-			textParts = append(textParts, notices...)
+			textParts, postImages := p.extractPostParts(resourceMessageID, post)
+			if files != nil {
+				postAttachments, notices := p.downloadPostFiles(resourceMessageID, post.Files, strings.Join(textParts, "\n"))
+				*files = append(*files, postAttachments...)
+				textParts = append(textParts, notices...)
+			} else {
+				for _, file := range post.Files {
+					textParts = append(textParts, fmt.Sprintf("[file: %s]", file.FileName))
+				}
+			}
 			*images = append(*images, postImages...)
 			text := replaceMentions(strings.Join(textParts, "\n"), item.Mentions)
 			if text != "" {
@@ -3443,7 +3479,7 @@ func (p *Platform) formatMergeForwardTree(parentID string, childrenMap map[strin
 				ImageKey string `json:"image_key"`
 			}
 			if err := json.Unmarshal([]byte(content), &imgBody); err == nil && imgBody.ImageKey != "" {
-				imgData, mimeType, err := p.downloadImage(msgID, imgBody.ImageKey)
+				imgData, mimeType, err := p.downloadImage(resourceMessageID, imgBody.ImageKey)
 				if err != nil {
 					slog.Error(p.tag()+": download merge_forward image failed", "error", err)
 					sb.WriteString(fmt.Sprintf("%s[%s] %s: [image - download failed]\n", indent, ts, senderName))
@@ -3459,7 +3495,13 @@ func (p *Platform) formatMergeForwardTree(parentID string, childrenMap map[strin
 				FileName string `json:"file_name"`
 			}
 			if err := json.Unmarshal([]byte(content), &fileBody); err == nil && fileBody.FileKey != "" {
-				fileData, err := p.downloadResource(msgID, fileBody.FileKey, "file")
+				if files == nil {
+					fmt.Fprintf(sb, "%s[%s] %s: [file: %s]\n", indent, ts, senderName, fileBody.FileName)
+					continue
+				}
+				// Forwarded file resources belong to the outer container, including
+				// files reached through nested merge_forward messages.
+				fileData, err := p.downloadResource(resourceMessageID, fileBody.FileKey, "file")
 				if err != nil {
 					slog.Error(p.tag()+": download merge_forward file failed", "error", err)
 					sb.WriteString(fmt.Sprintf("%s[%s] %s: [file: %s - download failed]\n", indent, ts, senderName, fileBody.FileName))
@@ -3472,7 +3514,7 @@ func (p *Platform) formatMergeForwardTree(parentID string, childrenMap map[strin
 
 		case "merge_forward":
 			sb.WriteString(fmt.Sprintf("%s[%s] %s: [forwarded messages]\n", indent, ts, senderName))
-			p.formatMergeForwardTree(msgID, childrenMap, nameMap, sb, images, files, depth+1)
+			p.formatMergeForwardTree(msgID, resourceMessageID, childrenMap, nameMap, sb, images, files, depth+1)
 
 		default:
 			if describesFeishuMessageType(msgType) {
@@ -4831,25 +4873,28 @@ type feishuPreviewHandle struct {
 // Card font is inherently smaller than Post/Text — this is a Feishu platform limitation.
 func buildCardJSON(content string) string {
 	content = sanitizeCardMarkdownForCard(content)
-	card := map[string]any{
-		"schema": "2.0",
-		"config": map[string]any{
-			"wide_screen_mode": true,
-			// cardkit element APIs (append/insert) require streaming mode so
-			// intermediate updates can add panel entries without re-rendering.
-			"streaming_mode": true,
-			"update_multi":   true,
-		},
-		"body": map[string]any{
-			"elements": []map[string]any{
-				{
-					"tag":     "markdown",
-					"content": content,
-				},
-			},
-		},
+	return marshalReplyCard(buildCardBodyElements(content), func(body []map[string]any) []map[string]any {
+		return body
+	}, content)
+}
+
+// marshalReplyCard builds a full-width reply card from the body elements and
+// what follows them. If drawing the tables as rows makes the card too large,
+// the body falls back to one markdown element with native tables.
+func marshalReplyCard(body []map[string]any, withTail func([]map[string]any) []map[string]any, content string) string {
+	marshal := func(body []map[string]any) []byte {
+		b, _ := json.Marshal(map[string]any{
+			"schema": "2.0",
+			"config": map[string]any{"width_mode": "fill"},
+			"body":   map[string]any{"elements": withTail(body)},
+		})
+		return b
 	}
-	b, _ := json.Marshal(card)
+	b := marshal(body)
+	transformed := len(body) != 1 || body[0]["tag"] != "markdown"
+	if len(b) > maxRichCardJSONBytes && transformed {
+		b = marshal([]map[string]any{{"tag": "markdown", "content": content}})
+	}
 	return string(b)
 }
 
@@ -4863,31 +4908,15 @@ func buildCardJSONWithStatusFooter(content, footer string) string {
 	segments := sanitizeCardMarkdownSegmentsForCard([]string{content, footer})
 	content = segments[0]
 	footer = segments[1]
-	elements := []map[string]any{
-		{
-			"tag":     "markdown",
-			"content": content,
-		},
-		{
-			"tag": "hr",
-		},
-		{
-			"tag":       "markdown",
-			"content":   footer,
-			"text_size": "notation",
-		},
-	}
-	card := map[string]any{
-		"schema": "2.0",
-		"config": map[string]any{
-			"wide_screen_mode": true,
-		},
-		"body": map[string]any{
-			"elements": elements,
-		},
-	}
-	b, _ := json.Marshal(card)
-	return string(b)
+	return marshalReplyCard(buildCardBodyElements(content), func(body []map[string]any) []map[string]any {
+		return append(body,
+			map[string]any{"tag": "hr"},
+			map[string]any{
+				"tag":       "markdown",
+				"content":   footer,
+				"text_size": "notation",
+			})
+	}, content)
 }
 
 func isZhLikeProgressLang(lang string) bool {

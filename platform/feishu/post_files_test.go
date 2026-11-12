@@ -131,6 +131,9 @@ func TestFormatMergeForwardTreeSurfacesPostFiles(t *testing.T) {
 			w.WriteHeader(404)
 			return
 		}
+		if !strings.HasPrefix(r.URL.Path, "/open-apis/im/v1/messages/om_root/resources/") {
+			t.Errorf("forwarded post file used wrong container: %s", r.URL.Path)
+		}
 		calls.Add(1)
 		if strings.HasSuffix(r.URL.Path, "/bad") {
 			w.Header().Set("Content-Type", "application/json")
@@ -159,6 +162,7 @@ func TestFormatMergeForwardTreeSurfacesPostFiles(t *testing.T) {
 		},
 		"om_3": {
 			item("om_4", "file", `{"file_key":"file_b","file_name":"b.xlsx"}`),
+			item("om_5", "post", `{"files":[{"file_key":"file_c","file_name":"nested.csv"}]}`),
 		},
 	}
 	p := &Platform{
@@ -169,10 +173,10 @@ func TestFormatMergeForwardTreeSurfacesPostFiles(t *testing.T) {
 	}
 	var sb strings.Builder
 	var files []core.FileAttachment
-	p.formatMergeForwardTree("om_root", children, map[string]string{"ou_alice": "Alice"}, &sb, new([]core.ImageAttachment), &files, 0)
+	p.formatMergeForwardTree("om_root", "om_root", children, map[string]string{"ou_alice": "Alice"}, &sb, new([]core.ImageAttachment), &files, 0)
 	out := sb.String()
-	if len(files) != 2 || files[0].FileName != "a.csv" || files[1].FileName != "b.xlsx" {
-		t.Fatalf("files = %+v, want a.csv then b.xlsx", files)
+	if len(files) != 3 || files[0].FileName != "a.csv" || files[1].FileName != "b.xlsx" || files[2].FileName != "nested.csv" {
+		t.Fatalf("files = %+v, want a.csv, b.xlsx, nested.csv", files)
 	}
 	for _, f := range files {
 		if string(f.Data) != "column\nvalue\n" || strings.HasPrefix(f.MimeType, "image/") {
@@ -184,9 +188,9 @@ func TestFormatMergeForwardTreeSurfacesPostFiles(t *testing.T) {
 			t.Errorf("forwarded bundle = %q, want it to contain %q", out, want)
 		}
 	}
-	// a.csv and b.xlsx cost one request each; the missing file costs a Range probe plus a plain GET.
-	if calls.Load() != 4 {
-		t.Errorf("downloads=%d, want 4", calls.Load())
+	// a.csv, b.xlsx and nested.csv cost one request each; the missing file costs a Range probe plus a plain GET.
+	if calls.Load() != 5 {
+		t.Errorf("downloads=%d, want 5", calls.Load())
 	}
 }
 

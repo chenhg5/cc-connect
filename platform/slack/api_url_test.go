@@ -1,7 +1,9 @@
 package slack
 
 import (
+	"bytes"
 	"context"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -20,7 +22,11 @@ func TestNormalizeAPIURL(t *testing.T) {
 		{in: "https://slack-gov.com/api", want: "https://slack-gov.com/api/"},
 		{in: " https://relay.example.com/slack/api ", want: "https://relay.example.com/slack/api/"},
 		{in: "http://127.0.0.1:8080/api", want: "http://127.0.0.1:8080/api/"},
-		{in: "https://relay.example.com", want: "https://relay.example.com/"},
+		{in: "https://relay.example.com", want: "https://relay.example.com/api/"},
+		{in: "https://slack-gov.com/", want: "https://slack-gov.com/api/"},
+		{in: "https://relay.example.com/slack/", wantErr: true},
+		{in: "https://slack-gov.com/apis/", wantErr: true},
+		{in: "https://slack-gov.com/api/v2/", wantErr: true},
 		{in: "ftp://slack.com/api/", wantErr: true},
 		{in: "slack-gov.com/api/", wantErr: true},
 		{in: "https:///api/", wantErr: true},
@@ -54,6 +60,11 @@ func TestNormalizeAPIURL_MalformedCredentialsNotEchoed(t *testing.T) {
 		"https://user:sup3rsecret%zz@relay.example.com/api/",
 		"https://sup3rsecret@[::1/api/",
 		"https://user:sup3r/secret@host:notaport/api/",
+		// No "@": the parser reads the secret as a port, so it isn't user
+		// info, but it is still what the operator meant as a password.
+		"https://user:sup3rsecret",
+		"https://user:sup3rsecret:notaport",
+		"https://user:sup3rsecret:notaport/api/",
 	} {
 		_, err := normalizeAPIURL(in)
 		if err == nil {
@@ -66,16 +77,100 @@ func TestNormalizeAPIURL_MalformedCredentialsNotEchoed(t *testing.T) {
 	}
 }
 
-func TestRedactUserInfo(t *testing.T) {
+func TestRedactAuthority(t *testing.T) {
 	for in, want := range map[string]string{
-		"https://u:p@[":                  "https://REDACTED@[",
-		"https://u:p@h/a@b":              "https://REDACTED@b",
-		"https://relay.example.com/api/": "https://relay.example.com/api/",
-		"u:p@h":                          "REDACTED@h",
+		// With an "@": greedy up to the last one.
+		"https://u:p@[":     "https://REDACTED@[",
+		"https://u:p@h/a@b": "https://REDACTED@b",
+		"u:p@h":             "REDACTED@h",
+		// Without an "@": the whole authority, path kept for diagnosis.
+		"https://user:sup3rsecret":          "https://REDACTED",
+		"https://host:notaport/api/":        "https://REDACTED/api/",
+		"https://relay.example.com/api/%zz": "https://REDACTED/api/%zz",
+		"%zz":                               "REDACTED",
 	} {
-		if got, _ := redactUserInfo(in); got != want {
-			t.Errorf("redactUserInfo(%q) = %q, want %q", in, got, want)
+		if got := redactAuthority(in); got != want {
+			t.Errorf("redactAuthority(%q) = %q, want %q", in, got, want)
 		}
+	}
+}
+
+func TestIsKnownSlackHost(t *testing.T) {
+	for host, want := range map[string]bool{
+		"slack.com":               true,
+		"slack-gov.com":           true,
+		"SLACK-GOV.COM":           true,
+		"slack-gov.com.":          true,
+		"api.slack.com":           true,
+		"slack.com.example.test":  false,
+		"evilslack.com":           false,
+		"slack.corp.example.com":  false,
+		"relay.example.com":       false,
+		"slack-gov.com.evil.test": false,
+	} {
+		if got := isKnownSlackHost(host); got != want {
+			t.Errorf("isKnownSlackHost(%q) = %v, want %v", host, got, want)
+		}
+	}
+}
+
+// captureWarnings runs fn with the default slog logger writing to a buffer
+// and returns what was logged at WARN or above.
+func captureWarnings(t *testing.T, fn func()) string {
+	t.Helper()
+	var buf bytes.Buffer
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelWarn})))
+	defer slog.SetDefault(prev)
+	fn()
+	return buf.String()
+}
+
+func TestNormalizeAPIURL_HostWarnings(t *testing.T) {
+	cases := []struct {
+		in       string
+		wantWarn string // substring expected in the log; "" means no warning
+	}{
+		{in: "https://slack-gov.com/api/", wantWarn: ""},
+		{in: "https://api.slack.com/api/", wantWarn: ""},
+		{in: "http://127.0.0.1:8080/api/", wantWarn: ""},
+		{in: "https://localhost/api/", wantWarn: ""},
+		{in: "https://slack.com.example.test/api/", wantWarn: "not a Slack domain"},
+		{in: "https://relay.example.com/slack/api/", wantWarn: "not a Slack domain"},
+		{in: "http://relay.example.com/api/", wantWarn: "plain http"},
+	}
+	for _, c := range cases {
+		var err error
+		logged := captureWarnings(t, func() { _, err = normalizeAPIURL(c.in) })
+		if err != nil {
+			t.Errorf("normalizeAPIURL(%q): unexpected error %v", c.in, err)
+			continue
+		}
+		if c.wantWarn == "" && logged != "" {
+			t.Errorf("normalizeAPIURL(%q): unexpected warning %q", c.in, logged)
+		}
+		if c.wantWarn != "" && !strings.Contains(logged, c.wantWarn) {
+			t.Errorf("normalizeAPIURL(%q): log %q, want a warning containing %q", c.in, logged, c.wantWarn)
+		}
+	}
+}
+
+func TestAPIURLOption(t *testing.T) {
+	for _, v := range []any{42, []string{"https://slack-gov.com/api/"}, map[string]any{"url": "x"}, true} {
+		_, err := apiURLOption(map[string]any{"base_url": v})
+		if err == nil || !strings.Contains(err.Error(), "must be a string") {
+			t.Errorf("apiURLOption(base_url=%#v): err = %v, want a type error", v, err)
+		}
+	}
+	for _, opts := range []map[string]any{{}, {"base_url": nil}, {"base_url": ""}} {
+		got, err := apiURLOption(opts)
+		if err != nil || got != "" {
+			t.Errorf("apiURLOption(%v) = %q, %v; want SDK default", opts, got, err)
+		}
+	}
+	got, err := apiURLOption(map[string]any{"base_url": "https://slack-gov.com"})
+	if err != nil || got != "https://slack-gov.com/api/" {
+		t.Errorf("apiURLOption(bare host) = %q, %v; want https://slack-gov.com/api/", got, err)
 	}
 }
 
