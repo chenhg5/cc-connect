@@ -90,6 +90,10 @@ func TestNormalizeAPIURL_NoErrorPathEchoesSecrets(t *testing.T) {
 		"https://relay.example.com/api/#sup3rsecret",       // fragment check
 		"https://user:sup3rsecret@relay.example.com/api/",  // user info check
 		"https://user:sup3rsecret",                         // parse error, no "@"
+		"https://relay.example.com/sup3rsecret",            // path check, secret in path
+		"ftp://relay.example.com/sup3rsecret/api/",         // scheme check, secret before /api/
+		"https://host:badport/sup3rsecret",                 // parse error, secret in path
+		"https://relay.example.com/sup3rsecret/api/?x=1",   // query check, secret before /api/
 	} {
 		_, err := normalizeAPIURL(in)
 		if err == nil {
@@ -114,6 +118,57 @@ func TestLogSafe(t *testing.T) {
 		if got := logSafe(in); got != want {
 			t.Errorf("logSafe(%q) = %q, want %q", in, got, want)
 		}
+	}
+}
+
+// TestNormalizeAPIURL_ErrorsShowHost checks the other half of the rule: for a
+// value that parsed, the host stays visible so the operator can see a typo.
+func TestNormalizeAPIURL_ErrorsShowHost(t *testing.T) {
+	for _, in := range []string{
+		"ftp://relay.example.com/api/",
+		"https://relay.example.com/api/?x=1",
+		"https://relay.example.com/wrong/",
+	} {
+		_, err := normalizeAPIURL(in)
+		if err == nil || !strings.Contains(err.Error(), "relay.example.com") {
+			t.Errorf("normalizeAPIURL(%q): err = %v, want it to show the host", in, err)
+		}
+	}
+}
+
+func TestSafePath(t *testing.T) {
+	for in, want := range map[string]string{
+		"":             "",
+		"/":            "/",
+		"/api":         "/api",
+		"/api/":        "/api/",
+		"/slack/api/":  "/<omitted>/api/",
+		"/sup3r/api":   "/<omitted>/api/",
+		"/sup3rsecret": "/<path omitted>",
+		"/api/v2/":     "/<path omitted>",
+	} {
+		if got := safePath(in); got != want {
+			t.Errorf("safePath(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+func TestNew_StartupLogHidesPath(t *testing.T) {
+	var buf bytes.Buffer
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelInfo})))
+	defer slog.SetDefault(prev)
+	_, err := New(map[string]any{"bot_token": "xoxb-test", "app_token": "xapp-test",
+		"base_url": "https://relay.example.com/sup3rsecret/api/"})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	logged := buf.String()
+	if strings.Contains(logged, "sup3r") {
+		t.Errorf("startup log echoes the path secret: %q", logged)
+	}
+	if !strings.Contains(logged, "relay.example.com") {
+		t.Errorf("startup log should still show the host: %q", logged)
 	}
 }
 
