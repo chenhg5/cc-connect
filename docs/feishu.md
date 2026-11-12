@@ -116,6 +116,8 @@ app_secret = "QhkMpxxxxxxxxxxxxxxxxxxxx"
 # reaction_emoji = "OnIt"      # 可选：agent 处理期间的临时表情，结束后移除
 # done_emoji = "none"          # 可选：agent 完成回复后添加的表情回复（如 "Done"）；设为 "none" 可禁用
 # image_batch_window_ms = 500  # 可选：连续多图合批窗口（默认 500ms，详见下文）
+# catchup_chats = ""           # 可选：开启 REST 补偿 polling 的群聊 chat_id（逗号分隔）；群消息需显式 @bot 才会补投
+# catchup_chats_p2p = ""       # 可选：开启 REST 补偿 polling 的单聊 chat_id（逗号分隔）；每条用户消息都会补投
 ```
 
 > 如果应用没有交互卡片权限，或后台未配置卡片回调，可将 `enable_feishu_card = false`，让所有命令统一走纯文本回复，避免卡片发送失败后用户看不到内容。
@@ -130,7 +132,10 @@ app_secret = "QhkMpxxxxxxxxxxxxxxxxxxxx"
 > **English:** Optional `ack_emoji = "Get"` adds a persistent receipt asynchronously once the engine accepts a message for processing or queueing, before waiting for agent startup/execution. It confirms acceptance, not execution or success, and survives completion/failure/cancellation. Omitted, empty or `"none"` keeps existing behavior. Processing (`reaction_emoji`) and completion (`done_emoji`) remain independent; if receipt and processing use the same emoji, the receipt owns it and typing cleanup does not remove it. Rejected/duplicate/stale messages, handled commands and synthetic scheduled work are not acknowledged. The receipt begins at engine acceptance; subsequent messages waiting on the existing session-startup lock still wait for admission. Receipt API calls have a five-second timeout and never block processing. Parsing/media preparation and image batching precede acceptance; a merged image batch acknowledges its newest canonical message.
 
 > `done_emoji` 设置后，agent 每次完成回复时会在用户消息上添加指定表情（如 `"Done"` → ✅）。先清理临时处理表情（与接收确认相同的表情会保留），再添加 done 表情。在 quiet 模式下特别有用，因为飞书卡片原地更新不触发推送，done 表情可以通知用户 agent 已完成。设为 `"none"` 或不配置则禁用。
-> `image_batch_window_ms` 控制连续多张图片合并成一条 agent 消息的等待窗口（默认 500ms）。飞书手机端一次连发多张图时，每张图是独立事件；cc-connect 会在窗口内将它们合并成一条多图消息再分发给 agent。如果你的网络/设备发送间隔超过 500ms 且仍被拆成多轮回复（每张图独立处理），可调高到 800–1200ms；如果以单图为主、希望响应更快，可适当调低。设为 `0` 时回退到默认 500ms。
+> `image_batch_window_ms` 控制连续多张图片合并成一条 agent 消息的等待窗口（默认 500ms）。飞书手机端一次连发多张图时，每张图是独立事件；cc-connect 会在窗口内将它们合并成一条多图消息再分发给 agent。如果你的网络/设备发送间隔超过 500ms 且仍被拆成多轮回复（每张图独立处理），可调高到 800–1200ms；如果以单图为主、希望响应更快，可适当调低。设为 `0` 时 fallback 到默认 500ms。
+
+> `catchup_chats` / `catchup_chats_p2p` 开启 catch-up polling（REST 补偿通道）：飞书 WebSocket 推送（`im.message.receive_v1`）是尽力而为的，连接看似健康时也可能静默丢事件（见 larksuite/oapi-sdk-go#195）。开启后 cc-connect 每 3 分钟通过 REST API 回看每个会话最近 5 分钟的消息（排除最后 30 秒在途窗口），把 WebSocket 丢失的消息补投给 agent。两个键都为空时功能完全关闭，现有配置不受影响。群聊消息必须显式 @bot 才会补投（`group_reply_all` 与 @_all 触发的消息不在覆盖范围内），单聊里每条用户消息都符合条件。补投消息与 WebSocket 路径执行同一套访问控制（`allow_from` / `allow_chat` / `group_only`）与 dedup：同一条消息无论先由哪个通道送达都只处理一次。polling 只在持有应用共享长连接的 primary 平台上运行；配置在错误选项键下的会话（通过 `Im.Chat.Get` 解析的真实类型校验）会被排除并打日志；繁忙会话单次最多翻 10 页（500 条）——catch-up polling 的定位是 fallback 补偿，不是完整 replay。
+> **English:** Optional `catchup_chats` / `catchup_chats_p2p` (comma-separated chat IDs) enable REST catch-up polling that compensates for Feishu's best-effort WebSocket push (dropped `im.message.receive_v1` events, see larksuite/oapi-sdk-go#195). Every 3 minutes cc-connect re-reads the last 5 minutes (minus a 30s in-flight buffer) of each configured chat and injects messages the push path missed. Both keys empty = disabled; existing configs are unaffected. Group chats require an explicit @bot mention (`group_reply_all` and @_all traffic is not compensated); in p2p chats every user message qualifies. Injected messages pass the same access control (`allow_from` / `allow_chat` / `group_only`) and dedup as the WebSocket path — a message is processed once regardless of which channel delivered it first. Polling runs only on the shared-WebSocket primary platform; a chat listed under the wrong option key (validated once against the real mode from `Im.Chat.Get`) is excluded with an error log. A single poll walks at most 10 pages (500 messages) per chat — catch-up polling is a backstop, not a full replay.
 
 ---
 
