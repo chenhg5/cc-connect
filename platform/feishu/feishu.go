@@ -1087,12 +1087,9 @@ func (p *Platform) onMessage(ctx context.Context, event *larkim.P2MessageReceive
 	}
 
 	// From now on this thread belongs to the bot: no mention needed inside it.
+	// Only a real thread id is mention state; message/root ids are not.
 	if chatType == "group" {
-		tid := stringValue(msg.ThreadId)
-		if tid == "" {
-			tid = stringValue(msg.RootId)
-		}
-		p.markThread(tid)
+		p.markThread(stringValue(msg.ThreadId))
 	}
 
 
@@ -3543,10 +3540,8 @@ func (p *Platform) createMessageReturningID(ctx context.Context, chatID, msgType
 				return fmt.Errorf("%s: %s returned empty message id", p.tag(), op)
 			}
 			// The bot now takes part in this thread, so replies inside it do
-			// not need an @. Mark both ids: some chats report the thread id as
-			// the root message id.
+			// not need an @. Only the real thread id belongs in mention state.
 			p.markThread(threadID)
-			p.markThread(messageID)
 			return nil
 		})
 	})

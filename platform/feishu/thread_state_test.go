@@ -2,10 +2,13 @@ package feishu
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"os"
 	"testing"
 	"time"
+
+	"github.com/chenhg5/cc-connect/core"
 )
 
 func stateTestStub() *rootStub {
@@ -80,6 +83,163 @@ func TestThreadSeenPersistsAcrossRestart(t *testing.T) {
 	}
 	if bytes.Equal(beforeData, flushedData) && os.SameFile(beforeInfo, flushedInfo) && beforeInfo.ModTime().Equal(flushedInfo.ModTime()) {
 		t.Fatal("flush did not change the state file; zero-write assertion is ineffective")
+	}
+}
+
+func TestP2PMessageDoesNotWriteThreadState(t *testing.T) {
+	dir := t.TempDir()
+	p := newRootTestPlatform(t, stateTestStub(), map[string]any{
+		"cc_data_dir": dir,
+		"cc_project":  "p2p-test",
+	})
+	p.botOpenID = "ou_bot"
+
+	handled := make(chan string, 1)
+	p.handler = func(_ core.Platform, msg *core.Message) {
+		handled <- msg.SessionKey
+	}
+	ev := rootTestEvent("om_p2p", "", "", "私聊消息")
+	ev.Event.Message.ChatType = stringPtr("p2p")
+	if err := p.onMessage(context.Background(), ev); err != nil {
+		t.Fatalf("onMessage() error = %v", err)
+	}
+	select {
+	case <-handled:
+	case <-time.After(2 * time.Second):
+		t.Fatal("p2p message was not dispatched")
+	}
+
+	p.threadSeenMu.Lock()
+	count := len(p.threadSeen)
+	pending := p.threadSaveTimer != nil
+	p.threadSeenMu.Unlock()
+	if count != 0 || pending {
+		t.Fatalf("p2p message must not touch thread state: entries=%d timer=%v", count, pending)
+	}
+	time.Sleep(50 * time.Millisecond)
+	if _, err := os.Stat(p.threadStatePath); err == nil {
+		t.Fatal("p2p message must not write the thread state file")
+	}
+}
+
+func TestCreateMessageMarksOnlyThreadID(t *testing.T) {
+	p := newRootTestPlatform(t, stateTestStub())
+	if err := p.createMessage(context.Background(), "oc_test", "text", `{"text":"hi"}`, "test"); err != nil {
+		t.Fatalf("createMessage() error = %v", err)
+	}
+
+	p.threadSeenMu.Lock()
+	_, messageMarked := p.threadSeen["om_created"]
+	_, threadMarked := p.threadSeen["omt_new"]
+	p.threadSeenMu.Unlock()
+	if messageMarked {
+		t.Fatal("messageID must not be recorded as a thread")
+	}
+	if !threadMarked {
+		t.Fatal("returned threadID must be recorded")
+	}
+}
+
+func TestLargeGroupMentionDoesNotMarkRootAsThread(t *testing.T) {
+	dir := t.TempDir()
+	stub := &rootStub{rootOf: func(id string) (string, bool) {
+		if id == "om_card" {
+			return "", true
+		}
+		return "", false
+	}}
+	p := newRootTestPlatform(t, stub, map[string]any{
+		"cc_data_dir": dir,
+		"cc_project":  "large-group-test",
+	})
+	p.botOpenID = "ou_bot"
+	handled := make(chan string, 1)
+	p.handler = func(_ core.Platform, msg *core.Message) {
+		handled <- msg.SessionKey
+	}
+
+	if err := p.onMessage(context.Background(), rootTestEvent("om_q", "om_card", "", "@bot 看下")); err != nil {
+		t.Fatalf("onMessage() error = %v", err)
+	}
+	select {
+	case <-handled:
+	case <-time.After(2 * time.Second):
+		t.Fatal("mentioned group message was not dispatched")
+	}
+
+	p.threadSeenMu.Lock()
+	count := len(p.threadSeen)
+	pending := p.threadSaveTimer != nil
+	p.threadSeenMu.Unlock()
+	if count != 0 || pending {
+		t.Fatalf("large-group root id must not enter thread state: entries=%d timer=%v", count, pending)
+	}
+}
+
+func TestTopicMessageMarksRealThreadID(t *testing.T) {
+	dir := t.TempDir()
+	stub := &rootStub{rootOf: func(id string) (string, bool) {
+		if id == "om_card" {
+			return "", true
+		}
+		return "", false
+	}}
+	p := newRootTestPlatform(t, stub, map[string]any{
+		"cc_data_dir": dir,
+		"cc_project":  "topic-test",
+	})
+	p.botOpenID = "ou_bot"
+	handled := make(chan string, 1)
+	p.handler = func(_ core.Platform, msg *core.Message) {
+		handled <- msg.SessionKey
+	}
+
+	if err := p.onMessage(context.Background(), rootTestEvent("om_topic_msg", "om_card", "omt_topic", "@bot 看下")); err != nil {
+		t.Fatalf("onMessage() error = %v", err)
+	}
+	select {
+	case <-handled:
+	case <-time.After(2 * time.Second):
+		t.Fatal("topic message was not dispatched")
+	}
+
+	p.threadSeenMu.Lock()
+	_, threadMarked := p.threadSeen["omt_topic"]
+	_, rootMarked := p.threadSeen["om_card"]
+	p.threadSeenMu.Unlock()
+	if !threadMarked {
+		t.Fatal("real threadID must be recorded")
+	}
+	if rootMarked {
+		t.Fatal("rootID must not be recorded as a thread")
+	}
+	p.flushThreadSeen()
+}
+
+func TestStartCronTopicMarksReturnedThreadID(t *testing.T) {
+	p := newRootTestPlatform(t, stateTestStub())
+	p.botOpenID = "ou_bot"
+
+	key, rc, err := p.StartCronTopic(context.Background(), "feishu:oc_test:root:om_old", "定时任务")
+	if err != nil {
+		t.Fatalf("StartCronTopic() error = %v", err)
+	}
+	if key != "feishu:oc_test:root:om_created" {
+		t.Fatalf("session key = %q", key)
+	}
+	if rc == nil {
+		t.Fatal("reply context must be returned")
+	}
+
+	p.threadSeenMu.Lock()
+	_, threadMarked := p.threadSeen["omt_new"]
+	_, messageMarked := p.threadSeen["om_created"]
+	p.threadSeenMu.Unlock()
+	if !threadMarked {
+		t.Fatal("cron new_topic must mark the returned threadID")
+	}
+	if messageMarked {
+		t.Fatal("cron new_topic must not mark messageID as a thread")
 	}
 }
 
