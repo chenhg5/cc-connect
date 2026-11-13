@@ -3442,6 +3442,9 @@ func (p *Platform) replyMessageReturningID(ctx context.Context, rc replyContext,
 			}
 			if resp.Data != nil {
 				msgID = stringValue(resp.Data.MessageId)
+				if tid := stringValue(resp.Data.ThreadId); tid != "" {
+					p.markThread(tid)
+				}
 			}
 			return nil
 		})
@@ -3481,6 +3484,11 @@ func (p *Platform) createMessageReturningID(ctx context.Context, chatID, msgType
 			if messageID == "" {
 				return fmt.Errorf("%s: %s returned empty message id", p.tag(), op)
 			}
+			// The bot now takes part in this thread, so replies inside it do
+			// not need an @. Mark both ids: some chats report the thread id as
+			// the root message id.
+			p.markThread(threadID)
+			p.markThread(messageID)
 			return nil
 		})
 	})
