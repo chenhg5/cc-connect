@@ -132,6 +132,9 @@ type QueueConfig struct {
 	// running: "steer" (default) forwards it into the running turn, "queue"
 	// holds it until the turn ends.
 	BusyMode string `toml:"busy_mode"`
+	// StopWaitSecs is how long /stop waits for the agent to end the turn
+	// before the process is terminated. 0 terminates immediately; default 2.
+	StopWaitSecs *int `toml:"stop_wait_secs"`
 }
 
 // WebhookConfig controls the external HTTP webhook endpoint.

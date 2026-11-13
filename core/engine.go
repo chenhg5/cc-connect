@@ -232,7 +232,8 @@ type Engine struct {
 	relayManager      *RelayManager
 	eventIdleTimeout  time.Duration
 	maxQueuedMessages int
-	busyMode          string // "steer" (default) forwards into the running turn; "queue" waits
+	busyMode          string        // "steer" (default) forwards into the running turn; "queue" waits
+	stopWait          time.Duration // how long /stop waits for the turn to unwind
 	dirHistory        *DirHistory
 	baseWorkDir       string
 	projectState      *ProjectStateStore
@@ -458,6 +459,7 @@ func NewEngine(name string, ag Agent, platforms []Platform, sessionStorePath str
 		eventIdleTimeout:      defaultEventIdleTimeout,
 		maxQueuedMessages:     defaultMaxQueuedMessages,
 		busyMode:              "steer",
+		stopWait:              interruptUnwindWaitTimeout,
 		showContextIndicator:  true,
 	}
 
@@ -977,6 +979,14 @@ func (e *Engine) SetStreamPreviewCfg(cfg StreamPreviewCfg) {
 // 0 disables the timeout entirely.
 func (e *Engine) SetEventIdleTimeout(d time.Duration) {
 	e.eventIdleTimeout = d
+}
+
+// SetStopWait sets how long /stop waits for the agent to end the turn before
+// the process is terminated. Zero stops immediately.
+func (e *Engine) SetStopWait(d time.Duration) {
+	if d >= 0 {
+		e.stopWait = d
+	}
 }
 
 // SetBusyMode selects what happens to messages that arrive mid-turn:
