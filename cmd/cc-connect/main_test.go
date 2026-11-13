@@ -203,7 +203,7 @@ func TestBuildAgentOptionsInjectsProjectScope(t *testing.T) {
 		},
 	}
 
-	got := buildAgentOptions("/tmp/data", proj)
+	got := buildAgentOptions("/tmp/data", "", proj)
 
 	if got["cc_data_dir"] != "/tmp/data" {
 		t.Fatalf("cc_data_dir = %v, want %q", got["cc_data_dir"], "/tmp/data")
@@ -216,6 +216,44 @@ func TestBuildAgentOptionsInjectsProjectScope(t *testing.T) {
 	}
 	if _, exists := proj.Agent.Options["cc_data_dir"]; exists {
 		t.Fatalf("project agent options mutated: %v", proj.Agent.Options)
+	}
+}
+
+func TestBuildAgentOptions_InheritsGlobalLanguageWithoutMutatingOptions(t *testing.T) {
+	tests := []struct {
+		name    string
+		options map[string]any
+		want    string
+	}{
+		{name: "global default", options: map[string]any{"model": "test-model"}, want: "zh"},
+		{name: "explicit override", options: map[string]any{"language": "ja"}, want: "ja"},
+		{name: "empty override", options: map[string]any{"language": ""}, want: "zh"},
+		{name: "nil options", want: "zh"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := config.Config{DataDir: "/tmp/data", Language: "zh"}
+			proj := config.ProjectConfig{
+				Name:  "demo-project",
+				Agent: config.AgentConfig{Options: tt.options},
+			}
+			var original map[string]any
+			if tt.options != nil {
+				original = make(map[string]any, len(tt.options))
+				for key, value := range tt.options {
+					original[key] = value
+				}
+			}
+
+			got := buildAgentOptions(cfg.DataDir, cfg.Language, proj)
+
+			if got["language"] != tt.want {
+				t.Errorf("language = %v, want %q", got["language"], tt.want)
+			}
+			if !reflect.DeepEqual(proj.Agent.Options, original) {
+				t.Errorf("project agent options mutated: got %v, want %v", proj.Agent.Options, original)
+			}
+		})
 	}
 }
 

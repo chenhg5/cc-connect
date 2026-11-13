@@ -371,7 +371,7 @@ func main() {
 				proj.Agent.Options["run_as_env"] = proj.RunAsEnv
 			}
 		}
-		agent, err := core.CreateAgent(proj.Agent.Type, buildAgentOptions(cfg.DataDir, proj))
+		agent, err := core.CreateAgent(proj.Agent.Type, buildAgentOptions(cfg.DataDir, cfg.Language, proj))
 		if err != nil {
 			slog.Error("failed to create agent", "project", proj.Name, "error", err)
 			os.Exit(1)
@@ -728,6 +728,8 @@ func main() {
 				engine.SetAgentSessionIdleTimeout(time.Duration(mins) * time.Minute)
 			}
 		}
+
+		engine.SetBusyMessageMode(proj.BusyMessageMode)
 
 		// Wire sender injection
 		if proj.InjectSender != nil {
@@ -1869,6 +1871,8 @@ func reloadConfig(configPath, projName string, engine *core.Engine) (*core.Confi
 		engine.SetAgentSessionIdleTimeout(0)
 	}
 
+	engine.SetBusyMessageMode(proj.BusyMessageMode)
+
 	// Reload instant reply
 	if cfg.InstantReply.Enabled != nil && *cfg.InstantReply.Enabled {
 		engine.SetInstantReply(core.InstantReplyCfg{
@@ -1992,13 +1996,16 @@ func convertProviderModels(ms []config.ProviderModelConfig) []core.ModelOption {
 	return opts
 }
 
-func buildAgentOptions(dataDir string, proj config.ProjectConfig) map[string]any {
-	opts := make(map[string]any, len(proj.Agent.Options)+2)
+func buildAgentOptions(dataDir, language string, proj config.ProjectConfig) map[string]any {
+	opts := make(map[string]any, len(proj.Agent.Options)+3)
 	for k, v := range proj.Agent.Options {
 		opts[k] = v
 	}
 	opts["cc_data_dir"] = dataDir
 	opts["cc_project"] = proj.Name
+	if configuredLanguage, _ := opts["language"].(string); configuredLanguage == "" {
+		opts["language"] = language
+	}
 	return opts
 }
 

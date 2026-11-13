@@ -443,6 +443,7 @@ type Engine struct {
 	// processInteractiveEvents.
 	autoCompressAllowHeuristic bool
 	resetOnIdle                time.Duration
+	busyMessageSteer           atomic.Bool
 
 	// Reply footer composition flags. The footer renders up to two lines:
 	//   line 1 — model · [effort ·] out/in/cw/cr · ctx%   (gated by showContextIndicator)
@@ -535,6 +536,10 @@ type workspaceInitFlow struct {
 // The message is NOT sent to agent stdin at queue time; the event loop
 // sends it after the current turn completes to avoid mid-turn interference.
 type queuedMessage struct {
+	receiptSent       <-chan struct{}
+	steerWhenReady    bool
+	accepted          <-chan struct{}
+	alreadySent       bool // ACK confirmed a new run; consume its events without replay.
 	messageID         string
 	platform          Platform
 	replyCtx          any
@@ -552,6 +557,13 @@ type queuedMessage struct {
 
 // interactiveState tracks a running interactive agent session and its permission state.
 type interactiveState struct {
+	steerInputTimeMs       int64
+	steerDispatcherRunning bool
+	steerPending           chan struct{} // closed by the input sender after resolving its reservation
+	steerHandoff           bool          // startup or reader handoff forbids even explicit supplements
+	steerAdmissionClosed   bool          // terminal delivery / queue handoff owns the stream
+	steerUncertain         bool          // unknown delivery: only reset/stop may admit further input
+
 	agentSession AgentSession
 	// busySession is the core.Session whose busy lock guards the in-flight
 	// turn. Set by getOrCreateInteractiveStateWith so /stop can release the
@@ -626,6 +638,9 @@ func latestUserMessageWatermarkLocked(state *interactiveState) int64 {
 		if q.userMessageTimeMs > wm {
 			wm = q.userMessageTimeMs
 		}
+	}
+	if state.steerInputTimeMs > wm {
+		wm = state.steerInputTimeMs
 	}
 	return wm
 }
@@ -3197,6 +3212,9 @@ func (e *Engine) handleMessage(p Platform, msg *Message) {
 		return
 	}
 
+	if e.rejectUncertainSteer(p, msg, interactiveKey) {
+		return
+	}
 	if e.discardStaleUserMessageIfNeeded(interactiveKey, msg) {
 		return
 	}
@@ -3230,7 +3248,12 @@ func (e *Engine) handleMessage(p Platform, msg *Message) {
 		// interactiveMu → session.mu, never reversed.
 		e.interactiveMu.Lock()
 		st, hasSt := e.interactiveStates[interactiveKey]
-		agentAlive := hasSt && st != nil && st.agentSession != nil && st.agentSession.Alive()
+		agentAlive := false
+		if hasSt && st != nil {
+			st.mu.Lock()
+			agentAlive = st.agentSession != nil && st.agentSession.Alive()
+			st.mu.Unlock()
+		}
 		e.interactiveMu.Unlock()
 		if !agentAlive && e.staleLockBreakAfter > 0 {
 			if since, broken := session.BreakStaleLock(e.staleLockBreakAfter); broken {
@@ -3253,6 +3276,12 @@ func (e *Engine) handleMessage(p Platform, msg *Message) {
 			}
 		}
 		// ── end self-heal; queueing path below is unchanged ────────────────
+		if e.busyMessageSteer.Load() && e.enqueueBusyInput(p, msg, interactiveKey, true, MsgSteerFallbackQueue, session, sessions) {
+			if g, ok := session.TryLock(); ok {
+				go e.drainOrphanedQueue(session, sessions, interactiveKey, agent, resolvedWorkspace, g)
+			}
+			return
+		}
 		// Session is busy — try to queue the message for the running turn
 		// so the agent processes it immediately after the current turn ends.
 		if e.queueMessageForBusySession(p, msg, interactiveKey) {
@@ -3400,84 +3429,11 @@ func (e *Engine) maybeAutoResetSessionOnIdle(p Platform, msg *Message, sessions 
 // the event loop sends it after the current turn's EventResult is received.
 // Returns true if the message was successfully queued, false otherwise.
 func (e *Engine) queueMessageForBusySession(p Platform, msg *Message, interactiveKey string) bool {
-	e.interactiveMu.Lock()
-	state, hasState := e.interactiveStates[interactiveKey]
-	if !hasState || state == nil {
-		e.interactiveMu.Unlock()
-		return false
-	}
-	// Keep interactiveMu until state.mu is held. Otherwise a starting session can
-	// replace a placeholder state between lookup and queue append, losing the
-	// queued message before adoptPendingFromPlaceholder sees it.
-	state.mu.Lock()
-	e.interactiveMu.Unlock()
-	defer state.mu.Unlock()
+	return e.queueMessageForBusySessionWithNotice(p, msg, interactiveKey, MsgMessageQueued)
+}
 
-	// Allow queueing when agentSession is nil (session is starting up,
-	// issue #565). Only reject if the session was established and died.
-	if state.agentSession != nil && !state.agentSession.Alive() {
-		return false
-	}
-
-	// Only queue metadata — do NOT send to agent stdin yet.
-	// The agent CLI may treat a mid-turn stdin message as part of the
-	// current turn, causing the event loop to hang waiting for a second
-	// EventResult that never arrives. Instead, the event loop sends the
-	// message after the current turn's EventResult is received.
-	if e.isStaleUserMessageLocked(state, msg.UserMessageTimeMs) {
-		snap := userMessageWatermarkSnapshotLocked(state)
-		e.logStaleUserMessageDropped("reject_before_queue", msg, interactiveKey, snap)
-		return true
-	}
-	if len(state.pendingMessages) >= e.maxQueuedMessages {
-		depth := len(state.pendingMessages)
-		e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgQueueFull), depth))
-		return true // handled: queue-full reply sent
-	}
-	state.pendingMessages = append(state.pendingMessages, queuedMessage{
-		messageID:         msg.MessageID,
-		platform:          p,
-		replyCtx:          msg.ReplyCtx,
-		content:           msg.Content,
-		images:            msg.Images,
-		files:             msg.Files,
-		fromVoice:         msg.FromVoice,
-		userID:            msg.UserID,
-		userName:          msg.UserName,
-		msgPlatform:       msg.Platform,
-		msgSessionKey:     msg.SessionKey,
-		channelKey:        msg.ChannelKey,
-		userMessageTimeMs: msg.UserMessageTimeMs,
-	})
-	// A queued message is still the user talking: restart the
-	// reset_on_idle_mins clock now, as the idle path does, or the next
-	// message is measured from the last one that found the session idle
-	// and can be rotated into a new session mid-conversation. Timer, cron
-	// and heartbeat turns never get here (they fail fast on a busy
-	// session), so #1115 still holds. busySession is nil only while the
-	// agent is still starting, right after the message that started it
-	// was counted.
-	if state.busySession != nil {
-		state.busySession.TouchUserActivity()
-	}
-	runMessageAccepted(msg)
-	queueDepth := len(state.pendingMessages)
-
-	slog.Debug("user message accepted into queue",
-		"session", msg.SessionKey,
-		"interactive_key", interactiveKey,
-		"msg_id", msg.MessageID,
-		"msg_create_time_ms", msg.UserMessageTimeMs,
-		"queue_depth", queueDepth,
-	)
-
-	slog.Info("message queued for busy session",
-		"session", msg.SessionKey,
-		"user", msg.UserName,
-		"queue_depth", queueDepth,
-	)
-	e.reply(p, msg.ReplyCtx, e.i18n.T(MsgMessageQueued))
-	return true
+func (e *Engine) queueMessageForBusySessionWithNotice(p Platform, msg *Message, key string, notice MsgKey) bool {
+	return e.enqueueBusyInput(p, msg, key, false, notice, nil, nil)
 }
 
 // ensureInteractiveStateForQueueing creates a placeholder interactiveState
@@ -3520,19 +3476,7 @@ func (e *Engine) drainOrphanedQueue(session *Session, sessions *SessionManager, 
 		return
 	}
 
-	// Stop unsolicited reader before draining — drainPendingMessages reads
-	// from Events() and we must not have concurrent readers.
-	e.stopUnsolicitedReader(state)
-
 	unlocked = e.drainPendingMessages(state, session, sessions, interactiveKey, lockGen)
-
-	// Restart unsolicited reader if the session is still alive and clean.
-	state.mu.Lock()
-	alive := state.agentSession != nil && state.agentSession.Alive() && !state.stopped && !state.eventsNeedResync
-	state.mu.Unlock()
-	if alive {
-		e.startUnsolicitedReader(state, session, sessions, interactiveKey, workspaceDir)
-	}
 }
 
 // ──────────────────────────────────────────────────────────────
@@ -4122,6 +4066,11 @@ func (e *Engine) processInteractiveMessageWith(p Platform, msg *Message, session
 		drainEvents(state.agentSession.Events())
 	}
 
+	state.mu.Lock()
+	state.steerAdmissionClosed = true
+	state.steerHandoff = true
+	state.mu.Unlock()
+
 	promptContent := e.buildSenderPrompt(msg.Content, msg.UserID, msg.UserName, msg.Platform, msg.SessionKey, msg.ChannelKey)
 
 	sendStart := time.Now()
@@ -4150,27 +4099,6 @@ func (e *Engine) processInteractiveMessageWith(p Platform, msg *Message, session
 	}
 	stopTyping = nil // ownership transferred; prevent defer from double-stopping
 
-	// Start unsolicited reader and arm the idle close timer BEFORE draining
-	// queued messages. drainPendingMessages releases the session lock, and
-	// without this ordering the next user message can race in, call
-	// cancelAgentSessionIdleClose (a no-op since nothing was scheduled yet),
-	// and then the late schedule below arms a timer that no subsequent cancel
-	// will catch — closing the live session mid-turn. See #1686 P1-C P1-2.
-	// The schedule's own state checks (agentSession nil, stopped, etc.) and
-	// cleanupInteractiveStateForIdleToken's stale-token guard make it safe to
-	// leave a scheduled timer running across drain.
-	state.mu.Lock()
-	alive := state.agentSession != nil && state.agentSession.Alive() && !state.stopped && !state.eventsNeedResync
-	state.mu.Unlock()
-	if alive {
-		e.startUnsolicitedReader(state, session, sessions, interactiveKey, workspaceDir)
-		e.scheduleAgentSessionIdleClose(interactiveKey, state)
-	}
-
-	// Guard against a narrow race: a message may have been queued between
-	// processInteractiveEvents observing an empty queue and returning here
-	// (session is still locked, so handleMessage's TryLock fails and routes
-	// the message to queueMessageForBusySession). Drain any such orphans.
 	if e.drainPendingMessages(state, session, sessions, interactiveKey, lockGen) {
 		unlocked = true
 	}
@@ -4530,12 +4458,14 @@ func (e *Engine) getOrCreateInteractiveStateWith(sessionKey string, p Platform, 
 	}
 
 	newState := &interactiveState{
-		agentSession:     agentSession,
-		busySession:      session,
-		platform:         p,
-		replyCtx:         replyCtx,
-		agent:            agent,
-		eventsNeedResync: true,
+		steerAdmissionClosed: true,
+		steerHandoff:         true,
+		agentSession:         agentSession,
+		busySession:          session,
+		platform:             p,
+		replyCtx:             replyCtx,
+		agent:                agent,
+		eventsNeedResync:     true,
 	}
 	adoptPendingFromPlaceholder(e.interactiveStates[sessionKey], newState)
 	state = newState
@@ -5523,6 +5453,15 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			}
 		case err := <-pendingSend:
 			pendingSend = nil
+			if err == nil {
+				state.mu.Lock()
+				if !state.stopped && !state.steerUncertain {
+					state.steerAdmissionClosed = false
+					state.steerHandoff = false
+				}
+				state.mu.Unlock()
+				e.kickBusySteerDispatcher(state, session, sessions)
+			}
 			if err != nil {
 				slog.Error("failed to send prompt", "error", err, "session_key", sessionKey)
 				sp.discard()
@@ -6192,6 +6131,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				)
 				continue
 			}
+			e.finishBusySteerAdmission(state)
 			cp.Finalize(ProgressCardStateCompleted)
 			// Use state.agentSession.CurrentSessionID() instead of event.SessionID.
 			// event.SessionID may be empty in some cases, causing the agent_session_id
@@ -6601,7 +6541,11 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			}
 
 			// Auto-compress after finishing a turn, before sending any queued messages.
-			if triggerAutoCompress {
+			e.sealBusySteerHandoff(state)
+			state.mu.Lock()
+			canCompress := !state.steerUncertain && (len(state.pendingMessages) == 0 || !state.pendingMessages[0].alreadySent)
+			state.mu.Unlock()
+			if triggerAutoCompress && canCompress {
 				compressor, ok := e.agent.(ContextCompressor)
 				if ok && compressor.CompressCommand() != "" {
 					if pendingSend != nil {
@@ -6628,11 +6572,15 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				}
 			}
 
+			if e.dropQueueForUncertainSteer(state) {
+				return
+			}
+
 			// Check for queued messages — if present, continue the event loop
 			// for the next turn instead of returning.
 			state.mu.Lock()
 			droppedStale := 0
-			for len(state.pendingMessages) > 0 && e.isQueuedUserMessageStaleForDrainLocked(state, state.pendingMessages[0].userMessageTimeMs) {
+			for len(state.pendingMessages) > 0 && !state.pendingMessages[0].alreadySent && e.isQueuedUserMessageStaleForDrainLocked(state, state.pendingMessages[0].userMessageTimeMs) {
 				state.pendingMessages = state.pendingMessages[1:]
 				droppedStale++
 			}
@@ -6653,6 +6601,10 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				state.currentTurnUserMessageTimeMs = queued.userMessageTimeMs
 				state.mu.Unlock()
 
+				if !e.waitBusyInputAccepted(state, queued) {
+					return
+				}
+
 				// Stop the previous turn's typing indicator
 				if stopTyping != nil {
 					stopTyping()
@@ -6668,7 +6620,9 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				// Drain stale events before starting the next turn. Between
 				// EventResult and Send(), the only buffered events would be
 				// stale leftovers (e.g. a deferred EventError from cmd.Wait()).
-				drainEvents(state.agentSession.Events())
+				if !queued.alreadySent {
+					drainEvents(state.agentSession.Events())
+				}
 
 				if pendingSend != nil {
 					if err := <-pendingSend; err != nil {
@@ -6682,14 +6636,22 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				as := state.agentSession // capture under lock to avoid race with cleanup
 				state.mu.Unlock()
 
+				state.mu.Lock()
+				state.steerAdmissionClosed = true
+				state.steerHandoff = true
+				state.mu.Unlock()
 				nextSend := make(chan error, 1)
-				go func() {
-					if as == nil {
-						nextSend <- fmt.Errorf("agent session became nil")
-						return
-					}
-					nextSend <- as.Send(queuedPrompt, queued.messageID, queued.images, queued.files)
-				}()
+				if queued.alreadySent {
+					nextSend <- nil
+				} else {
+					go func() {
+						if as == nil {
+							nextSend <- fmt.Errorf("agent session became nil")
+							return
+						}
+						nextSend <- as.Send(queuedPrompt, queued.messageID, queued.images, queued.files)
+					}()
+				}
 				pendingSend = nextSend
 
 				// Detect language now (deferred from queue time to avoid
@@ -6750,7 +6712,9 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 					e.send(queued.platform, queued.replyCtx, replyContent)
 				}
 
-				session.AddHistory("user", queued.content)
+				if !queued.alreadySent {
+					session.AddHistory("user", queued.content)
+				}
 				// Persist queued user message immediately (mirror of the
 				// initial AddHistory("user",...) save above).
 				sessions.Save()
@@ -6790,6 +6754,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			return
 
 		case EventError:
+			e.finishBusySteerAdmission(state)
 			cp.Finalize(ProgressCardStateFailed)
 			sp.discard()
 			// A backend can create its resumable session before a turn fails
@@ -6976,14 +6941,18 @@ func (e *Engine) notifyDroppedQueuedMessages(state *interactiveState, reason err
 // Returns true if the session was unlocked by this call.
 func (e *Engine) drainPendingMessages(state *interactiveState, session *Session, sessions *SessionManager, sessionKey string, lockGen uint64) bool {
 	for {
+		e.sealBusySteerHandoff(state)
+		e.dropQueueForUncertainSteer(state)
 		state.mu.Lock()
 		if len(state.pendingMessages) == 0 {
-			session.Unlock(lockGen)
 			state.mu.Unlock()
-			return true
+			if e.finishInteractiveQueueDrain(state, session, sessions, sessionKey, lockGen) {
+				return true
+			}
+			continue
 		}
 		droppedStale := 0
-		for len(state.pendingMessages) > 0 && e.isQueuedUserMessageStaleForDrainLocked(state, state.pendingMessages[0].userMessageTimeMs) {
+		for len(state.pendingMessages) > 0 && !state.pendingMessages[0].alreadySent && e.isQueuedUserMessageStaleForDrainLocked(state, state.pendingMessages[0].userMessageTimeMs) {
 			state.pendingMessages = state.pendingMessages[1:]
 			droppedStale++
 		}
@@ -6994,9 +6963,8 @@ func (e *Engine) drainPendingMessages(state *interactiveState, session *Session,
 			)
 		}
 		if len(state.pendingMessages) == 0 {
-			session.Unlock(lockGen)
 			state.mu.Unlock()
-			return true
+			continue
 		}
 		queued := state.pendingMessages[0]
 		state.pendingMessages = state.pendingMessages[1:]
@@ -7007,6 +6975,9 @@ func (e *Engine) drainPendingMessages(state *interactiveState, session *Session,
 		state.currentTurnUserMessageTimeMs = queued.userMessageTimeMs
 		state.mu.Unlock()
 
+		if !e.waitBusyInputAccepted(state, queued) {
+			return false
+		}
 		e.i18n.DetectAndSet(queued.content)
 		prompt := e.buildSenderPrompt(queued.content, queued.userID, queued.userName, queued.msgPlatform, queued.msgSessionKey, queued.channelKey)
 
@@ -7019,18 +6990,29 @@ func (e *Engine) drainPendingMessages(state *interactiveState, session *Session,
 			return false
 		}
 
-		drainEvents(as.Events())
-
-		session.AddHistory("user", queued.content)
+		e.stopUnsolicitedReader(state)
+		e.cancelAgentSessionIdleClose(state)
+		if !queued.alreadySent {
+			drainEvents(as.Events())
+			session.AddHistory("user", queued.content)
+		}
+		state.mu.Lock()
+		state.steerAdmissionClosed = true
+		state.steerHandoff = true
+		state.mu.Unlock()
 
 		sendDone := make(chan error, 1)
-		go func() {
-			if as == nil {
-				sendDone <- fmt.Errorf("agent session became nil")
-				return
-			}
-			sendDone <- as.Send(prompt, queued.messageID, queued.images, queued.files)
-		}()
+		if queued.alreadySent {
+			sendDone <- nil
+		} else {
+			go func() {
+				if as == nil {
+					sendDone <- fmt.Errorf("agent session became nil")
+					return
+				}
+				sendDone <- as.Send(prompt, queued.messageID, queued.images, queued.files)
+			}()
+		}
 
 		var stopTyping func()
 		if ti, ok := queued.platform.(TypingIndicator); ok {

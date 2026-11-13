@@ -403,6 +403,59 @@ type UserInputSteerer interface {
 	SteerUserInput(prompt string) (bool, error)
 }
 
+// SteerDisposition is what the harness actually agreed to do with a steered
+// input, derived from its prompt acknowledgement. It is NOT inferred from the
+// transport write succeeding — a successful write only proves the bytes left
+// cc-connect, not that the running turn will see them.
+type SteerDisposition string
+
+const (
+	// SteerQueued means the harness accepted the input into the in-flight
+	// turn's native queue. This is the outcome the user expects from steer.
+	SteerQueued SteerDisposition = "queued"
+	// SteerStarted means the harness had already finished the previous turn
+	// and started a new run for this input. Nothing is lost, but the input is
+	// NOT a supplement to the task the user thought was still running.
+	SteerStarted SteerDisposition = "started"
+	// SteerHandled means an extension or input handler consumed the prompt
+	// without a model run.
+	SteerHandled SteerDisposition = "handled"
+	// SteerUnconfirmed means the input was written to the transport but the
+	// adapter has no acknowledgement contract to prove acceptance.
+	SteerUnconfirmed SteerDisposition = "unconfirmed"
+)
+
+// SteerResult reports the outcome of a busy-steer delivery attempt.
+type SteerResult struct {
+	Disposition SteerDisposition
+	// ContinuesTurn means a native "started" run remains part of the current
+	// bridge turn: its adapter coalesces completion and will emit only one
+	// terminal event. False means an old terminal precedes the new run's events.
+	ContinuesTurn bool
+	// RequestID is the adapter-side correlation id for the prompt request,
+	// when the transport supports one (Pi RPC). Empty otherwise.
+	RequestID string
+}
+
+// BusySteerSender is the native, ACK-aware mid-turn capability. Agents that can
+// report {"queued"|"started"|"handled"} should implement it so the engine can
+// tell the user what actually happened instead of assuming success.
+//
+// Automatic steering requires both a true capability check and this cancellable
+// sender. Explicit supplements may use a legacy native sender; generic Send is
+// never assumed to support mid-turn input. Unknown delivery is not replayed.
+type BusySteerSender interface {
+	SupportsBusySteer() bool
+	SendBusySteer(ctx context.Context, text, messageID string, images []ImageAttachment, files []FileAttachment) (SteerResult, error)
+}
+
+// SteerNotAcceptedError certifies that the input did not reach the running task.
+// Only this error permits automatic queue fallback; unknown delivery is never replayed.
+type SteerNotAcceptedError struct{ Err error }
+
+func (e *SteerNotAcceptedError) Error() string { return e.Err.Error() }
+func (e *SteerNotAcceptedError) Unwrap() error { return e.Err }
+
 // ToolAuthorizer is an optional interface for agents that support dynamic tool authorization.
 type ToolAuthorizer interface {
 	AddAllowedTools(tools ...string) error
