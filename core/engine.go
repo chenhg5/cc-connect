@@ -222,6 +222,7 @@ type Engine struct {
 	relayManager      *RelayManager
 	eventIdleTimeout  time.Duration
 	maxQueuedMessages int
+	busyMode          string // "steer" (default) forwards into the running turn; "queue" waits
 	dirHistory        *DirHistory
 	baseWorkDir       string
 	projectState      *ProjectStateStore
@@ -334,6 +335,7 @@ type interactiveState struct {
 	interruptPending  bool // interrupt sent, waiting for the turn to unwind
 	interruptedAt     time.Time
 	turnActive        bool // true while a turn (or a queued turn) is in flight
+	turnProactive     bool // true when the running turn was started by the scheduler
 	taskCard          *turnCard // live progress card for the current turn (nil when unsupported)
 
 	// Unsolicited event reader: a background goroutine that consumes agent
@@ -444,6 +446,7 @@ func NewEngine(name string, ag Agent, platforms []Platform, sessionStorePath str
 		references:            DefaultReferenceRenderCfg(),
 		eventIdleTimeout:      defaultEventIdleTimeout,
 		maxQueuedMessages:     defaultMaxQueuedMessages,
+		busyMode:              "steer",
 		showContextIndicator:  true,
 	}
 
@@ -963,6 +966,16 @@ func (e *Engine) SetStreamPreviewCfg(cfg StreamPreviewCfg) {
 // 0 disables the timeout entirely.
 func (e *Engine) SetEventIdleTimeout(d time.Duration) {
 	e.eventIdleTimeout = d
+}
+
+// SetBusyMode selects what happens to messages that arrive mid-turn:
+// "steer" forwards them into the running turn, "queue" holds them until it
+// ends. Unknown values keep the current setting.
+func (e *Engine) SetBusyMode(mode string) {
+	switch strings.ToLower(strings.TrimSpace(mode)) {
+	case "steer", "queue":
+		e.busyMode = strings.ToLower(strings.TrimSpace(mode))
+	}
 }
 
 // SetMaxQueuedMessages sets the per-session message queue depth.
@@ -2197,8 +2210,13 @@ func (e *Engine) handleMessage(p Platform, msg *Message) {
 			e.reply(p, msg.ReplyCtx, e.i18n.T(MsgPreviousProcessing))
 			return
 		}
-		// Session is busy — try to queue the message for the running turn
-		// so the agent processes it immediately after the current turn ends.
+		// Session is busy: by default forward the message into the running
+		// turn (steer). The agent sees it at its next tool boundary without
+		// starting a new turn.
+		if e.steerBusySession(p, msg, interactiveKey, session, sessions) {
+			return
+		}
+		// Fall back to queueing until the current turn ends.
 		if e.queueMessageForBusySession(p, msg, interactiveKey) {
 			// Race guard: the drain loop in processInteractiveMessageWith may
 			// have just finished (session unlocked) between our TryLock failure
@@ -2280,6 +2298,70 @@ func (e *Engine) maybeAutoResetSessionOnIdle(p Platform, msg *Message, sessions 
 
 	e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgSessionAutoResetIdle, int(e.resetOnIdle/time.Minute)))
 	return newSession
+}
+
+// steerBusySession forwards a message into the in-flight turn instead of
+// queueing it. The agent CLI treats a mid-turn message as part of the current
+// turn and surfaces it at the next tool boundary; it does NOT emit a second
+// result, so this path must never book a new turn or expect one.
+func (e *Engine) steerBusySession(p Platform, msg *Message, interactiveKey string, session *Session, sessions *SessionManager) bool {
+	if strings.EqualFold(e.busyMode, "queue") {
+		return false
+	}
+	e.interactiveMu.Lock()
+	state, ok := e.interactiveStates[interactiveKey]
+	e.interactiveMu.Unlock()
+	if !ok || state == nil {
+		return false
+	}
+
+	state.mu.Lock()
+	as := state.agentSession
+	active := state.turnActive
+	stopping := state.interruptPending
+	proactive := state.turnProactive
+	state.mu.Unlock()
+	// Never inject into a scheduler-started turn: those runs should stay
+	// untouched, so the message queues as before.
+	if as == nil || !as.Alive() || !active || stopping || proactive {
+		return false
+	}
+
+	prompt := e.buildSenderPrompt(msg.Content, msg.UserID, msg.UserName, msg.Platform, msg.SessionKey, msg.ChannelKey)
+	sent := make(chan error, 1)
+	go func() { sent <- as.Send(prompt, msg.Images, msg.Files) }()
+	select {
+	case err := <-sent:
+		if err != nil {
+			slog.Warn("steer send failed; falling back to queue", "session", msg.SessionKey, "error", err)
+			return false
+		}
+	case <-time.After(3 * time.Second):
+		// Some agents block inside Send until the turn ends; the write has
+		// already been made, so treat it as steered.
+		slog.Debug("steer send still in flight; assuming delivered", "session", msg.SessionKey)
+	case <-e.ctx.Done():
+		return false
+	}
+
+	state.mu.Lock()
+	stillRunning := state.turnActive
+	state.mu.Unlock()
+	if !stillRunning {
+		// The turn ended between the lock probe and the write: the agent will
+		// treat this as a fresh turn, and the unsolicited reader relays the
+		// reply. Log it so the behaviour is traceable.
+		slog.Warn("steer landed after turn end; reply will be relayed by reader", "session", msg.SessionKey)
+	}
+
+	session.AddHistory("user", msg.Content)
+	sessions.Save()
+	if tc := stateTaskCard(state); tc != nil {
+		tc.SetStep(truncateStr(msg.Content, taskCardMaxStepLen))
+	}
+	e.reply(p, msg.ReplyCtx, e.i18n.T(MsgSteerAck))
+	slog.Info("message steered into running turn", "session", msg.SessionKey, "user", msg.UserName)
+	return true
 }
 
 // queueMessageForBusySession queues a message for later delivery when the
@@ -2706,6 +2788,7 @@ func (e *Engine) processInteractiveMessageWith(p Platform, msg *Message, session
 	state := e.getOrCreateInteractiveStateWith(interactiveKey, p, msg.ReplyCtx, session, sessions, agentOverride, ccSessionKey)
 	state.mu.Lock()
 	state.turnActive = true
+	state.turnProactive = msg.Proactive
 	// A stop that landed between turns may have left the flag set; never let
 	// it leak into this turn's result handling.
 	state.interruptedByUser = false
@@ -4872,6 +4955,7 @@ func (e *Engine) drainPendingMessages(state *interactiveState, session *Session,
 		queued := state.pendingMessages[0]
 		state.pendingMessages = state.pendingMessages[1:]
 		state.platform = queued.platform
+		state.turnProactive = false
 		state.replyCtx = queued.replyCtx
 		state.currentMessageID = queued.messageID
 		state.fromVoice = queued.fromVoice
