@@ -1113,6 +1113,68 @@ func TestProcessInteractiveEvents_MessageSentHookSkippedOnSendFailure(t *testing
 	}
 }
 
+func TestProcessInteractiveEvents_MessageSentHookRunsAfterSendOnChannelClose(t *testing.T) {
+	dir := t.TempDir()
+	sentMarker := filepath.Join(dir, "sent")
+	hookMarker := filepath.Join(dir, "hook")
+	p := &sendMarkerPlatform{
+		stubPlatformEngine: stubPlatformEngine{n: "test"},
+		marker:             sentMarker,
+	}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	e.SetHooks(NewHookManager("test", []HookConfig{{
+		Event:   "message.sent",
+		Type:    "command",
+		Command: "test -f " + sentMarker + " && touch " + hookMarker,
+		Async:   boolPtr(false),
+	}}, "sh", "-c", ""))
+	sessionKey := "test:user1"
+	session := e.sessions.GetOrCreateActive(sessionKey)
+	// receiptAgentSession closes its event channel at most once, so the
+	// engine's own cleanup after the exit does not double-close it.
+	agentSession := &receiptAgentSession{queuingAgentSession: newQueuingSession("s1")}
+	state := &interactiveState{agentSession: agentSession, platform: p, replyCtx: "ctx-1"}
+	e.interactiveStates[sessionKey] = state
+
+	// The agent streams some text and then exits without an EventResult,
+	// which takes the channelClosed path.
+	agentSession.events <- Event{Type: EventText, Content: "partial answer"}
+	_ = agentSession.Close()
+	e.processInteractiveEvents(state, session, e.sessions, sessionKey, "m1", time.Now(), nil, nil, nil, 0)
+
+	if _, err := os.Stat(hookMarker); err != nil {
+		t.Fatalf("message.sent hook did not observe completed platform send on channel close: %v", err)
+	}
+}
+
+func TestProcessInteractiveEvents_MessageSentHookSkippedOnSendFailureOnChannelClose(t *testing.T) {
+	dir := t.TempDir()
+	hookMarker := filepath.Join(dir, "hook")
+	p := &failingSendPlatform{stubPlatformEngine: stubPlatformEngine{n: "test"}}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	e.SetHooks(NewHookManager("test", []HookConfig{{
+		Event:   "message.sent",
+		Type:    "command",
+		Command: "touch " + hookMarker,
+		Async:   boolPtr(false),
+	}}, "sh", "-c", ""))
+	sessionKey := "test:user1"
+	session := e.sessions.GetOrCreateActive(sessionKey)
+	// receiptAgentSession closes its event channel at most once, so the
+	// engine's own cleanup after the exit does not double-close it.
+	agentSession := &receiptAgentSession{queuingAgentSession: newQueuingSession("s1")}
+	state := &interactiveState{agentSession: agentSession, platform: p, replyCtx: "ctx-1"}
+	e.interactiveStates[sessionKey] = state
+
+	agentSession.events <- Event{Type: EventText, Content: "partial answer"}
+	_ = agentSession.Close()
+	e.processInteractiveEvents(state, session, e.sessions, sessionKey, "m1", time.Now(), nil, nil, nil, 0)
+
+	if _, err := os.Stat(hookMarker); err == nil {
+		t.Fatal("message.sent hook fired on channel close even though platform send failed")
+	}
+}
+
 func TestProcessInteractiveEvents_SuppressesDuplicateSideChannelTextWithContextIndicator(t *testing.T) {
 	p := &stubMediaPlatform{stubPlatformEngine: stubPlatformEngine{n: "test"}}
 	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
