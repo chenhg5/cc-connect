@@ -63,7 +63,8 @@ type turnCard struct {
 	lastRender time.Time
 	finished   bool
 	disabled   bool
-	creating   bool
+	creating    bool
+	cardStarted bool
 	failCount  int
 	visible    bool // true once the card message exists
 
@@ -89,33 +90,25 @@ func newTurnCard(e *Engine, p Platform, replyCtx any, key string) *turnCard {
 	}
 }
 
-// Start schedules the first render. Short turns finish before the delay and
-// never create a card at all.
-func (tc *turnCard) Start() {
+// Start is intentionally a no-op: the card appears on the first real step
+// (see EnsureStarted), so quick answers never leave an empty "准备中" card.
+func (tc *turnCard) Start() {}
+
+// EnsureStarted posts the card the first time the agent actually does
+// something (a tool call). Idempotent and safe to call from the event loop.
+func (tc *turnCard) EnsureStarted() {
 	if tc == nil {
 		return
 	}
-	go tc.run()
-}
-
-func (tc *turnCard) run() {
-	delay := tc.e.cardDelay
-	if delay <= 0 {
-		tc.render(true)
-		tc.heartbeat()
+	tc.mu.Lock()
+	if tc.cardStarted || tc.finished || tc.visible {
+		tc.mu.Unlock()
 		return
 	}
-	timer := time.NewTimer(delay)
-	defer timer.Stop()
-	select {
-	case <-tc.done:
-		return
-	case <-tc.e.ctx.Done():
-		return
-	case <-timer.C:
-	}
+	tc.cardStarted = true
+	tc.mu.Unlock()
 	tc.render(true)
-	tc.heartbeat()
+	go tc.heartbeat()
 }
 
 func (tc *turnCard) heartbeat() {

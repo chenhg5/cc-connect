@@ -12,11 +12,6 @@ func (q QueueConfig) StopWaitDuration() (time.Duration, bool) {
 	return secondsDuration(q.StopWaitSecs)
 }
 
-// CardDelayDuration normalises card_delay_secs; ok is false when absent.
-func (q QueueConfig) CardDelayDuration() (time.Duration, bool) {
-	return secondsDuration(q.CardDelaySecs)
-}
-
 func secondsDuration(raw any) (time.Duration, bool) {
 	switch v := raw.(type) {
 	case int64:

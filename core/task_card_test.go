@@ -196,3 +196,27 @@ func TestRotateTaskCardAfterStop(t *testing.T) {
 		t.Fatal("rotateTaskCardIfFinished() replaced a running card")
 	}
 }
+
+// The card must appear only when the agent starts doing real work, so plain
+// answers never leave an empty "准备中" card behind.
+func TestTurnCardAppearsOnFirstToolUse(t *testing.T) {
+	e := NewEngine("test", &resultAgent{session: newResultAgentSession("ok")}, []Platform{&stubPlatformEngine{n: "test"}}, "", LangChinese)
+	t.Cleanup(e.cancel)
+	p := &taskCardStubPlatform{stubPlatformEngine: stubPlatformEngine{n: "feishu"}}
+
+	tc := newTurnCard(e, p, "ctx", "k")
+	tc.Start() // no-op
+	if len(p.sends) != 0 {
+		t.Fatalf("card sent before any work: %d", len(p.sends))
+	}
+
+	tc.EnsureStarted()
+	if len(p.sends) != 1 {
+		t.Fatalf("card sends = %d, want 1 after first tool use", len(p.sends))
+	}
+	tc.EnsureStarted() // idempotent
+	if len(p.sends) != 1 {
+		t.Fatalf("card re-sent on repeat EnsureStarted: %d", len(p.sends))
+	}
+	tc.Finish(taskCardDone, "")
+}

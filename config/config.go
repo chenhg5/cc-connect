@@ -136,9 +136,6 @@ type QueueConfig struct {
 	// before the process is terminated. Accepts an integer or a decimal
 	// (e.g. 1.5); 0 terminates immediately; default 2.
 	StopWaitSecs any `toml:"stop_wait_secs"`
-	// CardDelaySecs delays the first task card so quick answers leave no card
-	// behind. 0 shows the card immediately; default 2.
-	CardDelaySecs any `toml:"card_delay_secs"`
 }
 
 // WebhookConfig controls the external HTTP webhook endpoint.

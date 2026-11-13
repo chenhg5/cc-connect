@@ -1050,8 +1050,6 @@ func (p *Platform) onMessage(ctx context.Context, event *larkim.P2MessageReceive
 				slog.Debug(p.tag()+": responding to @all message", "chat_id", chatID)
 			case p.threadReplyWithoutMention && threadID != "" && p.botInThread(ctx, threadID):
 				slog.Debug(p.tag()+": thread message without mention accepted", "chat_id", chatID, "thread", threadID)
-			case p.threadReplyWithoutMention && p.recentChatUser(chatID, userID):
-				slog.Debug(p.tag()+": group message accepted without mention (known user)", "chat_id", chatID, "user", userID)
 			default:
 				slog.Info(p.tag()+": ignoring group message without bot mention",
 					"chat_id", chatID, "user", userID, "thread", threadID,
@@ -1083,11 +1081,6 @@ func (p *Platform) onMessage(ctx context.Context, event *larkim.P2MessageReceive
 		return nil
 	}
 
-	// The bot now knows this user in this chat: their following messages do not
-	// need a mention (topic groups often carry no thread id at all).
-	if chatType == "group" {
-		p.markChatUser(chatID, userID)
-	}
 
 	if msg.Content == nil && msgType != "merge_forward" {
 		slog.Debug(p.tag()+": message content is nil", "message_id", messageID, "type", msgType)
