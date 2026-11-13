@@ -2822,6 +2822,10 @@ func (e *Engine) processInteractiveMessageWith(p Platform, msg *Message, session
 		defer func() {
 			// No-op when a terminal state was already rendered (stop/failure).
 			taskCard.Finish(cardOutcome, "")
+			// A queued turn may have rotated in a fresh card; close it too.
+			if cur := stateTaskCard(state); cur != nil && cur != taskCard {
+				cur.Finish(cardOutcome, "")
+			}
 		}()
 	}
 	if targetModel != "" {
@@ -4967,9 +4971,11 @@ func (e *Engine) drainPendingMessages(state *interactiveState, session *Session,
 		state.fromVoice = queued.fromVoice
 		state.mu.Unlock()
 
-		// Queue shrank: refresh the card and reset the step for the new turn.
+		// A queued turn may follow a stop, in which case the previous card is
+		// already closed; give this turn its own live card.
+		tc := e.rotateTaskCardIfFinished(state, queued.platform, queued.replyCtx)
 		e.syncTaskCardQueue(state)
-		if tc := stateTaskCard(state); tc != nil {
+		if tc != nil {
 			tc.SetStep("")
 		}
 

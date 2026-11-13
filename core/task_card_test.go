@@ -169,3 +169,30 @@ func TestTurnCard_QuickTurnLeavesNoCard(t *testing.T) {
 		t.Fatalf("sent %d cards for a quick turn, want 0", sends)
 	}
 }
+
+// A follow-up that was queued behind a stopped turn must get its own live card.
+func TestRotateTaskCardAfterStop(t *testing.T) {
+	e := NewEngine("test", &resultAgent{session: newResultAgentSession("ok")}, []Platform{&stubPlatformEngine{n: "test"}}, "", LangChinese)
+	t.Cleanup(e.cancel)
+	p := &taskCardStubPlatform{stubPlatformEngine: stubPlatformEngine{n: "feishu"}}
+
+	old := newTurnCard(e, p, "ctx")
+	state := &interactiveState{taskCard: old, turnActive: true}
+	old.Finish(taskCardStopped, "")
+
+	fresh := e.rotateTaskCardIfFinished(state, p, "ctx2")
+	if fresh == nil {
+		t.Fatal("rotateTaskCardIfFinished() = nil for a stopped card")
+	}
+	if fresh == old {
+		t.Fatal("card was not rotated; the follow-up would run under a stopped card")
+	}
+	if fresh.Finished() {
+		t.Fatal("fresh card is already finished")
+	}
+
+	running := e.rotateTaskCardIfFinished(state, p, "ctx3")
+	if running != fresh {
+		t.Fatal("rotateTaskCardIfFinished() replaced a running card")
+	}
+}

@@ -340,3 +340,36 @@ func taskCardStepText(tool, input string) string {
 	}
 	return tool + " · " + truncateIf(input, 60)
 }
+
+// Finished reports whether the card already reached a terminal state.
+func (tc *turnCard) Finished() bool {
+	if tc == nil {
+		return true
+	}
+	tc.mu.Lock()
+	defer tc.mu.Unlock()
+	return tc.finished
+}
+
+// rotateTaskCardIfFinished gives a queued turn a fresh card when the previous
+// one was already closed (e.g. the user stopped mid-run and then followed up).
+// Without this the follow-up would run under a card that still says
+// "已停止", which looks like the bot never picked the message up.
+func (e *Engine) rotateTaskCardIfFinished(state *interactiveState, p Platform, replyCtx any) *turnCard {
+	if state == nil {
+		return nil
+	}
+	if cur := stateTaskCard(state); cur != nil && !cur.Finished() {
+		return cur
+	}
+	tc := newTurnCard(e, p, replyCtx)
+	if tc == nil {
+		return nil
+	}
+	state.mu.Lock()
+	state.taskCard = tc
+	state.mu.Unlock()
+	tc.Start()
+	e.syncTaskCardQueue(state)
+	return tc
+}
