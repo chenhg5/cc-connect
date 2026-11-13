@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"os"
 	"strings"
 	"sync"
 	"time"
@@ -296,7 +297,11 @@ func (tc *turnCard) buildCardLocked() *Card {
 	if step == "" {
 		step = tc.e.i18n.T(MsgTaskCardPreparing)
 	}
-	body := tc.e.i18n.Tf(MsgTaskCardStep, step)
+	stepKey := MsgTaskCardStep
+	if tc.finished {
+		stepKey = MsgTaskCardLastStep
+	}
+	body := tc.e.i18n.Tf(stepKey, step)
 
 	if len(tc.queue) > 0 && tc.status == taskCardRunning {
 		body += "\n" + tc.e.i18n.Tf(MsgTaskCardQueue, len(tc.queue))
@@ -365,14 +370,81 @@ func (e *Engine) syncTaskCardQueue(state *interactiveState) {
 // taskCardStepText turns a tool event into the one-line "current step" label.
 func taskCardStepText(tool, input string) string {
 	tool = strings.TrimSpace(tool)
-	input = strings.TrimSpace(strings.ReplaceAll(input, "\n", " "))
+	input = compactCommand(input)
 	if tool == "" {
-		return truncateIf(input, taskCardMaxStepLen)
+		return truncateMiddle(input, taskCardMaxStepLen)
 	}
 	if input == "" {
 		return tool
 	}
-	return tool + " · " + truncateIf(input, 60)
+	return tool + " · " + truncateMiddle(input, 70)
+}
+
+// compactCommand keeps the informative part of a shell command: a leading
+// "cd <long path> &&" (or export prelude) is dropped, the home directory
+// becomes "~", over-long paths keep their tail, and long commands are
+// truncated in the middle so the script name and args stay readable.
+func compactCommand(input string) string {
+	s := strings.TrimSpace(strings.ReplaceAll(input, "\n", " "))
+	for _, prefix := range []string{"bash -lc \"", "bash -c \"", "sh -c \"", "zsh -c \""} {
+		if strings.HasPrefix(s, prefix) {
+			s = strings.TrimSuffix(strings.TrimPrefix(s, prefix), "\"")
+			break
+		}
+	}
+	for {
+		trimmed := strings.TrimSpace(s)
+		cut := -1
+		switch {
+		case strings.HasPrefix(trimmed, "cd "), strings.HasPrefix(trimmed, "export "):
+			if i := strings.Index(trimmed, "&&"); i >= 0 {
+				cut = i + 2
+			} else if i := strings.Index(trimmed, ";"); i >= 0 {
+				cut = i + 1
+			}
+		}
+		if cut < 0 {
+			break
+		}
+		s = trimmed[cut:]
+	}
+	s = strings.Join(strings.Fields(s), " ")
+	if home, err := os.UserHomeDir(); err == nil && home != "" {
+		s = strings.ReplaceAll(s, home, "~")
+	}
+	s = strings.ReplaceAll(s, "$HOME", "~")
+	return shortenPaths(s)
+}
+
+// shortenPaths turns "~/a/b/c/d/script.js" into "…/d/script.js" when a token
+// is too long to read in a card.
+func shortenPaths(s string) string {
+	parts := strings.Fields(s)
+	for i, tok := range parts {
+		if len(tok) <= 28 || !strings.Contains(tok, "/") {
+			continue
+		}
+		segs := strings.Split(tok, "/")
+		if len(segs) < 4 {
+			continue
+		}
+		parts[i] = "…/" + strings.Join(segs[len(segs)-2:], "/")
+	}
+	return strings.Join(parts, " ")
+}
+
+// truncateMiddle keeps both ends of a long string so the tail (usually the
+// script name or arguments) stays readable.
+func truncateMiddle(s string, max int) string {
+	if max <= 0 || len(s) <= max {
+		return s
+	}
+	head := max * 2 / 5
+	tail := max - head - 1
+	if tail < 0 {
+		tail = 0
+	}
+	return s[:head] + "…" + s[len(s)-tail:]
 }
 
 // Finished reports whether the card already reached a terminal state.

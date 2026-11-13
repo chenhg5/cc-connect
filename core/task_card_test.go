@@ -2,6 +2,7 @@ package core
 
 import (
 	"context"
+	"os"
 	"strings"
 	"sync"
 	"testing"
@@ -10,9 +11,9 @@ import (
 
 type taskCardStubPlatform struct {
 	stubPlatformEngine
-	mu      sync.Mutex
-	sends   []*Card
-	updates []*Card
+	mu       sync.Mutex
+	sends    []*Card
+	updates  []*Card
 	failSend bool
 }
 
@@ -219,4 +220,26 @@ func TestTurnCardAppearsOnFirstToolUse(t *testing.T) {
 		t.Fatalf("card re-sent on repeat EnsureStarted: %d", len(p.sends))
 	}
 	tc.Finish(taskCardDone, "")
+}
+
+func TestCompactCommand(t *testing.T) {
+	home, _ := os.UserHomeDir()
+	cases := []struct{ in, want string }{
+		{"cd /Users/qitmac001665/Documents/ObsidianNotes/AgentSync/scripts && node agent.js --dry-run", "node agent.js --dry-run"},
+		{"cd /tmp && cd /var && ls -la", "ls -la"},
+		{"bash -lc \"cd /a/b/c && node x.js\"", "node x.js"},
+		{home + "/Documents/ObsidianNotes/AgentSync/scripts/x.sh", "…/scripts/x.sh"},
+	}
+	for _, c := range cases {
+		if got := compactCommand(c.in); got != c.want {
+			t.Errorf("compactCommand(%q) = %q, want %q", c.in, got, c.want)
+		}
+	}
+}
+
+func TestTruncateMiddleKeepsTail(t *testing.T) {
+	got := truncateMiddle("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaagent.js --flag", 20)
+	if !strings.HasSuffix(got, "--flag") || !strings.Contains(got, "…") {
+		t.Fatalf("truncateMiddle lost the tail: %q", got)
+	}
 }

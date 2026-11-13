@@ -176,6 +176,7 @@ const (
 	MsgTaskCardFailed            MsgKey = "task_card_failed"
 	MsgTaskCardPreparing         MsgKey = "task_card_preparing"
 	MsgTaskCardStep              MsgKey = "task_card_step"
+	MsgTaskCardLastStep          MsgKey = "task_card_last_step"
 	MsgTaskCardQueue             MsgKey = "task_card_queue"
 	MsgTaskCardStopBtn           MsgKey = "task_card_stop_btn"
 	MsgTaskCardWaitingConfirm    MsgKey = "task_card_waiting_confirm"
@@ -747,6 +748,13 @@ var messages = map[MsgKey]map[Language]string{
 		LangTraditionalChinese: "當前步驟：%s",
 		LangJapanese:           "現在のステップ：%s",
 		LangSpanish:            "Paso actual: %s",
+	},
+	MsgTaskCardLastStep: {
+		LangEnglish:            "Last step: %s",
+		LangChinese:            "最后步骤：%s",
+		LangTraditionalChinese: "最後步驟：%s",
+		LangJapanese:           "最後のステップ：%s",
+		LangSpanish:            "Último paso: %s",
 	},
 	MsgTaskCardQueue: {
 		LangEnglish:            "📋 Queued (%d)",
