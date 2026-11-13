@@ -316,9 +316,12 @@ func TestPruneThreadSeenCapsOldestEntries(t *testing.T) {
 	for i := 0; i < threadSeenMax+5; i++ {
 		seen["omt_"+time.Unix(int64(i), 0).Format("150405")+"_"+string(rune('a'+i%26))] = now.Add(time.Duration(i) * time.Second)
 	}
-	pruneThreadSeen(seen, now.Add(10*time.Minute))
+	evicted := pruneThreadSeen(seen, now.Add(10*time.Minute))
 	if len(seen) != threadSeenMax {
 		t.Fatalf("cache size = %d, want %d", len(seen), threadSeenMax)
+	}
+	if evicted != 5 {
+		t.Fatalf("evicted = %d, want 5", evicted)
 	}
 }
 

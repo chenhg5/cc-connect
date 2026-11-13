@@ -146,6 +146,7 @@ type Platform struct {
 	threadSeenSaved        map[string]time.Time
 	threadStatePath        string
 	threadSaveTimer        *time.Timer
+	threadSeenWarned       bool
 	// rootMu guards rootCache and rootInflight. rootCache maps a message id to
 	// its parent, so a whole topic resolves to one session even when Feishu
 	// reports a different root_id for the topic's first message and the rest.
@@ -3291,18 +3292,34 @@ func (p *Platform) markThread(threadID string) {
 		p.threadSeenSaved = make(map[string]time.Time)
 	}
 	p.threadSeen[threadID] = now
+	evicted := 0
 	if len(p.threadSeen) > threadSeenMax {
-		pruneThreadSeen(p.threadSeen, now)
+		evicted = pruneThreadSeen(p.threadSeen, now)
 		for id := range p.threadSeenSaved {
 			if _, ok := p.threadSeen[id]; !ok {
 				delete(p.threadSeenSaved, id)
 			}
 		}
 	}
+	warnCapacity := len(p.threadSeen) >= threadSeenWarnAt && !p.threadSeenWarned
+	if warnCapacity {
+		p.threadSeenWarned = true
+	} else if len(p.threadSeen) < threadSeenWarnAt {
+		p.threadSeenWarned = false
+	}
 	lastSaved, saved := p.threadSeenSaved[threadID]
 	needSave := !saved || now.Sub(lastSaved) >= threadSeenSaveRefresh
+	remaining := len(p.threadSeen)
 	p.threadSeenMu.Unlock()
 
+	if evicted > 0 {
+		slog.Warn(p.tag()+": thread state at capacity, evicted oldest entries",
+			"evicted", evicted, "remaining", remaining, "max", threadSeenMax)
+	}
+	if warnCapacity {
+		slog.Warn(p.tag()+": thread state nearing capacity",
+			"threads", remaining, "threshold", threadSeenWarnAt, "max", threadSeenMax)
+	}
 	if needSave {
 		p.scheduleThreadSeenSave()
 	}

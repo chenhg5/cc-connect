@@ -17,6 +17,7 @@ import (
 
 const (
 	threadSeenMax         = 1000
+	threadSeenWarnAt      = threadSeenMax * 8 / 10
 	threadSeenSaveDelay   = 30 * time.Second
 	threadSeenSaveRefresh = time.Hour
 	threadStateVersion    = 1
@@ -79,22 +80,47 @@ func (p *Platform) loadThreadSeen() {
 	}
 	now := time.Now()
 	seen := make(map[string]time.Time, len(state.Threads))
+	expired, future := 0, 0
 	for id, at := range state.Threads {
-		if id == "" || now.Sub(at) >= threadSeenTTL || at.After(now.Add(time.Minute)) {
+		if id == "" {
+			continue
+		}
+		if at.After(now.Add(time.Minute)) {
+			future++
+			continue
+		}
+		if now.Sub(at) >= threadSeenTTL {
+			expired++
 			continue
 		}
 		seen[id] = at
 	}
-	pruneThreadSeen(seen, now)
+	evicted := pruneThreadSeen(seen, now)
 	saved := make(map[string]time.Time, len(seen))
 	for id, at := range seen {
 		saved[id] = at
 	}
+	warnCapacity := len(seen) >= threadSeenWarnAt
 	p.threadSeenMu.Lock()
 	p.threadSeen = seen
 	p.threadSeenSaved = saved
+	p.threadSeenWarned = warnCapacity
 	p.threadSeenMu.Unlock()
 	slog.Info(p.tag()+": thread state loaded", "path", p.threadStatePath, "threads", len(seen))
+	if expired > 0 {
+		slog.Info(p.tag()+": thread state ignored expired entries", "count", expired, "remaining", len(seen))
+	}
+	if future > 0 {
+		slog.Warn(p.tag()+": thread state contains future timestamps, ignored", "count", future, "path", p.threadStatePath)
+	}
+	if evicted > 0 {
+		slog.Warn(p.tag()+": thread state at capacity on load, evicted oldest entries",
+			"evicted", evicted, "remaining", len(seen), "max", threadSeenMax)
+	}
+	if warnCapacity {
+		slog.Warn(p.tag()+": thread state nearing capacity",
+			"threads", len(seen), "threshold", threadSeenWarnAt, "max", threadSeenMax)
+	}
 }
 
 func (p *Platform) scheduleThreadSeenSave() {
@@ -185,14 +211,14 @@ func (p *Platform) persistThreadSeen() {
 
 // pruneThreadSeen removes expired entries and caps the map. When over the cap
 // it evicts the oldest entries first.
-func pruneThreadSeen(seen map[string]time.Time, now time.Time) {
+func pruneThreadSeen(seen map[string]time.Time, now time.Time) int {
 	for id, at := range seen {
 		if id == "" || now.Sub(at) >= threadSeenTTL {
 			delete(seen, id)
 		}
 	}
 	if len(seen) <= threadSeenMax {
-		return
+		return 0
 	}
 	type entry struct {
 		id string
@@ -203,7 +229,9 @@ func pruneThreadSeen(seen map[string]time.Time, now time.Time) {
 		entries = append(entries, entry{id: id, at: at})
 	}
 	sort.Slice(entries, func(i, j int) bool { return entries[i].at.Before(entries[j].at) })
-	for _, e := range entries[:len(entries)-threadSeenMax] {
+	evicted := len(entries) - threadSeenMax
+	for _, e := range entries[:evicted] {
 		delete(seen, e.id)
 	}
+	return evicted
 }
