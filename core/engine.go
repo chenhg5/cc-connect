@@ -35,6 +35,10 @@ const defaultMaxQueuedMessages = 5 // default cap for queued messages per sessio
 // recover.
 var interruptWatchdogTimeout = 25 * time.Second
 
+// interruptUnwindWaitTimeout is how long a stop waits for the agent to end the
+// turn before the process is terminated. Variable so tests can shorten it.
+var interruptUnwindWaitTimeout = 2 * time.Second
+
 const (
 	defaultThinkingMaxLen = 300
 	defaultToolMaxLen     = 500
@@ -2238,6 +2242,11 @@ func (e *Engine) handleMessage(p Platform, msg *Message) {
 				go e.drainOrphanedQueue(session, sessions, interactiveKey, agent, resolvedWorkspace)
 			}
 			return
+		}
+		// The turn may be just finishing; wait for the lock instead of telling
+		// the user their message was rejected.
+		if e.waitForSessionLock(session, 3*time.Second) {
+			goto sessionLocked
 		}
 		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgPreviousProcessing))
 		return
@@ -8475,6 +8484,29 @@ func (e *Engine) cmdStop(p Platform, msg *Message) {
 		return
 	}
 	e.reply(p, msg.ReplyCtx, e.i18n.T(MsgExecutionStopped))
+}
+
+// waitTurnUnwind polls until the state's turn is no longer active.
+func (e *Engine) waitTurnUnwind(state *interactiveState, timeout time.Duration) bool {
+	if timeout <= 0 {
+		return true
+	}
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		state.mu.Lock()
+		active := state.turnActive
+		stopped := state.stopped
+		state.mu.Unlock()
+		if !active || stopped {
+			return true
+		}
+		select {
+		case <-e.ctx.Done():
+			return true
+		case <-time.After(50 * time.Millisecond):
+		}
+	}
+	return false
 }
 
 // hasActiveTurn reports whether a turn is currently in flight for the session.

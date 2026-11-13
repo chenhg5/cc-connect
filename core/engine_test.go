@@ -8243,6 +8243,7 @@ func TestCmdStop_ReturnsWhileCloseBlockedAndStopsEventLoop(t *testing.T) {
 		agentSession: sess,
 		platform:     p,
 		replyCtx:     "ctx",
+		turnActive:   true,
 	}
 	e.interactiveMu.Lock()
 	e.interactiveStates[key] = state
@@ -8527,7 +8528,7 @@ func TestCmdStop_UsesInteractiveKeyForMultiWorkspace(t *testing.T) {
 
 	iKey := e.interactiveKeyForSessionKey(wsKey)
 	e.interactiveMu.Lock()
-	e.interactiveStates[iKey] = &interactiveState{agentSession: sess}
+	e.interactiveStates[iKey] = &interactiveState{agentSession: sess, turnActive: true}
 	e.interactiveMu.Unlock()
 
 	msg := &Message{SessionKey: wsKey, Content: "/stop", ReplyCtx: "ctx"}
