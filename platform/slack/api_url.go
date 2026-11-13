@@ -64,7 +64,9 @@ func normalizeAPIURL(raw string) (string, error) {
 	if u.Host == "" {
 		return "", fmt.Errorf("slack: base_url %q has no host", describeURL(u))
 	}
-	if u.RawQuery != "" || u.Fragment != "" {
+	// ForceQuery covers a bare trailing "?": the SDK appends method names to
+	// the root, so ".../api/?" would turn every method into a query string.
+	if u.RawQuery != "" || u.Fragment != "" || u.ForceQuery {
 		return "", fmt.Errorf("slack: base_url %q must not contain a query or fragment", describeURL(u))
 	}
 
@@ -181,22 +183,18 @@ func safePath(p string) string {
 	}
 }
 
-// redactAuthority masks the part of an unparseable URL that may hold
-// credentials, keeping the rest for diagnosis.
-//
-// Normally that is the authority: everything between the scheme and the next
-// "/". When the value contains an "@", the authority can't be located
-// reliably (a malformed password may carry an unescaped "/", "?" or "#"), so
-// the mask runs greedily up to the last "@" instead.
+// redactAuthority masks the authority of an unparseable URL: everything
+// between the scheme and the next "/". It deliberately leaves the path alone,
+// so it must only be used through logSafe, which collapses the path with
+// safePath. A malformed password with an unescaped "/" therefore ends up
+// split between the masked authority and a path that safePath hides, and an
+// "@" in the path is never mistaken for the end of user info.
 func redactAuthority(raw string) string {
 	start := 0
 	if i := strings.Index(raw, "://"); i >= 0 {
 		start = i + len("://")
 	}
 	rest := raw[start:]
-	if at := strings.LastIndex(rest, "@"); at >= 0 {
-		return raw[:start] + "REDACTED" + rest[at:]
-	}
 	if slash := strings.Index(rest, "/"); slash >= 0 {
 		return raw[:start] + "REDACTED" + rest[slash:]
 	}

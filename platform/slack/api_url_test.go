@@ -27,6 +27,9 @@ func TestNormalizeAPIURL(t *testing.T) {
 		{in: "https://relay.example.com/slack/", wantErr: true},
 		{in: "https://slack-gov.com/apis/", wantErr: true},
 		{in: "https://slack-gov.com/api/v2/", wantErr: true},
+		// A bare trailing "?" would turn every SDK method into a query string.
+		{in: "https://relay.example.com/api/?", wantErr: true},
+		{in: "https://relay.example.com/api?", wantErr: true},
 		{in: "ftp://slack.com/api/", wantErr: true},
 		{in: "slack-gov.com/api/", wantErr: true},
 		{in: "https:///api/", wantErr: true},
@@ -82,18 +85,20 @@ func TestNormalizeAPIURL_MalformedCredentialsNotEchoed(t *testing.T) {
 // never reaches the error.
 func TestNormalizeAPIURL_NoErrorPathEchoesSecrets(t *testing.T) {
 	for _, in := range []string{
-		"token:sup3rsecret@relay.example.com",              // opaque, fails the scheme check
-		"token:sup3r?secret@relay.example.com",             // "?" inside the secret
-		"ftp://relay.example.com/api/?token=sup3rsecret",   // scheme check, secret in query
-		"https:///api/?token=sup3rsecret",                  // no host, secret in query
-		"https://relay.example.com/api/?token=sup3rsecret", // query check
-		"https://relay.example.com/api/#sup3rsecret",       // fragment check
-		"https://user:sup3rsecret@relay.example.com/api/",  // user info check
-		"https://user:sup3rsecret",                         // parse error, no "@"
-		"https://relay.example.com/sup3rsecret",            // path check, secret in path
-		"ftp://relay.example.com/sup3rsecret/api/",         // scheme check, secret before /api/
-		"https://host:badport/sup3rsecret",                 // parse error, secret in path
-		"https://relay.example.com/sup3rsecret/api/?x=1",   // query check, secret before /api/
+		"token:sup3rsecret@relay.example.com",               // opaque, fails the scheme check
+		"token:sup3r?secret@relay.example.com",              // "?" inside the secret
+		"ftp://relay.example.com/api/?token=sup3rsecret",    // scheme check, secret in query
+		"https:///api/?token=sup3rsecret",                   // no host, secret in query
+		"https://relay.example.com/api/?token=sup3rsecret",  // query check
+		"https://relay.example.com/api/#sup3rsecret",        // fragment check
+		"https://user:sup3rsecret@relay.example.com/api/",   // user info check
+		"https://user:sup3rsecret",                          // parse error, no "@"
+		"https://relay.example.com/sup3rsecret",             // path check, secret in path
+		"ftp://relay.example.com/sup3rsecret/api/",          // scheme check, secret before /api/
+		"https://host:badport/sup3rsecret",                  // parse error, secret in path
+		"https://relay.example.com/sup3rsecret/api/?x=1",    // query check, secret before /api/
+		"https://relay.example.com/api/@sup3rsecret%zz",     // parse error, "@" in the path (#2247 review)
+		"https://u:p@relay.example.com/api/@sup3rsecret%zz", // parse error, "@" in both
 	} {
 		_, err := normalizeAPIURL(in)
 		if err == nil {
@@ -110,9 +115,9 @@ func TestLogSafe(t *testing.T) {
 	for in, want := range map[string]string{
 		"https://relay.example.com/api/?token=x": "https://REDACTED/api/?<omitted>",
 		"https://relay.example.com/api/#frag":    "https://REDACTED/api/?<omitted>",
-		"token:secret@relay.example.com":         "REDACTED@relay.example.com",
+		"token:secret@relay.example.com":         "REDACTED",
 		"token:sec?ret@relay.example.com":        "REDACTED?<omitted>",
-		"https://u:p@h/api/":                     "https://REDACTED@h/api/",
+		"https://u:p@h/api/":                     "https://REDACTED/api/",
 		"ftp://slack-gov.com/api/":               "ftp://REDACTED/api/",
 	} {
 		if got := logSafe(in); got != want {
@@ -173,12 +178,12 @@ func TestNew_StartupLogHidesPath(t *testing.T) {
 }
 
 func TestRedactAuthority(t *testing.T) {
+	// Only the authority (scheme to the next "/") is masked; the path is left
+	// for safePath, so an "@" never decides where the mask ends.
 	for in, want := range map[string]string{
-		// With an "@": greedy up to the last one.
-		"https://u:p@[":     "https://REDACTED@[",
-		"https://u:p@h/a@b": "https://REDACTED@b",
-		"u:p@h":             "REDACTED@h",
-		// Without an "@": the whole authority, path kept for diagnosis.
+		"https://u:p@[":                     "https://REDACTED",
+		"https://u:p@h/a@b":                 "https://REDACTED/a@b",
+		"u:p@h":                             "REDACTED",
 		"https://user:sup3rsecret":          "https://REDACTED",
 		"https://host:notaport/api/":        "https://REDACTED/api/",
 		"https://relay.example.com/api/%zz": "https://REDACTED/api/%zz",
