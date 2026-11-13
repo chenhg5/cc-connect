@@ -2412,7 +2412,10 @@ func (e *Engine) steerBusySession(p Platform, msg *Message, interactiveKey strin
 	if tc := stateTaskCard(state); tc != nil {
 		tc.SetStep(truncateStr(msg.Content, taskCardMaxStepLen))
 	}
-	e.sendAck(p, msg, e.i18n.T(MsgSteerAck))
+	// Both cues: emoji reaction on the message plus a short text so the user
+	// knows this went into the running task instead of starting a new one.
+	e.sendAck(p, msg, "")
+	e.reply(p, msg.ReplyCtx, e.i18n.T(MsgSteerAck))
 	slog.Info("message steered into running turn", "session", msg.SessionKey, "user", msg.UserName)
 	return true
 }
@@ -2472,7 +2475,8 @@ func (e *Engine) queueMessageForBusySession(p Platform, msg *Message, interactiv
 	e.syncTaskCardQueue(state)
 	// With a live card the queue is already visible there; a per-message
 	// "queued" reply would just be noise.
-	e.sendAck(p, msg, e.i18n.T(MsgMessageQueued))
+	e.sendAck(p, msg, "")
+	e.reply(p, msg.ReplyCtx, e.i18n.T(MsgMessageQueued))
 	return true
 }
 

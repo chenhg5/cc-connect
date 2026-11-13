@@ -92,7 +92,7 @@ func (p *ackStubPlatform) AddAckReaction(_ any) {
 	p.updated = append(p.updated, "reaction")
 }
 
-// Steering acknowledges with an emoji reaction, not a text bubble.
+// Steering acknowledges with both an emoji reaction and a short text.
 func TestSteerRewritesExistingAck(t *testing.T) {
 	p := &ackStubPlatform{stubPlatformEngine: stubPlatformEngine{n: "test"}}
 	e := NewEngine("test", &resultAgent{session: newResultAgentSession("ok")}, []Platform{p}, "", LangChinese)
@@ -113,12 +113,16 @@ func TestSteerRewritesExistingAck(t *testing.T) {
 	sent := append([]string(nil), p.sent...)
 	p.mu.Unlock()
 
-	if len(updated) != 1 || updated[0] != "reaction" {
-		t.Fatalf("acks = %v, want exactly one emoji reaction", updated)
-	}
+	foundText := false
 	for _, s := range sent {
 		if strings.Contains(s, "插话") {
-			t.Fatalf("separate steer reply sent: %q", s)
+			foundText = true
 		}
+	}
+	if !foundText {
+		t.Fatalf("no steer text reply: %v", sent)
+	}
+	if len(updated) != 1 {
+		t.Fatalf("reactions = %v, want exactly one emoji reaction too", updated)
 	}
 }
