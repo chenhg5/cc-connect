@@ -22,29 +22,6 @@ import (
 	"github.com/chenhg5/cc-connect/core"
 )
 
-var (
-	partialSupportOnce sync.Once
-	partialSupported   bool
-)
-
-// supportsPartialMessages probes the CLI once for token-level streaming
-// (--include-partial-messages). Older builds reject the flag, so the probe
-// decides whether it is safe to pass.
-func supportsPartialMessages(cliBin string) bool {
-	partialSupportOnce.Do(func() {
-		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-		defer cancel()
-		out, err := exec.CommandContext(ctx, cliBin, "--help").CombinedOutput()
-		if err != nil {
-			slog.Debug("claudecode: partial-message probe failed", "error", err)
-			return
-		}
-		partialSupported = strings.Contains(string(out), "include-partial-messages")
-		slog.Info("claudecode: partial-message streaming", "supported", partialSupported)
-	})
-	return partialSupported
-}
-
 // claudeSession manages a long-running Claude Code process using
 // --input-format stream-json and --permission-prompt-tool stdio.
 //
@@ -94,11 +71,9 @@ func newClaudeSession(ctx context.Context, workDir, cliBin string, cliExtraArgs 
 		"--permission-prompt-tool", "stdio",
 		"--replay-user-messages",
 	}
-	// Ask the CLI for token-level deltas so text can be shown as it is written
-	// instead of arriving as one large block at the end.
-	if supportsPartialMessages(cliBin) {
-		innerArgs = append(innerArgs, "--include-partial-messages")
-	}
+	// Token-level deltas: text is streamed to the user as it is written
+	// instead of arriving as one large block when the turn ends.
+	innerArgs = append(innerArgs, "--include-partial-messages")
 	if !disableVerbose {
 		innerArgs = append(innerArgs, "--verbose")
 	}
