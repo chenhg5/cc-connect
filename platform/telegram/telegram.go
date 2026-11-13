@@ -454,6 +454,18 @@ func (p *Platform) handleMessage(ctx context.Context, msg *models.Message) {
 	}
 	botName := p.botUsername()
 
+	if msg.Dice != nil {
+		p.dispatchMessage(&core.Message{
+			SessionKey: sessionKey, Platform: "telegram",
+			UserID: userID, UserName: userName, ChatName: chatName,
+			Content:    formatDiceContent(msg.Dice),
+			MessageID:  strconv.Itoa(msg.ID),
+			ChannelKey: channelKey,
+			ReplyCtx:   rctx,
+		}, msg)
+		return
+	}
+
 	if len(msg.Photo) > 0 {
 		best := msg.Photo[len(msg.Photo)-1]
 		imgData, err := p.downloadFile(best.FileID)
@@ -659,6 +671,69 @@ func stripBotMention(text, botName string) string {
 	}
 	text = strings.ReplaceAll(text, "@"+botName, "")
 	return strings.TrimSpace(text)
+}
+
+// formatDiceContent renders a Telegram dice/animated-emoji message (🎲🎯🏀⚽🎳🎰)
+// as plain text so the agent can see the emoji and the rolled value.
+func formatDiceContent(dice *models.Dice) string {
+	if dice == nil {
+		return ""
+	}
+	emoji := strings.TrimSpace(dice.Emoji)
+	if emoji == "" {
+		emoji = "🎲"
+	}
+	v := dice.Value
+
+	switch emoji {
+	case "🎲":
+		return fmt.Sprintf("[Rolled 🎲: %d/6]", v)
+	case "🎯":
+		label := "dart"
+		switch v {
+		case 6:
+			label = "dart hit the bullseye"
+		case 1:
+			label = "dart missed the board"
+		}
+		return fmt.Sprintf("[Rolled 🎯: %s (%d/6)]", label, v)
+	case "🏀":
+		label := "basketball missed"
+		if v >= 4 {
+			label = "basketball scored"
+		}
+		return fmt.Sprintf("[Rolled 🏀: %s (%d/5)]", label, v)
+	case "⚽":
+		label := "football missed"
+		if v >= 3 {
+			label = "football scored"
+		}
+		return fmt.Sprintf("[Rolled ⚽: %s (%d/5)]", label, v)
+	case "🎳":
+		label := "bowling"
+		switch v {
+		case 6:
+			label = "bowling strike"
+		case 1:
+			label = "bowling gutter ball"
+		}
+		return fmt.Sprintf("[Rolled 🎳: %s (%d/6)]", label, v)
+	case "🎰":
+		label := "slot machine"
+		switch v {
+		case 1:
+			label = "slot machine triple BAR"
+		case 22:
+			label = "slot machine triple grapes"
+		case 43:
+			label = "slot machine triple lemons"
+		case 64:
+			label = "slot machine JACKPOT"
+		}
+		return fmt.Sprintf("[Rolled 🎰: %s (%d/64)]", label, v)
+	default:
+		return fmt.Sprintf("[Rolled %s: %d]", emoji, v)
+	}
 }
 
 func (p *Platform) getNewBot() botFactory {
