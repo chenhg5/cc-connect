@@ -662,6 +662,20 @@ func waitDeleteModePhase(t *testing.T, e *Engine, sessionKey, targetPhase string
 	t.Fatalf("timed out waiting for delete mode phase %q", targetPhase)
 }
 
+func waitRefreshedCards(t *testing.T, p *stubCardPlatform, min int) []*Card {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		refreshed := p.getRefreshedCards()
+		if len(refreshed) >= min {
+			return refreshed
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("timed out waiting for %d refreshed cards", min)
+	return nil
+}
+
 type stubProviderAgent struct {
 	stubAgent
 	providers []ProviderConfig
@@ -4249,10 +4263,7 @@ func TestDeleteMode_ConfirmAndSubmitDeletesSelectedSessions(t *testing.T) {
 	if got, want := strings.Join(agent.deleted, ","), "session-1,session-3"; got != want {
 		t.Fatalf("deleted = %q, want %q", got, want)
 	}
-	refreshed := p.getRefreshedCards()
-	if len(refreshed) == 0 {
-		t.Fatal("expected refreshed result card via RefreshCard")
-	}
+	refreshed := waitRefreshedCards(t, p, 1)
 	pushedCard := refreshed[len(refreshed)-1]
 	if !strings.Contains(pushedCard.RenderText(), "Session deleted: One") {
 		t.Fatalf("result text = %q, want delete result", pushedCard.RenderText())
@@ -4284,10 +4295,7 @@ func TestDeleteMode_SubmitReportsMissingSelectedSessions(t *testing.T) {
 	}
 	// Wait for async deletion to complete.
 	waitDeleteModePhase(t, e, msg.SessionKey, "result")
-	refreshed := p.getRefreshedCards()
-	if len(refreshed) == 0 {
-		t.Fatal("expected refreshed result card via RefreshCard")
-	}
+	refreshed := waitRefreshedCards(t, p, 1)
 	pushedCard := refreshed[len(refreshed)-1]
 	resultText := pushedCard.RenderText()
 	if !strings.Contains(resultText, "Session deleted: One") {
@@ -4389,10 +4397,8 @@ func TestDeleteMode_SubmitBlocksActiveSession(t *testing.T) {
 	if len(agent.deleted) != 0 {
 		t.Fatalf("deleted = %v, want none", agent.deleted)
 	}
-	if len(p.getRefreshedCards()) == 0 {
-		t.Fatal("expected refreshed result card via RefreshCard")
-	}
-	pushedCard := p.getRefreshedCards()[len(p.getRefreshedCards())-1]
+	refreshed := waitRefreshedCards(t, p, 1)
+	pushedCard := refreshed[len(refreshed)-1]
 	if !strings.Contains(pushedCard.RenderText(), "Cannot delete the currently active session") {
 		t.Fatalf("result text = %q, want active-session warning", pushedCard.RenderText())
 	}
@@ -4465,10 +4471,7 @@ func TestDeleteMode_FormSubmitShowsConfirmThenDeletes(t *testing.T) {
 	if got, want := strings.Join(agent.deleted, ","), "session-1,session-3"; got != want {
 		t.Fatalf("deleted = %q, want %q", got, want)
 	}
-	refreshed := p.getRefreshedCards()
-	if len(refreshed) == 0 {
-		t.Fatal("expected pushed result card via RefreshCard")
-	}
+	refreshed := waitRefreshedCards(t, p, 1)
 	pushedCard := refreshed[len(refreshed)-1]
 	if !strings.Contains(pushedCard.RenderText(), "Session deleted: One") {
 		t.Fatalf("result text = %q, want delete result", pushedCard.RenderText())
@@ -13948,6 +13951,9 @@ func TestExecuteCronJob_ResolvesCronReplyTarget(t *testing.T) {
 	e := NewEngine("test", agent, []Platform{platform}, "", LangEnglish)
 	defer e.cancel()
 	e.cronScheduler = scheduler
+	chat := e.sessions.GetOrCreateActive("discord:channel-1:user-1")
+	chat.SetAgentSessionID("existing-chat-session", "stub")
+	chat.AddHistory("user", "existing conversation")
 
 	job := &CronJob{
 		ID:          "job-1",
@@ -13980,11 +13986,11 @@ func TestExecuteCronJob_ResolvesCronReplyTarget(t *testing.T) {
 		t.Fatalf("sent[1] = %q, want final result", sent[1])
 	}
 
-	if got := len(e.sessions.ListSessions("discord:thread-fresh")); got != 0 {
-		t.Fatalf("fresh session count = %d, want 0 for reuse mode", got)
+	if history := chat.GetHistory(0); len(history) != 1 || history[0].Role != "user" || history[0].Content != "existing conversation" {
+		t.Fatalf("chat history = %#v, want unchanged conversation after scheduled run", history)
 	}
-	if got := len(e.sessions.ListSessions("discord:channel-1:user-1")); got != 1 {
-		t.Fatalf("base session count = %d, want 1", got)
+	if active := e.sessions.GetOrCreateActive(job.SessionKey); active != chat || active.GetAgentSessionID() != "existing-chat-session" {
+		t.Fatal("scheduled run changed the active chat session")
 	}
 	if job.SessionKey != "discord:channel-1:user-1" {
 		t.Fatalf("job.SessionKey = %q, want unchanged base session key", job.SessionKey)
@@ -13996,6 +14002,30 @@ func TestExecuteCronJob_ResolvesCronReplyTarget(t *testing.T) {
 
 	if len(agentSession.sentPrompts) != 1 || !strings.Contains(agentSession.sentPrompts[0], "summarize activity") {
 		t.Fatalf("agent prompts = %#v, want prompt containing summarize activity", agentSession.sentPrompts)
+	}
+}
+
+func TestExecuteCronJob_ExplicitReuseKeepsChatSession(t *testing.T) {
+	store, err := NewCronStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	platform := &stubCronReplyTargetPlatform{stubPlatformEngine: stubPlatformEngine{n: "discord"}}
+	agentSession := newResultAgentSession("reused context")
+	e := NewEngine("test", &resultAgent{session: agentSession}, []Platform{platform}, "", LangEnglish)
+	defer e.cancel()
+	e.cronScheduler = NewCronScheduler(store)
+	chat := e.sessions.GetOrCreateActive("discord:channel-1:user-1")
+	chat.AddHistory("user", "existing conversation")
+	job := &CronJob{ID: "job-reuse", SessionKey: "discord:channel-1:user-1", Prompt: "continue", SessionMode: "reuse"}
+	if err := e.ExecuteCronJob(job); err != nil {
+		t.Fatalf("ExecuteCronJob: %v", err)
+	}
+	if history := chat.GetHistory(0); len(history) != 3 {
+		t.Fatalf("chat history = %d, want original user, cron user, cron answer", len(history))
+	}
+	if got := len(e.sessions.ListSessions("discord:thread-fresh")); got != 0 {
+		t.Fatalf("explicit reuse created a separate session: %d", got)
 	}
 }
 

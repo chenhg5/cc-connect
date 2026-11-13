@@ -102,12 +102,15 @@ the full themed summary; per-beta details remain in the beta sections below.
   because a later queued message has a higher `create_time` (#1286)
 - **core**: make `/history` entry truncation configurable via
   `[display].history_max_len`, defaulting to 1000; `0` disables truncation (#1291)
+- **cron/timer**: prompt jobs default to a fresh agent session per run, avoiding busy
+  chat sessions; use `session_mode = "reuse"` to keep shared-session behavior
 - **tts/minimax**: drop `status=2` trailer chunk to stop audio playing twice (#1364)
 - **tests**: add provider-resume regression tests for codex / opencode / kimi (#1366)
 
 ### ⚠️ Behavior Changes (carried forward from the beta cycle)
 All behavior changes from beta.1 → beta.5 remain in effect for v1.3.3. **Most likely
 to affect existing configs:**
+- Cron and timer prompts without an explicit `session_mode` now run in a fresh session (`new_per_run`) rather than sharing the active chat. They no longer inherit that chat's context or append their results to its history. Set `[cron] session_mode = "reuse"` globally, or `session_mode = "reuse"` per job, to retain the previous behavior.
 - `progress_style` default for Telegram & Discord is now `compact` (was `legacy`). Set
   `progress_style = "legacy"` to revert. (#1354)
 - QQ Bot default `intents` now include `INTERACTION_CREATE` (bit 26). Custom `intents`
