@@ -763,8 +763,8 @@ var messages = map[MsgKey]map[Language]string{
 	},
 	MsgSteerAck: {
 		LangEnglish:            "Received — sent into the running task, please wait…",
-		LangChinese:            "收到，已插话到当前任务，处理中……",
-		LangTraditionalChinese: "收到，已插話到當前任務，處理中……",
+		LangChinese:            "收到，已插话到当前任务，处理中...",
+		LangTraditionalChinese: "收到，已插話到當前任務，處理中...",
 		LangJapanese:           "了解しました。実行中のタスクに送信しました。少々お待ちください…",
 		LangSpanish:            "Recibido — enviado a la tarea en curso, un momento…",
 	},
@@ -791,8 +791,8 @@ var messages = map[MsgKey]map[Language]string{
 	},
 	MsgMessageQueued: {
 		LangEnglish:            "📬 Message received — will process after the current task finishes.",
-		LangChinese:            "收到，已排队，将在当前任务完成后处理……",
-		LangTraditionalChinese: "收到，已排隊，將在目前任務完成後處理……",
+		LangChinese:            "收到，已排队，将在当前任务完成后处理...",
+		LangTraditionalChinese: "收到，已排隊，將在目前任務完成後處理...",
 		LangJapanese:           "📬 メッセージを受信しました。現在のタスク完了後に処理します。",
 		LangSpanish:            "📬 Mensaje recibido — se procesará después de que termine la tarea actual.",
 	},

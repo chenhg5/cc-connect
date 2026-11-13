@@ -221,7 +221,7 @@ func newPlatform(name, domain string, opts map[string]any) (core.Platform, error
 	autoThread, _ := opts["auto_thread"].(bool)
 	threadAckMessage, _ := opts["thread_ack_message"].(string)
 	if autoThread && threadAckMessage == "" {
-		threadAckMessage = "收到，处理中……"
+		threadAckMessage = "收到，处理中..."
 	}
 	resolveMentionsOpt, _ := opts["resolve_mentions"].(bool)
 	noReplyToTrigger := false
