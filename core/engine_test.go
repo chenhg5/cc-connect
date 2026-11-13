@@ -67,6 +67,18 @@ type stubPlatformEngine struct {
 	mu   sync.Mutex
 }
 
+type sendMarkerPlatform struct {
+	stubPlatformEngine
+	marker string
+}
+
+func (p *sendMarkerPlatform) Send(ctx context.Context, replyCtx any, content string) error {
+	if err := os.WriteFile(p.marker, []byte("sent"), 0o600); err != nil {
+		return err
+	}
+	return p.stubPlatformEngine.Send(ctx, replyCtx, content)
+}
+
 func (p *stubPlatformEngine) Name() string               { return p.n }
 func (p *stubPlatformEngine) Start(MessageHandler) error { return nil }
 func (p *stubPlatformEngine) Reply(_ context.Context, _ any, content string) error {
@@ -1036,6 +1048,68 @@ func TestProcessInteractiveEvents_SuppressesDuplicateSideChannelText(t *testing.
 
 	if got := p.getSent(); len(got) != 1 || got[0] != sideText {
 		t.Fatalf("sent text = %#v, want one side-channel message", got)
+	}
+}
+
+func TestProcessInteractiveEvents_MessageSentHookRunsAfterPlatformSend(t *testing.T) {
+	dir := t.TempDir()
+	sentMarker := filepath.Join(dir, "sent")
+	hookMarker := filepath.Join(dir, "hook")
+	p := &sendMarkerPlatform{
+		stubPlatformEngine: stubPlatformEngine{n: "test"},
+		marker:             sentMarker,
+	}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	e.SetHooks(NewHookManager("test", []HookConfig{{
+		Event:   "message.sent",
+		Type:    "command",
+		Command: "test -f " + sentMarker + " && touch " + hookMarker,
+		Async:   boolPtr(false),
+	}}, "sh", "-c", ""))
+	sessionKey := "test:user1"
+	session := e.sessions.GetOrCreateActive(sessionKey)
+	agentSession := newControllableSession("s1")
+	state := &interactiveState{agentSession: agentSession, platform: p, replyCtx: "ctx-1"}
+	e.interactiveStates[sessionKey] = state
+
+	agentSession.events <- Event{Type: EventResult, Content: "answer", Done: true}
+	e.processInteractiveEvents(state, session, e.sessions, sessionKey, "m1", time.Now(), nil, nil, nil, 0)
+
+	if _, err := os.Stat(hookMarker); err != nil {
+		t.Fatalf("message.sent hook did not observe completed platform send: %v", err)
+	}
+}
+
+type failingSendPlatform struct {
+	stubPlatformEngine
+}
+
+func (p *failingSendPlatform) Send(context.Context, any, string) error {
+	return errors.New("send failed")
+}
+
+func TestProcessInteractiveEvents_MessageSentHookSkippedOnSendFailure(t *testing.T) {
+	dir := t.TempDir()
+	hookMarker := filepath.Join(dir, "hook")
+	p := &failingSendPlatform{stubPlatformEngine: stubPlatformEngine{n: "test"}}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	e.SetHooks(NewHookManager("test", []HookConfig{{
+		Event:   "message.sent",
+		Type:    "command",
+		Command: "touch " + hookMarker,
+		Async:   boolPtr(false),
+	}}, "sh", "-c", ""))
+	sessionKey := "test:user1"
+	session := e.sessions.GetOrCreateActive(sessionKey)
+	agentSession := newControllableSession("s1")
+	state := &interactiveState{agentSession: agentSession, platform: p, replyCtx: "ctx-1"}
+	e.interactiveStates[sessionKey] = state
+
+	agentSession.events <- Event{Type: EventResult, Content: "answer", Done: true}
+	e.processInteractiveEvents(state, session, e.sessions, sessionKey, "m1", time.Now(), nil, nil, nil, 0)
+
+	if _, err := os.Stat(hookMarker); err == nil {
+		t.Fatal("message.sent hook fired even though platform send failed")
 	}
 }
 

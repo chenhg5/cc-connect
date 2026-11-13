@@ -6362,15 +6362,6 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				}
 			}
 
-			if !isSilent {
-				e.hooks.Emit(HookEvent{
-					Event:      HookEventMessageSent,
-					SessionKey: sessionKey,
-					Platform:   p.Name(),
-					Content:    baseResponse,
-				})
-			}
-
 			// statusFooter holds the structured CCD-style footer separately so
 			// platforms implementing StatusFooterSender / StatusFooterUpdater
 			// can render it with smaller/dim styling. Other paths inline-append
@@ -6584,6 +6575,15 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 
 			if elapsed := time.Since(replyStart); elapsed >= slowPlatformSend {
 				slog.Warn("slow final reply send", "platform", p.Name(), "elapsed", elapsed, "response_len", len(fullResponse))
+			}
+
+			if !isSilent {
+				e.hooks.Emit(HookEvent{
+					Event:      HookEventMessageSent,
+					SessionKey: sessionKey,
+					Platform:   p.Name(),
+					Content:    baseResponse,
+				})
 			}
 
 			// TTS: async voice reply if enabled (skipped for silent replies)
@@ -6879,13 +6879,6 @@ channelClosed:
 			fullResponse = stripped
 		}
 
-		e.hooks.Emit(HookEvent{
-			Event:      HookEventMessageSent,
-			SessionKey: sessionKey,
-			Platform:   p.Name(),
-			Content:    fullResponse,
-		})
-
 		if toolCount > 0 && segmentStart > 0 {
 			sp.discard()
 			if segmentStart < len(textParts) {
@@ -6907,6 +6900,12 @@ channelClosed:
 				}
 			}
 		}
+		e.hooks.Emit(HookEvent{
+			Event:      HookEventMessageSent,
+			SessionKey: sessionKey,
+			Platform:   p.Name(),
+			Content:    fullResponse,
+		})
 	}
 }
 
