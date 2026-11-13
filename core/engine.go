@@ -2258,6 +2258,18 @@ func (e *Engine) handleMessage(p Platform, msg *Message) {
 		if e.waitForSessionLock(session, 3*time.Second) {
 			goto sessionLocked
 		}
+		// Last resort: the previous turn is wedged (its goroutine may be stuck
+		// in a network call and will never release the lock). Reset and take
+		// the lock ourselves rather than refusing the message.
+		slog.Warn("session still locked after stop attempts; force resetting", "session", msg.SessionKey)
+		e.stopInteractiveSessionSilently(interactiveKey)
+		if e.waitForSessionLock(session, 2*time.Second) {
+			goto sessionLocked
+		}
+		session.ForceUnlock()
+		if session.TryLock() {
+			goto sessionLocked
+		}
 		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgPreviousProcessing))
 		return
 	}

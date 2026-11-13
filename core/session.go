@@ -55,6 +55,19 @@ func (s *Session) UnlockWithoutUpdate() {
 	s.unlock(false)
 }
 
+// ForceUnlock releases the lock regardless of who holds it. Only for recovery
+// when a previous turn is wedged and will never release it itself.
+func (s *Session) ForceUnlock() {
+	s.mu.Lock()
+	was := s.busy
+	s.busy = false
+	s.UpdatedAt = time.Now()
+	s.mu.Unlock()
+	if was {
+		slog.Warn("session force-unlocked after wedged turn", "session", s.ID)
+	}
+}
+
 func (s *Session) unlock(update bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
