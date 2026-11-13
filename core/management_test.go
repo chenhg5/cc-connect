@@ -73,6 +73,9 @@ func testManagementServer(t *testing.T, token string) (*ManagementServer, *httpt
 	return mgmt, ts, e
 }
 
+// Socket-level coverage for legacy wildcard and explicit bind lives in
+// listen_test.go (TestManagementServer_ExplicitLoopbackBind and friends).
+
 type mgmtResponse struct {
 	OK    bool            `json:"ok"`
 	Data  json.RawMessage `json:"data,omitempty"`

@@ -19,7 +19,15 @@ Beta since v1.5.0 stable — 16 merged PRs focused on Feishu/Weixin reliability,
 
 ## Unreleased
 
+### Changed
+
+- **Management API / Web UI and Bridge**: add opt-in listener binding via `bind`. Unset or empty `bind` preserves the legacy wildcard listener and authentication behavior; an explicit non-empty bind enables host validation and requires a non-whitespace token for non-loopback addresses. Web setup sets `127.0.0.1` only for newly enabled listeners whose bind is unset, preserves configured non-empty binds, and leaves already enabled listener binds unchanged. Missing tokens may still be populated as before. Inbound webhook listeners are outside this change.
+- See `docs/management-api.md#22-listener-binding-migration-and-rollback` and `docs/bridge-protocol.md#binding-rules-migration-and-rollback` for opt-in configuration, IPv6, restart and rollback guidance. Removing `bind` restores legacy wildcard exposure, not loopback protection.
+
 ### Fixed
+
+- **core**: preserve the public `ManagementServer.Start()` and `BridgeServer.Start()` signatures; add `StartChecked() error` for synchronous listener validation and binding. The CLI uses it to report startup errors and exit non-zero.
+- **core**: accept bare and bracketed IPv6 bind addresses, including zone identifiers (`fe80::1%eth0` / `[fe80::1%eth0]`), while rejecting host:port, URL and malformed bind values.
 - **Pi**: Merge custom providers with the built-in model catalog, resolve ambiguous aliases using the default provider, and filter duplicate or empty model entries. Reasoning levels follow the selected model, and switching models clears unsupported thinking overrides. Context windows now use catalog values for catalog-only models, with custom definitions taking precedence (#1872).
 
 ### Added

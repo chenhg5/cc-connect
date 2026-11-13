@@ -983,7 +983,7 @@ type = "claudecode"
 /web setup
 ```
 
-该命令会自动在 `config.toml` 中启用 **Management API** 和 **Bridge**，生成 token，并返回访问地址。首次启用后需要执行 `/restart` 使配置生效。
+该命令会自动在 `config.toml` 中启用 **Management API** 和 **Bridge**，生成 token，并返回访问地址。仅为本次新启用且未设置 bind 的监听器显式设置 `bind = "127.0.0.1"`；保留已配置的非空 bind，已启用监听器的 bind 也保持不变。缺失的 token 仍可能按原有行为自动补齐。首次启用后需要执行 `/restart` 使配置生效。
 
 启用后，打开返回的地址（默认 `http://localhost:9820`），用显示的 token 登录即可。
 
@@ -1000,12 +1000,16 @@ type = "claudecode"
 ```toml
 [management]
 enabled = true
+bind = "127.0.0.1"              # 显式仅允许本机访问；设为 0.0.0.0 才允许远程访问
 port = 9820                     # 管理后台监听端口
 token = "your-secret-token"     # 登录 token；/web setup 会自动生成
 cors_origins = ["*"]            # 允许的 CORS 来源；留空则不设置 CORS 头
 ```
 
 然后重启 cc-connect。
+
+> **兼容与显式启用：** `bind` 未设置或为空时保留旧版通配监听，管理 token 仍可选。显式非空 `bind` 才启用绑定检查；非回环绑定必须配置非纯空白 token。删除 `bind` 并重启会恢复通配监听，可能扩大网络暴露，请保留 token 和防火墙保护。`bind` 与 `port` 修改后需重启，详见
+> [management-api.zh-CN.md §2.2](management-api.zh-CN.md#22-监听绑定迁移与回滚)。
 
 ### 构建选项
 
@@ -1023,7 +1027,7 @@ go build -tags 'no_web' ./cmd/cc-connect
 
 API 与 Web UI 共用同一端口。基础 URL：`http://<host>:<port>/api/v1`
 
-所有 API 请求需要 `Authorization: Bearer <token>` 请求头。
+配置 token 后，API 请求可使用 `Authorization: Bearer <token>` 请求头认证。
 
 主要接口：
 
@@ -1059,6 +1063,7 @@ Bridge 提供 WebSocket + REST 服务，让外部适配器（自定义 UI、机�
 ```toml
 [bridge]
 enabled = true
+bind = "127.0.0.1"              # 显式仅允许本机访问；远程适配器接入时设为 0.0.0.0
 port = 9810                     # Bridge 监听端口（与管理后台分开）
 token = "your-bridge-secret"    # WebSocket 和 REST 的认证 token
 path = "/bridge/ws"             # WebSocket 端点路径
@@ -1067,9 +1072,12 @@ cors_origins = ["*"]            # 允许的 CORS 来源；留空则不设置 COR
 
 然后重启 cc-connect。
 
+> **兼容与显式启用：** `bind` 未设置或为空时保留旧版通配监听；除 `insecure = true` 外仍需 token。显式非回环 `bind` 必须配置非纯空白 token，即使启用 insecure 也不例外。删除 `bind` 并重启会恢复旧版行为，可能扩大网络暴露，请保留 token 和防火墙保护。`bind` 与 `port` 修改后需重启，详见
+> [bridge-protocol.zh-CN.md](bridge-protocol.zh-CN.md#绑定规则迁移与回滚)。
+
 ### 认证方式
 
-所有 Bridge 连接需要 token 认证，支持三种方式：
+除 `insecure = true` 且未配置 token 外，Bridge 连接需要 token 认证，支持三种方式：
 
 - URL 参数：`?token=<bridge-token>`
 - 请求头：`Authorization: Bearer <bridge-token>`

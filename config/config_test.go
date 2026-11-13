@@ -2047,6 +2047,22 @@ func readTestConfig(t *testing.T) Config {
 	return cfg
 }
 
+func TestEnableWebAdmin_DefaultsServersToLoopback(t *testing.T) {
+	writeTestConfig(t, "")
+
+	if _, err := EnableWebAdmin("management-token", "bridge-token"); err != nil {
+		t.Fatalf("EnableWebAdmin returned error: %v", err)
+	}
+
+	cfg := readTestConfig(t)
+	if got, want := cfg.Management.Bind, "127.0.0.1"; got != want {
+		t.Fatalf("management bind = %q, want %q", got, want)
+	}
+	if got, want := cfg.Bridge.Bind, "127.0.0.1"; got != want {
+		t.Fatalf("bridge bind = %q, want %q", got, want)
+	}
+}
+
 func TestLoadRelayTimeoutConfig(t *testing.T) {
 	configPath := writeConfigFixture(t, relayConfigFixture)
 
@@ -3603,5 +3619,29 @@ func TestRemoveGlobalProvider_CleansUpProviderRefs(t *testing.T) {
 	refs2 := cfg.Projects[1].Agent.ProviderRefs
 	if len(refs2) != 0 {
 		t.Errorf("proj2 provider_refs: want [], got %v", refs2)
+	}
+}
+
+func TestEnableWebAdmin_PreservesExistingListenerBinds(t *testing.T) {
+	cases := []struct {
+		name, content, management, bridge string
+	}{
+		{"enabled legacy management", "[management]\nenabled=true\n", "", "127.0.0.1"},
+		{"enabled legacy bridge", "[bridge]\nenabled=true\ntoken='existing'\n", "127.0.0.1", ""},
+		{"both enabled legacy", "[management]\nenabled=true\n[bridge]\nenabled=true\n", "", ""},
+		{"configured disabled listeners", "[management]\nenabled=false\nbind='0.0.0.0'\n[bridge]\nenabled=false\nbind='[::1]'\n", "0.0.0.0", "[::1]"},
+		{"configured enabled listeners", "[management]\nenabled=true\nbind='10.0.0.1'\n[bridge]\nenabled=true\nbind='[fe80::1%eth0]'\n", "10.0.0.1", "[fe80::1%eth0]"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			writeTestConfig(t, tc.content)
+			if _, err := EnableWebAdmin("management-token", "bridge-token"); err != nil {
+				t.Fatal(err)
+			}
+			cfg := readTestConfig(t)
+			if cfg.Management.Bind != tc.management || cfg.Bridge.Bind != tc.bridge {
+				t.Fatalf("binds = (%q, %q), want (%q, %q)", cfg.Management.Bind, cfg.Bridge.Bind, tc.management, tc.bridge)
+			}
+		})
 	}
 }

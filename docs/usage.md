@@ -1071,7 +1071,7 @@ The easiest way to enable web admin:
 /web setup
 ```
 
-This automatically enables both the **Management API** and the **Bridge** in `config.toml`, generates tokens, and prints the access URL. You may need to run `/restart` for changes to take effect.
+This automatically enables both the **Management API** and the **Bridge** in `config.toml`, generates tokens, and prints the access URL. It explicitly sets `bind = "127.0.0.1"` only for newly enabled listeners whose bind is unset, preserves configured non-empty binds, and leaves already enabled listener binds unchanged. Missing tokens may still be populated as before. You may need to run `/restart` for changes to take effect.
 
 After setup, open the URL shown (default `http://localhost:9820`) and log in with the token.
 
@@ -1088,12 +1088,20 @@ Add the following to `config.toml`:
 ```toml
 [management]
 enabled = true
+bind = "127.0.0.1"              # Explicit loopback-only binding; set 0.0.0.0 to allow remote access
 port = 9820                     # Management UI & API listen port
 token = "your-secret-token"     # Login token; /web setup generates one automatically
 cors_origins = ["*"]            # Allowed CORS origins; empty = no CORS headers
 ```
 
 Then restart cc-connect.
+
+> **Compatibility and opt-in:** unset or empty `bind` preserves legacy wildcard
+> listening and optional management authentication. An explicit non-empty bind
+> enables checks; a non-loopback bind requires a non-whitespace token. Removing
+> `bind` and restarting restores wildcard exposure, so keep the token and firewall
+> protection. Changes to `bind` or `port` require a restart. See
+> [management-api.md §2.2](management-api.md#22-listener-binding-migration-and-rollback).
 
 ### Build Options
 
@@ -1111,7 +1119,7 @@ When built with `no_web`, the `/web` command will report that web admin is not a
 
 The Management API is served on the same port as the UI. Base URL: `http://<host>:<port>/api/v1`
 
-All API requests require the `Authorization: Bearer <token>` header.
+When a token is configured, API requests can authenticate with the `Authorization: Bearer <token>` header.
 
 Key endpoints:
 
@@ -1147,6 +1155,7 @@ Add the following to `config.toml`:
 ```toml
 [bridge]
 enabled = true
+bind = "127.0.0.1"              # Explicit loopback-only binding; set 0.0.0.0 to allow remote adapters
 port = 9810                     # Bridge listen port (separate from management)
 token = "your-bridge-secret"    # Auth token for WebSocket and REST
 path = "/bridge/ws"             # WebSocket endpoint path
@@ -1155,9 +1164,16 @@ cors_origins = ["*"]            # Allowed CORS origins; empty = no CORS
 
 Then restart cc-connect.
 
+> **Compatibility and opt-in:** unset or empty `bind` preserves legacy wildcard
+> listening; a token is still required unless `insecure = true`. An explicit
+> non-loopback bind requires a non-whitespace token even in insecure mode. Removing
+> `bind` and restarting restores legacy behavior and may broaden network access;
+> keep the token and firewall protection. Changes to `bind` or `port` require a restart. See
+> [bridge-protocol.md](bridge-protocol.md#binding-rules-migration-and-rollback).
+
 ### Authentication
 
-All Bridge connections require a token. Supported methods:
+Bridge connections require a token unless `insecure = true` and no token is configured. Supported methods:
 
 - Query parameter: `?token=<bridge-token>`
 - Header: `Authorization: Bearer <bridge-token>`

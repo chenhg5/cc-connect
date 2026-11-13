@@ -385,6 +385,8 @@ level = "info" # debug, info, warn, error
 # =============================================================================
 # Webhook / 外部 Webhook 端点
 # =============================================================================
+# Management/Bridge bind rules do not apply to this inbound webhook listener.
+# Management/Bridge 的 bind 规则不适用于此入站 webhook 监听器。
 # Exposes an HTTP endpoint for external systems (git hooks, CI/CD, file watchers)
 # to trigger agent prompts or shell commands.
 # 暴露一个 HTTP 端点，供外部系统（git hook、CI/CD、文件监听）触发 agent 或 shell 命令。
@@ -428,8 +430,11 @@ level = "info" # debug, info, warn, error
 #
 # [bridge]
 # enabled = true
+# Unset/empty bind keeps legacy wildcard exposure; set explicitly to opt in. / 未设置或为空时保留旧版通配监听；显式设置才启用绑定约束。
+# bind = "127.0.0.1"  # Host only; IPv6: "::1", "[::1]", "[fe80::1%eth0]". / 仅主机地址，不含端口。
+# Explicit non-loopback bind requires a non-whitespace token. Restart after changes. / 显式非回环绑定必须配置非纯空白 token；修改后重启。
 # port = 9810                         # WebSocket listen port (default: 9810) / 监听端口
-# token = "your-bridge-secret"        # Auth token (required) / 认证密钥（必填）
+# token = "your-bridge-secret"  # Required unless insecure=true; explicit non-loopback always requires it. / 除 insecure=true 外必填；显式非回环绑定始终必填。
 # path = "/bridge/ws"                 # URL path (default: "/bridge/ws") / URL 路径
 
 # =============================================================================
@@ -443,8 +448,11 @@ level = "info" # debug, info, warn, error
 #
 # [management]
 # enabled = true
+# Unset/empty bind keeps legacy wildcard exposure; set explicitly to opt in. / 未设置或为空时保留旧版通配监听；显式设置才启用绑定约束。
+# bind = "127.0.0.1"  # Host only; IPv6: "::1", "[::1]", "[fe80::1%eth0]". / 仅主机地址，不含端口。
+# Explicit non-loopback bind requires a non-whitespace token. Restart after changes. / 显式非回环绑定必须配置非纯空白 token；修改后重启。
 # port = 9820                           # HTTP listen port (default: 9820) / 监听端口
-# token = "your-mgmt-secret"            # Auth token (required) / 认证密钥（必填）
+# token = "your-mgmt-secret"  # Optional in legacy mode; strongly recommended. / 旧版模式下可选，强烈建议配置。
 # cors_origins = ["http://localhost:3000"]  # Allowed CORS origins / 允许的 CORS 来源
 
 # =============================================================================
