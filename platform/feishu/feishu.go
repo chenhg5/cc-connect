@@ -141,14 +141,8 @@ type Platform struct {
 	// messages that do not @ the bot. Threads it never joined still need a
 	// mention, so unrelated conversations are left alone.
 	threadReplyWithoutMention bool
-	threadBotMu                sync.Mutex
-	threadBotSeen              map[string]threadBotEntry
-	// chatUserSeen remembers (chat,user) pairs that already talked to the bot,
-	// so the next messages in that chat do not need a mention. Key insight:
-	// in topic groups the message often has no thread id, so thread membership
-	// alone cannot decide it.
-	chatUserMu   sync.Mutex
-	chatUserSeen map[string]time.Time
+	threadSeenMu               sync.Mutex
+	threadSeen             map[string]time.Time
 	// noReplyToTrigger: when true, send via Create instead of Im.Message.Reply (no quote to the user's message).
 	noReplyToTrigger bool
 	resolveMentions  bool
@@ -308,8 +302,7 @@ func newPlatform(name, domain string, opts map[string]any) (core.Platform, error
 		autoThread:                 autoThread,
 		threadAckMessage:           threadAckMessage,
 		threadReplyWithoutMention:  threadReplyWithoutMention,
-		threadBotSeen:              make(map[string]threadBotEntry),
-		chatUserSeen:               make(map[string]time.Time),
+		threadSeen:             make(map[string]time.Time),
 		resolveMentions:            resolveMentionsOpt,
 		noReplyToTrigger:           noReplyToTrigger,
 		client:                     lark.NewClient(appID, appSecret, clientOpts...),
@@ -1048,8 +1041,9 @@ func (p *Platform) onMessage(ctx context.Context, event *larkim.P2MessageReceive
 			// Feishu @all sends {"text":"@_all"} with 0 mentions.
 			case p.respondToAtEveryoneAndHere && msg.Content != nil && strings.Contains(*msg.Content, "@_all"):
 				slog.Debug(p.tag()+": responding to @all message", "chat_id", chatID)
-			case p.threadReplyWithoutMention && threadID != "" && p.botInThread(ctx, threadID):
-				slog.Debug(p.tag()+": thread message without mention accepted", "chat_id", chatID, "thread", threadID)
+			case p.threadReplyWithoutMention && p.threadAllowed(threadID):
+				slog.Debug(p.tag()+": thread message without mention accepted",
+					"chat_id", chatID, "thread", threadID, "user", userID)
 			default:
 				slog.Info(p.tag()+": ignoring group message without bot mention",
 					"chat_id", chatID, "user", userID, "thread", threadID,
@@ -1079,6 +1073,15 @@ func (p *Platform) onMessage(ctx context.Context, event *larkim.P2MessageReceive
 	if chatType != "group" && p.groupOnly {
 		slog.Debug(p.tag()+": p2p message skipped (group_only=true)", "chat_type", chatType)
 		return nil
+	}
+
+	// From now on this thread belongs to the bot: no mention needed inside it.
+	if chatType == "group" {
+		tid := stringValue(msg.ThreadId)
+		if tid == "" {
+			tid = stringValue(msg.RootId)
+		}
+		p.markThread(tid)
 	}
 
 
@@ -3263,100 +3266,38 @@ func (p *Platform) fetchBotOpenID() (string, error) {
 }
 
 
-const chatUserTTL = 24 * time.Hour
+const threadSeenTTL = 24 * time.Hour
 
-// markChatUser remembers that this user already reached the bot in this chat.
-func (p *Platform) markChatUser(chatID, userID string) {
-	if chatID == "" || userID == "" {
+// markThread remembers a thread the bot is taking part in. Inside it the
+// mention requirement no longer applies.
+func (p *Platform) markThread(threadID string) {
+	if threadID == "" {
 		return
 	}
-	p.chatUserMu.Lock()
-	if p.chatUserSeen == nil {
-		p.chatUserSeen = make(map[string]time.Time)
+	p.threadSeenMu.Lock()
+	if p.threadSeen == nil {
+		p.threadSeen = make(map[string]time.Time)
 	}
-	p.chatUserSeen[chatID+":"+userID] = time.Now()
-	if len(p.chatUserSeen) > 1000 {
-		for k, at := range p.chatUserSeen {
-			if time.Since(at) > chatUserTTL {
-				delete(p.chatUserSeen, k)
+	p.threadSeen[threadID] = time.Now()
+	if len(p.threadSeen) > 1000 {
+		for k, at := range p.threadSeen {
+			if time.Since(at) > threadSeenTTL {
+				delete(p.threadSeen, k)
 			}
 		}
 	}
-	p.chatUserMu.Unlock()
+	p.threadSeenMu.Unlock()
 }
 
-// recentChatUser reports whether this user talked to the bot recently in this
-// chat, i.e. the bot is already part of that conversation.
-func (p *Platform) recentChatUser(chatID, userID string) bool {
-	p.chatUserMu.Lock()
-	defer p.chatUserMu.Unlock()
-	at, ok := p.chatUserSeen[chatID+":"+userID]
-	return ok && time.Since(at) < chatUserTTL
-}
-
-type threadBotEntry struct {
-	in bool
-	at time.Time
-}
-
-// botInThread reports whether the bot has already posted in the given thread.
-// Results are cached: every un-mentioned group message would otherwise cost an
-// API round trip.
-func (p *Platform) botInThread(ctx context.Context, threadID string) bool {
-	if threadID == "" || p.client == nil {
+// threadAllowed reports whether the bot already takes part in this thread.
+func (p *Platform) threadAllowed(threadID string) bool {
+	if threadID == "" {
 		return false
 	}
-	p.threadBotMu.Lock()
-	if e, ok := p.threadBotSeen[threadID]; ok {
-		ttl := 10 * time.Minute
-		if !e.in {
-			ttl = 30 * time.Second
-		}
-		if time.Since(e.at) < ttl {
-			p.threadBotMu.Unlock()
-			return e.in
-		}
-	}
-	p.threadBotMu.Unlock()
-
-	req := larkim.NewListMessageReqBuilder().
-		ContainerIdType("thread").
-		ContainerId(threadID).
-		PageSize(50).
-		Build()
-	resp, err := p.client.Im.Message.List(ctx, req)
-	if err != nil || resp == nil || !resp.Success() || resp.Data == nil {
-		if err != nil {
-			slog.Debug(p.tag()+": list thread messages failed", "thread", threadID, "error", err)
-		}
-		return false
-	}
-	in := false
-	for _, item := range resp.Data.Items {
-		if item == nil || item.Sender == nil {
-			continue
-		}
-		if item.Sender.IdType != nil && *item.Sender.IdType == "app" {
-			in = true
-			break
-		}
-		if p.botOpenID != "" && item.Sender.Id != nil && *item.Sender.Id == p.botOpenID {
-			in = true
-			break
-		}
-	}
-	p.threadBotMu.Lock()
-	p.threadBotSeen[threadID] = threadBotEntry{in: in, at: time.Now()}
-	if len(p.threadBotSeen) > 500 {
-		for k := range p.threadBotSeen {
-			delete(p.threadBotSeen, k)
-			if len(p.threadBotSeen) <= 400 {
-				break
-			}
-		}
-	}
-	p.threadBotMu.Unlock()
-	return in
+	p.threadSeenMu.Lock()
+	defer p.threadSeenMu.Unlock()
+	at, ok := p.threadSeen[threadID]
+	return ok && time.Since(at) < threadSeenTTL
 }
 
 func isBotMentioned(mentions []*larkim.MentionEvent, botOpenID string) bool {
