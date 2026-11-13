@@ -132,3 +132,66 @@ func TestProviderPresetsIncludesOpper(t *testing.T) {
 		t.Fatal("opper should support opencode")
 	}
 }
+
+func TestProviderPresetsIncludesUberLLM(t *testing.T) {
+	body, err := os.ReadFile("../provider-presets.json")
+	if err != nil {
+		t.Fatalf("read provider-presets.json: %v", err)
+	}
+
+	var presets ProviderPresetsResponse
+	if err := json.Unmarshal(body, &presets); err != nil {
+		t.Fatalf("parse provider-presets.json: %v", err)
+	}
+
+	var uber *ProviderPreset
+	for i := range presets.Providers {
+		if presets.Providers[i].Name == "uberllm" {
+			uber = &presets.Providers[i]
+			break
+		}
+	}
+	if uber == nil {
+		t.Fatal("uberllm preset not found")
+	}
+	if uber.InviteURL != "" {
+		t.Fatalf("uberllm invite_url = %q, want empty", uber.InviteURL)
+	}
+
+	claude := uber.AgentConfig("claudecode")
+	if claude == nil {
+		t.Fatal("uberllm claudecode config missing")
+	}
+	// Claude Code appends /v1/messages itself, so the base URL has no /v1.
+	if claude.BaseURL != "https://api.uberllm.dev" {
+		t.Fatalf("claudecode base_url = %q", claude.BaseURL)
+	}
+	if claude.Model != "anthropic/claude-sonnet-4.6" {
+		t.Fatalf("claudecode model = %q", claude.Model)
+	}
+
+	codex := uber.AgentConfig("codex")
+	if codex == nil {
+		t.Fatal("uberllm codex config missing")
+	}
+	if codex.BaseURL != "https://api.uberllm.dev/v1" {
+		t.Fatalf("codex base_url = %q", codex.BaseURL)
+	}
+	if codex.Model != "openai/gpt-5.4" {
+		t.Fatalf("codex model = %q", codex.Model)
+	}
+	if codex.CodexConfig == nil || codex.CodexConfig.WireAPI != "responses" {
+		t.Fatalf("codex_config = %#v", codex.CodexConfig)
+	}
+
+	opencode := uber.AgentConfig("opencode")
+	if opencode == nil {
+		t.Fatal("uberllm opencode config missing")
+	}
+	if opencode.BaseURL != "https://api.uberllm.dev/v1" {
+		t.Fatalf("opencode base_url = %q", opencode.BaseURL)
+	}
+	if opencode.Model != "deepseek/deepseek-v4-flash" {
+		t.Fatalf("opencode model = %q", opencode.Model)
+	}
+}
