@@ -1,6 +1,7 @@
 package core
 
 import (
+	"context"
 	"fmt"
 	"log/slog"
 	"strings"
@@ -17,6 +18,10 @@ const (
 	taskCardMaxQueueItems     = 5
 	taskCardMaxStepLen        = 80
 	taskCardMaxQueueItemLen   = 40
+	// taskCardMaxFailures tolerates transient platform errors before giving up.
+	taskCardMaxFailures = 5
+	// taskCardRetryGap slows refreshes down while the platform is rejecting them.
+	taskCardRetryGap = 15 * time.Second
 )
 
 // taskCardStatus is the lifecycle state shown on the live task card.
@@ -57,6 +62,7 @@ type turnCard struct {
 	lastRender time.Time
 	finished   bool
 	disabled   bool
+	failCount  int
 	visible    bool // true once the card message exists
 
 	done chan struct{}
@@ -200,7 +206,13 @@ func (tc *turnCard) render(force bool) {
 		return
 	}
 	now := time.Now()
-	if !force && now.Sub(tc.lastRender) < taskCardMinRenderGap {
+	minGap := taskCardMinRenderGap
+	if tc.failCount > 0 {
+		// Back off after a failure (usually a platform rate limit while the
+		// answer text is streaming through its own message).
+		minGap = taskCardRetryGap
+	}
+	if !force && now.Sub(tc.lastRender) < minGap {
 		tc.mu.Unlock()
 		return
 	}
@@ -209,27 +221,41 @@ func (tc *turnCard) render(force bool) {
 	handle := tc.handle
 	tc.mu.Unlock()
 
+	// Bound every remote call: a hung request would otherwise hold renderMu
+	// forever and freeze the card for the rest of the turn.
+	ctx, cancel := context.WithTimeout(tc.e.ctx, 10*time.Second)
+	defer cancel()
+
+	var err error
 	if handle == nil {
-		h, err := tc.sender.SendTaskCard(tc.e.ctx, tc.replyCtx, card)
-		if err != nil {
-			slog.Debug("task card: initial send failed, disabling", "platform", tc.senderName(), "error", err)
+		var h any
+		h, err = tc.sender.SendTaskCard(ctx, tc.replyCtx, card)
+		if err == nil {
 			tc.mu.Lock()
-			tc.disabled = true
+			tc.handle = h
+			tc.visible = true
+			tc.failCount = 0
 			tc.mu.Unlock()
 			return
 		}
+	} else {
+		err = tc.sender.UpdateTaskCard(ctx, handle, card)
+	}
+	if err == nil {
 		tc.mu.Lock()
-		tc.handle = h
-		tc.visible = true
+		tc.failCount = 0
 		tc.mu.Unlock()
 		return
 	}
-	if err := tc.sender.UpdateTaskCard(tc.e.ctx, handle, card); err != nil {
-		slog.Debug("task card: update failed, disabling", "platform", tc.senderName(), "error", err)
-		tc.mu.Lock()
+
+	tc.mu.Lock()
+	tc.failCount++
+	fails := tc.failCount
+	if fails >= taskCardMaxFailures {
 		tc.disabled = true
-		tc.mu.Unlock()
 	}
+	tc.mu.Unlock()
+	slog.Warn("task card refresh failed", "platform", tc.senderName(), "consecutive", fails, "error", err)
 }
 
 func (tc *turnCard) senderName() string {
