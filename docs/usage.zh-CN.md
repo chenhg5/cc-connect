@@ -161,6 +161,8 @@ Cursor 项目可在 `[projects.agent.options]` 中设置可选的 `instructions_
 将 UTF-8 文件附到每轮请求之前，包括续接会话。每轮都会重新读取，修改后无需重启 Agent；
 文件不可读时该轮明确失败。未设置时保持原有请求行为。
 
+`/memory` 读写项目根目录的 `AGENTS.md`，Cursor CLI 每次会话都会加载这个文件。`/cron setup` 写入的也是它。如果设置了 `instructions_file`，应指向同一个 `AGENTS.md`；两者路径不同时，`/memory` 仍写入项目根目录的 `AGENTS.md`。Cursor 没有用户级记忆文件，因此不支持 `/memory global`。
+
 ### Gemini CLI 模式
 
 | 模式 | 配置值 | 行为 |
