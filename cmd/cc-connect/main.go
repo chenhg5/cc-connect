@@ -300,6 +300,11 @@ func main() {
 	core.CurrentCommit = commit
 	core.CurrentBuildTime = buildTime
 
+	if err := configureProcessDNS(os.Getenv("CC_CONNECT_DNS_SERVER")); err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		os.Exit(1)
+	}
+
 	configPath := resolveConfigPath(rootOpts.configPath)
 
 	// Handle --force: kill any existing instance before we try to acquire the lock

@@ -45,6 +45,7 @@ func TestCaptureDaemonEnv_IncludesDiscoveredVars(t *testing.T) {
 
 func TestCaptureDaemonEnv_SkipsDiscoverersWhenNoCapture(t *testing.T) {
 	t.Setenv("HTTPS_PROXY", "http://127.0.0.1:10818")
+	t.Setenv("CC_CONNECT_DNS_SERVER", "127.0.0.1:5353")
 	withDiscoverer(t, func() (map[string]string, error) {
 		return map[string]string{"CAPTURE_TEST_TOK2": "do-not-capture-me"}, nil
 	})
@@ -55,6 +56,9 @@ func TestCaptureDaemonEnv_SkipsDiscoverersWhenNoCapture(t *testing.T) {
 	}
 	if got["HTTPS_PROXY"] != "http://127.0.0.1:10818" {
 		t.Errorf("HTTPS_PROXY should still be captured: %q", got["HTTPS_PROXY"])
+	}
+	if got["CC_CONNECT_DNS_SERVER"] != "127.0.0.1:5353" {
+		t.Errorf("CC_CONNECT_DNS_SERVER should still be captured: %q", got["CC_CONNECT_DNS_SERVER"])
 	}
 }
 
