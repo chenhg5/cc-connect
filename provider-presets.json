@@ -70,19 +70,19 @@
       "agents": {
         "claudecode": {
           "base_url": "https://api.minimax.io/anthropic",
-          "model": "MiniMax-M3",
-          "models": ["MiniMax-M3", "MiniMax-M3-highspeed", "MiniMax-M2.7"]
+          "model": "MiniMax-M3.1-Flash",
+          "models": ["MiniMax-M3.1-Flash", "MiniMax-M3"]
         },
         "codex": {
           "base_url": "https://api.minimax.io/v1",
-          "model": "MiniMax-M3",
-          "models": ["MiniMax-M3", "MiniMax-M2.7"],
+          "model": "MiniMax-M3.1-Flash",
+          "models": ["MiniMax-M3.1-Flash", "MiniMax-M3"],
           "codex_config": { "wire_api": "responses" }
         },
         "opencode": {
           "base_url": "https://api.minimax.io/v1",
-          "model": "MiniMax-M3",
-          "models": ["MiniMax-M3", "MiniMax-M2.7"]
+          "model": "MiniMax-M3.1-Flash",
+          "models": ["MiniMax-M3.1-Flash", "MiniMax-M3"]
         }
       }
     },
@@ -98,19 +98,19 @@
       "agents": {
         "claudecode": {
           "base_url": "https://api.minimaxi.com/anthropic",
-          "model": "MiniMax-M3",
-          "models": ["MiniMax-M3", "MiniMax-M3-highspeed", "MiniMax-M2.7"]
+          "model": "MiniMax-M3.1-Flash",
+          "models": ["MiniMax-M3.1-Flash", "MiniMax-M3"]
         },
         "codex": {
           "base_url": "https://api.minimaxi.com/v1",
-          "model": "MiniMax-M3",
-          "models": ["MiniMax-M3", "MiniMax-M2.7"],
+          "model": "MiniMax-M3.1-Flash",
+          "models": ["MiniMax-M3.1-Flash", "MiniMax-M3"],
           "codex_config": { "wire_api": "responses" }
         },
         "opencode": {
           "base_url": "https://api.minimaxi.com/v1",
-          "model": "MiniMax-M3",
-          "models": ["MiniMax-M3", "MiniMax-M2.7"]
+          "model": "MiniMax-M3.1-Flash",
+          "models": ["MiniMax-M3.1-Flash", "MiniMax-M3"]
         }
       }
     },
@@ -720,6 +720,33 @@
           "base_url": "https://api.opper.ai/v3/compat",
           "model": "claude-sonnet-4-6",
           "models": ["claude-sonnet-4-6", "gpt-5.5"]
+        }
+      }
+    },
+    {
+      "name": "runcrate",
+      "display_name": "Runcrate",
+      "description": "Runcrate inference API for open models, with OpenAI-compatible and Anthropic Messages endpoints for coding agents.",
+      "description_zh": "Runcrate 开源模型推理 API，提供 OpenAI 兼容与 Anthropic Messages 接口，适用于编码智能体。",
+      "features": ["OpenAI Compatible", "Anthropic Compatible", "1M Context", "Open Models"],
+      "tier": 3,
+      "website": "https://www.runcrate.ai",
+      "agents": {
+        "claudecode": {
+          "base_url": "https://api.runcrate.ai",
+          "model": "deepseek-ai/DeepSeek-V4.1-Flash",
+          "models": ["deepseek-ai/DeepSeek-V4.1-Flash", "zai-org/GLM-5.3", "Qwen/Qwen3.8-Flash"]
+        },
+        "codex": {
+          "base_url": "https://api.runcrate.ai/v1",
+          "model": "deepseek-ai/DeepSeek-V4.1-Flash",
+          "models": ["deepseek-ai/DeepSeek-V4.1-Flash", "zai-org/GLM-5.3", "Qwen/Qwen3.8-Flash"],
+          "codex_config": { "wire_api": "responses" }
+        },
+        "opencode": {
+          "base_url": "https://api.runcrate.ai/v1",
+          "model": "deepseek-ai/DeepSeek-V4.1-Flash",
+          "models": ["deepseek-ai/DeepSeek-V4.1-Flash", "zai-org/GLM-5.3", "Qwen/Qwen3.8-Flash"]
         }
       }
     }

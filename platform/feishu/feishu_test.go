@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/BurntSushi/toml"
 	"github.com/chenhg5/cc-connect/core"
 	lark "github.com/larksuite/oapi-sdk-go/v3"
 	larkim "github.com/larksuite/oapi-sdk-go/v3/service/im/v1"
@@ -1759,6 +1760,176 @@ func TestNewPlatform_RequireMentionTrueDoesNotForceGroupReplyAll(t *testing.T) {
 	}
 }
 
+func TestOnMessageSkipWhenMentionOthers(t *testing.T) {
+	botMention := &larkim.MentionEvent{
+		Key: strPtr("@_user_1"), Id: &larkim.UserId{OpenId: strPtr("ou_bot")}, Name: strPtr("Bot"),
+	}
+	otherMention := &larkim.MentionEvent{
+		Key: strPtr("@_user_2"), Id: &larkim.UserId{OpenId: strPtr("ou_other")}, Name: strPtr("Other"),
+	}
+	scenarios := []struct {
+		name           string
+		chatType       string
+		text           string
+		mentions       []*larkim.MentionEvent
+		wantContent    string
+		unknownContent string
+	}{
+		{"other only", "group", "@_user_2 hello", []*larkim.MentionEvent{otherMention}, "@Other hello", "@Other hello"},
+		{"self only", "group", "@_user_1 hello", []*larkim.MentionEvent{botMention}, "hello", "@Bot hello"},
+		{"both", "group", "@_user_1 @_user_2 hello", []*larkim.MentionEvent{botMention, otherMention}, "@Other hello", "@Bot @Other hello"},
+		{"no mention", "group", "hello", nil, "hello", "hello"},
+		// Feishu represents @all in content, with an empty Mentions list.
+		{"all", "group", "@_all hello", nil, "@_all hello", "@_all hello"},
+		{"private other", "p2p", "@_user_2 hello", []*larkim.MentionEvent{otherMention}, "@Other hello", "@Other hello"},
+		{"private no mention", "p2p", "hello", nil, "hello", "hello"},
+	}
+	configs := []struct {
+		name       string
+		all        bool
+		skip       bool
+		alias      bool
+		unknownBot bool
+		want       [7]bool
+	}{
+		{"reply all skip on", true, true, false, false, [7]bool{false, true, true, true, true, true, true}},
+		{"reply all skip off", true, false, false, false, [7]bool{true, true, true, true, true, true, true}},
+		{"mention required skip on", false, true, false, false, [7]bool{false, true, true, false, false, true, true}},
+		{"mention required skip off", false, false, false, false, [7]bool{false, true, true, false, false, true, true}},
+		{"require mention false skip on", false, true, true, false, [7]bool{false, true, true, true, true, true, true}},
+		{"require mention false skip off", false, false, true, false, [7]bool{true, true, true, true, true, true, true}},
+		{"unknown identity skip on", true, true, false, true, [7]bool{false, false, false, true, true, true, true}},
+		{"unknown identity skip off", true, false, false, true, [7]bool{true, true, true, true, true, true, true}},
+	}
+
+	for _, cfg := range configs {
+		t.Run(cfg.name, func(t *testing.T) {
+			for i, tc := range scenarios {
+				t.Run(tc.name, func(t *testing.T) {
+					srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+						t.Errorf("unexpected API request: %s %s", r.Method, r.URL.Path)
+						http.Error(w, "unexpected API request", http.StatusInternalServerError)
+					}))
+					defer srv.Close()
+					opts := map[string]any{
+						"app_id":                   "cli_skip_mentions",
+						"app_secret":               "test-secret",
+						"group_reply_all":          cfg.all,
+						"skip_when_mention_others": cfg.skip,
+					}
+					if cfg.alias {
+						opts["require_mention"] = false
+					}
+					platform, err := newPlatform("feishu", srv.URL, opts)
+					if err != nil {
+						t.Fatalf("newPlatform() error = %v", err)
+					}
+					p := extractBasePlatform(platform)
+					if p == nil {
+						t.Fatal("expected a Feishu platform")
+					}
+					p.client = lark.NewClient("cli_skip_mentions", "test-secret",
+						lark.WithOpenBaseUrl(srv.URL), lark.WithHttpClient(srv.Client()))
+					if !cfg.unknownBot {
+						p.botOpenID = "ou_bot"
+					}
+					p.userNameCache.Store("ou_user", "User")
+					p.chatNameCache.Store("oc_chat", "Chat")
+					received := make(chan *core.Message, 1)
+					p.handler = func(_ core.Platform, msg *core.Message) { received <- msg }
+					content, err := json.Marshal(map[string]string{"text": tc.text})
+					if err != nil {
+						t.Fatalf("marshal content: %v", err)
+					}
+					event := &larkim.P2MessageReceiveV1{
+						Event: &larkim.P2MessageReceiveV1Data{
+							Sender: &larkim.EventSender{
+								SenderId: &larkim.UserId{OpenId: strPtr("ou_user")}, SenderType: strPtr("user"),
+							},
+							Message: &larkim.EventMessage{
+								MessageId: strPtr("om_skip_mentions"), ChatId: strPtr("oc_chat"),
+								ChatType: strPtr(tc.chatType), MessageType: strPtr("text"),
+								Content: strPtr(string(content)), Mentions: tc.mentions,
+								CreateTime: strPtr(strconv.FormatInt(time.Now().Add(time.Second).UnixMilli(), 10)),
+							},
+						},
+					}
+					if err := p.onMessage(context.Background(), event); err != nil {
+						t.Fatalf("onMessage() error = %v", err)
+					}
+					if !cfg.want[i] {
+						select {
+						case msg := <-received:
+							t.Fatalf("filtered message reached handler: %+v", msg)
+						case <-time.After(300 * time.Millisecond):
+						}
+						return
+					}
+					select {
+					case msg := <-received:
+						wantContent := tc.wantContent
+						if cfg.unknownBot {
+							wantContent = tc.unknownContent
+						}
+						if msg.Content != wantContent {
+							t.Errorf("Content = %q, want %q", msg.Content, wantContent)
+						}
+						if msg.MessageID != "om_skip_mentions" || msg.SessionKey != "feishu:oc_chat:ou_user" || msg.UserID != "ou_user" {
+							t.Errorf("unexpected dispatched message identity: %+v", msg)
+						}
+					case <-time.After(2 * time.Second):
+						t.Fatal("timed out waiting for handler dispatch")
+					}
+				})
+			}
+		})
+	}
+}
+
+func TestShouldSkipMentionedOthers(t *testing.T) {
+	tests := []struct {
+		name       string
+		chatType   string
+		all        bool
+		skip       bool
+		mentions   int
+		botMention bool
+		want       bool
+	}{
+		{"group mentions other", "group", true, true, 1, false, true},
+		{"group mentions bot", "group", true, true, 1, true, false},
+		{"group mentions both", "group", true, true, 2, true, false},
+		{"group no mention", "group", true, true, 0, false, false},
+		{"all message has no mention", "group", true, true, 0, false, false},
+		{"option disabled", "group", true, false, 1, false, false},
+		{"group reply all disabled", "group", false, true, 1, false, false},
+		{"private chat", "p2p", true, true, 1, false, false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := shouldSkipMentionedOthers(tc.chatType, tc.all, tc.skip, tc.mentions, tc.botMention); got != tc.want {
+				t.Fatalf("shouldSkipMentionedOthers() = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestNewPlatform_SkipWhenMentionOthers(t *testing.T) {
+	p, err := newPlatform("feishu", lark.FeishuBaseUrl, map[string]any{
+		"app_id":                   "cli_test",
+		"app_secret":               "secret",
+		"group_reply_all":          true,
+		"skip_when_mention_others": true,
+	})
+	if err != nil {
+		t.Fatalf("newPlatform error: %v", err)
+	}
+	fp := extractBasePlatform(p)
+	if fp == nil || !fp.skipWhenMentionOthers {
+		t.Fatal("skip_when_mention_others should be enabled")
+	}
+}
+
 func newTestPlatform(mentionMap map[string]string, resolveMentions bool, members map[string]string) *Platform {
 	p := &Platform{
 		resolveMentions: resolveMentions,
@@ -2659,5 +2830,185 @@ func TestDispatchMessagePostWithFiles(t *testing.T) {
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("timed out waiting for dispatched message")
+	}
+}
+
+func TestStreamingConfigFromTOML(t *testing.T) {
+	var config struct {
+		Options map[string]any `toml:"options"`
+	}
+	_, err := toml.Decode(`[options]
+app_id = "cli_test"
+app_secret = "secret"
+print_frequency_ms = 20
+print_step = 2
+print_strategy = "delay"
+`, &config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"feishu", "lark"} {
+		t.Run(name, func(t *testing.T) {
+			platform, err := newPlatform(name, "https://example.invalid", config.Options)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var card struct {
+				Config struct {
+					StreamingConfig struct {
+						Frequency map[string]int `json:"print_frequency_ms"`
+						Step      map[string]int `json:"print_step"`
+						Strategy  string         `json:"print_strategy"`
+					} `json:"streaming_config"`
+				} `json:"config"`
+			}
+			data := platform.(core.RichCardSupporter).BuildRichCard(core.CardStatusWorking, "", nil, "body", true, "")
+			if err := json.Unmarshal([]byte(data), &card); err != nil {
+				t.Fatal(err)
+			}
+			sc := card.Config.StreamingConfig
+			if sc.Frequency["default"] != 20 || sc.Step["default"] != 2 || sc.Strategy != "delay" {
+				t.Fatalf("TOML options not preserved: %s", data)
+			}
+		})
+	}
+}
+
+func TestStreamingConfigValidation(t *testing.T) {
+	for _, tc := range []struct {
+		key   string
+		value any
+		valid bool
+	}{
+		{"print_frequency_ms", int64(20), true}, {"print_frequency_ms", 1000, true},
+		{"print_frequency_ms", 19, false}, {"print_frequency_ms", 1001, false},
+		{"print_frequency_ms", 20.5, false}, {"print_frequency_ms", "20", false},
+		{"print_step", int64(2), true}, {"print_step", 1000, true},
+		{"print_step", 0, false}, {"print_step", 1001, false}, {"print_step", true, false},
+		{"print_strategy", " FAST ", true}, {"print_strategy", "delay", true},
+		{"print_strategy", "", false}, {"print_strategy", "other", false}, {"print_strategy", 1, false},
+	} {
+		opts := map[string]any{"app_id": "cli_test", "app_secret": "secret", tc.key: tc.value}
+		_, err := New(opts)
+		if (err == nil) != tc.valid {
+			t.Fatalf("%s=%v: valid=%v, err=%v", tc.key, tc.value, tc.valid, err)
+		}
+		if err != nil && !strings.Contains(err.Error(), tc.key) {
+			t.Fatalf("missing field in error: %v", err)
+		}
+		if _, isString := tc.value.(string); tc.key == "print_strategy" && isString && !tc.valid {
+			if !strings.Contains(err.Error(), "must be 'fast' or 'delay' (case-insensitive)") {
+				t.Fatalf("missing accepted values or case-insensitive guidance: %v", err)
+			}
+		}
+	}
+}
+
+func TestStreamingConfigRendering(t *testing.T) {
+	for _, configured := range []bool{false, true} {
+		opts := map[string]any{"app_id": "cli_test", "app_secret": "secret"}
+		if configured {
+			opts["print_frequency_ms"] = int64(20)
+			opts["print_step"] = int64(2)
+			opts["print_strategy"] = " FAST "
+		}
+		platform, err := New(opts)
+		if err != nil {
+			t.Fatal(err)
+		}
+		p := extractBasePlatform(platform)
+		for _, streaming := range []bool{true, false} {
+			for _, compact := range []bool{false, true} {
+				var steps []core.ToolStep
+				if compact {
+					for i := 0; i < 80; i++ {
+						steps = append(steps, core.ToolStep{Kind: core.ToolStepKindTool, Name: "Bash", Result: strings.Repeat("long output ", 100)})
+					}
+				}
+				data := p.BuildRichCard(core.CardStatusWorking, "", steps, "body", streaming, "")
+				var card map[string]any
+				if err := json.Unmarshal([]byte(data), &card); err != nil {
+					t.Fatal(err)
+				}
+				cfg := card["config"].(map[string]any)
+				actual, exists := cfg["streaming_config"]
+				if exists != (configured && streaming) {
+					t.Fatalf("unexpected config: %s", data)
+				}
+				if exists {
+					sc := actual.(map[string]any)
+					if sc["print_frequency_ms"].(map[string]any)["default"] != float64(20) || sc["print_step"].(map[string]any)["default"] != float64(2) || sc["print_strategy"] != "fast" {
+						t.Fatalf("wrong config: %v", sc)
+					}
+				}
+			}
+		}
+	}
+}
+
+func TestStreamingConfigPartialOverride(t *testing.T) {
+	platform, err := New(map[string]any{"app_id": "cli_test", "app_secret": "secret", "print_step": int64(3)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := extractBasePlatform(platform)
+	if len(p.streamingConfig) != 1 {
+		t.Fatalf("unspecified defaults overridden: %v", p.streamingConfig)
+	}
+	if _, ok := p.streamingConfig["print_step"]; !ok {
+		t.Fatal("print_step missing")
+	}
+}
+
+func TestRichCardTypewriterPreservesWorkingPanels(t *testing.T) {
+	p := &Platform{streamingConfig: map[string]any{"print_step": map[string]any{"default": 2}}}
+	baseline := &Platform{}
+	for _, working := range []bool{true, false} {
+		status := core.CardStatusWorking
+		if !working {
+			status = core.CardStatusDone
+		}
+		data := p.BuildRichCard(status, "", []core.ToolStep{{Kind: core.ToolStepKindTool, Name: "Bash", Result: "TOOL OUTPUT", Done: !working}}, "BODY INCREMENT", working, "FOOTER")
+		var card map[string]any
+		if err := json.Unmarshal([]byte(data), &card); err != nil {
+			t.Fatal(err)
+		}
+		if got := card["config"].(map[string]any)["streaming_mode"]; got != working {
+			t.Fatalf("wrong animation flag: %s", data)
+		}
+		elements := card["body"].(map[string]any)["elements"].([]any)
+		// Typewriter settings must preserve the renderer's panel behavior.
+		// The default layout can evolve independently of this configuration.
+		baselineData := baseline.BuildRichCard(status, "", []core.ToolStep{{Kind: core.ToolStepKindTool, Name: "Bash", Result: "TOOL OUTPUT", Done: !working}}, "BODY INCREMENT", working, "FOOTER")
+		var baselineCard map[string]any
+		if err := json.Unmarshal([]byte(baselineData), &baselineCard); err != nil {
+			t.Fatal(err)
+		}
+		baselineElements := baselineCard["body"].(map[string]any)["elements"].([]any)
+		if elements[0].(map[string]any)["expanded"] != baselineElements[0].(map[string]any)["expanded"] {
+			t.Fatalf("typewriter settings changed tool panel state: %s", data)
+		}
+		if !strings.Contains(data, "BODY INCREMENT") || !strings.Contains(data, "TOOL OUTPUT") || !strings.Contains(data, "FOOTER") {
+			t.Fatal("card lost content")
+		}
+	}
+}
+
+func TestRichCardTypewriterSurvivesCardSizeCompaction(t *testing.T) {
+	p := &Platform{}
+	var steps []core.ToolStep
+	for i := 0; i < 80; i++ {
+		steps = append(steps, core.ToolStep{Kind: core.ToolStepKindTool, Name: "Bash", Result: strings.Repeat("LONG OUTPUT ", 100)})
+	}
+	data := p.BuildRichCard(core.CardStatusWorking, "", steps, "BODY", true, "")
+	var card map[string]any
+	if err := json.Unmarshal([]byte(data), &card); err != nil {
+		t.Fatal(err)
+	}
+	if card["config"].(map[string]any)["streaming_mode"] != true {
+		t.Fatal("compaction disabled typewriter")
+	}
+	if !strings.Contains(data, "BODY") {
+		t.Fatal("compaction lost body")
 	}
 }

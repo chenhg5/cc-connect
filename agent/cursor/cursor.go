@@ -248,6 +248,21 @@ func (a *Agent) SkillDirs() []string {
 	return dirs
 }
 
+// ── MemoryFileProvider implementation ─────────────────────────
+
+func (a *Agent) ProjectMemoryFile() string {
+	workDir := a.GetWorkDir()
+	absDir, err := filepath.Abs(workDir)
+	if err != nil {
+		absDir = workDir
+	}
+	return filepath.Join(absDir, "AGENTS.md")
+}
+
+func (a *Agent) GlobalMemoryFile() string { return "" }
+
+var _ core.MemoryFileProvider = (*Agent)(nil)
+
 // ── ContextCompressor implementation ──────────────────────────
 
 func (a *Agent) CompressCommand() string { return "" }
