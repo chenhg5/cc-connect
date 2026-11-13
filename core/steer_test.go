@@ -1,7 +1,6 @@
 package core
 
 import (
-	"context"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -87,14 +86,13 @@ type ackStubPlatform struct {
 	updated []string
 }
 
-func (p *ackStubPlatform) SendAck(_ context.Context, _ any, text string) error {
+func (p *ackStubPlatform) AddAckReaction(_ any) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	p.updated = append(p.updated, text)
-	return nil
+	p.updated = append(p.updated, "reaction")
 }
 
-// With a deferred ack the single bubble carries the steer text.
+// Steering acknowledges with an emoji reaction, not a text bubble.
 func TestSteerRewritesExistingAck(t *testing.T) {
 	p := &ackStubPlatform{stubPlatformEngine: stubPlatformEngine{n: "test"}}
 	e := NewEngine("test", &resultAgent{session: newResultAgentSession("ok")}, []Platform{p}, "", LangChinese)
@@ -105,7 +103,7 @@ func TestSteerRewritesExistingAck(t *testing.T) {
 	sessions := e.sessions
 	session := sessions.GetOrCreateActive("k")
 
-	msg := &Message{SessionKey: "k", Platform: "test", UserID: "u", Content: "快点", ReplyCtx: "ctx", AckHandle: "ack-1"}
+	msg := &Message{SessionKey: "k", Platform: "test", UserID: "u", Content: "快点", ReplyCtx: "ctx"}
 	if !e.steerBusySession(p, msg, "k", session, sessions) {
 		t.Fatal("steerBusySession() = false")
 	}
@@ -115,8 +113,8 @@ func TestSteerRewritesExistingAck(t *testing.T) {
 	sent := append([]string(nil), p.sent...)
 	p.mu.Unlock()
 
-	if len(updated) != 1 || !strings.Contains(updated[0], "插话") {
-		t.Fatalf("acks = %v, want exactly one steer text", updated)
+	if len(updated) != 1 || updated[0] != "reaction" {
+		t.Fatalf("acks = %v, want exactly one emoji reaction", updated)
 	}
 	for _, s := range sent {
 		if strings.Contains(s, "插话") {

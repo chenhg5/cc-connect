@@ -334,12 +334,10 @@ type SessionInterrupter interface {
 	Interrupt(reason string) error
 }
 
-// AckSender is an optional interface for platforms that defer their courtesy
-// ack to the engine. The platform stops replying immediately and instead hands
-// the engine a handle, so exactly one message states the real outcome
-// (processing / steered into the running task / queued).
-type AckSender interface {
-	SendAck(ctx context.Context, handle any, text string) error
+// AckReactor is an optional interface for platforms that acknowledge an
+// inbound message with an emoji reaction instead of a text reply.
+type AckReactor interface {
+	AddAckReaction(replyCtx any)
 }
 
 // TaskCardSender is an optional interface for platforms that can post a

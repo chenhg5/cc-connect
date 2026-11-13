@@ -525,14 +525,12 @@ func (p *interactivePlatform) UpdateTaskCard(ctx context.Context, handle any, ca
 	})
 }
 
-// SendAck posts the engine's single outcome notice (processing / steered /
-// queued) as a reply to the triggering message. The platform no longer sends
-// its own ack, so the user never sees two bubbles racing.
-func (p *interactivePlatform) SendAck(ctx context.Context, handle any, text string) error {
-	rc, ok := handle.(replyContext)
-	if !ok {
-		return fmt.Errorf("%s: invalid ack handle %T", p.tag(), handle)
+// AddAckReaction marks an inbound message as acknowledged with an emoji
+// reaction, so no extra text bubble is needed.
+func (p *Platform) AddAckReaction(rctx any) {
+	rc, ok := rctx.(replyContext)
+	if !ok || rc.messageID == "" {
+		return
 	}
-	msgType, body := buildReplyContent(text)
-	return p.replyMessage(ctx, rc, msgType, body)
+	go p.addReaction(rc.messageID)
 }

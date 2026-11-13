@@ -2244,11 +2244,6 @@ func (e *Engine) handleMessage(p Platform, msg *Message) {
 	}
 
 sessionLocked:
-	// Acknowledge only when the platform deferred its courtesy reply; platforms
-	// that ack on their own are left untouched.
-	if msg.AckHandle != nil {
-		e.sendAck(p, msg, e.i18n.T(MsgAckProcessing))
-	}
 	if rotated := e.maybeAutoResetSessionOnIdle(p, msg, sessions, interactiveKey, session); rotated != nil {
 		session = rotated
 	}
@@ -2317,22 +2312,20 @@ func (e *Engine) maybeAutoResetSessionOnIdle(p Platform, msg *Message, sessions 
 	return newSession
 }
 
-// sendAck posts the single outcome notice for a message through the platform's
-// deferred ack channel, falling back to a plain reply.
+// sendAck acknowledges a message with an emoji reaction when the platform
+// supports it (no extra bubble); text is only a fallback for platforms that
+// cannot react.
 func (e *Engine) sendAck(p Platform, msg *Message, text string) {
-	if msg == nil || text == "" {
+	if msg == nil {
 		return
 	}
-	if msg.AckHandle != nil {
-		if sender, ok := p.(AckSender); ok {
-			if err := sender.SendAck(e.ctx, msg.AckHandle, text); err == nil {
-				return
-			} else {
-				slog.Warn("deferred ack failed; sending a plain reply", "platform", p.Name(), "error", err)
-			}
-		}
+	if reactor, ok := p.(AckReactor); ok {
+		reactor.AddAckReaction(msg.ReplyCtx)
+		return
 	}
-	e.reply(p, msg.ReplyCtx, text)
+	if text != "" {
+		e.reply(p, msg.ReplyCtx, text)
+	}
 }
 
 // steerBusySession forwards a message into the in-flight turn instead of
@@ -2460,9 +2453,7 @@ func (e *Engine) queueMessageForBusySession(p Platform, msg *Message, interactiv
 	e.syncTaskCardQueue(state)
 	// With a live card the queue is already visible there; a per-message
 	// "queued" reply would just be noise.
-	if !stateTaskCard(state).Visible() {
-		e.sendAck(p, msg, e.i18n.T(MsgMessageQueued))
-	}
+	e.sendAck(p, msg, e.i18n.T(MsgMessageQueued))
 	return true
 }
 

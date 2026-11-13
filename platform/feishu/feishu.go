@@ -1127,18 +1127,11 @@ func (p *Platform) dispatchMessage(ctx context.Context, msgType, content string,
 			)
 			return
 		}
-		// The courtesy ack is deferred to the engine so one message can state
-		// the real outcome (processing / steered / queued).
-		var ackHandle any
-		if p.autoThread {
-			ackHandle = rctx
-		}
 		p.dispatchCoreMessage(&core.Message{
 			SessionKey: sessionKey, Platform: p.platformName,
 			MessageID: messageID,
 			UserID:    userID, UserName: userName, ChatName: chatName,
 			Content: text, ExtraContent: quoted.text, Images: quoted.images, ReplyCtx: rctx,
-			AckHandle: ackHandle,
 		})
 
 	case "image":
@@ -1330,18 +1323,11 @@ func (p *Platform) dispatchMessage(ctx context.Context, msgType, content string,
 			slog.Debug(p.tag()+": dropping interactive card with no extractable text", "message_id", messageID)
 			return
 		}
-		// The courtesy ack is deferred to the engine so one message can state
-		// the real outcome (processing / steered / queued).
-		var ackHandle any
-		if p.autoThread {
-			ackHandle = rctx
-		}
 		p.dispatchCoreMessage(&core.Message{
 			SessionKey: sessionKey, Platform: p.platformName,
 			MessageID: messageID,
 			UserID:    userID, UserName: userName, ChatName: chatName,
 			Content: text, ExtraContent: quoted.text, Images: quoted.images, ReplyCtx: rctx,
-			AckHandle: ackHandle,
 		})
 
 	default:
