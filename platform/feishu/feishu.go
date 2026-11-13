@@ -132,7 +132,6 @@ type Platform struct {
 	allowFromP2p               string // comma-separated open_ids allowed to private-message (p2p) the bot; "" or "*" = all. Group messages are NOT affected.
 	groupOnly                  bool
 	groupReplyAll              bool
-	respondToAtEveryoneAndHere bool
 	shareSessionInChannel      bool
 	threadIsolation            bool
 	autoThread                 bool   // when true, reply with ReplyInThread(true) to auto-create Feishu threads
@@ -143,6 +142,16 @@ type Platform struct {
 	threadReplyWithoutMention bool
 	threadSeenMu               sync.Mutex
 	threadSeen             map[string]time.Time
+	// rootMu guards rootCache and rootInflight. rootCache maps a message id to
+	// its parent, so a whole topic resolves to one session even when Feishu
+	// reports a different root_id for the topic's first message and the rest.
+	rootMu       sync.Mutex
+	rootCache    map[string]rootEntry
+	rootInflight map[string]chan struct{}
+	// Breaker state: after repeated Feishu failures, fail fast for a cooldown
+	// instead of making every topic wait for the lookup timeout.
+	rootFailStreak  int
+	rootBrokenUntil time.Time
 	// noReplyToTrigger: when true, send via Create instead of Im.Message.Reply (no quote to the user's message).
 	noReplyToTrigger bool
 	resolveMentions  bool
@@ -225,7 +234,6 @@ func newPlatform(name, domain string, opts map[string]any) (core.Platform, error
 	allowFromP2p, _ := opts["allow_from_p2p"].(string)
 	groupOnly, _ := opts["group_only"].(bool)
 	groupReplyAll, _ := opts["group_reply_all"].(bool)
-	respondToAtEveryoneAndHere, _ := opts["respond_to_at_everyone_and_here"].(bool)
 	shareSessionInChannel, _ := opts["share_session_in_channel"].(bool)
 	threadIsolation, _ := opts["thread_isolation"].(bool)
 	autoThread, _ := opts["auto_thread"].(bool)
@@ -296,7 +304,6 @@ func newPlatform(name, domain string, opts map[string]any) (core.Platform, error
 		allowFromP2p:               allowFromP2p,
 		groupOnly:                  groupOnly,
 		groupReplyAll:              groupReplyAll,
-		respondToAtEveryoneAndHere: respondToAtEveryoneAndHere,
 		shareSessionInChannel:      shareSessionInChannel,
 		threadIsolation:            threadIsolation,
 		autoThread:                 autoThread,
@@ -1034,14 +1041,11 @@ func (p *Platform) onMessage(ctx context.Context, event *larkim.P2MessageReceive
 	if chatType == "group" && !p.groupReplyAll && p.botOpenID != "" {
 		if !isBotMentioned(msg.Mentions, p.botOpenID) {
 			threadID := stringValue(msg.ThreadId)
-			if threadID == "" {
-				threadID = stringValue(msg.RootId)
-			}
 			switch {
-			// Feishu @all sends {"text":"@_all"} with 0 mentions.
-			case p.respondToAtEveryoneAndHere && msg.Content != nil && strings.Contains(*msg.Content, "@_all"):
-				slog.Debug(p.tag()+": responding to @all message", "chat_id", chatID)
-			case p.threadReplyWithoutMention && p.threadAllowed(threadID):
+			// Only an explicit bot mention may waive the requirement. @all is
+			// not a direct mention, and in a large group a quote sets RootId
+			// but is not an invitation to the bot.
+			case p.threadReplyWithoutMention && threadID != "" && p.threadAllowed(threadID):
 				slog.Debug(p.tag()+": thread message without mention accepted",
 					"chat_id", chatID, "thread", threadID, "user", userID)
 			default:
@@ -1098,7 +1102,7 @@ func (p *Platform) onMessage(ctx context.Context, event *larkim.P2MessageReceive
 	mentions := msg.Mentions
 	parentID := stringValue(msg.ParentId)
 
-	sessionKey := p.makeSessionKey(msg, chatID, userID)
+	sessionKey := p.makeSessionKey(ctx, msg, chatID, userID)
 	rctx := replyContext{messageID: messageID, chatID: chatID, sessionKey: sessionKey}
 	slog.Debug(p.tag()+": routed inbound message",
 		"message_id", messageID,
@@ -3333,14 +3337,42 @@ func stripMentions(text string, mentions []*larkim.MentionEvent, botOpenID strin
 
 // TODO: Session-key derivation and reply-thread behavior are split across multiple code paths here.
 // Should revisit thread/root handling without changing thread_isolation=false behavior.
-func (p *Platform) makeSessionKey(msg *larkim.EventMessage, chatID, userID string) string {
+func (p *Platform) makeSessionKey(ctx context.Context, msg *larkim.EventMessage, chatID, userID string) string {
 	if p.threadIsolation && msg != nil && stringValue(msg.ChatType) == "group" {
 		rootID := stringValue(msg.RootId)
 		if rootID == "" {
-			rootID = stringValue(msg.MessageId)
+			if messageID := stringValue(msg.MessageId); messageID != "" {
+				// The event already proves this message is a chain head. Do not
+				// speculatively cache it before another message references it.
+				key := fmt.Sprintf("%s:%s:root:%s", p.tag(), chatID, messageID)
+				slog.Info(p.tag()+": topic session resolved",
+					"chat_id", chatID, "user_id", userID, "message_id", messageID,
+					"root_id", "", "thread_id", stringValue(msg.ThreadId),
+					"canonical_root", messageID, "session_key", key, "mode", "new_root")
+				return key
+			}
 		}
 		if rootID != "" {
-			return fmt.Sprintf("%s:%s:root:%s", p.tag(), chatID, rootID)
+			top := p.canonicalRoot(ctx, rootID)
+			if top == rootID && stringValue(msg.ThreadId) != "" {
+				p.rememberRoot(stringValue(msg.MessageId), rootID)
+			}
+			key := fmt.Sprintf("%s:%s:root:%s", p.tag(), chatID, top)
+			if top == rootID {
+				slog.Info(p.tag()+": topic session resolved",
+					"chat_id", chatID, "user_id", userID, "message_id", stringValue(msg.MessageId),
+					"root_id", rootID, "thread_id", stringValue(msg.ThreadId),
+					"canonical_root", top, "session_key", key, "mode", "direct_root")
+			} else {
+				// The immediate root differs from the chain head: this is a
+				// follow-up inside a topic that got merged instead of opening
+				// a second session.
+				slog.Info(p.tag()+": topic session merged via root chain",
+					"chat_id", chatID, "user_id", userID, "message_id", stringValue(msg.MessageId),
+					"root_id", rootID, "thread_id", stringValue(msg.ThreadId),
+					"canonical_root", top, "session_key", key)
+			}
+			return key
 		}
 	}
 	if p.shareSessionInChannel {
