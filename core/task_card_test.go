@@ -71,7 +71,7 @@ func TestTurnCard_RendersRunningStateWithStopButton(t *testing.T) {
 	t.Cleanup(e.cancel)
 	p := &taskCardStubPlatform{stubPlatformEngine: stubPlatformEngine{n: "feishu"}}
 
-	tc := newTurnCard(e, p, "ctx")
+	tc := newTurnCard(e, p, "ctx", "k")
 	if tc == nil {
 		t.Fatal("newTurnCard() = nil, want a card for a TaskCardSender platform")
 	}
@@ -100,7 +100,7 @@ func TestTurnCard_ReflectsStepQueueAndFinish(t *testing.T) {
 	t.Cleanup(e.cancel)
 	p := &taskCardStubPlatform{stubPlatformEngine: stubPlatformEngine{n: "feishu"}}
 
-	tc := newTurnCard(e, p, "ctx")
+	tc := newTurnCard(e, p, "ctx", "k")
 	tc.Start()
 	tc.render(true)
 
@@ -135,7 +135,7 @@ func TestTurnCard_ReflectsStepQueueAndFinish(t *testing.T) {
 func TestTurnCard_NilForUnsupportedPlatform(t *testing.T) {
 	e := NewEngine("test", &resultAgent{session: newResultAgentSession("ok")}, []Platform{&stubPlatformEngine{n: "test"}}, "", LangChinese)
 	t.Cleanup(e.cancel)
-	if tc := newTurnCard(e, &stubPlatformEngine{n: "plain"}, "ctx"); tc != nil {
+	if tc := newTurnCard(e, &stubPlatformEngine{n: "plain"}, "ctx", "k"); tc != nil {
 		t.Fatal("newTurnCard() != nil for a platform without TaskCardSender")
 	}
 }
@@ -155,7 +155,7 @@ func TestTurnCard_QuickTurnLeavesNoCard(t *testing.T) {
 	t.Cleanup(e.cancel)
 	p := &taskCardStubPlatform{stubPlatformEngine: stubPlatformEngine{n: "feishu"}}
 
-	tc := newTurnCard(e, p, "ctx")
+	tc := newTurnCard(e, p, "ctx", "k")
 	tc.Start()
 	tc.Finish(taskCardDone, "")
 
@@ -176,11 +176,11 @@ func TestRotateTaskCardAfterStop(t *testing.T) {
 	t.Cleanup(e.cancel)
 	p := &taskCardStubPlatform{stubPlatformEngine: stubPlatformEngine{n: "feishu"}}
 
-	old := newTurnCard(e, p, "ctx")
+	old := newTurnCard(e, p, "ctx", "k")
 	state := &interactiveState{taskCard: old, turnActive: true}
 	old.Finish(taskCardStopped, "")
 
-	fresh := e.rotateTaskCardIfFinished(state, p, "ctx2")
+	fresh := e.rotateTaskCardIfFinished(state, p, "ctx2", "k")
 	if fresh == nil {
 		t.Fatal("rotateTaskCardIfFinished() = nil for a stopped card")
 	}
@@ -191,7 +191,7 @@ func TestRotateTaskCardAfterStop(t *testing.T) {
 		t.Fatal("fresh card is already finished")
 	}
 
-	running := e.rotateTaskCardIfFinished(state, p, "ctx3")
+	running := e.rotateTaskCardIfFinished(state, p, "ctx3", "k")
 	if running != fresh {
 		t.Fatal("rotateTaskCardIfFinished() replaced a running card")
 	}

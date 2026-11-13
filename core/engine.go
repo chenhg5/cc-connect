@@ -232,6 +232,8 @@ type Engine struct {
 	relayManager      *RelayManager
 	eventIdleTimeout  time.Duration
 	maxQueuedMessages int
+	outboxMu          sync.Mutex
+	outboxes          map[string]*outbox
 	busyMode          string        // "steer" (default) forwards into the running turn; "queue" waits
 	stopWait          time.Duration // how long /stop waits for the turn to unwind
 	dirHistory        *DirHistory
@@ -2883,7 +2885,7 @@ func (e *Engine) processInteractiveMessageWith(p Platform, msg *Message, session
 	var taskCard *turnCard
 	cardOutcome := taskCardDone
 	if !msg.Proactive {
-		taskCard = newTurnCard(e, p, msg.ReplyCtx)
+		taskCard = newTurnCard(e, p, msg.ReplyCtx, interactiveKey)
 	}
 	if taskCard != nil {
 		state.mu.Lock()
@@ -3824,11 +3826,18 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 	workspaceRenderer := func(content string) string {
 		return e.renderOutgoingContentForWorkspace(state.platform, content, workspaceDir)
 	}
+	// Outbound calls run on the session's outbox goroutine: the turn loop must
+	// never block on the platform API, otherwise a slow send keeps the session
+	// locked and every later message looks unanswered.
+	out := e.outboxFor(sessionKey)
 	sendWorkspace := func(p Platform, replyCtx any, content string) {
-		e.sendForWorkspace(p, replyCtx, content, workspaceDir)
+		pl, rc, c := p, replyCtx, content
+		out.push(func() { e.sendForWorkspace(pl, rc, c, workspaceDir) })
 	}
 	sendWorkspaceWithError := func(p Platform, replyCtx any, content string) error {
-		return e.sendWithErrorForWorkspace(p, replyCtx, content, workspaceDir)
+		pl, rc, c := p, replyCtx, content
+		out.push(func() { _ = e.sendWithErrorForWorkspace(pl, rc, c, workspaceDir) })
+		return nil
 	}
 
 	// Streaming card: aggregate entire turn into a single updatable card.
@@ -5047,7 +5056,11 @@ func (e *Engine) drainPendingMessages(state *interactiveState, session *Session,
 
 		// A queued turn may follow a stop, in which case the previous card is
 		// already closed; give this turn its own live card.
-		tc := e.rotateTaskCardIfFinished(state, queued.platform, queued.replyCtx)
+		cardKey := sessionKey
+		if prev := stateTaskCard(state); prev != nil {
+			cardKey = prev.key
+		}
+		tc := e.rotateTaskCardIfFinished(state, queued.platform, queued.replyCtx, cardKey)
 		e.syncTaskCardQueue(state)
 		if tc != nil {
 			tc.SetStep("")

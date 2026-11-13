@@ -10,6 +10,7 @@ import (
 // seconds; production keeps the 2s window.
 func TestMain(m *testing.M) {
 	interruptUnwindWaitTimeout = 0
+	outboxInline = true
 	os.Exit(m.Run())
 }
 

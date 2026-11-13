@@ -48,6 +48,7 @@ type turnCard struct {
 	e        *Engine
 	sender   TaskCardSender
 	replyCtx any
+	key      string
 
 	// renderMu serializes remote calls so two refreshes never race to create
 	// the initial message twice.
@@ -62,6 +63,7 @@ type turnCard struct {
 	lastRender time.Time
 	finished   bool
 	disabled   bool
+	creating   bool
 	failCount  int
 	visible    bool // true once the card message exists
 
@@ -71,7 +73,7 @@ type turnCard struct {
 
 // newTurnCard returns nil when the platform cannot host a live card, so all
 // call sites can stay nil-safe.
-func newTurnCard(e *Engine, p Platform, replyCtx any) *turnCard {
+func newTurnCard(e *Engine, p Platform, replyCtx any, key string) *turnCard {
 	sender, ok := p.(TaskCardSender)
 	if !ok || sender == nil {
 		return nil
@@ -80,6 +82,7 @@ func newTurnCard(e *Engine, p Platform, replyCtx any) *turnCard {
 		e:        e,
 		sender:   sender,
 		replyCtx: replyCtx,
+		key:      key,
 		started:  time.Now(),
 		status:   taskCardRunning,
 		done:     make(chan struct{}),
@@ -191,9 +194,6 @@ func (tc *turnCard) render(force bool) {
 		return
 	}
 
-	tc.renderMu.Lock()
-	defer tc.renderMu.Unlock()
-
 	tc.mu.Lock()
 	if tc.disabled {
 		tc.mu.Unlock()
@@ -202,6 +202,11 @@ func (tc *turnCard) render(force bool) {
 	// Never surface a card for a turn that already ended before the first
 	// render: that would leave a pointless "✅ 已完成 · 0:00" message.
 	if tc.handle == nil && !tc.visible && tc.finished {
+		tc.mu.Unlock()
+		return
+	}
+	// A create is already in flight; don't enqueue a second one.
+	if tc.handle == nil && tc.creating {
 		tc.mu.Unlock()
 		return
 	}
@@ -219,43 +224,50 @@ func (tc *turnCard) render(force bool) {
 	tc.lastRender = now
 	card := tc.buildCardLocked()
 	handle := tc.handle
+	if handle == nil {
+		tc.creating = true
+	}
 	tc.mu.Unlock()
 
-	// Bound every remote call: a hung request would otherwise hold renderMu
-	// forever and freeze the card for the rest of the turn.
-	ctx, cancel := context.WithTimeout(tc.e.ctx, 10*time.Second)
-	defer cancel()
+	// The network call runs on the session's outbox goroutine so the turn loop
+	// never waits for the platform.
+	tc.e.outboxFor(tc.key).push(func() {
+		ctx, cancel := context.WithTimeout(tc.e.ctx, 10*time.Second)
+		defer cancel()
 
-	var err error
-	if handle == nil {
-		var h any
-		h, err = tc.sender.SendTaskCard(ctx, tc.replyCtx, card)
-		if err == nil {
+		var err error
+		if handle == nil {
+			var h any
+			h, err = tc.sender.SendTaskCard(ctx, tc.replyCtx, card)
 			tc.mu.Lock()
-			tc.handle = h
-			tc.visible = true
-			tc.failCount = 0
+			tc.creating = false
+			if err == nil {
+				tc.handle = h
+				tc.visible = true
+				tc.failCount = 0
+			}
 			tc.mu.Unlock()
+		} else {
+			err = tc.sender.UpdateTaskCard(ctx, handle, card)
+			if err == nil {
+				tc.mu.Lock()
+				tc.failCount = 0
+				tc.mu.Unlock()
+			}
+		}
+		if err == nil {
 			return
 		}
-	} else {
-		err = tc.sender.UpdateTaskCard(ctx, handle, card)
-	}
-	if err == nil {
-		tc.mu.Lock()
-		tc.failCount = 0
-		tc.mu.Unlock()
-		return
-	}
 
-	tc.mu.Lock()
-	tc.failCount++
-	fails := tc.failCount
-	if fails >= taskCardMaxFailures {
-		tc.disabled = true
-	}
-	tc.mu.Unlock()
-	slog.Warn("task card refresh failed", "platform", tc.senderName(), "consecutive", fails, "error", err)
+		tc.mu.Lock()
+		tc.failCount++
+		fails := tc.failCount
+		if fails >= taskCardMaxFailures {
+			tc.disabled = true
+		}
+		tc.mu.Unlock()
+		slog.Warn("task card refresh failed", "platform", tc.senderName(), "consecutive", fails, "error", err)
+	})
 }
 
 func (tc *turnCard) senderName() string {
@@ -381,14 +393,14 @@ func (tc *turnCard) Finished() bool {
 // one was already closed (e.g. the user stopped mid-run and then followed up).
 // Without this the follow-up would run under a card that still says
 // "已停止", which looks like the bot never picked the message up.
-func (e *Engine) rotateTaskCardIfFinished(state *interactiveState, p Platform, replyCtx any) *turnCard {
+func (e *Engine) rotateTaskCardIfFinished(state *interactiveState, p Platform, replyCtx any, key string) *turnCard {
 	if state == nil {
 		return nil
 	}
 	if cur := stateTaskCard(state); cur != nil && !cur.Finished() {
 		return cur
 	}
-	tc := newTurnCard(e, p, replyCtx)
+	tc := newTurnCard(e, p, replyCtx, key)
 	if tc == nil {
 		return nil
 	}
