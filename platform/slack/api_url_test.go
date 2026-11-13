@@ -77,6 +77,46 @@ func TestNormalizeAPIURL_MalformedCredentialsNotEchoed(t *testing.T) {
 	}
 }
 
+// TestNormalizeAPIURL_NoErrorPathEchoesSecrets feeds every validation branch
+// a value that fails there while carrying a secret, and checks the secret
+// never reaches the error.
+func TestNormalizeAPIURL_NoErrorPathEchoesSecrets(t *testing.T) {
+	for _, in := range []string{
+		"token:sup3rsecret@relay.example.com",              // opaque, fails the scheme check
+		"token:sup3r?secret@relay.example.com",             // "?" inside the secret
+		"ftp://relay.example.com/api/?token=sup3rsecret",   // scheme check, secret in query
+		"https:///api/?token=sup3rsecret",                  // no host, secret in query
+		"https://relay.example.com/api/?token=sup3rsecret", // query check
+		"https://relay.example.com/api/#sup3rsecret",       // fragment check
+		"https://user:sup3rsecret@relay.example.com/api/",  // user info check
+		"https://user:sup3rsecret",                         // parse error, no "@"
+	} {
+		_, err := normalizeAPIURL(in)
+		if err == nil {
+			t.Errorf("normalizeAPIURL(%q): want error", in)
+			continue
+		}
+		if strings.Contains(err.Error(), "sup3r") {
+			t.Errorf("normalizeAPIURL(%q): error echoes the secret: %v", in, err)
+		}
+	}
+}
+
+func TestLogSafe(t *testing.T) {
+	for in, want := range map[string]string{
+		"https://relay.example.com/api/?token=x": "https://REDACTED/api/?<omitted>",
+		"https://relay.example.com/api/#frag":    "https://REDACTED/api/?<omitted>",
+		"token:secret@relay.example.com":         "REDACTED@relay.example.com",
+		"token:sec?ret@relay.example.com":        "REDACTED?<omitted>",
+		"https://u:p@h/api/":                     "https://REDACTED@h/api/",
+		"ftp://slack-gov.com/api/":               "ftp://REDACTED/api/",
+	} {
+		if got := logSafe(in); got != want {
+			t.Errorf("logSafe(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
 func TestRedactAuthority(t *testing.T) {
 	for in, want := range map[string]string{
 		// With an "@": greedy up to the last one.
@@ -213,6 +253,12 @@ func TestNew_BaseURL(t *testing.T) {
 		"base_url": "ftp://slack-gov.com/api/"}
 	if _, err := New(bad); err == nil || !strings.Contains(err.Error(), "base_url") {
 		t.Errorf("New with invalid base_url: err = %v, want a base_url error", err)
+	}
+
+	wrongType := map[string]any{"bot_token": "xoxb-test", "app_token": "xapp-test",
+		"base_url": 42}
+	if _, err := New(wrongType); err == nil || !strings.Contains(err.Error(), "must be a string") {
+		t.Errorf("New with non-string base_url: err = %v, want a type error", err)
 	}
 
 	creds := map[string]any{"bot_token": "xoxb-test", "app_token": "xapp-test",
