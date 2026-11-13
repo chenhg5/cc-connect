@@ -58,23 +58,26 @@ func TestSteerBusySession_QueueModeAndIdleFallBack(t *testing.T) {
 	}
 }
 
-// When the platform already acknowledged the message, steering must not add a
-// second "已插话" bubble.
-func TestSteerBusySession_NoExtraAckWhenPlatformAcked(t *testing.T) {
+// Without a deferred-ack handle the engine falls back to a plain reply.
+func TestSteerBusySession_FallsBackToPlainReply(t *testing.T) {
 	e, p := steerTestEngine(t)
 	state := &interactiveState{agentSession: newResultAgentSession("ok"), platform: p, replyCtx: "ctx", turnActive: true}
 	e.interactiveStates["k"] = state
 	sessions := e.sessions
 	session := sessions.GetOrCreateActive("k")
 
-	msg := &Message{SessionKey: "k", Platform: "test", UserID: "u", Content: "快点", ReplyCtx: "ctx", Acked: true}
+	msg := &Message{SessionKey: "k", Platform: "test", UserID: "u", Content: "快点", ReplyCtx: "ctx"}
 	if !e.steerBusySession(p, msg, "k", session, sessions) {
 		t.Fatal("steerBusySession() = false, want true")
 	}
+	found := false
 	for _, sent := range p.sent {
 		if strings.Contains(sent, "插话") {
-			t.Fatalf("extra steer ack sent despite platform ack: %q", sent)
+			found = true
 		}
+	}
+	if !found {
+		t.Fatalf("no steer ack sent: %v", p.sent)
 	}
 }
 
@@ -84,14 +87,14 @@ type ackStubPlatform struct {
 	updated []string
 }
 
-func (p *ackStubPlatform) UpdateAck(_ context.Context, _ any, text string) error {
+func (p *ackStubPlatform) SendAck(_ context.Context, _ any, text string) error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.updated = append(p.updated, text)
 	return nil
 }
 
-// The single bubble is rewritten in place instead of a second message.
+// With a deferred ack the single bubble carries the steer text.
 func TestSteerRewritesExistingAck(t *testing.T) {
 	p := &ackStubPlatform{stubPlatformEngine: stubPlatformEngine{n: "test"}}
 	e := NewEngine("test", &resultAgent{session: newResultAgentSession("ok")}, []Platform{p}, "", LangChinese)
@@ -102,7 +105,7 @@ func TestSteerRewritesExistingAck(t *testing.T) {
 	sessions := e.sessions
 	session := sessions.GetOrCreateActive("k")
 
-	msg := &Message{SessionKey: "k", Platform: "test", UserID: "u", Content: "快点", ReplyCtx: "ctx", Acked: true, AckHandle: "ack-1"}
+	msg := &Message{SessionKey: "k", Platform: "test", UserID: "u", Content: "快点", ReplyCtx: "ctx", AckHandle: "ack-1"}
 	if !e.steerBusySession(p, msg, "k", session, sessions) {
 		t.Fatal("steerBusySession() = false")
 	}
@@ -113,7 +116,7 @@ func TestSteerRewritesExistingAck(t *testing.T) {
 	p.mu.Unlock()
 
 	if len(updated) != 1 || !strings.Contains(updated[0], "插话") {
-		t.Fatalf("ack updates = %v, want one steer text", updated)
+		t.Fatalf("acks = %v, want exactly one steer text", updated)
 	}
 	for _, s := range sent {
 		if strings.Contains(s, "插话") {

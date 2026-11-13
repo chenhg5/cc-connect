@@ -180,6 +180,7 @@ const (
 	MsgTaskCardStopBtn           MsgKey = "task_card_stop_btn"
 	MsgTaskCardWaitingConfirm    MsgKey = "task_card_waiting_confirm"
 	MsgSteerAck                  MsgKey = "steer_ack"
+	MsgAckProcessing             MsgKey = "ack_processing"
 	MsgNoExecution               MsgKey = "no_execution"
 	MsgPreviousProcessing        MsgKey = "previous_processing"
 	MsgQueueFull                 MsgKey = "queue_full"
@@ -760,6 +761,13 @@ var messages = map[MsgKey]map[Language]string{
 		LangTraditionalChinese: "⏹ 停止當前",
 		LangJapanese:           "⏹ 停止",
 		LangSpanish:            "⏹ Detener",
+	},
+	MsgAckProcessing: {
+		LangEnglish:            "Received, processing...",
+		LangChinese:            "收到，处理中...",
+		LangTraditionalChinese: "收到，處理中...",
+		LangJapanese:           "受信しました。処理中...",
+		LangSpanish:            "Recibido, procesando...",
 	},
 	MsgSteerAck: {
 		LangEnglish:            "Received — sent into the running task, please wait…",

@@ -334,12 +334,12 @@ type SessionInterrupter interface {
 	Interrupt(reason string) error
 }
 
-// AckUpdater is an optional interface for platforms whose courtesy ack
-// ("收到，正在处理中...") can be rewritten in place. The engine uses it to turn
-// that single bubble into the accurate outcome (e.g. steered into the running
-// task) instead of stacking a second message.
-type AckUpdater interface {
-	UpdateAck(ctx context.Context, handle any, text string) error
+// AckSender is an optional interface for platforms that defer their courtesy
+// ack to the engine. The platform stops replying immediately and instead hands
+// the engine a handle, so exactly one message states the real outcome
+// (processing / steered into the running task / queued).
+type AckSender interface {
+	SendAck(ctx context.Context, handle any, text string) error
 }
 
 // TaskCardSender is an optional interface for platforms that can post a

@@ -1127,24 +1127,18 @@ func (p *Platform) dispatchMessage(ctx context.Context, msgType, content string,
 			)
 			return
 		}
-		acked := false
+		// The courtesy ack is deferred to the engine so one message can state
+		// the real outcome (processing / steered / queued).
 		var ackHandle any
 		if p.autoThread {
-			ackMsgType, ackMsgBody := buildReplyContent(p.threadAckMessage)
-			rc := replyContext{messageID: messageID, chatID: chatID, sessionKey: sessionKey}
-			if id, err := p.replyMessageReturningID(ctx, rc, ackMsgType, ackMsgBody); err != nil {
-				slog.Warn(p.tag()+": auto_thread ack failed", "error", err)
-			} else {
-				acked = true
-				ackHandle = &feishuAckHandle{messageID: id}
-			}
+			ackHandle = rctx
 		}
 		p.dispatchCoreMessage(&core.Message{
 			SessionKey: sessionKey, Platform: p.platformName,
 			MessageID: messageID,
 			UserID:    userID, UserName: userName, ChatName: chatName,
 			Content: text, ExtraContent: quoted.text, Images: quoted.images, ReplyCtx: rctx,
-			Acked: acked, AckHandle: ackHandle,
+			AckHandle: ackHandle,
 		})
 
 	case "image":
@@ -1336,24 +1330,18 @@ func (p *Platform) dispatchMessage(ctx context.Context, msgType, content string,
 			slog.Debug(p.tag()+": dropping interactive card with no extractable text", "message_id", messageID)
 			return
 		}
-		acked := false
+		// The courtesy ack is deferred to the engine so one message can state
+		// the real outcome (processing / steered / queued).
 		var ackHandle any
 		if p.autoThread {
-			ackMsgType, ackMsgBody := buildReplyContent(p.threadAckMessage)
-			rc := replyContext{messageID: messageID, chatID: chatID, sessionKey: sessionKey}
-			if id, err := p.replyMessageReturningID(ctx, rc, ackMsgType, ackMsgBody); err != nil {
-				slog.Warn(p.tag()+": auto_thread ack failed", "error", err)
-			} else {
-				acked = true
-				ackHandle = &feishuAckHandle{messageID: id}
-			}
+			ackHandle = rctx
 		}
 		p.dispatchCoreMessage(&core.Message{
 			SessionKey: sessionKey, Platform: p.platformName,
 			MessageID: messageID,
 			UserID:    userID, UserName: userName, ChatName: chatName,
 			Content: text, ExtraContent: quoted.text, Images: quoted.images, ReplyCtx: rctx,
-			Acked: acked, AckHandle: ackHandle,
+			AckHandle: ackHandle,
 		})
 
 	default:

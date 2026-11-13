@@ -2244,6 +2244,11 @@ func (e *Engine) handleMessage(p Platform, msg *Message) {
 	}
 
 sessionLocked:
+	// Acknowledge only when the platform deferred its courtesy reply; platforms
+	// that ack on their own are left untouched.
+	if msg.AckHandle != nil {
+		e.sendAck(p, msg, e.i18n.T(MsgAckProcessing))
+	}
 	if rotated := e.maybeAutoResetSessionOnIdle(p, msg, sessions, interactiveKey, session); rotated != nil {
 		session = rotated
 	}
@@ -2312,6 +2317,24 @@ func (e *Engine) maybeAutoResetSessionOnIdle(p Platform, msg *Message, sessions 
 	return newSession
 }
 
+// sendAck posts the single outcome notice for a message through the platform's
+// deferred ack channel, falling back to a plain reply.
+func (e *Engine) sendAck(p Platform, msg *Message, text string) {
+	if msg == nil || text == "" {
+		return
+	}
+	if msg.AckHandle != nil {
+		if sender, ok := p.(AckSender); ok {
+			if err := sender.SendAck(e.ctx, msg.AckHandle, text); err == nil {
+				return
+			} else {
+				slog.Warn("deferred ack failed; sending a plain reply", "platform", p.Name(), "error", err)
+			}
+		}
+	}
+	e.reply(p, msg.ReplyCtx, text)
+}
+
 // steerBusySession forwards a message into the in-flight turn instead of
 // queueing it. The agent CLI treats a mid-turn message as part of the current
 // turn and surfaces it at the next tool boundary; it does NOT emit a second
@@ -2377,17 +2400,7 @@ func (e *Engine) steerBusySession(p Platform, msg *Message, interactiveKey strin
 	if tc := stateTaskCard(state); tc != nil {
 		tc.SetStep(truncateStr(msg.Content, taskCardMaxStepLen))
 	}
-	// Rewrite the platform's courtesy ack ("收到，正在处理中...") into the
-	// accurate outcome, so the user gets one bubble instead of two.
-	if msg.Acked && msg.AckHandle != nil {
-		if updater, ok := p.(AckUpdater); ok {
-			if err := updater.UpdateAck(e.ctx, msg.AckHandle, e.i18n.T(MsgSteerAck)); err != nil {
-				slog.Debug("steer ack update failed", "platform", p.Name(), "error", err)
-			}
-		}
-	} else if !msg.Acked {
-		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgSteerAck))
-	}
+	e.sendAck(p, msg, e.i18n.T(MsgSteerAck))
 	slog.Info("message steered into running turn", "session", msg.SessionKey, "user", msg.UserName)
 	return true
 }
@@ -2447,12 +2460,8 @@ func (e *Engine) queueMessageForBusySession(p Platform, msg *Message, interactiv
 	e.syncTaskCardQueue(state)
 	// With a live card the queue is already visible there; a per-message
 	// "queued" reply would just be noise.
-	if !msg.Acked && !stateTaskCard(state).Visible() {
-		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgMessageQueued))
-	} else if msg.Acked && msg.AckHandle != nil {
-		if updater, ok := p.(AckUpdater); ok {
-			_ = updater.UpdateAck(e.ctx, msg.AckHandle, e.i18n.T(MsgMessageQueued))
-		}
+	if !stateTaskCard(state).Visible() {
+		e.sendAck(p, msg, e.i18n.T(MsgMessageQueued))
 	}
 	return true
 }

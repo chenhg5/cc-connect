@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"log/slog"
 	"strings"
-	"time"
 
 	"github.com/chenhg5/cc-connect/core"
 	lark "github.com/larksuite/oapi-sdk-go/v3"
@@ -526,54 +525,14 @@ func (p *interactivePlatform) UpdateTaskCard(ctx context.Context, handle any, ca
 	})
 }
 
-// feishuAckHandle identifies the courtesy ack message so it can be rewritten.
-type feishuAckHandle struct {
-	messageID string
-}
-
-// UpdateAck rewrites the earlier "收到，正在处理中..." message in place, so the
-// user ends up with a single accurate bubble.
-func (p *interactivePlatform) UpdateAck(ctx context.Context, handle any, text string) error {
-	h, ok := handle.(*feishuAckHandle)
-	if !ok || h == nil || h.messageID == "" {
+// SendAck posts the engine's single outcome notice (processing / steered /
+// queued) as a reply to the triggering message. The platform no longer sends
+// its own ack, so the user never sees two bubbles racing.
+func (p *interactivePlatform) SendAck(ctx context.Context, handle any, text string) error {
+	rc, ok := handle.(replyContext)
+	if !ok {
 		return fmt.Errorf("%s: invalid ack handle %T", p.tag(), handle)
 	}
-	_, body := buildReplyContent(text)
-	req := larkim.NewPatchMessageReqBuilder().
-		MessageId(h.messageID).
-		Body(larkim.NewPatchMessageReqBodyBuilder().Content(body).Build()).
-		Build()
-
-	// The ack was created milliseconds ago; Feishu occasionally rejects a
-	// patch that arrives before the message is readable. Retry briefly.
-	var lastErr error
-	for attempt := 0; attempt < 3; attempt++ {
-		if attempt > 0 {
-			select {
-			case <-ctx.Done():
-				return ctx.Err()
-			case <-time.After(200 * time.Millisecond):
-			}
-		}
-		err := p.withTransientRetry(ctx, "update ack", func() error {
-			return p.withFreshTenantAccessTokenRetry(ctx, "update ack", func(client *lark.Client, options ...larkcore.RequestOptionFunc) error {
-				resp, err := client.Im.Message.Patch(ctx, req, options...)
-				if err != nil {
-					return fmt.Errorf("%s: update ack: %w", p.tag(), err)
-				}
-				if !resp.Success() {
-					return fmt.Errorf("%s: update ack code=%d msg=%s", p.tag(), resp.Code, resp.Msg)
-				}
-				return nil
-			})
-		})
-		if err == nil {
-			if attempt > 0 {
-				slog.Info("feishu: ack rewritten after retry", "message_id", h.messageID, "attempt", attempt+1)
-			}
-			return nil
-		}
-		lastErr = err
-	}
-	return lastErr
+	msgType, body := buildReplyContent(text)
+	return p.replyMessage(ctx, rc, msgType, body)
 }
