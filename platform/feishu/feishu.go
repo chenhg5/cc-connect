@@ -137,6 +137,12 @@ type Platform struct {
 	threadIsolation            bool
 	autoThread                 bool   // when true, reply with ReplyInThread(true) to auto-create Feishu threads
 	threadAckMessage           string // first reply text when creating thread (e.g. "收到，正在处理中...")
+	// threadReplyWithoutMention: inside a thread the bot already joined, accept
+	// messages that do not @ the bot. Threads it never joined still need a
+	// mention, so unrelated conversations are left alone.
+	threadReplyWithoutMention bool
+	threadBotMu                sync.Mutex
+	threadBotSeen              map[string]threadBotEntry
 	// noReplyToTrigger: when true, send via Create instead of Im.Message.Reply (no quote to the user's message).
 	noReplyToTrigger bool
 	resolveMentions  bool
@@ -208,6 +214,10 @@ func newPlatform(name, domain string, opts map[string]any) (core.Platform, error
 	doneEmoji, _ := opts["done_emoji"].(string)
 	if doneEmoji == "none" {
 		doneEmoji = ""
+	}
+	threadReplyWithoutMention := true
+	if v, ok := opts["thread_reply_without_mention"].(bool); ok {
+		threadReplyWithoutMention = v
 	}
 	allowFrom, _ := opts["allow_from"].(string)
 	core.CheckAllowFrom(name, allowFrom)
@@ -289,6 +299,8 @@ func newPlatform(name, domain string, opts map[string]any) (core.Platform, error
 		threadIsolation:            threadIsolation,
 		autoThread:                 autoThread,
 		threadAckMessage:           threadAckMessage,
+		threadReplyWithoutMention:  threadReplyWithoutMention,
+		threadBotSeen:              make(map[string]threadBotEntry),
 		resolveMentions:            resolveMentionsOpt,
 		noReplyToTrigger:           noReplyToTrigger,
 		client:                     lark.NewClient(appID, appSecret, clientOpts...),
@@ -1019,10 +1031,17 @@ func (p *Platform) onMessage(ctx context.Context, event *larkim.P2MessageReceive
 
 	if chatType == "group" && !p.groupReplyAll && p.botOpenID != "" {
 		if !isBotMentioned(msg.Mentions, p.botOpenID) {
+			threadID := stringValue(msg.ThreadId)
+			if threadID == "" {
+				threadID = stringValue(msg.RootId)
+			}
+			switch {
 			// Feishu @all sends {"text":"@_all"} with 0 mentions.
-			if p.respondToAtEveryoneAndHere && msg.Content != nil && strings.Contains(*msg.Content, "@_all") {
+			case p.respondToAtEveryoneAndHere && msg.Content != nil && strings.Contains(*msg.Content, "@_all"):
 				slog.Debug(p.tag()+": responding to @all message", "chat_id", chatID)
-			} else {
+			case p.threadReplyWithoutMention && threadID != "" && p.botInThread(ctx, threadID):
+				slog.Debug(p.tag()+": thread message without mention accepted", "chat_id", chatID, "thread", threadID)
+			default:
 				slog.Debug(p.tag()+": ignoring group message without bot mention", "chat_id", chatID)
 				return nil
 			}
@@ -3229,6 +3248,72 @@ func (p *Platform) fetchBotOpenID() (string, error) {
 		return "", fmt.Errorf("api code=%d", result.Code)
 	}
 	return result.Bot.OpenID, nil
+}
+
+
+type threadBotEntry struct {
+	in bool
+	at time.Time
+}
+
+// botInThread reports whether the bot has already posted in the given thread.
+// Results are cached: every un-mentioned group message would otherwise cost an
+// API round trip.
+func (p *Platform) botInThread(ctx context.Context, threadID string) bool {
+	if threadID == "" || p.client == nil {
+		return false
+	}
+	p.threadBotMu.Lock()
+	if e, ok := p.threadBotSeen[threadID]; ok {
+		ttl := 10 * time.Minute
+		if !e.in {
+			ttl = 30 * time.Second
+		}
+		if time.Since(e.at) < ttl {
+			p.threadBotMu.Unlock()
+			return e.in
+		}
+	}
+	p.threadBotMu.Unlock()
+
+	req := larkim.NewListMessageReqBuilder().
+		ContainerIdType("thread").
+		ContainerId(threadID).
+		PageSize(50).
+		Build()
+	resp, err := p.client.Im.Message.List(ctx, req)
+	if err != nil || resp == nil || !resp.Success() || resp.Data == nil {
+		if err != nil {
+			slog.Debug(p.tag()+": list thread messages failed", "thread", threadID, "error", err)
+		}
+		return false
+	}
+	in := false
+	for _, item := range resp.Data.Items {
+		if item == nil || item.Sender == nil {
+			continue
+		}
+		if item.Sender.IdType != nil && *item.Sender.IdType == "app" {
+			in = true
+			break
+		}
+		if p.botOpenID != "" && item.Sender.Id != nil && *item.Sender.Id == p.botOpenID {
+			in = true
+			break
+		}
+	}
+	p.threadBotMu.Lock()
+	p.threadBotSeen[threadID] = threadBotEntry{in: in, at: time.Now()}
+	if len(p.threadBotSeen) > 500 {
+		for k := range p.threadBotSeen {
+			delete(p.threadBotSeen, k)
+			if len(p.threadBotSeen) <= 400 {
+				break
+			}
+		}
+	}
+	p.threadBotMu.Unlock()
+	return in
 }
 
 func isBotMentioned(mentions []*larkim.MentionEvent, botOpenID string) bool {
