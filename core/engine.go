@@ -5550,7 +5550,8 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			state.eventsNeedResync = true
 			p := state.platform
 			state.mu.Unlock()
-			e.send(p, replyCtx, fmt.Sprintf(e.i18n.T(MsgError), "agent session timed out (no response)"))
+			e.send(p, replyCtx, fmt.Sprintf(e.i18n.T(MsgAgentIdleTimeout), e.eventIdleTimeout))
+			e.notifyDroppedQueuedMessagesWithText(state, e.i18n.T(MsgQueuedMessageTimedOut))
 			e.cleanupInteractiveState(sessionKey, state)
 			return
 		case <-turnDeadlineCh:
@@ -6961,12 +6962,16 @@ func mergeRichToolResult(steps []ToolStep, event Event, result string, maxLen in
 // the event loop exits abnormally (EventError, channel closed) and queued
 // messages can no longer be delivered to the agent.
 func (e *Engine) notifyDroppedQueuedMessages(state *interactiveState, reason error) {
+	e.notifyDroppedQueuedMessagesWithText(state, fmt.Sprintf(e.i18n.T(MsgError), reason))
+}
+
+func (e *Engine) notifyDroppedQueuedMessagesWithText(state *interactiveState, text string) {
 	state.mu.Lock()
 	remaining := state.pendingMessages
 	state.pendingMessages = nil
 	state.mu.Unlock()
 	for _, q := range remaining {
-		e.send(q.platform, q.replyCtx, fmt.Sprintf(e.i18n.T(MsgError), reason))
+		e.send(q.platform, q.replyCtx, text)
 	}
 }
 

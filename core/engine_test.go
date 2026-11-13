@@ -11468,12 +11468,18 @@ func TestEventIdleTimeout_CleansUpSession(t *testing.T) {
 		agentSession: sess,
 		platform:     p,
 		replyCtx:     "ctx",
+		pendingMessages: []queuedMessage{{
+			platform: p,
+			replyCtx: "queued-ctx",
+			content:  "queued message",
+		}},
 	}
 	e.interactiveMu.Lock()
 	e.interactiveStates[key] = state
 	e.interactiveMu.Unlock()
 
 	session := e.sessions.GetOrCreateActive(key)
+	session.SetAgentSessionID("persisted-agent-session", "test")
 	session.TryLock()
 
 	done := make(chan struct{})
@@ -11490,13 +11496,26 @@ func TestEventIdleTimeout_CleansUpSession(t *testing.T) {
 
 	sent := p.getSent()
 	foundTimeout := false
+	foundQueuedNotice := false
 	for _, s := range sent {
-		if strings.Contains(s, "timed out") {
+		if strings.Contains(s, "timed out") && strings.Contains(s, "history was preserved") {
 			foundTimeout = true
+		}
+		if strings.Contains(s, "queued message was not processed") && strings.Contains(s, "send this message again") {
+			foundQueuedNotice = true
+		}
+		if strings.Contains(s, "session reset") {
+			t.Fatalf("misleading reset message sent: %q", s)
 		}
 	}
 	if !foundTimeout {
 		t.Fatalf("expected timeout error message, got %v", sent)
+	}
+	if !foundQueuedNotice {
+		t.Fatalf("expected queued-message timeout notice, got %v", sent)
+	}
+	if got := session.GetAgentSessionID(); got != "persisted-agent-session" {
+		t.Fatalf("persistent agent session ID changed after run timeout: %q", got)
 	}
 }
 
