@@ -141,7 +141,11 @@ type Platform struct {
 	// mention, so unrelated conversations are left alone.
 	threadReplyWithoutMention bool
 	threadSeenMu               sync.Mutex
+	threadSaveMu               sync.Mutex
 	threadSeen             map[string]time.Time
+	threadSeenSaved        map[string]time.Time
+	threadStatePath        string
+	threadSaveTimer        *time.Timer
 	// rootMu guards rootCache and rootInflight. rootCache maps a message id to
 	// its parent, so a whole topic resolves to one session even when Feishu
 	// reports a different root_id for the topic's first message and the rest.
@@ -310,6 +314,7 @@ func newPlatform(name, domain string, opts map[string]any) (core.Platform, error
 		threadAckMessage:           threadAckMessage,
 		threadReplyWithoutMention:  threadReplyWithoutMention,
 		threadSeen:             make(map[string]time.Time),
+		threadStatePath:        threadSeenStatePath(name, opts),
 		resolveMentions:            resolveMentionsOpt,
 		noReplyToTrigger:           noReplyToTrigger,
 		client:                     lark.NewClient(appID, appSecret, clientOpts...),
@@ -320,6 +325,8 @@ func newPlatform(name, domain string, opts map[string]any) (core.Platform, error
 		encryptKey:                 encryptKey,
 		peerBots:                   peerBots,
 	}
+	base.loadThreadSeen()
+
 	if !useInteractiveCard {
 		base.self = base
 		return base, nil
@@ -3270,7 +3277,7 @@ func (p *Platform) fetchBotOpenID() (string, error) {
 }
 
 
-const threadSeenTTL = 24 * time.Hour
+const threadSeenTTL = 3 * 24 * time.Hour
 
 // markThread remembers a thread the bot is taking part in. Inside it the
 // mention requirement no longer applies.
@@ -3278,19 +3285,30 @@ func (p *Platform) markThread(threadID string) {
 	if threadID == "" {
 		return
 	}
+	now := time.Now()
 	p.threadSeenMu.Lock()
 	if p.threadSeen == nil {
 		p.threadSeen = make(map[string]time.Time)
 	}
-	p.threadSeen[threadID] = time.Now()
-	if len(p.threadSeen) > 1000 {
-		for k, at := range p.threadSeen {
-			if time.Since(at) > threadSeenTTL {
-				delete(p.threadSeen, k)
+	if p.threadSeenSaved == nil {
+		p.threadSeenSaved = make(map[string]time.Time)
+	}
+	p.threadSeen[threadID] = now
+	if len(p.threadSeen) > threadSeenMax {
+		pruneThreadSeen(p.threadSeen, now)
+		for id := range p.threadSeenSaved {
+			if _, ok := p.threadSeen[id]; !ok {
+				delete(p.threadSeenSaved, id)
 			}
 		}
 	}
+	lastSaved, saved := p.threadSeenSaved[threadID]
+	needSave := !saved || now.Sub(lastSaved) >= threadSeenSaveRefresh
 	p.threadSeenMu.Unlock()
+
+	if needSave {
+		p.scheduleThreadSeenSave()
+	}
 }
 
 // threadAllowed reports whether the bot already takes part in this thread.
@@ -3301,7 +3319,15 @@ func (p *Platform) threadAllowed(threadID string) bool {
 	p.threadSeenMu.Lock()
 	defer p.threadSeenMu.Unlock()
 	at, ok := p.threadSeen[threadID]
-	return ok && time.Since(at) < threadSeenTTL
+	if !ok {
+		return false
+	}
+	if time.Since(at) >= threadSeenTTL {
+		delete(p.threadSeen, threadID)
+		delete(p.threadSeenSaved, threadID)
+		return false
+	}
+	return true
 }
 
 func isBotMentioned(mentions []*larkim.MentionEvent, botOpenID string) bool {
@@ -4303,6 +4329,7 @@ func (p *Platform) UpdateMessage(ctx context.Context, previewHandle any, content
 }
 
 func (p *Platform) Stop() error {
+	p.flushThreadSeen()
 	if p.isWSPrimary {
 		remaining := unregisterSharedWS(p)
 		if remaining > 0 {
