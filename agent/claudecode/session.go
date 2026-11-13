@@ -22,6 +22,29 @@ import (
 	"github.com/chenhg5/cc-connect/core"
 )
 
+var (
+	partialSupportOnce sync.Once
+	partialSupported   bool
+)
+
+// supportsPartialMessages probes the CLI once for token-level streaming
+// (--include-partial-messages). Older builds reject the flag, so the probe
+// decides whether it is safe to pass.
+func supportsPartialMessages(cliBin string) bool {
+	partialSupportOnce.Do(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		defer cancel()
+		out, err := exec.CommandContext(ctx, cliBin, "--help").CombinedOutput()
+		if err != nil {
+			slog.Debug("claudecode: partial-message probe failed", "error", err)
+			return
+		}
+		partialSupported = strings.Contains(string(out), "include-partial-messages")
+		slog.Info("claudecode: partial-message streaming", "supported", partialSupported)
+	})
+	return partialSupported
+}
+
 // claudeSession manages a long-running Claude Code process using
 // --input-format stream-json and --permission-prompt-tool stdio.
 //
@@ -31,6 +54,13 @@ type claudeSession struct {
 	cmd             *exec.Cmd
 	stdin           io.WriteCloser
 	stdinMu         sync.Mutex
+
+	// Incremental streaming state: when --include-partial-messages is active the
+	// CLI emits text deltas first and then the completed assistant message.
+	// Tracking the message id lets us emit each piece of text exactly once.
+	streamMu     sync.Mutex
+	streamMsgID  string
+	streamedText int
 	events          chan core.Event
 	sessionID       atomic.Value // stores string
 	model           atomic.Value // stores string — actual model the process was spawned with (routing-aware)
@@ -63,6 +93,11 @@ func newClaudeSession(ctx context.Context, workDir, cliBin string, cliExtraArgs 
 		"--input-format", "stream-json",
 		"--permission-prompt-tool", "stdio",
 		"--replay-user-messages",
+	}
+	// Ask the CLI for token-level deltas so text can be shown as it is written
+	// instead of arriving as one large block at the end.
+	if supportsPartialMessages(cliBin) {
+		innerArgs = append(innerArgs, "--include-partial-messages")
 	}
 	if !disableVerbose {
 		innerArgs = append(innerArgs, "--verbose")
@@ -336,6 +371,8 @@ func (cs *claudeSession) handleReadLoopLine(line string) {
 		cs.handleUser(raw)
 	case "result":
 		cs.handleResult(raw)
+	case "stream_event":
+		cs.handleStreamEvent(raw)
 	case "control_request":
 		cs.handleControlRequest(raw)
 	case "control_cancel_request":
@@ -374,6 +411,12 @@ func (cs *claudeSession) handleAssistant(raw map[string]any) {
 	if !ok {
 		return
 	}
+	// With partial streaming the same text already reached the engine as
+	// deltas; re-emitting the completed message would duplicate it.
+	msgID, _ := msg["id"].(string)
+	cs.streamMu.Lock()
+	alreadyStreamed := msgID != "" && msgID == cs.streamMsgID && cs.streamedText > 0
+	cs.streamMu.Unlock()
 	for _, contentItem := range contentArr {
 		item, ok := contentItem.(map[string]any)
 		if !ok {
@@ -403,6 +446,9 @@ func (cs *claudeSession) handleAssistant(raw map[string]any) {
 				}
 			}
 		case "text":
+			if alreadyStreamed {
+				continue
+			}
 			if text, ok := item["text"].(string); ok && text != "" {
 				evt := core.Event{Type: core.EventText, Content: text}
 				select {
@@ -411,6 +457,41 @@ func (cs *claudeSession) handleAssistant(raw map[string]any) {
 					return
 				}
 			}
+		}
+	}
+}
+
+// handleStreamEvent forwards token-level text deltas from the CLI. Only text
+// is forwarded: thinking/tool deltas are redundant with the completed events.
+func (cs *claudeSession) handleStreamEvent(raw map[string]any) {
+	evt, ok := raw["event"].(map[string]any)
+	if !ok {
+		return
+	}
+	switch evt["type"] {
+	case "message_start":
+		msg, _ := evt["message"].(map[string]any)
+		id, _ := msg["id"].(string)
+		cs.streamMu.Lock()
+		cs.streamMsgID = id
+		cs.streamedText = 0
+		cs.streamMu.Unlock()
+	case "content_block_delta":
+		delta, _ := evt["delta"].(map[string]any)
+		if delta == nil || delta["type"] != "text_delta" {
+			return
+		}
+		text, _ := delta["text"].(string)
+		if text == "" {
+			return
+		}
+		cs.streamMu.Lock()
+		cs.streamedText += len(text)
+		cs.streamMu.Unlock()
+		out := core.Event{Type: core.EventText, Content: text}
+		select {
+		case cs.events <- out:
+		case <-cs.ctx.Done():
 		}
 	}
 }
@@ -441,6 +522,13 @@ func (cs *claudeSession) handleUser(raw map[string]any) {
 }
 
 func (cs *claudeSession) handleResult(raw map[string]any) {
+	// The message is finished; drop the partial-stream bookkeeping so the next
+	// message starts clean.
+	cs.streamMu.Lock()
+	cs.streamMsgID = ""
+	cs.streamedText = 0
+	cs.streamMu.Unlock()
+
 	var content string
 	if result, ok := raw["result"].(string); ok {
 		content = result
