@@ -143,6 +143,12 @@ type Platform struct {
 	threadReplyWithoutMention bool
 	threadBotMu                sync.Mutex
 	threadBotSeen              map[string]threadBotEntry
+	// chatUserSeen remembers (chat,user) pairs that already talked to the bot,
+	// so the next messages in that chat do not need a mention. Key insight:
+	// in topic groups the message often has no thread id, so thread membership
+	// alone cannot decide it.
+	chatUserMu   sync.Mutex
+	chatUserSeen map[string]time.Time
 	// noReplyToTrigger: when true, send via Create instead of Im.Message.Reply (no quote to the user's message).
 	noReplyToTrigger bool
 	resolveMentions  bool
@@ -301,6 +307,7 @@ func newPlatform(name, domain string, opts map[string]any) (core.Platform, error
 		threadAckMessage:           threadAckMessage,
 		threadReplyWithoutMention:  threadReplyWithoutMention,
 		threadBotSeen:              make(map[string]threadBotEntry),
+		chatUserSeen:               make(map[string]time.Time),
 		resolveMentions:            resolveMentionsOpt,
 		noReplyToTrigger:           noReplyToTrigger,
 		client:                     lark.NewClient(appID, appSecret, clientOpts...),
@@ -1041,8 +1048,12 @@ func (p *Platform) onMessage(ctx context.Context, event *larkim.P2MessageReceive
 				slog.Debug(p.tag()+": responding to @all message", "chat_id", chatID)
 			case p.threadReplyWithoutMention && threadID != "" && p.botInThread(ctx, threadID):
 				slog.Debug(p.tag()+": thread message without mention accepted", "chat_id", chatID, "thread", threadID)
+			case p.threadReplyWithoutMention && p.recentChatUser(chatID, userID):
+				slog.Debug(p.tag()+": group message accepted without mention (known user)", "chat_id", chatID, "user", userID)
 			default:
-				slog.Debug(p.tag()+": ignoring group message without bot mention", "chat_id", chatID)
+				slog.Info(p.tag()+": ignoring group message without bot mention",
+					"chat_id", chatID, "user", userID, "thread", threadID,
+					"hint", "set thread_reply_without_mention or group_reply_all to change")
 				return nil
 			}
 		}
@@ -1068,6 +1079,12 @@ func (p *Platform) onMessage(ctx context.Context, event *larkim.P2MessageReceive
 	if chatType != "group" && p.groupOnly {
 		slog.Debug(p.tag()+": p2p message skipped (group_only=true)", "chat_type", chatType)
 		return nil
+	}
+
+	// The bot now knows this user in this chat: their following messages do not
+	// need a mention (topic groups often carry no thread id at all).
+	if chatType == "group" {
+		p.markChatUser(chatID, userID)
 	}
 
 	if msg.Content == nil && msgType != "merge_forward" {
@@ -3250,6 +3267,37 @@ func (p *Platform) fetchBotOpenID() (string, error) {
 	return result.Bot.OpenID, nil
 }
 
+
+const chatUserTTL = 24 * time.Hour
+
+// markChatUser remembers that this user already reached the bot in this chat.
+func (p *Platform) markChatUser(chatID, userID string) {
+	if chatID == "" || userID == "" {
+		return
+	}
+	p.chatUserMu.Lock()
+	if p.chatUserSeen == nil {
+		p.chatUserSeen = make(map[string]time.Time)
+	}
+	p.chatUserSeen[chatID+":"+userID] = time.Now()
+	if len(p.chatUserSeen) > 1000 {
+		for k, at := range p.chatUserSeen {
+			if time.Since(at) > chatUserTTL {
+				delete(p.chatUserSeen, k)
+			}
+		}
+	}
+	p.chatUserMu.Unlock()
+}
+
+// recentChatUser reports whether this user talked to the bot recently in this
+// chat, i.e. the bot is already part of that conversation.
+func (p *Platform) recentChatUser(chatID, userID string) bool {
+	p.chatUserMu.Lock()
+	defer p.chatUserMu.Unlock()
+	at, ok := p.chatUserSeen[chatID+":"+userID]
+	return ok && time.Since(at) < chatUserTTL
+}
 
 type threadBotEntry struct {
 	in bool
