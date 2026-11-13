@@ -7,6 +7,7 @@ import (
 	"sync"
 	"testing"
 	"time"
+	"unicode/utf8"
 )
 
 type taskCardStubPlatform struct {
@@ -241,5 +242,17 @@ func TestTruncateMiddleKeepsTail(t *testing.T) {
 	got := truncateMiddle("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaagent.js --flag", 20)
 	if !strings.HasSuffix(got, "--flag") || !strings.Contains(got, "…") {
 		t.Fatalf("truncateMiddle lost the tail: %q", got)
+	}
+}
+
+// Chinese steps must never be cut mid-rune (that shows up as garbage).
+func TestTruncateMiddleChinese(t *testing.T) {
+	in := "当前步骤：正在查询金克拉日志并统计近三十分钟的报价失败率用于对比昨日同时段数据"
+	got := truncateMiddle(in, 20)
+	if !utf8.ValidString(got) {
+		t.Fatalf("invalid UTF-8 after truncation: %q", got)
+	}
+	if n := utf8.RuneCountInString(got); n > 21 {
+		t.Fatalf("too long: %d runes", n)
 	}
 }

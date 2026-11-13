@@ -436,7 +436,10 @@ func shortenPaths(s string) string {
 // truncateMiddle keeps both ends of a long string so the tail (usually the
 // script name or arguments) stays readable.
 func truncateMiddle(s string, max int) string {
-	if max <= 0 || len(s) <= max {
+	// Slice by runes, not bytes: a Chinese character is 3 bytes and cutting
+	// mid-rune renders as garbage in the card.
+	runes := []rune(s)
+	if max <= 0 || len(runes) <= max {
 		return s
 	}
 	head := max * 2 / 5
@@ -444,7 +447,7 @@ func truncateMiddle(s string, max int) string {
 	if tail < 0 {
 		tail = 0
 	}
-	return s[:head] + "…" + s[len(s)-tail:]
+	return string(runes[:head]) + "…" + string(runes[len(runes)-tail:])
 }
 
 // Finished reports whether the card already reached a terminal state.
