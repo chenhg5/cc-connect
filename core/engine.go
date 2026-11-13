@@ -2835,6 +2835,12 @@ func (e *Engine) processInteractiveMessageWith(p Platform, msg *Message, session
 
 	// Live task card: one card per turn that keeps ticking while the agent is
 	// silent (elapsed time + current step + queue + stop button).
+	// Close any leftover card from a previous turn (e.g. after a hard stop) so
+	// at most one card is ever live.
+	if prev := stateTaskCard(state); prev != nil && !prev.Finished() {
+		prev.Finish(taskCardStopped, "")
+	}
+
 	var taskCard *turnCard
 	cardOutcome := taskCardDone
 	if !msg.Proactive {
@@ -8447,6 +8453,14 @@ func (e *Engine) cmdStop(p Platform, msg *Message) {
 		}
 	}
 
+	// Nothing running: do not kill the session just because the user pressed
+	// stop again (a stale card button, or a double click), or the context is
+	// lost for no reason.
+	if !e.hasActiveTurn(iKey) {
+		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgNoExecution))
+		return
+	}
+
 	if !e.stopInteractiveSession(iKey, p, msg.ReplyCtx) {
 		// Fallback: try suffix scan in case interactiveKeyForSessionKey
 		// resolved a different key than the one used to store the state
@@ -8461,6 +8475,19 @@ func (e *Engine) cmdStop(p Platform, msg *Message) {
 		return
 	}
 	e.reply(p, msg.ReplyCtx, e.i18n.T(MsgExecutionStopped))
+}
+
+// hasActiveTurn reports whether a turn is currently in flight for the session.
+func (e *Engine) hasActiveTurn(sessionKey string) bool {
+	e.interactiveMu.Lock()
+	state := e.interactiveStates[sessionKey]
+	e.interactiveMu.Unlock()
+	if state == nil {
+		return false
+	}
+	state.mu.Lock()
+	defer state.mu.Unlock()
+	return state.turnActive
 }
 
 // interruptInteractiveTurn asks the agent to abandon the in-flight turn while
@@ -8635,6 +8662,9 @@ func (e *Engine) stopInteractiveSessionWithOptions(sessionKey string, notifyQueu
 	agentSession := state.agentSession
 	state.mu.Unlock()
 
+	if tc := stateTaskCard(state); tc != nil {
+		tc.Finish(taskCardStopped, "")
+	}
 	state.markStopped()
 	delete(e.interactiveStates, sessionKey)
 	e.interactiveMu.Unlock()
