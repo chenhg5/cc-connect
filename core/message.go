@@ -179,6 +179,7 @@ type Message struct {
 	ReplyCtx     any                 // platform-specific context needed for replying
 	FromVoice    bool                // true if message originated from voice transcription
 	Proactive    bool                // true for scheduler-initiated runs (cron); no interactive UI
+	Acked        bool                // platform already sent a "received" ack, so the engine must not add its own
 	ModeOverride string              // if set, temporarily override agent permission mode for this message
 }
 

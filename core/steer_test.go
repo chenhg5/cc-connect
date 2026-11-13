@@ -55,3 +55,23 @@ func TestSteerBusySession_QueueModeAndIdleFallBack(t *testing.T) {
 		t.Fatal("steerBusySession() = true while idle, want false")
 	}
 }
+
+// When the platform already acknowledged the message, steering must not add a
+// second "已插话" bubble.
+func TestSteerBusySession_NoExtraAckWhenPlatformAcked(t *testing.T) {
+	e, p := steerTestEngine(t)
+	state := &interactiveState{agentSession: newResultAgentSession("ok"), platform: p, replyCtx: "ctx", turnActive: true}
+	e.interactiveStates["k"] = state
+	sessions := e.sessions
+	session := sessions.GetOrCreateActive("k")
+
+	msg := &Message{SessionKey: "k", Platform: "test", UserID: "u", Content: "快点", ReplyCtx: "ctx", Acked: true}
+	if !e.steerBusySession(p, msg, "k", session, sessions) {
+		t.Fatal("steerBusySession() = false, want true")
+	}
+	for _, sent := range p.sent {
+		if strings.Contains(sent, "插话") {
+			t.Fatalf("extra steer ack sent despite platform ack: %q", sent)
+		}
+	}
+}

@@ -2377,7 +2377,11 @@ func (e *Engine) steerBusySession(p Platform, msg *Message, interactiveKey strin
 	if tc := stateTaskCard(state); tc != nil {
 		tc.SetStep(truncateStr(msg.Content, taskCardMaxStepLen))
 	}
-	e.reply(p, msg.ReplyCtx, e.i18n.T(MsgSteerAck))
+	// The platform may have already posted a "received" ack; don't stack a
+	// second message on top of it.
+	if !msg.Acked {
+		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgSteerAck))
+	}
 	slog.Info("message steered into running turn", "session", msg.SessionKey, "user", msg.UserName)
 	return true
 }
@@ -2437,7 +2441,7 @@ func (e *Engine) queueMessageForBusySession(p Platform, msg *Message, interactiv
 	e.syncTaskCardQueue(state)
 	// With a live card the queue is already visible there; a per-message
 	// "queued" reply would just be noise.
-	if !stateTaskCard(state).Visible() {
+	if !msg.Acked && !stateTaskCard(state).Visible() {
 		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgMessageQueued))
 	}
 	return true
