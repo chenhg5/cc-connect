@@ -7465,6 +7465,15 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				setProgressNoticeSink()
 				state.mu.Unlock()
 
+				// Same rule as the turn above: the streaming card aggregates the
+				// whole queued turn, so its fresh compact progress writer must
+				// not post a second card for the same message. Tool results go
+				// through the writer unconditionally, so leaving it enabled
+				// produced two independently-updated cards per queued message.
+				if streamCard != nil && !streamCard.Failed() {
+					cp.disable()
+				}
+
 				// Send instant reply for queued turn if no streaming card is active.
 				if e.instantReply.Enabled && streamCard == nil {
 					replyContent := e.instantReply.Content

@@ -18796,6 +18796,93 @@ func TestStreamingCard_DisablesCompactProgressWriter(t *testing.T) {
 	}
 }
 
+// queuedDualCardAgentSession emits the same thinking/tool/result turn for
+// every prompt, so the turn started from a queued message matches the initial
+// one.
+type queuedDualCardAgentSession struct {
+	events chan Event
+}
+
+func newQueuedDualCardAgentSession() *queuedDualCardAgentSession {
+	return &queuedDualCardAgentSession{events: make(chan Event, 16)}
+}
+
+func (s *queuedDualCardAgentSession) Send(_ string, _ string, _ []ImageAttachment, _ []FileAttachment) error {
+	go func() {
+		s.events <- Event{Type: EventThinking, Content: "分析中……"}
+		s.events <- Event{Type: EventToolUse, ToolName: "bash", ToolInput: "ls"}
+		s.events <- Event{Type: EventToolResult, ToolName: "bash", Content: "ok"}
+		s.events <- Event{Type: EventResult, Content: "完成。", Done: true}
+	}()
+	return nil
+}
+
+func (s *queuedDualCardAgentSession) RespondPermission(_ string, _ PermissionResult) error {
+	return nil
+}
+func (s *queuedDualCardAgentSession) Events() <-chan Event     { return s.events }
+func (s *queuedDualCardAgentSession) CurrentSessionID() string { return "queued-dual" }
+func (s *queuedDualCardAgentSession) Alive() bool              { return true }
+func (s *queuedDualCardAgentSession) Close() error             { return nil }
+
+// TestStreamingCard_QueuedTurnDoesNotAlsoPostProgressCard is the queued-message
+// half of TestStreamingCard_DisablesCompactProgressWriter. Tool results reach
+// the compact progress writer without a streaming-card guard, so a queued
+// turn's fresh writer posted a second card next to the streaming card: the
+// platform showed two independently-updated cards for one message.
+func TestStreamingCard_QueuedTurnDoesNotAlsoPostProgressCard(t *testing.T) {
+	p := &dualCardPlatform{
+		stubCompactProgressPlatform: stubCompactProgressPlatform{
+			stubPlatformEngine: stubPlatformEngine{n: "feishu"},
+			style:              "card",
+			supportPayload:     true,
+		},
+	}
+	agentSession := newQueuedDualCardAgentSession()
+	e := NewEngine("test", &resultAgent{session: agentSession}, []Platform{p}, "", LangEnglish)
+	e.SetDisplayConfig(DisplayCfg{
+		ThinkingMessages: true,
+		ThinkingMaxLen:   300,
+		ToolMaxLen:       500,
+		ToolMessages:     true,
+		Mode:             "full",
+		CardMode:         "legacy",
+	})
+
+	sessionKey := "feishu:queued-dual"
+	session := e.sessions.GetOrCreateActive(sessionKey)
+	state := &interactiveState{
+		agentSession: agentSession,
+		platform:     p,
+		replyCtx:     "ctx-1",
+		pendingMessages: []queuedMessage{
+			{platform: p, replyCtx: "ctx-queued", content: "queued-msg", messageID: "queued-1"},
+		},
+	}
+	e.interactiveStates[sessionKey] = state
+
+	e.processInteractiveTurnWithRetry(state, session, e.sessions, sessionKey, "initial-msg", "m1", nil, nil, "ctx-1", time.Now(), sessionKey, len("initial-msg"), 0)
+
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		starts := len(p.getPreviewStarts())
+		if starts >= 2 {
+			// Brief settle window so a (buggy) third preview surfaces too.
+			time.Sleep(200 * time.Millisecond)
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("timed out waiting for both turns: previewStarts=%d", starts)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+
+	starts := p.getPreviewStarts()
+	if len(starts) != 2 {
+		t.Fatalf("SendPreviewStart calls = %d, want 2 (one streaming card per turn; queued turn must not also post a progress card): %#v", len(starts), starts)
+	}
+}
+
 // progressCardAgentSession emits a turn with intermediate step text (opencode
 // step buffering) followed by an EventResult carrying the answer content —
 // mirroring the opencode session behavior after the step-buffer change,
