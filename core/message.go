@@ -178,6 +178,7 @@ type Message struct {
 	ChannelKey   string              // platform-provided channel identifier for workspace binding (optional)
 	ReplyCtx     any                 // platform-specific context needed for replying
 	FromVoice    bool                // true if message originated from voice transcription
+	Proactive    bool                // true for scheduler-initiated runs (cron); no interactive UI
 	ModeOverride string              // if set, temporarily override agent permission mode for this message
 }
 

@@ -10,6 +10,9 @@ import (
 
 const (
 	taskCardHeartbeatInterval = 5 * time.Second
+	// taskCardFirstVisibleAfter suppresses cards for quick turns: a Q&A that
+	// finishes in under two seconds leaves no extra card behind.
+	taskCardFirstVisibleAfter  = 2 * time.Second
 	taskCardMinRenderGap      = 1500 * time.Millisecond
 	taskCardMaxQueueItems     = 5
 	taskCardMaxStepLen        = 80
@@ -54,6 +57,7 @@ type turnCard struct {
 	lastRender time.Time
 	finished   bool
 	disabled   bool
+	visible    bool // true once the card message exists
 
 	done chan struct{}
 	once sync.Once
@@ -76,13 +80,27 @@ func newTurnCard(e *Engine, p Platform, replyCtx any) *turnCard {
 	}
 }
 
-// Start posts the initial card and launches the heartbeat.
+// Start schedules the first render. Short turns finish before the delay and
+// never create a card at all.
 func (tc *turnCard) Start() {
 	if tc == nil {
 		return
 	}
+	go tc.run()
+}
+
+func (tc *turnCard) run() {
+	timer := time.NewTimer(taskCardFirstVisibleAfter)
+	defer timer.Stop()
+	select {
+	case <-tc.done:
+		return
+	case <-tc.e.ctx.Done():
+		return
+	case <-timer.C:
+	}
 	tc.render(true)
-	go tc.heartbeat()
+	tc.heartbeat()
 }
 
 func (tc *turnCard) heartbeat() {
@@ -98,6 +116,17 @@ func (tc *turnCard) heartbeat() {
 			tc.render(false)
 		}
 	}
+}
+
+// Visible reports whether the card message has been posted already. Before
+// that, callers must keep using plain-text fallbacks.
+func (tc *turnCard) Visible() bool {
+	if tc == nil {
+		return false
+	}
+	tc.mu.Lock()
+	defer tc.mu.Unlock()
+	return tc.visible
 }
 
 // SetStep records what the agent is doing now and refreshes (throttled).
@@ -164,6 +193,12 @@ func (tc *turnCard) render(force bool) {
 		tc.mu.Unlock()
 		return
 	}
+	// Never surface a card for a turn that already ended before the first
+	// render: that would leave a pointless "✅ 已完成 · 0:00" message.
+	if tc.handle == nil && !tc.visible && tc.finished {
+		tc.mu.Unlock()
+		return
+	}
 	now := time.Now()
 	if !force && now.Sub(tc.lastRender) < taskCardMinRenderGap {
 		tc.mu.Unlock()
@@ -185,6 +220,7 @@ func (tc *turnCard) render(force bool) {
 		}
 		tc.mu.Lock()
 		tc.handle = h
+		tc.visible = true
 		tc.mu.Unlock()
 		return
 	}

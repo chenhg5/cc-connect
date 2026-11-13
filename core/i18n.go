@@ -178,6 +178,7 @@ const (
 	MsgTaskCardStep              MsgKey = "task_card_step"
 	MsgTaskCardQueue             MsgKey = "task_card_queue"
 	MsgTaskCardStopBtn           MsgKey = "task_card_stop_btn"
+	MsgTaskCardWaitingConfirm    MsgKey = "task_card_waiting_confirm"
 	MsgNoExecution               MsgKey = "no_execution"
 	MsgPreviousProcessing        MsgKey = "previous_processing"
 	MsgQueueFull                 MsgKey = "queue_full"
@@ -758,6 +759,13 @@ var messages = map[MsgKey]map[Language]string{
 		LangTraditionalChinese: "⏹ 停止當前",
 		LangJapanese:           "⏹ 停止",
 		LangSpanish:            "⏹ Detener",
+	},
+	MsgTaskCardWaitingConfirm: {
+		LangEnglish:            "waiting for your confirmation",
+		LangChinese:            "等待你的确认",
+		LangTraditionalChinese: "等待你的確認",
+		LangJapanese:           "確認待ち",
+		LangSpanish:            "esperando tu confirmación",
 	},
 	MsgNoExecution: {
 		LangEnglish:            "No execution in progress.",

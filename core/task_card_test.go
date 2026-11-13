@@ -76,6 +76,8 @@ func TestTurnCard_RendersRunningStateWithStopButton(t *testing.T) {
 		t.Fatal("newTurnCard() = nil, want a card for a TaskCardSender platform")
 	}
 	tc.Start()
+	// Simulate the first-render delay elapsing.
+	tc.render(true)
 	defer tc.Finish(taskCardDone, "")
 
 	card := p.last()
@@ -100,6 +102,7 @@ func TestTurnCard_ReflectsStepQueueAndFinish(t *testing.T) {
 
 	tc := newTurnCard(e, p, "ctx")
 	tc.Start()
+	tc.render(true)
 
 	tc.SetStep("Bash · grep booking_check_fail_rate")
 	tc.SetQueue([]string{"快点", "帮我看下 XX 订单"})
@@ -143,5 +146,26 @@ func TestFormatCardElapsed(t *testing.T) {
 		if got := formatCardElapsed(time.Duration(secs) * time.Second); got != want {
 			t.Errorf("formatCardElapsed(%ds) = %q, want %q", secs, got, want)
 		}
+	}
+}
+
+// A turn that finishes before the first render must not leave a card behind.
+func TestTurnCard_QuickTurnLeavesNoCard(t *testing.T) {
+	e := NewEngine("test", &resultAgent{session: newResultAgentSession("ok")}, []Platform{&stubPlatformEngine{n: "test"}}, "", LangChinese)
+	t.Cleanup(e.cancel)
+	p := &taskCardStubPlatform{stubPlatformEngine: stubPlatformEngine{n: "feishu"}}
+
+	tc := newTurnCard(e, p, "ctx")
+	tc.Start()
+	tc.Finish(taskCardDone, "")
+
+	if tc.Visible() {
+		t.Fatal("card became visible for a turn that finished before the delay")
+	}
+	p.mu.Lock()
+	sends := len(p.sends)
+	p.mu.Unlock()
+	if sends != 0 {
+		t.Fatalf("sent %d cards for a quick turn, want 0", sends)
 	}
 }

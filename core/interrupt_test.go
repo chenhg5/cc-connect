@@ -41,7 +41,7 @@ func TestInterruptInteractiveTurn_SetsCancelFlag(t *testing.T) {
 	state := &interactiveState{agentSession: sess, turnActive: true}
 	e.interactiveStates["k"] = state
 
-	if !e.interruptInteractiveTurn("k", "user /stop") {
+	if !e.interruptInteractiveTurn("k", "user /stop", true, true) {
 		t.Fatal("interruptInteractiveTurn() = false, want true for interruptible session")
 	}
 	if got := sess.count(); got != 1 {
@@ -64,17 +64,17 @@ func TestInterruptInteractiveTurn_RejectsIdleAndUnsupported(t *testing.T) {
 
 	idle := &interactiveState{agentSession: &interruptSpySession{resultAgentSession: newResultAgentSession("ok")}}
 	e.interactiveStates["idle"] = idle
-	if e.interruptInteractiveTurn("idle", "x") {
+	if e.interruptInteractiveTurn("idle", "x", true, true) {
 		t.Fatal("interruptInteractiveTurn() = true for an idle session, want false")
 	}
 
 	unsupported := &interactiveState{agentSession: newResultAgentSession("ok"), turnActive: true}
 	e.interactiveStates["plain"] = unsupported
-	if e.interruptInteractiveTurn("plain", "x") {
+	if e.interruptInteractiveTurn("plain", "x", true, true) {
 		t.Fatal("interruptInteractiveTurn() = true for a session without Interrupt(), want false")
 	}
 
-	if e.interruptInteractiveTurn("missing", "x") {
+	if e.interruptInteractiveTurn("missing", "x", true, true) {
 		t.Fatal("interruptInteractiveTurn() = true for an unknown session, want false")
 	}
 }
