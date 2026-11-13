@@ -277,15 +277,23 @@ func TestProbeListSessions_parsesSessions(t *testing.T) {
 // fakeCallbacks captures reportModes / reportListSupported invocations
 // so tests can assert on them deterministically.
 type fakeCallbacks struct {
-	mu         sync.Mutex
-	modes      []acpModesBlock
-	listCalls  []bool
+	mu        sync.Mutex
+	modes     []acpModesBlock
+	listCalls []bool
 }
 
-func (f *fakeCallbacks) reportModes(b acpModesBlock)       { f.mu.Lock(); f.modes = append(f.modes, b); f.mu.Unlock() }
-func (f *fakeCallbacks) reportListSupported(supported bool) { f.mu.Lock(); f.listCalls = append(f.listCalls, supported); f.mu.Unlock() }
+func (f *fakeCallbacks) reportModes(b acpModesBlock) {
+	f.mu.Lock()
+	f.modes = append(f.modes, b)
+	f.mu.Unlock()
+}
+func (f *fakeCallbacks) reportListSupported(supported bool) {
+	f.mu.Lock()
+	f.listCalls = append(f.listCalls, supported)
+	f.mu.Unlock()
+}
 func (f *fakeCallbacks) reportModels(current string, models []core.ModelOption) {}
-func (f *fakeCallbacks) reportActiveSession(s *acpSession)                       {}
+func (f *fakeCallbacks) reportActiveSession(s *acpSession)                      {}
 func (f *fakeCallbacks) lastModes() (acpModesBlock, bool) {
 	f.mu.Lock()
 	defer f.mu.Unlock()

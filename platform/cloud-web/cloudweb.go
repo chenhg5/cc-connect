@@ -22,8 +22,8 @@ type Platform struct {
 	project string
 	token   string
 
-	transportKind string
-	allowFrom     string
+	transportKind  string
+	allowFrom      string
 	shareInChannel bool
 	groupReplyAll  bool
 

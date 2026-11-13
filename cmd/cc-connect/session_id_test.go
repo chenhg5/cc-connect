@@ -202,16 +202,16 @@ func TestMatchesProject(t *testing.T) {
 		want     bool
 	}{
 		{"mybot.json", "mybot", true},
-		{"mybot_abc123.json", "mybot", true},          // hash suffix
-		{"mybot_ws_abc123.json", "mybot", true},        // workspace hash suffix
-		{"mybot.sessions.json", "mybot", true},         // legacy naming
-		{"other.json", "mybot", false},                 // different project
-		{"mybotextra.json", "mybot", false},             // no underscore separator
-		{"mybot.txt", "mybot", false},                  // wrong extension
-		{"mybot_extra.json", "mybot", false},            // suffix is not hex
-		{"mybot_ws_notahex.json", "mybot", false},       // ws_ prefix but non-hex suffix
-		{"mybot_AABB00.json", "mybot", true},            // uppercase hex
-		{"mybot_ws.json", "mybot", false},               // "ws" alone is not hex (Codex #1 fix)
+		{"mybot_abc123.json", "mybot", true},      // hash suffix
+		{"mybot_ws_abc123.json", "mybot", true},   // workspace hash suffix
+		{"mybot.sessions.json", "mybot", true},    // legacy naming
+		{"other.json", "mybot", false},            // different project
+		{"mybotextra.json", "mybot", false},       // no underscore separator
+		{"mybot.txt", "mybot", false},             // wrong extension
+		{"mybot_extra.json", "mybot", false},      // suffix is not hex
+		{"mybot_ws_notahex.json", "mybot", false}, // ws_ prefix but non-hex suffix
+		{"mybot_AABB00.json", "mybot", true},      // uppercase hex
+		{"mybot_ws.json", "mybot", false},         // "ws" alone is not hex (Codex #1 fix)
 	}
 
 	for _, tt := range tests {
