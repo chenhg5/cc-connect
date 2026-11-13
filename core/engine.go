@@ -29,6 +29,12 @@ const maxPlatformMessageLen = 4000
 const telegramBotCommandLimit = 100
 const defaultMaxQueuedMessages = 5 // default cap for queued messages per session
 
+// interruptWatchdogTimeout bounds how long a session may stay blocked after a
+// stop was requested. The CLI applies interrupts at its next turn boundary, so
+// a stop issued mid-thinking can take a while; past this point we give up and
+// recover.
+var interruptWatchdogTimeout = 25 * time.Second
+
 const (
 	defaultThinkingMaxLen = 300
 	defaultToolMaxLen     = 500
@@ -8472,14 +8478,18 @@ func (e *Engine) interruptInteractiveTurn(sessionKey, reason string, dropQueue, 
 	return true
 }
 
-// interruptWatchdog is a last-resort guard: if the agent never unwinds the
-// interrupted turn, the session would stay locked forever and every later
-// message would queue behind a dead turn. Force a hard stop in that case.
+// interruptWatchdog is a last-resort guard for interrupts the CLI did not act
+// on (it only reads stdin at turn boundaries, so a stop issued while the model
+// is thinking can take a while). Without it the session would stay locked
+// forever and every later message would queue behind a dead turn.
+//
+// When it fires it hard-stops the session and re-dispatches the messages that
+// were waiting, so a follow-up typed during the stop is never silently lost.
 func (e *Engine) interruptWatchdog(sessionKey string) {
 	select {
 	case <-e.ctx.Done():
 		return
-	case <-time.After(8 * time.Second):
+	case <-time.After(interruptWatchdogTimeout):
 	}
 	e.interactiveMu.Lock()
 	state := e.interactiveStates[sessionKey]
@@ -8493,8 +8503,34 @@ func (e *Engine) interruptWatchdog(sessionKey string) {
 	if !stuck {
 		return
 	}
-	slog.Warn("interrupt produced no result in time; forcing hard stop", "session", sessionKey)
-	e.stopInteractiveSessionSilently(sessionKey)
+
+	// Take the queued messages before the hard stop clears them.
+	state.mu.Lock()
+	pending := state.pendingMessages
+	state.pendingMessages = nil
+	state.mu.Unlock()
+
+	slog.Warn("interrupt produced no result in time; forcing hard stop",
+		"session", sessionKey, "requeued", len(pending))
+	e.stopInteractiveSessionWithOptions(sessionKey, false)
+
+	// Redispatch them as fresh messages so they still get answered.
+	for _, q := range pending {
+		msg := &Message{
+			SessionKey:   q.msgSessionKey,
+			Platform:     q.msgPlatform,
+			MessageID:    q.messageID,
+			UserID:       q.userID,
+			UserName:     q.userName,
+			Content:      q.content,
+			Images:       q.images,
+			Files:        q.files,
+			FromVoice:    q.fromVoice,
+			ChannelKey:   q.channelKey,
+			ReplyCtx:     q.replyCtx,
+		}
+		go e.handleMessage(q.platform, msg)
+	}
 }
 
 func (e *Engine) stopInteractiveSession(sessionKey string, quietPlatform Platform, quietReplyCtx any) bool {
