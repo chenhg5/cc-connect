@@ -11,9 +11,6 @@ import (
 
 const (
 	taskCardHeartbeatInterval = 5 * time.Second
-	// taskCardFirstVisibleAfter suppresses cards for quick turns: a Q&A that
-	// finishes in under two seconds leaves no extra card behind.
-	taskCardFirstVisibleAfter  = 2 * time.Second
 	taskCardMinRenderGap      = 1500 * time.Millisecond
 	taskCardMaxQueueItems     = 5
 	taskCardMaxStepLen        = 80
@@ -54,19 +51,19 @@ type turnCard struct {
 	// the initial message twice.
 	renderMu sync.Mutex
 
-	mu         sync.Mutex
-	handle     any
-	started    time.Time
-	status     taskCardStatus
-	step       string
-	queue      []string
-	lastRender time.Time
-	finished   bool
-	disabled   bool
+	mu          sync.Mutex
+	handle      any
+	started     time.Time
+	status      taskCardStatus
+	step        string
+	queue       []string
+	lastRender  time.Time
+	finished    bool
+	disabled    bool
 	creating    bool
 	cardStarted bool
-	failCount  int
-	visible    bool // true once the card message exists
+	failCount   int
+	visible     bool // true once the card message exists
 
 	done chan struct{}
 	once sync.Once
