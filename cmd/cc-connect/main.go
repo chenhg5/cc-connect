@@ -534,8 +534,8 @@ func main() {
 		if cfg.Queue.BusyMode != "" {
 			engine.SetBusyMode(cfg.Queue.BusyMode)
 		}
-		if cfg.Queue.StopWaitSecs != nil && *cfg.Queue.StopWaitSecs >= 0 {
-			engine.SetStopWait(time.Duration(*cfg.Queue.StopWaitSecs) * time.Second)
+		if d, ok := cfg.Queue.StopWaitDuration(); ok {
+			engine.SetStopWait(d)
 		}
 
 		// Wire auto-compress settings
