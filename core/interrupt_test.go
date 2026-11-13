@@ -79,3 +79,24 @@ func TestInterruptInteractiveTurn_RejectsIdleAndUnsupported(t *testing.T) {
 	}
 }
 
+
+// stop_wait_secs = 0 must end the session immediately instead of sending an
+// interrupt and walking away.
+func TestStopWithZeroWaitEndsSession(t *testing.T) {
+	old := suppressForceStopAfterInterrupt
+	suppressForceStopAfterInterrupt = false
+	t.Cleanup(func() { suppressForceStopAfterInterrupt = old })
+
+	e := newInterruptTestEngine(t)
+	e.SetStopWait(0)
+	sess := &interruptSpySession{resultAgentSession: newResultAgentSession("ok")}
+	state := &interactiveState{agentSession: sess, turnActive: true}
+	e.interactiveStates["k"] = state
+
+	if !e.interruptInteractiveTurn("k", "user /stop", true, true) {
+		t.Fatal("interruptInteractiveTurn() = false")
+	}
+	if _, ok := e.interactiveStates["k"]; ok {
+		t.Fatal("state still present; zero wait must hard-stop the session")
+	}
+}

@@ -39,6 +39,10 @@ var interruptWatchdogTimeout = 25 * time.Second
 // turn before the process is terminated. Variable so tests can shorten it.
 var interruptUnwindWaitTimeout = 2 * time.Second
 
+// suppressForceStopAfterInterrupt keeps unit tests from hard-stopping stub
+// sessions that never emit a result.
+var suppressForceStopAfterInterrupt bool
+
 const (
 	defaultThinkingMaxLen = 300
 	defaultToolMaxLen     = 500
@@ -8620,9 +8624,31 @@ func (e *Engine) interruptInteractiveTurn(sessionKey, reason string, dropQueue, 
 		return false
 	}
 	if tc := stateTaskCard(state); tc != nil {
-		tc.Finish(taskCardStopped, e.i18n.T(MsgExecutionStopped))
+		tc.Finish(taskCardStopped, "")
 	}
-	slog.Info("interactive turn interrupted", "session", sessionKey, "reason", reason)
+
+	// The CLI only reads stdin at turn boundaries, so an interrupt sent while
+	// it is thinking may not land for a long time. Wait briefly; if the turn is
+	// still running, end the process — otherwise the session stays locked and
+	// every later message is swallowed by a dead turn.
+	// stop_wait_secs = 0 means "end it now": zero wait goes straight to the
+	// hard stop instead of assuming the interrupt worked.
+	unwound := false
+	if e.stopWait > 0 {
+		unwound = e.waitTurnUnwind(state, e.stopWait)
+	}
+	if !unwound && !suppressForceStopAfterInterrupt {
+		slog.Warn("turn did not unwind after interrupt; ending the session",
+			"session", sessionKey, "reason", reason, "waited", e.stopWait)
+		if dropQueue {
+			state.mu.Lock()
+			state.pendingMessages = nil
+			state.mu.Unlock()
+		}
+		e.stopInteractiveSessionSilently(sessionKey)
+	}
+	slog.Info("interactive turn interrupted", "session", sessionKey, "reason", reason,
+		"unwound", unwound)
 	return true
 }
 
