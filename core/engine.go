@@ -347,6 +347,7 @@ type interactiveState struct {
 	needsRestart      bool // user stopped the turn; the session may be wedged, restart before reuse
 	interruptedAt     time.Time
 	turnActive        bool // true while a turn (or a queued turn) is in flight
+	turnSettled       bool // the agent already returned a result; a still-locked session is wedged
 	turnProactive     bool // true when the running turn was started by the scheduler
 	taskCard          *turnCard // live progress card for the current turn (nil when unsupported)
 
@@ -2379,10 +2380,12 @@ func (e *Engine) steerBusySession(p Platform, msg *Message, interactiveKey strin
 	active := state.turnActive
 	stopping := state.interruptPending
 	proactive := state.turnProactive
-	wedged := state.needsRestart
+	wedged := state.needsRestart || state.turnSettled
 	state.mu.Unlock()
-	// A stop may leave the CLI unable to read stdin until the next turn
-	// boundary; steering into that is a black hole.
+	// needsRestart: the CLI may not read stdin until the next boundary.
+	// turnSettled: the agent already finished the turn, so anything still
+	// holding the session is stuck outside the agent (e.g. a hung send).
+	// Steering in either case is a black hole.
 	if wedged {
 		return false
 	}
@@ -2855,6 +2858,7 @@ func (e *Engine) processInteractiveMessageWith(p Platform, msg *Message, session
 	state := e.getOrCreateInteractiveStateWith(interactiveKey, p, msg.ReplyCtx, session, sessions, agentOverride, ccSessionKey)
 	state.mu.Lock()
 	state.turnActive = true
+	state.turnSettled = false
 	state.turnProactive = msg.Proactive
 	// A stop that landed between turns may have left the flag set; never let
 	// it leak into this turn's result handling.
@@ -4440,6 +4444,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			// Mark clean exit so unsolicited reader preserves buffered events.
 			state.mu.Lock()
 			state.eventsNeedResync = false
+			state.turnSettled = true
 			state.mu.Unlock()
 
 			// A user-requested interrupt ends the turn with an exception-style
@@ -8618,7 +8623,7 @@ func (e *Engine) restartWedgedSession(p Platform, msg *Message, interactiveKey s
 		return false
 	}
 	state.mu.Lock()
-	wedged := state.needsRestart && state.turnActive
+	wedged := (state.needsRestart || state.turnSettled) && state.turnActive
 	state.mu.Unlock()
 	if !wedged {
 		return false

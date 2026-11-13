@@ -281,7 +281,9 @@ func newPlatform(name, domain string, opts map[string]any) (core.Platform, error
 	}
 	encryptKey, _ := opts["encrypt_key"].(string)
 
-	var clientOpts []lark.ClientOptionFunc
+	// Bound every API call: a hung request inside the event loop keeps the
+	// session locked and makes later messages look unanswered.
+	clientOpts := []lark.ClientOptionFunc{lark.WithReqTimeout(20 * time.Second)}
 	if domain != lark.FeishuBaseUrl {
 		clientOpts = append(clientOpts, lark.WithOpenBaseUrl(domain))
 	}
