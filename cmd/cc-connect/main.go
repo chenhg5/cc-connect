@@ -537,6 +537,9 @@ func main() {
 		if d, ok := cfg.Queue.StopWaitDuration(); ok {
 			engine.SetStopWait(d)
 		}
+		if d, ok := cfg.Queue.CardDelayDuration(); ok {
+			engine.SetCardDelay(d)
+		}
 
 		// Wire auto-compress settings
 		if proj.AutoCompress.Enabled != nil && *proj.AutoCompress.Enabled {

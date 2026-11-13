@@ -99,7 +99,13 @@ func (tc *turnCard) Start() {
 }
 
 func (tc *turnCard) run() {
-	timer := time.NewTimer(taskCardFirstVisibleAfter)
+	delay := tc.e.cardDelay
+	if delay <= 0 {
+		tc.render(true)
+		tc.heartbeat()
+		return
+	}
+	timer := time.NewTimer(delay)
 	defer timer.Stop()
 	select {
 	case <-tc.done:

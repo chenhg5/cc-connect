@@ -236,6 +236,7 @@ type Engine struct {
 	outboxes          map[string]*outbox
 	busyMode          string        // "steer" (default) forwards into the running turn; "queue" waits
 	stopWait          time.Duration // how long /stop waits for the turn to unwind
+	cardDelay         time.Duration // delay before the first task card appears
 	dirHistory        *DirHistory
 	baseWorkDir       string
 	projectState      *ProjectStateStore
@@ -463,6 +464,7 @@ func NewEngine(name string, ag Agent, platforms []Platform, sessionStorePath str
 		maxQueuedMessages:     defaultMaxQueuedMessages,
 		busyMode:              "steer",
 		stopWait:              interruptUnwindWaitTimeout,
+		cardDelay:             2 * time.Second,
 		showContextIndicator:  true,
 	}
 
@@ -982,6 +984,14 @@ func (e *Engine) SetStreamPreviewCfg(cfg StreamPreviewCfg) {
 // 0 disables the timeout entirely.
 func (e *Engine) SetEventIdleTimeout(d time.Duration) {
 	e.eventIdleTimeout = d
+}
+
+// SetCardDelay sets how long the first task card waits before appearing.
+// Zero shows it immediately.
+func (e *Engine) SetCardDelay(d time.Duration) {
+	if d >= 0 {
+		e.cardDelay = d
+	}
 }
 
 // SetStopWait sets how long /stop waits for the agent to end the turn before
