@@ -339,6 +339,7 @@ type interactiveState struct {
 	// treats that result as a user cancel instead of a failure.
 	interruptedByUser bool
 	interruptPending  bool // interrupt sent, waiting for the turn to unwind
+	needsRestart      bool // user stopped the turn; the session may be wedged, restart before reuse
 	interruptedAt     time.Time
 	turnActive        bool // true while a turn (or a queued turn) is in flight
 	turnProactive     bool // true when the running turn was started by the scheduler
@@ -2222,6 +2223,11 @@ func (e *Engine) handleMessage(p Platform, msg *Message) {
 		if e.steerBusySession(p, msg, interactiveKey, session, sessions) {
 			return
 		}
+		// The turn was stopped by the user: steering is a black hole, restart
+		// the session and answer this message as a fresh turn.
+		if e.restartWedgedSession(p, msg, interactiveKey, session, agent, sessions, resolvedWorkspace) {
+			return
+		}
 		// Fall back to queueing until the current turn ends.
 		if e.queueMessageForBusySession(p, msg, interactiveKey) {
 			// Race guard: the drain loop in processInteractiveMessageWith may
@@ -2326,7 +2332,13 @@ func (e *Engine) steerBusySession(p Platform, msg *Message, interactiveKey strin
 	active := state.turnActive
 	stopping := state.interruptPending
 	proactive := state.turnProactive
+	wedged := state.needsRestart
 	state.mu.Unlock()
+	// A stop may leave the CLI unable to read stdin until the next turn
+	// boundary; steering into that is a black hole.
+	if wedged {
+		return false
+	}
 	// Never inject into a scheduler-started turn: those runs should stay
 	// untouched, so the message queues as before.
 	if as == nil || !as.Alive() || !active || stopping || proactive {
@@ -2799,6 +2811,7 @@ func (e *Engine) processInteractiveMessageWith(p Platform, msg *Message, session
 	// it leak into this turn's result handling.
 	state.interruptedByUser = false
 	state.interruptPending = false
+	state.needsRestart = false
 	state.mu.Unlock()
 	defer func() {
 		state.mu.Lock()
@@ -4380,6 +4393,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			if state != nil {
 				state.mu.Lock()
 				interrupted := state.interruptedByUser
+				state.needsRestart = false
 				if interrupted {
 					state.interruptedByUser = false
 					state.interruptPending = false
@@ -8466,6 +8480,7 @@ func (e *Engine) interruptInteractiveTurn(sessionKey, reason string, dropQueue, 
 	// result, which must be attributed to a user cancel, not a failure.
 	state.interruptedByUser = true
 	state.interruptPending = true
+	state.needsRestart = true
 	state.interruptedAt = time.Now()
 	state.mu.Unlock()
 
@@ -8491,6 +8506,48 @@ func (e *Engine) interruptInteractiveTurn(sessionKey, reason string, dropQueue, 
 //
 // When it fires it hard-stops the session and re-dispatches the messages that
 // were waiting, so a follow-up typed during the stop is never silently lost.
+// restartWedgedSession recovers from a stop that left the agent unable to
+// consume new input (the CLI only reads stdin at turn boundaries). Steering in
+// that state looks successful — the write lands in the pipe — but nothing ever
+// answers. Instead we kill the process, wait for the turn to release the lock
+// and run the message as a fresh turn (resume keeps the conversation).
+func (e *Engine) restartWedgedSession(p Platform, msg *Message, interactiveKey string, session *Session, agent Agent, sessions *SessionManager, workspaceDir string) bool {
+	e.interactiveMu.Lock()
+	state := e.interactiveStates[interactiveKey]
+	e.interactiveMu.Unlock()
+	if state == nil {
+		return false
+	}
+	state.mu.Lock()
+	wedged := state.needsRestart && state.turnActive
+	state.mu.Unlock()
+	if !wedged {
+		return false
+	}
+
+	slog.Warn("session wedged after stop; restarting and re-dispatching",
+		"session", msg.SessionKey, "interactive_key", interactiveKey)
+	e.stopInteractiveSessionWithOptions(interactiveKey, false)
+
+	go func() {
+		deadline := time.Now().Add(10 * time.Second)
+		for time.Now().Before(deadline) {
+			if session.TryLock() {
+				e.processInteractiveMessageWith(p, msg, session, agent, sessions, interactiveKey, workspaceDir, msg.SessionKey)
+				return
+			}
+			select {
+			case <-e.ctx.Done():
+				return
+			case <-time.After(100 * time.Millisecond):
+			}
+		}
+		slog.Warn("session lock did not release after restart", "session", msg.SessionKey)
+		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgPreviousProcessing))
+	}()
+	return true
+}
+
 func (e *Engine) interruptWatchdog(sessionKey string) {
 	select {
 	case <-e.ctx.Done():
