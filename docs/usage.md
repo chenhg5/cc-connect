@@ -182,6 +182,15 @@ the turn explicitly. Leave it unset to keep the existing prompt behavior.
 | Default | `default` | Standard permissions |
 | YOLO | `yolo` | Skip all checks |
 
+> **OpenCode `question` tool:** `opencode run --format json` cannot forward or
+> answer OpenCode's native interactive `question` tool, so a model calling it
+> would hang the turn forever. cc-connect therefore denies that tool for its
+> OpenCode sessions (it sets `"question": "deny"` in `OPENCODE_PERMISSION`,
+> keeping any other permissions you configured there). When resuming an existing
+> session, it also checks the session's persisted permission rules through a
+> temporary loopback `opencode serve` and appends a wildcard deny for `question`
+> if needed. The model can still ask for clarification as ordinary chat text.
+
 ### Configuration
 
 ```toml

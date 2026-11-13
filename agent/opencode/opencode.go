@@ -504,6 +504,7 @@ func (a *Agent) StartSession(ctx context.Context, sessionID string) (core.AgentS
 	extraEnv := append([]string(nil), a.configEnv...)
 	extraEnv = append(extraEnv, a.providerEnvLocked()...)
 	extraEnv = append(extraEnv, a.sessionEnv...)
+	extraEnv = withHeadlessQuestionDenied(extraEnv)
 	if a.activeIdx >= 0 && a.activeIdx < len(a.providers) {
 		if m := a.providers[a.activeIdx].Model; m != "" {
 			model = m
@@ -512,6 +513,43 @@ func (a *Agent) StartSession(ctx context.Context, sessionID string) (core.AgentS
 	a.mu.Unlock()
 
 	return newOpencodeSession(ctx, cmd, extraArgs, workDir, model, mode, agentName, sessionID, extraEnv)
+}
+
+// withHeadlessQuestionDenied returns env with OPENCODE_PERMISSION forcing the
+// native `question` tool to "deny".
+//
+// `opencode run --format json` has no way to forward a question to the user
+// or to receive an answer, so a model that calls the tool leaves the process
+// waiting forever. Any permissions the user already set through
+// OPENCODE_PERMISSION (in env, or inherited from the cc-connect process) are
+// preserved; only the "question" key is overridden.
+func withHeadlessQuestionDenied(env []string) []string {
+	const key = "OPENCODE_PERMISSION"
+
+	raw := os.Getenv(key)
+	for _, entry := range env {
+		if name, value, ok := strings.Cut(entry, "="); ok && name == key {
+			raw = value
+		}
+	}
+
+	permissions := make(map[string]any)
+	if raw != "" {
+		if err := json.Unmarshal([]byte(raw), &permissions); err != nil {
+			slog.Warn("opencode: invalid OPENCODE_PERMISSION; keeping only the headless question deny", "err", err)
+		}
+	}
+	if permissions == nil { // JSON "null", or a failed decode
+		permissions = make(map[string]any)
+	}
+	permissions["question"] = "deny"
+
+	encoded, err := json.Marshal(permissions)
+	if err != nil {
+		// Unreachable in practice: the map holds only decoded JSON values.
+		encoded = []byte(`{"question":"deny"}`)
+	}
+	return core.MergeEnv(env, []string{key + "=" + string(encoded)})
 }
 
 // ListSessions runs `opencode session list` and parses the JSON output.

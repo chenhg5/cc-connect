@@ -3,6 +3,9 @@ package opencode
 import (
 	"context"
 	"encoding/json"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -428,3 +431,258 @@ func TestHandleToolUseErrorNoMessageNoText(t *testing.T) {
 
 // verify Agent implements core.Agent
 var _ core.Agent = (*Agent)(nil)
+
+func decodeSessionPermissionEnv(t *testing.T, session core.AgentSession) map[string]any {
+	t.Helper()
+	oc, ok := session.(*opencodeSession)
+	if !ok {
+		t.Fatalf("session type = %T, want *opencodeSession", session)
+	}
+	var permissions map[string]any
+	if err := json.Unmarshal([]byte(envValue(oc.extraEnv, "OPENCODE_PERMISSION")), &permissions); err != nil {
+		t.Fatalf("OPENCODE_PERMISSION is invalid JSON: %v", err)
+	}
+	return permissions
+}
+
+func TestAgentStartSessionDeniesHeadlessQuestionTool(t *testing.T) {
+	t.Setenv("OPENCODE_PERMISSION", `{"bash":"ask","question":"allow"}`)
+	a := &Agent{
+		workDir:   t.TempDir(),
+		model:     "openai/test",
+		mode:      "default",
+		cmd:       "true",
+		activeIdx: -1,
+	}
+	session, err := a.StartSession(context.Background(), "ses_test")
+	if err != nil {
+		t.Fatalf("StartSession: %v", err)
+	}
+	defer func() { _ = session.Close() }()
+
+	permissions := decodeSessionPermissionEnv(t, session)
+	if got := permissions["question"]; got != "deny" {
+		t.Fatalf("question permission = %#v, want deny", got)
+	}
+	if got := permissions["bash"]; got != "ask" {
+		t.Fatalf("bash permission = %#v, want preserved ask", got)
+	}
+}
+
+func TestAgentStartSessionMergesSessionPermissionOverride(t *testing.T) {
+	t.Setenv("OPENCODE_PERMISSION", `{"bash":"allow"}`)
+	a := &Agent{
+		workDir:   t.TempDir(),
+		model:     "openai/test",
+		mode:      "default",
+		cmd:       "true",
+		activeIdx: -1,
+		sessionEnv: []string{
+			`OPENCODE_PERMISSION={"edit":"ask","question":"allow"}`,
+		},
+	}
+	session, err := a.StartSession(context.Background(), "ses_test")
+	if err != nil {
+		t.Fatalf("StartSession: %v", err)
+	}
+	defer func() { _ = session.Close() }()
+
+	permissions := decodeSessionPermissionEnv(t, session)
+	if got := permissions["question"]; got != "deny" {
+		t.Fatalf("question permission = %#v, want deny", got)
+	}
+	if got := permissions["edit"]; got != "ask" {
+		t.Fatalf("edit permission = %#v, want session override preserved", got)
+	}
+	if _, ok := permissions["bash"]; ok {
+		t.Fatalf("process permission should be replaced by session override: %#v", permissions)
+	}
+}
+
+func TestAgentStartSessionHandlesUnusablePermissionEnv(t *testing.T) {
+	for _, raw := range []string{"null", "not json", `["question"]`} {
+		t.Run(raw, func(t *testing.T) {
+			t.Setenv("OPENCODE_PERMISSION", raw)
+			a := &Agent{workDir: t.TempDir(), model: "openai/test", cmd: "true", activeIdx: -1}
+			session, err := a.StartSession(context.Background(), "")
+			if err != nil {
+				t.Fatalf("StartSession: %v", err)
+			}
+			defer func() { _ = session.Close() }()
+			oc := session.(*opencodeSession)
+			if got := envValue(oc.extraEnv, "OPENCODE_PERMISSION"); got != `{"question":"deny"}` {
+				t.Fatalf("OPENCODE_PERMISSION = %q, want question deny", got)
+			}
+		})
+	}
+}
+
+func stubOpenCodeServer(t *testing.T, start func(extraArgs []string) (string, error)) {
+	t.Helper()
+	original := startOpenCodeServer
+	startOpenCodeServer = func(_ context.Context, _ string, extraArgs []string, _ string, _ []string) (string, func(), error) {
+		baseURL, err := start(extraArgs)
+		if err != nil {
+			return "", nil, err
+		}
+		return baseURL, func() {}, nil
+	}
+	t.Cleanup(func() { startOpenCodeServer = original })
+}
+
+func TestOpencodeSessionDeniesQuestionOnResumedSession(t *testing.T) {
+	workDir := t.TempDir()
+	type permissionRule struct {
+		Permission string `json:"permission"`
+		Pattern    string `json:"pattern"`
+		Action     string `json:"action"`
+	}
+	updated := make(chan []permissionRule, 1)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/session/ses_test" {
+			t.Errorf("path = %q, want session path", r.URL.Path)
+		}
+		if got := r.URL.Query().Get("directory"); got != workDir {
+			t.Errorf("directory = %q, want %q", got, workDir)
+		}
+		username, password, ok := r.BasicAuth()
+		if !ok || username != "tester" || password != "secret" {
+			t.Errorf("basic auth = (%q, %q, %v), want tester credentials", username, password, ok)
+		}
+		switch r.Method {
+		case http.MethodGet:
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"permission":[{"permission":"bash","pattern":"*","action":"allow"},{"permission":"question","pattern":"*","action":"allow"},{"permission":"question","pattern":"custom","action":"ask"}]}`))
+		case http.MethodPatch:
+			var body struct {
+				Permission []permissionRule `json:"permission"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+				t.Errorf("decode update: %v", err)
+			}
+			updated <- body.Permission
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"id":"ses_test"}`))
+		default:
+			t.Errorf("method = %s, want GET or PATCH", r.Method)
+		}
+	}))
+	defer server.Close()
+
+	var gotExtraArgs []string
+	stubOpenCodeServer(t, func(extraArgs []string) (string, error) {
+		gotExtraArgs = extraArgs
+		return server.URL, nil
+	})
+
+	wrapperArgs := []string{"--wrapper-flag"}
+	s, err := newOpencodeSession(context.Background(), "opencode", wrapperArgs, workDir, "openai/test", "default", "", "ses_test", []string{
+		"OPENCODE_SERVER_USERNAME=tester",
+		"OPENCODE_SERVER_PASSWORD=secret",
+	})
+	if err != nil {
+		t.Fatalf("newOpencodeSession: %v", err)
+	}
+	defer func() { _ = s.Close() }()
+	if err := s.denyHeadlessSessionQuestion("ses_test"); err != nil {
+		t.Fatalf("denyHeadlessSessionQuestion: %v", err)
+	}
+	if !reflect.DeepEqual(gotExtraArgs, wrapperArgs) {
+		t.Fatalf("server extraArgs = %v, want %v", gotExtraArgs, wrapperArgs)
+	}
+
+	select {
+	case permissions := <-updated:
+		if len(permissions) != 1 {
+			t.Fatalf("permissions = %+v, want one appended question deny", permissions)
+		}
+		if permissions[0] != (permissionRule{Permission: "question", Pattern: "*", Action: "deny"}) {
+			t.Fatalf("question permission = %+v, want wildcard deny", permissions[0])
+		}
+	case <-time.After(time.Second):
+		t.Fatal("session permission update not received")
+	}
+}
+
+func TestOpencodeSessionKeepsExistingFinalQuestionDeny(t *testing.T) {
+	var patches atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPatch {
+			patches.Add(1)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"permission":[{"permission":"question","pattern":"*","action":"allow"},{"permission":"question","pattern":"*","action":"deny"}]}`))
+	}))
+	defer server.Close()
+
+	stubOpenCodeServer(t, func([]string) (string, error) { return server.URL, nil })
+
+	s, err := newOpencodeSession(context.Background(), "opencode", nil, t.TempDir(), "openai/test", "default", "", "ses_test", nil)
+	if err != nil {
+		t.Fatalf("newOpencodeSession: %v", err)
+	}
+	defer func() { _ = s.Close() }()
+	if err := s.denyHeadlessSessionQuestion("ses_test"); err != nil {
+		t.Fatalf("denyHeadlessSessionQuestion: %v", err)
+	}
+	if got := patches.Load(); got != 0 {
+		t.Fatalf("PATCH requests = %d, want 0 for an already denied question tool", got)
+	}
+}
+
+func TestOpencodeSessionRetriesPermissionPreparation(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"permission":[{"permission":"question","pattern":"*","action":"deny"}]}`))
+	}))
+	defer server.Close()
+
+	calls := 0
+	stubOpenCodeServer(t, func([]string) (string, error) {
+		calls++
+		if calls == 1 {
+			return "", fmt.Errorf("temporary start failure")
+		}
+		return server.URL, nil
+	})
+
+	s, err := newOpencodeSession(context.Background(), "opencode", nil, t.TempDir(), "openai/test", "default", "", "ses_test", nil)
+	if err != nil {
+		t.Fatalf("newOpencodeSession: %v", err)
+	}
+	defer func() { _ = s.Close() }()
+	if err := s.Send("hello", "", nil, nil); err == nil {
+		t.Fatal("Send unexpectedly succeeded although the resumed session could not be prepared")
+	}
+	if s.prepared {
+		t.Fatal("session marked prepared after failed attempt")
+	}
+	if err := s.prepareHeadlessSession("ses_test", true); err != nil {
+		t.Fatalf("retry preparation: %v", err)
+	}
+	if err := s.prepareHeadlessSession("ses_test", true); err != nil {
+		t.Fatalf("repeated preparation: %v", err)
+	}
+	if !s.prepared || calls != 2 {
+		t.Fatalf("prepared = %v, server starts = %d; want true and 2", s.prepared, calls)
+	}
+}
+
+func TestOpencodeSessionSkipsPermissionPreparationForNewSession(t *testing.T) {
+	stubOpenCodeServer(t, func([]string) (string, error) {
+		t.Error("opencode server started for a brand-new session")
+		return "", fmt.Errorf("unexpected")
+	})
+
+	s, err := newOpencodeSession(context.Background(), "opencode", nil, t.TempDir(), "openai/test", "default", "", "", nil)
+	if err != nil {
+		t.Fatalf("newOpencodeSession: %v", err)
+	}
+	defer func() { _ = s.Close() }()
+	if err := s.prepareHeadlessSession("", false); err != nil {
+		t.Fatalf("prepareHeadlessSession: %v", err)
+	}
+	if !s.prepared {
+		t.Fatal("new session not marked prepared")
+	}
+}

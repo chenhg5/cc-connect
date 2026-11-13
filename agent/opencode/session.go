@@ -8,9 +8,13 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net"
+	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -39,6 +43,8 @@ type opencodeSession struct {
 	alive             atomic.Bool
 	expectingContinue atomic.Bool // true when compaction_continue received, waiting for next step
 	resultSent        atomic.Bool // true when EventResult has been sent for this turn
+	prepareMu         sync.Mutex
+	prepared          bool // true once the resumed session's question permission has been checked
 }
 
 func newOpencodeSession(ctx context.Context, cmd string, extraArgs []string, workDir, model, mode, agentName, resumeID string, extraEnv []string) (*opencodeSession, error) {
@@ -66,6 +72,13 @@ func newOpencodeSession(ctx context.Context, cmd string, extraArgs []string, wor
 }
 
 func (s *opencodeSession) Send(prompt string, messageID string, images []core.ImageAttachment, files []core.FileAttachment) error {
+	// Prepare before staging attachments so a failure here leaves no temp copies behind.
+	chatID := s.CurrentSessionID()
+	isResume := chatID != ""
+	if err := s.prepareHeadlessSession(chatID, isResume); err != nil {
+		return err
+	}
+
 	if len(files) > 0 {
 		filePaths := core.SaveFilesToDisk(s.workDir, messageID, files)
 		prompt = core.AppendFileRefs(prompt, filePaths)
@@ -80,9 +93,6 @@ func (s *opencodeSession) Send(prompt string, messageID string, images []core.Im
 
 	s.resultSent.Store(false)
 	s.expectingContinue.Store(false)
-
-	chatID := s.CurrentSessionID()
-	isResume := chatID != ""
 
 	args := s.buildRunArgs(prompt, imagePaths, chatID)
 
@@ -120,6 +130,221 @@ func (s *opencodeSession) Send(prompt string, messageID string, images []core.Im
 	go s.readLoop(cmd, stdout, &stderrBuf)
 
 	return nil
+}
+
+// prepareHeadlessSession makes sure a resumed OpenCode session cannot call the
+// interactive `question` tool. It runs once per opencodeSession; a failed
+// attempt is retried on the next Send.
+//
+// New sessions need no preparation: OPENCODE_PERMISSION (see
+// withHeadlessQuestionDenied) already denies the tool. A resumed session can
+// carry its own persisted permission rules, which OpenCode evaluates after the
+// config-level ones, so those are checked through the OpenCode server API.
+func (s *opencodeSession) prepareHeadlessSession(sessionID string, resume bool) error {
+	s.prepareMu.Lock()
+	defer s.prepareMu.Unlock()
+	if s.prepared {
+		return nil
+	}
+	if resume {
+		if err := s.denyHeadlessSessionQuestion(sessionID); err != nil {
+			return err
+		}
+	}
+	s.prepared = true
+	return nil
+}
+
+// denyHeadlessSessionQuestion reads the persisted permission rules of an
+// existing OpenCode session through a temporary loopback `opencode serve` and,
+// unless the last rule matching the question tool is already a wildcard deny,
+// appends one. Unrelated rules are left untouched.
+func (s *opencodeSession) denyHeadlessSessionQuestion(sessionID string) error {
+	const maxSessionResponseBytes = 8 << 20
+
+	env := core.MergeEnv(os.Environ(), s.extraEnv)
+	baseURL, stopServer, err := startOpenCodeServer(s.ctx, s.cmd, s.extraArgs, s.workDir, env)
+	if err != nil {
+		return fmt.Errorf("opencode: prepare resumed session permissions: %w", err)
+	}
+	defer stopServer()
+
+	endpoint, err := url.Parse(baseURL)
+	if err != nil {
+		return fmt.Errorf("opencode: parse session server URL: %w", err)
+	}
+	endpoint.Path = "/session/" + url.PathEscape(sessionID)
+	query := endpoint.Query()
+	query.Set("directory", s.workDir)
+	endpoint.RawQuery = query.Encode()
+
+	requestCtx, cancelRequest := context.WithTimeout(s.ctx, 30*time.Second)
+	defer cancelRequest()
+	req, err := http.NewRequestWithContext(requestCtx, http.MethodGet, endpoint.String(), nil)
+	if err != nil {
+		return fmt.Errorf("opencode: create session permission request: %w", err)
+	}
+	setOpenCodeServerAuth(req, env)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("opencode: get resumed session permissions: %w", err)
+	}
+	responseBody, readErr := io.ReadAll(io.LimitReader(resp.Body, maxSessionResponseBytes+1))
+	_ = resp.Body.Close()
+	if readErr != nil {
+		return fmt.Errorf("opencode: read resumed session permissions: %w", readErr)
+	}
+	if len(responseBody) > maxSessionResponseBytes {
+		return fmt.Errorf("opencode: resumed session response exceeds %d bytes", maxSessionResponseBytes)
+	}
+	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
+		return fmt.Errorf("opencode: get resumed session permissions returned %s: %s", resp.Status, truncate(strings.TrimSpace(string(responseBody)), 300))
+	}
+
+	var sessionInfo struct {
+		Permission []map[string]any `json:"permission"`
+	}
+	if err := json.Unmarshal(responseBody, &sessionInfo); err != nil {
+		return fmt.Errorf("opencode: decode resumed session permissions: %w", err)
+	}
+	// OpenCode applies the last matching rule, so only the final rule that
+	// targets the question tool (or every tool) decides the outcome.
+	for i := len(sessionInfo.Permission) - 1; i >= 0; i-- {
+		rule := sessionInfo.Permission[i]
+		permission, _ := rule["permission"].(string)
+		if permission != "question" && permission != "*" {
+			continue
+		}
+		pattern, _ := rule["pattern"].(string)
+		action, _ := rule["action"].(string)
+		if pattern == "*" && action == "deny" {
+			return nil
+		}
+		break
+	}
+
+	denyRule := map[string]any{
+		"permission": "question",
+		"pattern":    "*",
+		"action":     "deny",
+	}
+	body, err := json.Marshal(map[string]any{"permission": []map[string]any{denyRule}})
+	if err != nil {
+		return fmt.Errorf("opencode: encode resumed session permissions: %w", err)
+	}
+	req, err = http.NewRequestWithContext(requestCtx, http.MethodPatch, endpoint.String(), bytes.NewReader(body))
+	if err != nil {
+		return fmt.Errorf("opencode: create session permission update: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	setOpenCodeServerAuth(req, env)
+	resp, err = http.DefaultClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("opencode: update resumed session permissions: %w", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	responseBody, _ = io.ReadAll(io.LimitReader(resp.Body, 64*1024))
+	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
+		return fmt.Errorf("opencode: update resumed session permissions returned %s: %s", resp.Status, truncate(strings.TrimSpace(string(responseBody)), 300))
+	}
+	return nil
+}
+
+func setOpenCodeServerAuth(req *http.Request, env []string) {
+	if password := envValue(env, "OPENCODE_SERVER_PASSWORD"); password != "" {
+		username := envValue(env, "OPENCODE_SERVER_USERNAME")
+		if username == "" {
+			username = "opencode"
+		}
+		req.SetBasicAuth(username, password)
+	}
+}
+
+// startOpenCodeServer launches a temporary `opencode serve` bound to a free
+// loopback port and waits until it answers health checks. The returned stop
+// function kills the server. It is a variable so tests can substitute a fake.
+var startOpenCodeServer = func(ctx context.Context, executable string, extraArgs []string, workDir string, env []string) (string, func(), error) {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		return "", nil, fmt.Errorf("opencode: reserve server port: %w", err)
+	}
+	port := listener.Addr().(*net.TCPAddr).Port
+	if err := listener.Close(); err != nil {
+		return "", nil, fmt.Errorf("opencode: release server port: %w", err)
+	}
+
+	args := append(append([]string{}, extraArgs...), "serve", "--hostname", "127.0.0.1", "--port", strconv.Itoa(port))
+	cmd := exec.CommandContext(ctx, executable, args...)
+	cmd.Dir = workDir
+	cmd.Env = env
+	cmd.Stdout = io.Discard
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	cmd.WaitDelay = 1 * time.Second
+	if err := cmd.Start(); err != nil {
+		return "", nil, fmt.Errorf("opencode: start server: %w", err)
+	}
+	stop := func() {
+		if cmd.Process != nil {
+			_ = cmd.Process.Kill()
+		}
+		_ = cmd.Wait()
+	}
+
+	baseURL := "http://" + net.JoinHostPort("127.0.0.1", strconv.Itoa(port))
+	if err := waitForOpenCodeServer(ctx, baseURL, env, 30*time.Second); err != nil {
+		stop()
+		if msg := strings.TrimSpace(stderr.String()); msg != "" {
+			return "", nil, fmt.Errorf("opencode: server unavailable: %w: %s", err, truncate(msg, 300))
+		}
+		return "", nil, fmt.Errorf("opencode: server unavailable: %w", err)
+	}
+	return baseURL, stop, nil
+}
+
+func waitForOpenCodeServer(ctx context.Context, baseURL string, env []string, timeout time.Duration) error {
+	deadline := time.Now().Add(timeout)
+	var lastErr error
+	for {
+		requestCtx, cancel := context.WithTimeout(ctx, time.Second)
+		req, err := http.NewRequestWithContext(requestCtx, http.MethodGet, baseURL+"/global/health", nil)
+		if err == nil {
+			setOpenCodeServerAuth(req, env)
+			resp, requestErr := http.DefaultClient.Do(req)
+			if requestErr == nil {
+				_ = resp.Body.Close()
+				if resp.StatusCode >= http.StatusOK && resp.StatusCode < http.StatusMultipleChoices {
+					cancel()
+					return nil
+				}
+				lastErr = fmt.Errorf("health returned %s", resp.Status)
+			} else {
+				lastErr = requestErr
+			}
+		} else {
+			lastErr = err
+		}
+		cancel()
+		if time.Now().After(deadline) {
+			return lastErr
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(50 * time.Millisecond):
+		}
+	}
+}
+
+// envValue returns the value of key in env, preferring the last occurrence.
+func envValue(env []string, key string) string {
+	prefix := key + "="
+	for i := len(env) - 1; i >= 0; i-- {
+		if strings.HasPrefix(env[i], prefix) {
+			return strings.TrimPrefix(env[i], prefix)
+		}
+	}
+	return ""
 }
 
 func (s *opencodeSession) stageImages(prompt string, images []core.ImageAttachment) (string, []string, error) {
