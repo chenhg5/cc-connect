@@ -269,7 +269,7 @@ func (tc *turnCard) buildCardLocked() *Card {
 		shown := 0
 		for i, item := range tc.queue {
 			if i >= taskCardMaxQueueItems {
-				body += fmt.Sprintf("\n↳ …+%d", len(tc.queue)-shown)
+				body += fmt.Sprintf("\n↳ 还有 %d 条未显示", len(tc.queue)-shown)
 				break
 			}
 			body += fmt.Sprintf("\n↳ %d. %s", i+1, truncateIf(item, taskCardMaxQueueItemLen))
