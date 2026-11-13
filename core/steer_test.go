@@ -1,8 +1,10 @@
 package core
 
 import (
+	"context"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 )
 
@@ -72,6 +74,50 @@ func TestSteerBusySession_NoExtraAckWhenPlatformAcked(t *testing.T) {
 	for _, sent := range p.sent {
 		if strings.Contains(sent, "插话") {
 			t.Fatalf("extra steer ack sent despite platform ack: %q", sent)
+		}
+	}
+}
+
+type ackStubPlatform struct {
+	stubPlatformEngine
+	mu      sync.Mutex
+	updated []string
+}
+
+func (p *ackStubPlatform) UpdateAck(_ context.Context, _ any, text string) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.updated = append(p.updated, text)
+	return nil
+}
+
+// The single bubble is rewritten in place instead of a second message.
+func TestSteerRewritesExistingAck(t *testing.T) {
+	p := &ackStubPlatform{stubPlatformEngine: stubPlatformEngine{n: "test"}}
+	e := NewEngine("test", &resultAgent{session: newResultAgentSession("ok")}, []Platform{p}, "", LangChinese)
+	t.Cleanup(e.cancel)
+
+	state := &interactiveState{agentSession: newResultAgentSession("ok"), platform: p, replyCtx: "ctx", turnActive: true}
+	e.interactiveStates["k"] = state
+	sessions := e.sessions
+	session := sessions.GetOrCreateActive("k")
+
+	msg := &Message{SessionKey: "k", Platform: "test", UserID: "u", Content: "快点", ReplyCtx: "ctx", Acked: true, AckHandle: "ack-1"}
+	if !e.steerBusySession(p, msg, "k", session, sessions) {
+		t.Fatal("steerBusySession() = false")
+	}
+
+	p.mu.Lock()
+	updated := append([]string(nil), p.updated...)
+	sent := append([]string(nil), p.sent...)
+	p.mu.Unlock()
+
+	if len(updated) != 1 || !strings.Contains(updated[0], "插话") {
+		t.Fatalf("ack updates = %v, want one steer text", updated)
+	}
+	for _, s := range sent {
+		if strings.Contains(s, "插话") {
+			t.Fatalf("separate steer reply sent: %q", s)
 		}
 	}
 }

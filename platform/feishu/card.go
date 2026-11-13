@@ -524,3 +524,34 @@ func (p *interactivePlatform) UpdateTaskCard(ctx context.Context, handle any, ca
 		})
 	})
 }
+
+// feishuAckHandle identifies the courtesy ack message so it can be rewritten.
+type feishuAckHandle struct {
+	messageID string
+}
+
+// UpdateAck rewrites the earlier "收到，正在处理中..." message in place, so the
+// user ends up with a single accurate bubble.
+func (p *interactivePlatform) UpdateAck(ctx context.Context, handle any, text string) error {
+	h, ok := handle.(*feishuAckHandle)
+	if !ok || h == nil || h.messageID == "" {
+		return fmt.Errorf("%s: invalid ack handle %T", p.tag(), handle)
+	}
+	_, body := buildReplyContent(text)
+	req := larkim.NewPatchMessageReqBuilder().
+		MessageId(h.messageID).
+		Body(larkim.NewPatchMessageReqBodyBuilder().Content(body).Build()).
+		Build()
+	return p.withTransientRetry(ctx, "update ack", func() error {
+		return p.withFreshTenantAccessTokenRetry(ctx, "update ack", func(client *lark.Client, options ...larkcore.RequestOptionFunc) error {
+			resp, err := client.Im.Message.Patch(ctx, req, options...)
+			if err != nil {
+				return fmt.Errorf("%s: update ack: %w", p.tag(), err)
+			}
+			if !resp.Success() {
+				return fmt.Errorf("%s: update ack code=%d msg=%s", p.tag(), resp.Code, resp.Msg)
+			}
+			return nil
+		})
+	})
+}

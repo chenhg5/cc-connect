@@ -2377,9 +2377,15 @@ func (e *Engine) steerBusySession(p Platform, msg *Message, interactiveKey strin
 	if tc := stateTaskCard(state); tc != nil {
 		tc.SetStep(truncateStr(msg.Content, taskCardMaxStepLen))
 	}
-	// The platform may have already posted a "received" ack; don't stack a
-	// second message on top of it.
-	if !msg.Acked {
+	// Rewrite the platform's courtesy ack ("收到，正在处理中...") into the
+	// accurate outcome, so the user gets one bubble instead of two.
+	if msg.Acked && msg.AckHandle != nil {
+		if updater, ok := p.(AckUpdater); ok {
+			if err := updater.UpdateAck(e.ctx, msg.AckHandle, e.i18n.T(MsgSteerAck)); err != nil {
+				slog.Debug("steer ack update failed", "platform", p.Name(), "error", err)
+			}
+		}
+	} else if !msg.Acked {
 		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgSteerAck))
 	}
 	slog.Info("message steered into running turn", "session", msg.SessionKey, "user", msg.UserName)
@@ -2443,6 +2449,10 @@ func (e *Engine) queueMessageForBusySession(p Platform, msg *Message, interactiv
 	// "queued" reply would just be noise.
 	if !msg.Acked && !stateTaskCard(state).Visible() {
 		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgMessageQueued))
+	} else if msg.Acked && msg.AckHandle != nil {
+		if updater, ok := p.(AckUpdater); ok {
+			_ = updater.UpdateAck(e.ctx, msg.AckHandle, e.i18n.T(MsgMessageQueued))
+		}
 	}
 	return true
 }

@@ -180,6 +180,7 @@ type Message struct {
 	FromVoice    bool                // true if message originated from voice transcription
 	Proactive    bool                // true for scheduler-initiated runs (cron); no interactive UI
 	Acked        bool                // platform already sent a "received" ack, so the engine must not add its own
+	AckHandle    any                 // handle for rewriting that ack in place (platform-specific)
 	ModeOverride string              // if set, temporarily override agent permission mode for this message
 }
 

@@ -1127,11 +1127,16 @@ func (p *Platform) dispatchMessage(ctx context.Context, msgType, content string,
 			)
 			return
 		}
+		acked := false
+		var ackHandle any
 		if p.autoThread {
 			ackMsgType, ackMsgBody := buildReplyContent(p.threadAckMessage)
 			rc := replyContext{messageID: messageID, chatID: chatID, sessionKey: sessionKey}
-			if err := p.replyMessage(ctx, rc, ackMsgType, ackMsgBody); err != nil {
+			if id, err := p.replyMessageReturningID(ctx, rc, ackMsgType, ackMsgBody); err != nil {
 				slog.Warn(p.tag()+": auto_thread ack failed", "error", err)
+			} else {
+				acked = true
+				ackHandle = &feishuAckHandle{messageID: id}
 			}
 		}
 		p.dispatchCoreMessage(&core.Message{
@@ -1139,6 +1144,7 @@ func (p *Platform) dispatchMessage(ctx context.Context, msgType, content string,
 			MessageID: messageID,
 			UserID:    userID, UserName: userName, ChatName: chatName,
 			Content: text, ExtraContent: quoted.text, Images: quoted.images, ReplyCtx: rctx,
+			Acked: acked, AckHandle: ackHandle,
 		})
 
 	case "image":
@@ -1330,11 +1336,16 @@ func (p *Platform) dispatchMessage(ctx context.Context, msgType, content string,
 			slog.Debug(p.tag()+": dropping interactive card with no extractable text", "message_id", messageID)
 			return
 		}
+		acked := false
+		var ackHandle any
 		if p.autoThread {
 			ackMsgType, ackMsgBody := buildReplyContent(p.threadAckMessage)
 			rc := replyContext{messageID: messageID, chatID: chatID, sessionKey: sessionKey}
-			if err := p.replyMessage(ctx, rc, ackMsgType, ackMsgBody); err != nil {
+			if id, err := p.replyMessageReturningID(ctx, rc, ackMsgType, ackMsgBody); err != nil {
 				slog.Warn(p.tag()+": auto_thread ack failed", "error", err)
+			} else {
+				acked = true
+				ackHandle = &feishuAckHandle{messageID: id}
 			}
 		}
 		p.dispatchCoreMessage(&core.Message{
@@ -1342,6 +1353,7 @@ func (p *Platform) dispatchMessage(ctx context.Context, msgType, content string,
 			MessageID: messageID,
 			UserID:    userID, UserName: userName, ChatName: chatName,
 			Content: text, ExtraContent: quoted.text, Images: quoted.images, ReplyCtx: rctx,
+			Acked: acked, AckHandle: ackHandle,
 		})
 
 	default:

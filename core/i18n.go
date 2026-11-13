@@ -762,11 +762,11 @@ var messages = map[MsgKey]map[Language]string{
 		LangSpanish:            "⏹ Detener",
 	},
 	MsgSteerAck: {
-		LangEnglish:            "↪ Sent into the running task; it will pick this up shortly.",
-		LangChinese:            "↪ 已插话到当前任务，它会在下一步看到。",
-		LangTraditionalChinese: "↪ 已插話到當前任務，它會在下一步看到。",
-		LangJapanese:           "↪ 実行中のタスクに送信しました。",
-		LangSpanish:            "↪ Enviado a la tarea en curso.",
+		LangEnglish:            "Received — sent into the running task, please wait…",
+		LangChinese:            "收到，已插话到当前任务，请稍候…",
+		LangTraditionalChinese: "收到，已插話到當前任務，請稍候…",
+		LangJapanese:           "了解しました。実行中のタスクに送信しました。少々お待ちください…",
+		LangSpanish:            "Recibido — enviado a la tarea en curso, un momento…",
 	},
 	MsgTaskCardWaitingConfirm: {
 		LangEnglish:            "waiting for your confirmation",
