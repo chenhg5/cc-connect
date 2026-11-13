@@ -4,7 +4,9 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"crypto/rand"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -52,6 +54,11 @@ type claudeSession struct {
 	// reported, so a fallback the CLI announces twice (provisional, then final)
 	// reaches the user once.
 	lastModelSwitch atomic.Value // stores string
+
+	// controlWaiters routes the CLI's control_response for a control_request
+	// cc-connect sent (set_model) back to the caller, keyed by request_id.
+	controlMu      sync.Mutex
+	controlWaiters map[string]chan map[string]any
 
 	// usageMu guards lastUsage. Populated from the most recent result event.
 	usageMu   sync.Mutex
@@ -659,6 +666,8 @@ func (cs *claudeSession) handleReadLoopLine(line string) {
 		cs.handleResult(raw)
 	case "control_request":
 		cs.handleControlRequest(raw)
+	case "control_response":
+		cs.handleControlResponse(raw)
 	case "control_cancel_request":
 		requestID, _ := raw["request_id"].(string)
 		slog.Debug("claudeSession: permission cancelled", "request_id", requestID)
@@ -1525,6 +1534,82 @@ func (cs *claudeSession) RespondPermission(requestID string, result core.Permiss
 
 	slog.Debug("claudeSession: permission response", "request_id", requestID, "behavior", result.Behavior)
 	return cs.writeJSON(controlResponse)
+}
+
+// SetLiveModel switches the running Claude Code process to model with the
+// set_model control request, so the conversation, the process and its prompt
+// cache stay in place. Claude Code treats it as a model pick: it also ends a
+// safeguards fallback that kept the session on the fallback model. It returns
+// once the CLI acknowledges the request.
+func (cs *claudeSession) SetLiveModel(ctx context.Context, model string) error {
+	if !cs.alive.Load() {
+		return fmt.Errorf("claudecode: set_model %s: session process is not running", model)
+	}
+	var b [8]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		return fmt.Errorf("claudecode: set_model %s: request id: %w", model, err)
+	}
+	requestID := "cc-connect-set-model-" + hex.EncodeToString(b[:])
+	ch := make(chan map[string]any, 1)
+	cs.controlMu.Lock()
+	if cs.controlWaiters == nil {
+		cs.controlWaiters = make(map[string]chan map[string]any)
+	}
+	cs.controlWaiters[requestID] = ch
+	cs.controlMu.Unlock()
+	defer func() {
+		cs.controlMu.Lock()
+		delete(cs.controlWaiters, requestID)
+		cs.controlMu.Unlock()
+	}()
+
+	if err := cs.writeJSON(map[string]any{
+		"type":       "control_request",
+		"request_id": requestID,
+		"request":    map[string]any{"subtype": "set_model", "model": model},
+	}); err != nil {
+		return fmt.Errorf("claudecode: set_model %s: %w", model, err)
+	}
+
+	select {
+	case resp := <-ch:
+		if subtype, _ := resp["subtype"].(string); subtype != "success" {
+			msg, _ := resp["error"].(string)
+			if msg == "" {
+				msg = "request rejected"
+			}
+			return fmt.Errorf("claudecode: set_model %s: %s", model, msg)
+		}
+	case <-ctx.Done():
+		return fmt.Errorf("claudecode: set_model %s: %w", model, ctx.Err())
+	case <-cs.done:
+		return fmt.Errorf("claudecode: set_model %s: session ended", model)
+	}
+
+	cs.activeModel.Store(model)
+	cs.reportedCtxWindow.Store(0)
+	// A later fallback is a new episode even if it names the same models.
+	cs.lastModelSwitch.Store("")
+	slog.Info("claudeSession: switched model in place", "model", model)
+	return nil
+}
+
+// handleControlResponse delivers the CLI's answer to a control_request that
+// cc-connect sent.
+func (cs *claudeSession) handleControlResponse(raw map[string]any) {
+	resp, _ := raw["response"].(map[string]any)
+	requestID, _ := resp["request_id"].(string)
+	cs.controlMu.Lock()
+	ch := cs.controlWaiters[requestID]
+	cs.controlMu.Unlock()
+	if ch == nil {
+		slog.Debug("claudeSession: control_response without a waiter", "request_id", requestID)
+		return
+	}
+	select {
+	case ch <- resp:
+	default:
+	}
 }
 
 func (cs *claudeSession) writeJSON(v any) error {
