@@ -1329,9 +1329,12 @@ app_secret = "your-feishu-app-secret"
 # share_session_in_channel = false  # If true, all users in a channel share one agent session / 频道共享会话
 # session_scope = "user"  # Session granularity: "user" (default, per channel+user) |
 #                         # "channel" (one session per channel, same as share_session_in_channel) |
-#                         # "thread" (one session per Slack thread — a new top-level message starts
-#                         #  a fresh session, replies in the same thread continue it).
-#                         # 会话粒度："user"(默认) | "channel"(整个频道一个会话) | "thread"(每个 Slack 话题串一个会话)
+#                         # "thread" (one session per Slack thread — a new top-level channel message
+#                         #  starts a fresh session, replies in the same thread continue it; top-level
+#                         #  DMs are not split: they stay one continuous per-user session; only
+#                         #  replies inside a DM thread get a per-thread session).
+#                         # 会话粒度："user"(默认) | "channel"(整个频道一个会话) | "thread"(每个 Slack 话题串一个会话；
+#                         #  私信里的顶层消息不拆分，仍是同一个连续会话，只有在私信的话题串里回复才单独成会话)
 
 # Google Chat (uncomment to enable / 取消注释以启用)
 # Uses a registered Google Chat app whose Cloud Pub/Sub connection publishes
