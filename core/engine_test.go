@@ -8469,9 +8469,9 @@ func TestCmdCronExec_TriggersJob(t *testing.T) {
 						if marked {
 							return
 						}
-						time.Sleep(5 * time.Millisecond)
+						time.Sleep(10 * time.Millisecond)
 					}
-					t.Fatal("run output seen but the job was never marked complete")
+					t.Fatalf("timed out waiting for cron persistence, sent=%v", platform.getSent())
 				}
 				time.Sleep(10 * time.Millisecond)
 			}
