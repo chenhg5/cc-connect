@@ -7775,14 +7775,14 @@ func (e *Engine) cmdList(p Platform, msg *Message, args []string) {
 				displayName = strings.ReplaceAll(s.Summary, "\n", " ")
 				displayName = strings.Join(strings.Fields(displayName), " ")
 				if displayName == "" {
-					displayName = "(empty)"
+					displayName = e.i18n.T(MsgListEmptySummary)
 				}
 				if len([]rune(displayName)) > 40 {
 					displayName = string([]rune(displayName)[:40]) + "…"
 				}
 			}
-			sb.WriteString(fmt.Sprintf("%s **%d.** %s · **%d** msgs · %s\n",
-				marker, i+1, displayName, s.MessageCount, s.ModifiedAt.Format("01-02 15:04")))
+			sb.WriteString(e.i18n.Tf(MsgListItem, marker, i+1, displayName, s.MessageCount, s.ModifiedAt.Format("01-02 15:04")))
+			sb.WriteString("\n")
 		}
 		if totalPages > 1 {
 			sb.WriteString(fmt.Sprintf(e.i18n.T(MsgListPageHint), page, totalPages))

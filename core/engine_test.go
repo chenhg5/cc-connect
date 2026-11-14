@@ -16988,3 +16988,24 @@ func TestCmdCurrent_UsesNativeSummaryForCurrentAgentSession(t *testing.T) {
 		t.Fatalf("/list item count = %d, want %d\n%s", got, len(nativeSessions), p.sent[0])
 	}
 }
+
+// Issue #2175: the plain-text /list branch must use the localized item and
+// empty-summary strings instead of hardcoded English.
+func TestCmdList_LegacyTextIsLocalized(t *testing.T) {
+	p := &stubPlatformEngine{n: "plain"}
+	sessions := []AgentSessionInfo{{ID: "session-a", Summary: "", MessageCount: 3, ModifiedAt: time.Date(2026, 3, 11, 2, 0, 0, 0, time.UTC)}}
+	e := NewEngine("test", &stubListAgent{sessions: sessions}, []Platform{p}, "", LangChinese)
+	msg := &Message{SessionKey: "test:user1", ReplyCtx: "ctx"}
+
+	e.cmdList(p, msg, nil)
+
+	if len(p.sent) != 1 {
+		t.Fatalf("sent messages = %d, want 1", len(p.sent))
+	}
+	if !strings.Contains(p.sent[0], "条消息") || !strings.Contains(p.sent[0], "（空）") {
+		t.Fatalf("list text = %q, want Chinese item and empty label", p.sent[0])
+	}
+	if strings.Contains(p.sent[0], "msgs") || strings.Contains(p.sent[0], "(empty)") {
+		t.Fatalf("list text = %q, still has hardcoded English", p.sent[0])
+	}
+}

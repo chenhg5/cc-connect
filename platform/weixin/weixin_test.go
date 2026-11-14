@@ -923,3 +923,66 @@ func TestSend_ReconstructedReplyCtxStillCountsAsPush(t *testing.T) {
 		t.Fatalf("push budget counter = %d, want 1", got)
 	}
 }
+
+// Issue #2175: ilink renders text_item with Markdown paragraph semantics, so
+// Markdown markers show up literally and a lone "\n" is folded into a space.
+func TestPlainTextForWeixin(t *testing.T) {
+	tests := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{"strips bold and promotes breaks", "**list** (2)\n◻ **1.** a\n◻ **2.** b", "list (2)\n\n◻ 1. a\n\n◻ 2. b"},
+		{"already spaced stays", "1. a\n\n2. b", "1. a\n\n2. b"},
+		{"three newlines collapse to two", "head\n\n\nbody", "head\n\nbody"},
+		{"heading and inline code", "# Title\nrun `go test`", "Title\n\nrun go test"},
+		{"code block keeps one line per line", "see:\n```go\nline1\nline2\n```\ndone", "see:\n\nline1\n\nline2\n\ndone"},
+		{"unclosed fence marker is dropped", "x\n```\na\nb", "x\n\na\n\nb"},
+		{"rule only strips to empty", "---", ""},
+		{"plain text unchanged", "hello", "hello"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := plainTextForWeixin(tt.in)
+			if got != tt.want {
+				t.Fatalf("plainTextForWeixin(%q) = %q, want %q", tt.in, got, tt.want)
+			}
+		})
+	}
+}
+
+// A reply that is only Markdown strips to nothing; the raw text is sent then,
+// instead of dropping the turn.
+func TestSendChunks_FallsBackToRawWhenStrippedEmpty(t *testing.T) {
+	var gotText string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req sendMessageReq
+		if err := json.NewDecoder(r.Body).Decode(&req); err == nil && len(req.Msg.ItemList) > 0 && req.Msg.ItemList[0].TextItem != nil {
+			gotText = req.Msg.ItemList[0].TextItem.Text
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"message_id":1}`))
+	}))
+	defer srv.Close()
+
+	p := &Platform{httpClient: &http.Client{}}
+	p.api = newAPIClient(srv.URL, "tok", "", p.httpClient)
+	rc := &replyContext{peerUserID: "peer-1", contextToken: "tok-1"}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	if err := p.sendChunks(ctx, rc, "---", sendPathReply); err != nil {
+		t.Fatalf("sendChunks: %v", err)
+	}
+	if gotText != "---" {
+		t.Fatalf("sent text = %q, want raw %q", gotText, "---")
+	}
+}
+
+func TestPromoteSingleLineBreaks_Idempotent(t *testing.T) {
+	in := "a\nb\n\nc\n\n\nd\n"
+	once := promoteSingleLineBreaks(in)
+	if twice := promoteSingleLineBreaks(once); twice != once {
+		t.Fatalf("not idempotent: %q then %q", once, twice)
+	}
+}

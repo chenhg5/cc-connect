@@ -814,6 +814,48 @@ func (p *Platform) checkSendQuota(ctx context.Context, path sendPath) error {
 	return nil
 }
 
+// plainTextForWeixin prepares agent output for ilink's text_item, which shows
+// Markdown markers literally and renders with paragraph semantics (a lone "\n"
+// is folded into a space, only a blank line starts a new line).
+//
+// Every single line break is doubled, inside code fences too, so pasted code
+// keeps one line per line instead of being folded into one long line. An
+// unclosed fence is closed first so StripMarkdown removes its marker. Then the
+// Markdown markers are stripped.
+func plainTextForWeixin(s string) string {
+	if strings.Count(s, "```")%2 == 1 {
+		s += "\n```"
+	}
+	return core.StripMarkdown(promoteSingleLineBreaks(s))
+}
+
+// promoteSingleLineBreaks turns every lone "\n" into "\n\n". Runs of two or
+// more newlines are left as they are, so applying it twice changes nothing.
+func promoteSingleLineBreaks(s string) string {
+	if !strings.Contains(s, "\n") {
+		return s
+	}
+	var sb strings.Builder
+	for i := 0; i < len(s); {
+		if s[i] != '\n' {
+			sb.WriteByte(s[i])
+			i++
+			continue
+		}
+		j := i
+		for j < len(s) && s[j] == '\n' {
+			j++
+		}
+		if j-i == 1 {
+			sb.WriteString("\n\n")
+		} else {
+			sb.WriteString(s[i:j])
+		}
+		i = j
+	}
+	return sb.String()
+}
+
 func (p *Platform) sendChunks(ctx context.Context, replyCtx any, content string, path sendPath) error {
 	rc, ok := replyCtx.(*replyContext)
 	if !ok || rc == nil {
@@ -834,6 +876,11 @@ func (p *Platform) sendChunks(ctx context.Context, replyCtx any, content string,
 	}
 	if strings.TrimSpace(content) == "" {
 		return nil
+	}
+	// A reply that is only Markdown (a "---" rule, an empty code fence) strips
+	// to nothing. Send the raw text then, so the turn doesn't look unanswered.
+	if plain := plainTextForWeixin(content); strings.TrimSpace(plain) != "" {
+		content = plain
 	}
 	chunks := core.SplitMessageCodeFenceAware(content, maxWeixinChunk)
 	total := len(chunks)
