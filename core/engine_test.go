@@ -6595,6 +6595,92 @@ func TestHandleCardNav_DirSelectSwitchesWorkDir(t *testing.T) {
 	}
 }
 
+func TestHandleCardNav_DisabledProviderIsRefused(t *testing.T) {
+	agent := &stubProviderAgent{
+		providers: []ProviderConfig{{Name: "a"}, {Name: "b"}},
+		active:    "a",
+	}
+	e := NewEngine("test", agent, []Platform{&stubPlatformEngine{n: "test"}}, "", LangEnglish)
+	e.SetDisabledCommands([]string{"provider"})
+	sk := "test:user1"
+
+	for _, action := range []string{"nav:/provider", "act:/provider b", "act:/provider/add-other", "act:/provider clear"} {
+		card := e.handleCardNav(action, sk)
+		if card == nil || !strings.Contains(card.RenderText(), "Command `/provider` is disabled") {
+			t.Fatalf("%s: card = %v, want disabled notice", action, card)
+		}
+	}
+	if agent.active != "a" {
+		t.Fatalf("active provider = %q, want a", agent.active)
+	}
+}
+
+func TestHandleCardNav_DisabledDirAndDeleteAreRefused(t *testing.T) {
+	temp := t.TempDir()
+	d1 := filepath.Join(temp, "a")
+	d2 := filepath.Join(temp, "b")
+	for _, d := range []string{d1, d2} {
+		if err := os.Mkdir(d, 0o755); err != nil {
+			t.Fatalf("mkdir: %v", err)
+		}
+	}
+	dataDir := t.TempDir()
+	agent := &stubWorkDirAgent{workDir: d2}
+	e := NewEngine("test", agent, []Platform{&stubPlatformEngine{n: "test"}}, dataDir, LangEnglish)
+	e.SetDirHistory(NewDirHistory(dataDir))
+	e.dirHistory.Add("test", d1)
+	e.dirHistory.Add("test", d2)
+	e.SetDisabledCommands([]string{"dir", "delete"})
+	sk := "test:user1"
+
+	_ = e.handleCardNav("act:/dir select 2", sk)
+	if agent.workDir != d2 {
+		t.Fatalf("workDir = %q, want unchanged %q", agent.workDir, d2)
+	}
+	card := e.handleCardNav("act:/delete-mode submit", sk)
+	if card == nil || !strings.Contains(card.RenderText(), "Command `/delete` is disabled") {
+		t.Fatalf("delete-mode card = %v, want disabled notice", card)
+	}
+}
+
+func TestHandleCardNav_RoleDisabledCommandFollowsSessionUser(t *testing.T) {
+	agent := &stubProviderAgent{providers: []ProviderConfig{{Name: "a"}, {Name: "b"}}, active: "a"}
+	e := NewEngine("test", agent, []Platform{&stubPlatformEngine{n: "test"}}, "", LangEnglish)
+	urm := NewUserRoleManager()
+	urm.Configure("member", []RoleInput{
+		{Name: "admin", UserIDs: []string{"u_admin"}},
+		{Name: "member", UserIDs: []string{"*"}, DisabledCommands: []string{"provider"}},
+	})
+	e.SetUserRoles(urm)
+
+	_ = e.handleCardNav("act:/provider b", "test:chat1:u_other")
+	if agent.active != "a" {
+		t.Fatalf("member switched provider to %q", agent.active)
+	}
+	_ = e.handleCardNav("act:/provider b", "test:chat1:u_admin")
+	if agent.active != "b" {
+		t.Fatalf("admin provider = %q, want b", agent.active)
+	}
+}
+
+func TestRenderHelpCard_HidesDisabledCommands(t *testing.T) {
+	e := NewEngine("test", &stubAgent{}, []Platform{&stubPlatformEngine{n: "test"}}, "", LangEnglish)
+	e.SetDisabledCommands([]string{"delete", "provider", "memory", "upgrade", "dir"})
+
+	for _, group := range []string{"session", "agent", "tools", "system"} {
+		card := e.handleCardNav("nav:/help "+group, "test:user1")
+		text := card.RenderText()
+		for _, cmd := range []string{"/delete", "/provider", "/memory", "/upgrade", "/dir"} {
+			if strings.Contains(text, "**"+cmd+"**") {
+				t.Fatalf("help %s = %q, should not list %s", group, text, cmd)
+			}
+		}
+	}
+	if _, ok := findCardAction(e.handleCardNav("nav:/help agent", "test:user1"), "nav:/model"); !ok {
+		t.Fatal("enabled commands should stay on the help card")
+	}
+}
+
 func TestRenderHelpCard_DefaultsToSessionTab(t *testing.T) {
 	e := NewEngine("test", &stubAgent{}, []Platform{&stubPlatformEngine{n: "test"}}, "", LangEnglish)
 
