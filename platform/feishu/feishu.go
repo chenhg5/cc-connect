@@ -175,10 +175,12 @@ type Platform struct {
 	chatMemberCache  sync.Map          // chatID -> *chatMemberEntry
 	recalledMu       sync.Mutex
 	recalledMsgIDs   map[string]time.Time // message_id -> recall time, short TTL race guard
-	// adoptMu guards adoptMissed: threads probed for a bot message after a cron
-	// topic failed to register. Only misses are stored, with a short TTL.
-	adoptMu     sync.Mutex
-	adoptMissed map[string]time.Time
+	// cronHeadsMu guards cronHeads: root message ids of cron topics whose
+	// thread id was not readable when they were created. A later message in
+	// that topic carries this id as its root_id, which is how the topic gets
+	// registered without any extra API call.
+	cronHeadsMu sync.Mutex
+	cronHeads   map[string]time.Time
 	// Webhook mode fields (for Lark international version)
 	server       *http.Server
 	port         string
@@ -1058,11 +1060,10 @@ func (p *Platform) onMessage(ctx context.Context, event *larkim.P2MessageReceive
 			// but is not an invitation to the bot.
 			allowed := p.threadReplyWithoutMention && threadID != "" && p.threadAllowed(threadID)
 			if !allowed && p.threadReplyWithoutMention && threadID != "" {
-				// Last chance for a cron topic whose thread id only became
-				// readable after the create-time poll gave up: adopt the thread
-				// if the bot already posted there, so the first reply in it is
-				// not dropped.
-				allowed = p.adoptBotTopic(ctx, threadID)
+				// Last chance for a cron topic whose thread id could not be
+				// read when it was created: the topic root the bot opened is
+				// known, and this message names it as its root_id.
+				allowed = p.adoptCronTopic(threadID, stringValue(msg.RootId))
 			}
 			if !allowed {
 				slog.Info(p.tag()+": ignoring group message without bot mention",
@@ -3599,8 +3600,8 @@ func (p *Platform) StartCronTopic(ctx context.Context, sessionKey, content strin
 	}
 	if threadID == "" {
 		// Feishu omits thread_id on the create response for a brand-new topic
-		// root, so read it back once. The mention exemption is the only thing
-		// at stake here: a failed lookup must not fail the cron run.
+		// root, so read it back. The mention exemption is the only thing at
+		// stake here: a failed lookup must not fail the cron run.
 		tid, lookupErr := p.lookupMessageThreadID(ctx, messageID)
 		if lookupErr != nil {
 			slog.Warn(p.tag()+": cron topic thread lookup failed", "root_id", messageID, "error", lookupErr)
@@ -3608,6 +3609,11 @@ func (p *Platform) StartCronTopic(ctx context.Context, sessionKey, content strin
 			threadID = tid
 			p.markThread(threadID)
 		}
+	}
+	if threadID == "" {
+		// Still not visible: keep the root around so the first message that
+		// carries it as root_id registers the topic without any extra call.
+		p.noteCronHead(messageID)
 	}
 
 	newKey := fmt.Sprintf("%s:%s:root:%s", p.tag(), rc.chatID, messageID)
@@ -3634,13 +3640,11 @@ const (
 	// Feishu exposes the thread id of a brand-new topic root only after the
 	// topic is committed, so poll instead of reading once.
 	cronThreadLookupPollInterval = 200 * time.Millisecond
-	// If the wait above still loses the race, the first unmentioned message in
-	// the topic adopts it. One list call for the topic root only, short
-	// deadline; a thread the bot never posted in is remembered so a busy group
-	// is not probed on every message.
-	adoptTopicTimeout = 800 * time.Millisecond
-	adoptTopicMissTTL = 5 * time.Minute
-	adoptTopicMissMax = 200
+	// If the wait above still loses the race, the topic is adopted from the
+	// first message that names it: that message carries the cron root as its
+	// root_id, so no extra API call is needed. Roots are remembered for a day.
+	cronHeadTTL = 24 * time.Hour
+	cronHeadMax = 50
 )
 
 // lookupMessageThreadID polls until the thread id of a message the bot just
@@ -3695,104 +3699,56 @@ func (p *Platform) lookupMessageThreadID(ctx context.Context, messageID string) 
 	}
 }
 
-// adoptBotTopic is the fallback for a cron topic that never got registered
-// because its thread id was not readable within the create-time budget. When
-// the bot already posted in the thread, the topic counts as joined: register it
-// and let the unmentioned message through. Threads without a bot message are
-// remembered for a short while so a busy group is not probed on every message.
-func (p *Platform) adoptBotTopic(ctx context.Context, threadID string) bool {
-	threadID = strings.TrimSpace(threadID)
-	if threadID == "" || p.client == nil {
-		return false
+// noteCronHead remembers a cron topic root whose thread id was not readable at
+// create time. The bot opens the topic, so any message inside it names this
+// message as its root_id — that is all the fallback below needs.
+func (p *Platform) noteCronHead(messageID string) {
+	messageID = strings.TrimSpace(messageID)
+	if messageID == "" {
+		return
 	}
-	if p.adoptMissedRecently(threadID) {
-		return false
-	}
-
-	cctx, cancel := context.WithTimeout(ctx, adoptTopicTimeout)
-	defer cancel()
-
-	// A cron topic is opened by the bot, so the very first message decides it.
-	// Asking for one item keeps this fallback to a single cheap call.
-	req := larkim.NewListMessageReqBuilder().
-		ContainerIdType("thread").
-		ContainerId(threadID).
-		SortType(larkim.SortTypeListMessageByCreateTimeAsc).
-		PageSize(1).
-		Build()
-
-	var resp *larkim.ListMessageResp
-	err := p.withFreshTenantAccessTokenRetry(cctx, "adopt_topic", func(client *lark.Client, options ...larkcore.RequestOptionFunc) error {
-		var err error
-		resp, err = client.Im.Message.List(cctx, req, options...)
-		if err != nil {
-			return fmt.Errorf("%s: list thread %s: %w", p.tag(), threadID, err)
-		}
-		if resp == nil {
-			return fmt.Errorf("%s: list thread %s: nil response", p.tag(), threadID)
-		}
-		if !resp.Success() {
-			return fmt.Errorf("%s: list thread %s failed code=%d msg=%s", p.tag(), threadID, resp.Code, resp.Msg)
-		}
-		return nil
-	})
-	if err != nil {
-		// Do not cache failures: the next message in the thread gets another
-		// chance instead of leaving the topic dropped for minutes.
-		slog.Warn(p.tag()+": adopt topic lookup failed", "thread", threadID, "error", err)
-		return false
-	}
-
-	if resp.Data != nil {
-		for _, item := range resp.Data.Items {
-			if item == nil || item.Sender == nil {
-				continue
-			}
-			if stringValue(item.Sender.SenderType) != "app" {
-				continue
-			}
-			if appID := stringValue(item.Sender.Id); p.appID != "" && appID != "" && appID != p.appID {
-				continue
-			}
-			p.markThread(threadID)
-			slog.Info(p.tag()+": adopted unregistered bot topic",
-				"thread", threadID, "root_id", stringValue(item.MessageId))
-			return true
-		}
-	}
-	p.noteAdoptMiss(threadID)
-	return false
-}
-
-func (p *Platform) adoptMissedRecently(threadID string) bool {
-	p.adoptMu.Lock()
-	defer p.adoptMu.Unlock()
-	at, ok := p.adoptMissed[threadID]
-	if !ok {
-		return false
-	}
-	if time.Since(at) >= adoptTopicMissTTL {
-		delete(p.adoptMissed, threadID)
-		return false
-	}
-	return true
-}
-
-func (p *Platform) noteAdoptMiss(threadID string) {
 	now := time.Now()
-	p.adoptMu.Lock()
-	defer p.adoptMu.Unlock()
-	if p.adoptMissed == nil {
-		p.adoptMissed = make(map[string]time.Time)
+	p.cronHeadsMu.Lock()
+	defer p.cronHeadsMu.Unlock()
+	if p.cronHeads == nil {
+		p.cronHeads = make(map[string]time.Time)
 	}
-	p.adoptMissed[threadID] = now
-	if len(p.adoptMissed) > adoptTopicMissMax {
-		for id, at := range p.adoptMissed {
-			if now.Sub(at) >= adoptTopicMissTTL {
-				delete(p.adoptMissed, id)
+	p.cronHeads[messageID] = now
+	if len(p.cronHeads) > cronHeadMax {
+		for id, at := range p.cronHeads {
+			if now.Sub(at) >= cronHeadTTL {
+				delete(p.cronHeads, id)
 			}
 		}
 	}
+}
+
+// adoptCronTopic registers a topic whose thread id was missed at create time.
+// It only accepts the exact root the cron run posted, so unrelated topics are
+// never picked up, and it makes no API call at all.
+func (p *Platform) adoptCronTopic(threadID, rootID string) bool {
+	threadID = strings.TrimSpace(threadID)
+	rootID = strings.TrimSpace(rootID)
+	if threadID == "" || rootID == "" {
+		return false
+	}
+
+	p.cronHeadsMu.Lock()
+	at, ok := p.cronHeads[rootID]
+	if !ok {
+		p.cronHeadsMu.Unlock()
+		return false
+	}
+	delete(p.cronHeads, rootID)
+	p.cronHeadsMu.Unlock()
+	if time.Since(at) >= cronHeadTTL {
+		return false
+	}
+
+	p.markThread(threadID)
+	slog.Info(p.tag()+": adopted cron topic from its root",
+		"thread", threadID, "root_id", rootID)
+	return true
 }
 
 // fetchMessageThreadID performs one read of the root message. An empty thread
