@@ -456,6 +456,9 @@ level = "info" # debug, info, warn, error
 # Supported events / 支持的事件:
 #   message.received   — user message arrives / 用户消息到达
 #   message.sent       — agent reply sent / Agent 回复发送完成
+#                        fires only after the reply was delivered to the platform;
+#                        not fired for silent (NO_REPLY) replies or if delivery fails
+#                        仅在回复已成功发到平台后触发；静默回复（NO_REPLY）或发送失败时不触发
 #   session.started    — agent session spawned / Agent 会话启动
 #   session.ended      — agent session stopped / Agent 会话结束
 #   cron.triggered     — cron job fires / 定时任务触发
