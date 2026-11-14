@@ -82,8 +82,13 @@ type stubTelegramBot struct {
 	setMyCommandsCalls   int
 	getFileCalls         int
 	setReactionCalls     int
+	// sentTexts records every SendMessage text in order; editedTexts records
+	// every EditMessageText text. Tests assert on content, not just counts.
+	sentTexts   []string
+	editedTexts []string
 
 	sendErr    error
+	editErr    error
 	getFileErr error
 	file       *models.File
 }
@@ -94,9 +99,10 @@ func newStubTelegramBot() *stubTelegramBot {
 	}
 }
 
-func (b *stubTelegramBot) SendMessage(_ context.Context, _ *tgbot.SendMessageParams) (*models.Message, error) {
+func (b *stubTelegramBot) SendMessage(_ context.Context, p *tgbot.SendMessageParams) (*models.Message, error) {
 	b.mu.Lock()
 	b.sendMessageCalls++
+	b.sentTexts = append(b.sentTexts, p.Text)
 	b.mu.Unlock()
 	if b.sendErr != nil {
 		return nil, b.sendErr
@@ -154,10 +160,14 @@ func (b *stubTelegramBot) SendChatAction(_ context.Context, _ *tgbot.SendChatAct
 	return true, nil
 }
 
-func (b *stubTelegramBot) EditMessageText(_ context.Context, _ *tgbot.EditMessageTextParams) (*models.Message, error) {
+func (b *stubTelegramBot) EditMessageText(_ context.Context, p *tgbot.EditMessageTextParams) (*models.Message, error) {
 	b.mu.Lock()
 	b.editMessageTextCalls++
+	b.editedTexts = append(b.editedTexts, p.Text)
 	b.mu.Unlock()
+	if b.editErr != nil {
+		return nil, b.editErr
+	}
 	if b.sendErr != nil {
 		return nil, b.sendErr
 	}
