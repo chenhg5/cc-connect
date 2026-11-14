@@ -338,6 +338,19 @@ type DisplayCfg struct {
 	ToolMessages     bool
 	HistoryMaxLen    *int // max runes for /history entries; nil = default, 0 = no truncation
 	HideAgentFooter  bool // strip model/token footer lines emitted as agent text
+	// PrependPreToolText is a quiet-mode-only knob. When Mode == "quiet" and
+	// this is false (the default), the engine slices the accumulated
+	// assistant text at the last tool_use boundary and only delivers the
+	// text block that follows. Set this to true to keep the pre-tool
+	// "lead-in" and render all text in one card. Ignored outside quiet mode.
+	PrependPreToolText bool
+}
+
+// quietDropsPreTool reports whether quiet mode keeps only the text emitted
+// after the last tool_use. With tool messages shown, each text segment is
+// already delivered on its own, so nothing is dropped.
+func (d DisplayCfg) quietDropsPreTool() bool {
+	return d.Mode == "quiet" && !d.PrependPreToolText && !d.ToolMessages
 }
 
 // InstantReplyCfg controls the immediate confirmation reply sent when a message
@@ -5417,7 +5430,16 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 
 	var textParts []string
 	var segmentStart int // index into textParts: text before this has been sent/displayed
-	silentHold := false  // true while accumulated segment text could still resolve to a bare NO_REPLY marker
+	// postLastToolStart is the index in textParts where the text block emitted
+	// after the LAST tool_use begins. It stays 0 if no tool_use was observed.
+	// When quiet mode drops pre-tool text, textParts[postLastToolStart:] is
+	// what every renderer shows and what the final reply delivers.
+	postLastToolStart := 0
+	// prevBlockStart:prevBlockEnd is the most recent non-empty text block
+	// that ended at a tool_use. Quiet mode delivers it when the agent says
+	// nothing after its last tool call.
+	prevBlockStart, prevBlockEnd := 0, 0
+	silentHold := false // true while accumulated segment text could still resolve to a bare NO_REPLY marker
 	toolCount := 0
 	waitStart := time.Now()
 	firstEventLogged := false
@@ -5465,6 +5487,25 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 	var cardToolCalls []cardToolEntry  // track tool calls for card content
 	var cardThinkingText string        // latest thinking text
 	var cardAnswerText strings.Builder // accumulated answer text
+	postToolText := func() string {
+		return strings.Join(textParts[postLastToolStart:], "")
+	}
+	// quietReply is the text quiet mode delivers: the text after the last
+	// tool_use, or the most recent text block when nothing follows it.
+	quietReply := func() string {
+		if strings.TrimSpace(postToolText()) == "" && prevBlockEnd > prevBlockStart {
+			return strings.Join(textParts[prevBlockStart:prevBlockEnd], "")
+		}
+		return postToolText()
+	}
+	// visibleBody is the answer text a card or preview shows, given the full
+	// text that renderer has accumulated.
+	visibleBody := func(full string) string {
+		if e.display.quietDropsPreTool() {
+			return postToolText()
+		}
+		return full
+	}
 
 	if scp, ok := state.platform.(StreamingCardPlatform); ok {
 		if sc, err := scp.CreateStreamingCard(e.ctx, state.replyCtx); err != nil {
@@ -5668,6 +5709,8 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			// final aggregation cannot concatenate the invalid draft.
 			textParts = nil
 			segmentStart = 0
+			postLastToolStart = 0
+			prevBlockStart, prevBlockEnd = 0, 0
 			silentHold = false
 			partialText = ""
 			cardAnswerText.Reset()
@@ -5692,7 +5735,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 					})
 				}
 				if cardMessageID == nil {
-					card := buildResolvedRichCard(CardStatusThinking, "", toolSteps, partialText, true, e.composeRichStatusFooter(true, turnStart, e.agent, state.agentSession, state.workspaceDir))
+					card := buildResolvedRichCard(CardStatusThinking, "", toolSteps, visibleBody(partialText), true, e.composeRichStatusFooter(true, turnStart, e.agent, state.agentSession, state.workspaceDir))
 					if starter, ok := p.(PreviewStarter); ok {
 						handle, err := starter.SendPreviewStart(e.ctx, replyCtx, card)
 						if err != nil {
@@ -5702,7 +5745,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 						}
 					}
 				} else if updater, ok := p.(MessageUpdater); ok {
-					card := buildResolvedRichCard(CardStatusThinking, "", toolSteps, partialText, true, e.composeRichStatusFooter(true, turnStart, e.agent, state.agentSession, state.workspaceDir))
+					card := buildResolvedRichCard(CardStatusThinking, "", toolSteps, visibleBody(partialText), true, e.composeRichStatusFooter(true, turnStart, e.agent, state.agentSession, state.workspaceDir))
 					if err := updater.UpdateMessage(e.ctx, cardMessageID, card); err != nil {
 						slog.Debug("rich card: failed to update thinking card", "platform", p.Name(), "error", err)
 					}
@@ -5714,7 +5757,10 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			//   compact: freeze+detach to split text into separate cards
 			if !e.display.ThinkingMessages && len(textParts) > segmentStart {
 				if e.display.Mode == "quiet" {
-					if sp.canPreview() && sp.appendSeparator("\n\n") {
+					// Right after a tool boundary there is no visible text yet,
+					// so a separator here would open the reply.
+					noTextSinceTool := e.display.quietDropsPreTool() && len(textParts) == postLastToolStart
+					if !noTextSinceTool && sp.canPreview() && sp.appendSeparator("\n\n") {
 						textParts = append(textParts, "\n\n")
 					}
 				} else {
@@ -5737,7 +5783,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				// --- StreamingCard path ---
 				if streamCard != nil && !streamCard.Failed() {
 					cardThinkingText = truncateIf(event.Content, e.display.ThinkingMaxLen)
-					_ = streamCard.Update(e.ctx, buildCardContent(cardThinkingText, cardToolCalls, cardAnswerText.String()))
+					_ = streamCard.Update(e.ctx, buildCardContent(cardThinkingText, cardToolCalls, visibleBody(cardAnswerText.String())))
 					continue // skip original independent message sending
 				}
 				// --- Original path (fallback) ---
@@ -5768,7 +5814,35 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 
 		case EventToolUse:
 			toolCount++
+			// Quiet mode drops the text before this tool call. Every renderer
+			// reads the boundary set here, so it is set before any of them runs.
+			droppedText := false
+			if e.display.quietDropsPreTool() {
+				if strings.TrimSpace(postToolText()) != "" {
+					droppedText = true
+					prevBlockStart, prevBlockEnd = postLastToolStart, len(textParts)
+					// The separator ends the dropped block, so it never opens the
+					// reply. It keeps blocks apart where the permission-prompt and
+					// agent-exit paths join several blocks.
+					if sp.canPreview() && sp.appendSeparator("\n\n") {
+						textParts = append(textParts, "\n\n")
+					}
+				}
+				postLastToolStart = len(textParts)
+				silentHold = false
+			}
 			if hasRichCard {
+				if droppedText && cardMessageID != nil {
+					if updater, ok := p.(MessageUpdater); ok {
+						card := buildResolvedRichCard(CardStatusWorking, "", toolSteps, visibleBody(partialText), true, e.composeRichStatusFooter(true, turnStart, e.agent, state.agentSession, state.workspaceDir))
+						if err := updater.UpdateMessage(e.ctx, cardMessageID, card); err == nil {
+							lastRichCardUpdate = time.Now()
+							lastRichCardLen = 0
+						} else {
+							slog.Debug("rich card: failed to clear text at tool boundary", "platform", p.Name(), "error", err)
+						}
+					}
+				}
 				// When tool messages are suppressed, skip card updates on tool events.
 				if !e.display.ToolMessages {
 					break
@@ -5779,7 +5853,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 					Summary: truncateIf(event.ToolInput, e.display.ToolMaxLen),
 				})
 				if cardMessageID == nil {
-					card := buildResolvedRichCard(CardStatusWorking, "", toolSteps, partialText, true, e.composeRichStatusFooter(true, turnStart, e.agent, state.agentSession, state.workspaceDir))
+					card := buildResolvedRichCard(CardStatusWorking, "", toolSteps, visibleBody(partialText), true, e.composeRichStatusFooter(true, turnStart, e.agent, state.agentSession, state.workspaceDir))
 					if starter, ok := p.(PreviewStarter); ok {
 						handle, err := starter.SendPreviewStart(e.ctx, replyCtx, card)
 						if err != nil {
@@ -5789,7 +5863,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 						}
 					}
 				} else if updater, ok := p.(MessageUpdater); ok {
-					card := buildResolvedRichCard(CardStatusWorking, "", toolSteps, partialText, true, e.composeRichStatusFooter(true, turnStart, e.agent, state.agentSession, state.workspaceDir))
+					card := buildResolvedRichCard(CardStatusWorking, "", toolSteps, visibleBody(partialText), true, e.composeRichStatusFooter(true, turnStart, e.agent, state.agentSession, state.workspaceDir))
 					if err := updater.UpdateMessage(e.ctx, cardMessageID, card); err != nil {
 						slog.Debug("rich card: failed to update tool card", "platform", p.Name(), "error", err)
 					}
@@ -5797,11 +5871,12 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				break
 			}
 			// When tool messages are hidden, behavior depends on display mode:
-			//   quiet:   append separator to keep all text in one card
+			//   quiet:   keep all text in one card, with a separator when the
+			//            pre-tool text stays (PrependPreToolText)
 			//   compact: freeze+detach to split text into separate cards
 			if !e.display.ToolMessages && len(textParts) > segmentStart {
 				if e.display.Mode == "quiet" {
-					if sp.canPreview() && sp.appendSeparator("\n\n") {
+					if !e.display.quietDropsPreTool() && sp.canPreview() && sp.appendSeparator("\n\n") {
 						textParts = append(textParts, "\n\n")
 					}
 				} else {
@@ -5845,7 +5920,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 						Name:  event.ToolName,
 						Input: formattedInput,
 					})
-					_ = streamCard.Update(e.ctx, buildCardContent(cardThinkingText, cardToolCalls, cardAnswerText.String()))
+					_ = streamCard.Update(e.ctx, buildCardContent(cardThinkingText, cardToolCalls, visibleBody(cardAnswerText.String())))
 					continue // skip original independent message sending
 				}
 				// --- Original path (fallback) ---
@@ -5909,7 +5984,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 					if hasRichCard {
 						toolSteps = mergeRichToolResult(toolSteps, event, result, e.display.ToolMaxLen)
 						if cardMessageID == nil {
-							card := buildResolvedRichCard(CardStatusWorking, "", toolSteps, partialText, true, e.composeRichStatusFooter(true, turnStart, e.agent, state.agentSession, state.workspaceDir))
+							card := buildResolvedRichCard(CardStatusWorking, "", toolSteps, visibleBody(partialText), true, e.composeRichStatusFooter(true, turnStart, e.agent, state.agentSession, state.workspaceDir))
 							if starter, ok := p.(PreviewStarter); ok {
 								handle, err := starter.SendPreviewStart(e.ctx, replyCtx, card)
 								if err != nil {
@@ -5919,7 +5994,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 								}
 							}
 						} else if updater, ok := p.(MessageUpdater); ok {
-							card := buildResolvedRichCard(CardStatusWorking, "", toolSteps, partialText, true, e.composeRichStatusFooter(true, turnStart, e.agent, state.agentSession, state.workspaceDir))
+							card := buildResolvedRichCard(CardStatusWorking, "", toolSteps, visibleBody(partialText), true, e.composeRichStatusFooter(true, turnStart, e.agent, state.agentSession, state.workspaceDir))
 							if err := updater.UpdateMessage(e.ctx, cardMessageID, card); err != nil {
 								slog.Debug("rich card: failed to update tool-result card", "platform", p.Name(), "error", err)
 							}
@@ -5956,7 +6031,15 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				// paths share this single transition; couldBeSilentPrefix is
 				// monotonically decreasing as segments grow, so the transition
 				// is held → released at most once per segment.
-				peekSegment := strings.Join(textParts[segmentStart:], "") + content
+				//
+				// Quiet mode holds on the post-tool slice, the text it renders
+				// and delivers, so a pre-tool lead-in cannot release the hold
+				// for a bare NO_REPLY that follows a tool call.
+				holdStart := segmentStart
+				if e.display.quietDropsPreTool() {
+					holdStart = postLastToolStart
+				}
+				peekSegment := strings.Join(textParts[holdStart:], "") + content
 				prevHold := silentHold
 				silentHold = couldBeSilentPrefix(peekSegment)
 				releasedNow := prevHold && !silentHold
@@ -5970,7 +6053,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 						} else {
 							cardAnswerText.WriteString(content)
 						}
-						_ = streamCard.Update(e.ctx, buildCardContent(cardThinkingText, cardToolCalls, cardAnswerText.String()))
+						_ = streamCard.Update(e.ctx, buildCardContent(cardThinkingText, cardToolCalls, visibleBody(cardAnswerText.String())))
 					}
 					handledByStreamCard = true
 				}
@@ -5978,7 +6061,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 					if len(textParts) == 0 {
 						if hasRichCard {
 							if cardMessageID == nil && !silentHold {
-								card := buildResolvedRichCard(CardStatusWorking, "", toolSteps, partialText, true, e.composeRichStatusFooter(true, turnStart, e.agent, state.agentSession, state.workspaceDir))
+								card := buildResolvedRichCard(CardStatusWorking, "", toolSteps, visibleBody(partialText), true, e.composeRichStatusFooter(true, turnStart, e.agent, state.agentSession, state.workspaceDir))
 								if starter, ok := p.(PreviewStarter); ok {
 									handle, err := starter.SendPreviewStart(e.ctx, replyCtx, card)
 									if err != nil {
@@ -6002,7 +6085,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 							// here using the accumulated partialText so the card emerges
 							// with the post-prefix content already in body.
 							if cardMessageID == nil {
-								card := buildResolvedRichCard(CardStatusWorking, "", toolSteps, partialText, true, e.composeRichStatusFooter(true, turnStart, e.agent, state.agentSession, state.workspaceDir))
+								card := buildResolvedRichCard(CardStatusWorking, "", toolSteps, visibleBody(partialText), true, e.composeRichStatusFooter(true, turnStart, e.agent, state.agentSession, state.workspaceDir))
 								if starter, ok := p.(PreviewStarter); ok {
 									handle, err := starter.SendPreviewStart(e.ctx, replyCtx, card)
 									if err != nil {
@@ -6021,27 +6104,28 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 								throttleDur = 200 * time.Millisecond
 								throttleChars = 20
 							}
-							if cardMessageID != nil && (time.Since(lastRichCardUpdate) > throttleDur || len(partialText)-lastRichCardLen > throttleChars) {
+							body := visibleBody(partialText)
+							if cardMessageID != nil && (time.Since(lastRichCardUpdate) > throttleDur || len(body)-lastRichCardLen > throttleChars) {
 								// Prefer per-element streaming text update (cardkit-v1) when available;
 								// it engages Lark's native typewriter rendering. Falls back to
 								// full-card Patch on ErrNotSupported (handle without cardID) or any error.
 								streamed := false
 								if hasStreamer {
-									streamBody := resolveRichCardMarkdown(partialText, false)
+									streamBody := resolveRichCardMarkdown(body, false)
 									if err := streamer.StreamRichCardText(e.ctx, cardMessageID, streamBody); err == nil {
 										lastRichCardUpdate = time.Now()
-										lastRichCardLen = len(partialText)
+										lastRichCardLen = len(body)
 										streamed = true
 									} else if !errors.Is(err, ErrNotSupported) {
 										slog.Debug("rich card: streaming text update failed, falling back to full Patch", "platform", p.Name(), "error", err)
 									}
 								}
 								if !streamed {
-									card := buildResolvedRichCard(CardStatusWorking, "", toolSteps, partialText, true, e.composeRichStatusFooter(true, turnStart, e.agent, state.agentSession, state.workspaceDir))
+									card := buildResolvedRichCard(CardStatusWorking, "", toolSteps, body, true, e.composeRichStatusFooter(true, turnStart, e.agent, state.agentSession, state.workspaceDir))
 									if updater, ok := p.(MessageUpdater); ok {
 										if err := updater.UpdateMessage(e.ctx, cardMessageID, card); err == nil {
 											lastRichCardUpdate = time.Now()
-											lastRichCardLen = len(partialText)
+											lastRichCardLen = len(body)
 										} else {
 											slog.Debug("rich card: failed to update text card", "platform", p.Name(), "error", err)
 										}
@@ -6051,7 +6135,10 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 						}
 					} else {
 						if !silentHold && sp.canPreview() {
-							if releasedNow {
+							firstAfterTool := postLastToolStart > 0 && len(textParts) == postLastToolStart+1
+							if e.display.quietDropsPreTool() && (releasedNow || firstAfterTool) {
+								sp.replaceText(postToolText())
+							} else if releasedNow {
 								sp.appendText(peekSegment) // flush all held chunks at once
 							} else {
 								sp.appendText(content)
@@ -6104,23 +6191,34 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				continue
 			}
 
-			// Flush accumulated text segment before permission prompt
-			previewActive := sp.canPreview()
-			if len(textParts) > segmentStart {
-				if !previewActive {
-					segment := strings.Join(textParts[segmentStart:], "")
-					if segment != "" {
-						for _, chunk := range SplitMessageCodeFenceAware(segment, maxPlatformMessageLen) {
-							sendWorkspace(p, replyCtx, chunk)
+			// Flush accumulated text segment before permission prompt.
+			// Quiet mode sends nothing and deletes the live preview; the
+			// final reply picks from the text so far. A separator ends the
+			// text before the prompt so the reply keeps it apart from the
+			// text after.
+			if e.display.quietDropsPreTool() {
+				if strings.TrimSpace(postToolText()) != "" {
+					textParts = append(textParts, "\n\n")
+				}
+				sp.deletePreview()
+			} else {
+				previewActive := sp.canPreview()
+				if len(textParts) > segmentStart {
+					if !previewActive {
+						segment := strings.Join(textParts[segmentStart:], "")
+						if segment != "" {
+							for _, chunk := range SplitMessageCodeFenceAware(segment, maxPlatformMessageLen) {
+								sendWorkspace(p, replyCtx, chunk)
+							}
 						}
 					}
+					segmentStart = len(textParts)
+					silentHold = false
 				}
-				segmentStart = len(textParts)
-				silentHold = false
-			}
-			sp.freeze()
-			if previewActive {
-				sp.detachPreview() // keep frozen preview visible as permanent message
+				sp.freeze()
+				if previewActive {
+					sp.detachPreview() // keep frozen preview visible as permanent message
+				}
 			}
 
 			slog.Info("permission request",
@@ -6162,10 +6260,10 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			<-pending.Resolved
 			slog.Info("permission resolved", "request_id", event.RequestID)
 
-			// The stream preview was frozen+detached when this permission
-			// request was emitted, so any subsequent EventText in this turn
-			// would otherwise be buffered until EventResult and sent as a
-			// single bulk message (regression fixed by
+			// The stream preview was frozen+detached (deleted in quiet mode)
+			// when this permission request was emitted, so any subsequent
+			// EventText in this turn would otherwise be buffered until
+			// EventResult and sent as a single bulk message (regression fixed by
 			// fix/stream-preview-after-permission). unfreeze() restores the
 			// preview so the post-resolution output opens a fresh streaming
 			// card and continues to update incrementally.
@@ -6224,8 +6322,19 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			// When tool progress is hidden, segmentStart stays 0 and textParts
 			// contains ALL text across tool boundaries. Prefer the full accumulated
 			// text over event.Content which only contains the last assistant segment.
-			if len(textParts) > 0 && segmentStart == 0 && !e.display.ToolMessages {
-				fullResponse = strings.Join(textParts, "")
+			// A NO_REPLY result with no text after the last tool_use keeps
+			// the quiet turn silent.
+			quietSilent := false
+			if e.display.quietDropsPreTool() && strings.TrimSpace(postToolText()) == "" {
+				stripped, ok := stripTrailingSilent(fullResponse)
+				quietSilent = isSilentReply(fullResponse) || (ok && strings.TrimSpace(stripped) == "")
+			}
+			if len(textParts) > 0 && segmentStart == 0 && !e.display.ToolMessages && !quietSilent {
+				if e.display.quietDropsPreTool() {
+					fullResponse = quietReply()
+				} else {
+					fullResponse = strings.Join(textParts, "")
+				}
 			} else if fullResponse == "" && len(textParts) > 0 {
 				fullResponse = strings.Join(textParts, "")
 			}
@@ -6447,7 +6556,15 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				// would otherwise post the suppressed marker verbatim.
 				cardBody := fullResponse
 				if isSilent {
-					cardBody = strings.TrimRight(cardAnswerText.String(), " \t\r\n")
+					silentBody := visibleBody(cardAnswerText.String())
+					if e.display.quietDropsPreTool() {
+						// The post-tool slice comes from textParts, which still
+						// ends with the marker, so strip it.
+						if stripped, ok := stripTrailingSilent(silentBody); ok {
+							silentBody = stripped
+						}
+					}
+					cardBody = strings.TrimRight(silentBody, " \t\r\n")
 				}
 				finalContent := buildCardContent(cardThinkingText, cardToolCalls, cardBody)
 				if err := streamCard.Finalize(e.ctx, finalContent); err != nil {
@@ -6475,17 +6592,19 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				// card would stay frozen in "Working" / "Thinking" header state forever
 				// (no Done flip, no Patch).
 				//
-				// Determine the visible body to finalize the card with. partialText
-				// accumulates every EventText chunk this turn, so it captures any
-				// pre-NO_REPLY content the user already saw streaming (e.g. when the
-				// agent wrote "Hello\nNO_REPLY"). Strip the trailing NO_REPLY marker
-				// before rendering. If there is neither body nor tool history, the
+				// Determine the visible body to finalize the card with: the text
+				// the card has been showing, which captures any pre-NO_REPLY
+				// content the user already saw streaming (e.g. when the agent
+				// wrote "Hello\nNO_REPLY"). Strip the NO_REPLY marker before
+				// rendering. If there is neither body nor tool history, the
 				// card has nothing visible worth keeping; delete to avoid an
 				// orphaned shell. Finalizing-in-place avoids the "撤回了一条消息"
 				// gray bar that DeletePreviewMessage would leave in Lark.
 				if hasRichCard && cardMessageID != nil {
-					silentBody := partialText
-					if stripped, ok := stripTrailingSilent(partialText); ok {
+					silentBody := visibleBody(partialText)
+					if isSilentReply(silentBody) {
+						silentBody = ""
+					} else if stripped, ok := stripTrailingSilent(silentBody); ok {
 						silentBody = strings.TrimRight(stripped, " \t\r\n")
 					}
 					if silentBody != "" || len(toolSteps) > 0 {
@@ -6700,6 +6819,8 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				msgID = queued.messageID
 				textParts = nil
 				segmentStart = 0
+				postLastToolStart = 0
+				prevBlockStart, prevBlockEnd = 0, 0
 				toolCount = 0
 				turnStart = time.Now()
 				firstEventLogged = false
@@ -6809,7 +6930,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			state.eventsNeedResync = state.agentSession == nil || !state.agentSession.Alive() || state.stopped
 			state.mu.Unlock()
 			if hasRichCard && cardMessageID != nil {
-				errCard := buildResolvedRichCard(CardStatusError, "", toolSteps, partialText, false, e.composeRichStatusFooter(false, turnStart, e.agent, state.agentSession, state.workspaceDir))
+				errCard := buildResolvedRichCard(CardStatusError, "", toolSteps, visibleBody(partialText), false, e.composeRichStatusFooter(false, turnStart, e.agent, state.agentSession, state.workspaceDir))
 				if updater, ok := p.(MessageUpdater); ok {
 					if err := updater.UpdateMessage(e.ctx, cardMessageID, errCard); err != nil {
 						slog.Debug("rich card: failed to update error card", "platform", p.Name(), "error", err)
@@ -6859,6 +6980,9 @@ channelClosed:
 		state.mu.Unlock()
 
 		fullResponse := strings.Join(textParts, "")
+		if e.display.quietDropsPreTool() {
+			fullResponse = quietReply()
+		}
 		session.AddHistory("assistant", fullResponse)
 		// Persist immediately — this path runs on abnormal channel close,
 		// so deferring the save until the next foreground turn risks losing
