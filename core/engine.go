@@ -366,6 +366,7 @@ type Engine struct {
 	tts                   *TTSCfg
 	display               DisplayCfg
 	injectSender          bool
+	busyAction            string // BusyActionQueue (default) or BusyActionInject
 	attachmentSendEnabled bool
 	startedAt             time.Time
 
@@ -800,6 +801,7 @@ func NewEngine(name string, ag Agent, platforms []Platform, sessionStorePath str
 		eventIdleTimeout:      defaultEventIdleTimeout,
 		staleLockBreakAfter:   busyStaleLockMaxHeld,
 		maxQueuedMessages:     defaultMaxQueuedMessages,
+		busyAction:            BusyActionQueue,
 		showContextIndicator:  true,
 		showWorkdirIndicator:  true,
 		shell:                 defaultShell(),
@@ -1051,6 +1053,26 @@ func (e *Engine) SetWebStatusFunc(fn func() string)                    { e.webSt
 
 func (e *Engine) SetSkipGit(skipGit bool) {
 	e.skipGit = skipGit
+}
+
+// Busy actions: what a user message does when it arrives while the session
+// is still running a turn.
+const (
+	// BusyActionQueue waits for the running turn to finish (default).
+	BusyActionQueue = "queue"
+	// BusyActionInject delivers the message into the running turn, like
+	// /ps, when the agent can take mid-turn input; otherwise it queues.
+	BusyActionInject = "inject"
+)
+
+// SetBusyAction sets the project's busy_action. Unknown values fall back to
+// BusyActionQueue; config validation rejects them earlier.
+func (e *Engine) SetBusyAction(v string) {
+	if strings.EqualFold(strings.TrimSpace(v), BusyActionInject) {
+		e.busyAction = BusyActionInject
+		return
+	}
+	e.busyAction = BusyActionQueue
 }
 
 // SetInjectSender controls whether sender identity (platform and user ID) is
@@ -3253,7 +3275,14 @@ func (e *Engine) handleMessage(p Platform, msg *Message) {
 			}
 		}
 		// ── end self-heal; queueing path below is unchanged ────────────────
-		// Session is busy — try to queue the message for the running turn
+		// Session is busy — with busy_action = "inject", deliver the message
+		// into the running turn when the agent can take mid-turn input, the
+		// same way /ps does, so the user does not wait for the whole turn
+		// before it is seen.
+		if e.busyAction == BusyActionInject && e.injectMessageIntoBusyTurn(p, msg, interactiveKey, session, sessions) {
+			return
+		}
+		// Otherwise try to queue the message for the running turn
 		// so the agent processes it immediately after the current turn ends.
 		if e.queueMessageForBusySession(p, msg, interactiveKey) {
 			// Race guard: the drain loop in processInteractiveMessageWith may
@@ -3393,6 +3422,68 @@ func (e *Engine) maybeAutoResetSessionOnIdle(p Platform, msg *Message, sessions 
 
 	e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgSessionAutoResetIdle, int(e.resetOnIdle/time.Minute)))
 	return newSession, newGen
+}
+
+// injectMessageIntoBusyTurn delivers a message that arrived while the session
+// is busy directly to the running turn, as if the user had typed /ps. It is
+// used only when the agent session can take mid-turn input safely:
+// UserInputSteerer (native steer RPC, text only) or MidTurnInputSender
+// (SendMidTurn writes to the same live process). Returns false when the message
+// should fall through to the queue instead: unsupported agent, agent not yet
+// running, an existing queue whose order must be kept, a stale or voice
+// message, or a delivery error.
+func (e *Engine) injectMessageIntoBusyTurn(p Platform, msg *Message, interactiveKey string, session *Session, sessions *SessionManager) bool {
+	e.interactiveMu.Lock()
+	state, ok := e.interactiveStates[interactiveKey]
+	e.interactiveMu.Unlock()
+	if !ok || state == nil {
+		return false
+	}
+	state.mu.Lock()
+	agentSession := state.agentSession
+	queued := len(state.pendingMessages)
+	stale := e.isStaleUserMessageLocked(state, msg.UserMessageTimeMs)
+	state.mu.Unlock()
+	// A voice message keeps the queue, as in upstream #523: its turn is the
+	// one that answers by voice (state.fromVoice), which an injection is not.
+	if agentSession == nil || !agentSession.Alive() || queued > 0 || stale || msg.FromVoice {
+		return false
+	}
+
+	prompt := e.buildSenderPrompt(msg.Content, msg.UserID, msg.UserName, msg.Platform, msg.SessionKey, msg.ChannelKey)
+	hasAttachments := len(msg.Images) > 0 || len(msg.Files) > 0
+	delivered := false
+	var err error
+	if steerer, ok := agentSession.(UserInputSteerer); ok {
+		if hasAttachments {
+			return false
+		}
+		delivered, err = steerer.SteerUserInput(prompt)
+	} else if sender, ok := agentSession.(MidTurnInputSender); ok {
+		err = sender.SendMidTurn(prompt, msg.MessageID, msg.Images, msg.Files)
+		delivered = err == nil
+	}
+	if err != nil {
+		slog.Warn("busy message injection failed; falling back to queue",
+			"session", msg.SessionKey, "msg_id", msg.MessageID, "error", err)
+		return false
+	}
+	if !delivered {
+		return false
+	}
+
+	e.noteUserMessageAccepted(interactiveKey, msg.UserMessageTimeMs)
+	session.TouchUserActivity()
+	session.AddHistory("user", msg.Content)
+	sessions.Save()
+	runMessageAccepted(msg)
+	slog.Info("message injected into busy session",
+		"session", msg.SessionKey,
+		"user", msg.UserName,
+		"msg_id", msg.MessageID,
+	)
+	e.reply(p, msg.ReplyCtx, e.i18n.T(MsgMessageInjected))
+	return true
 }
 
 // queueMessageForBusySession queues a message for later delivery when the

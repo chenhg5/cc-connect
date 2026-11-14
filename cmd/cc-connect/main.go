@@ -734,6 +734,9 @@ func main() {
 			engine.SetInjectSender(*proj.InjectSender)
 		}
 
+		// Wire busy-session message routing (queue or inject)
+		engine.SetBusyAction(proj.BusyAction)
+
 		// Wire speech-to-text if enabled
 		if cfg.Speech.Enabled {
 			speechCfg := core.SpeechCfg{
@@ -1881,6 +1884,9 @@ func reloadConfig(configPath, projName string, engine *core.Engine) (*core.Confi
 
 	// Reload sender injection
 	engine.SetInjectSender(proj.InjectSender != nil && *proj.InjectSender)
+
+	// Reload busy-session message routing
+	engine.SetBusyAction(proj.BusyAction)
 
 	// Reload attachment send-back switch
 	engine.SetAttachmentSendEnabled(cfg.AttachmentSend != "off")
