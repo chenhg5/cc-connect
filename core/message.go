@@ -516,6 +516,14 @@ type Event struct {
 	Metadata                 map[string]any // optional metadata from agent (e.g. compaction_continue)
 	Synthetic                bool           // true if this is a synthetic/generated message (not from real user)
 	ModelSwitch              *ModelSwitch   // populated for EventModelSwitch
+	UsageLimit               *UsageLimit    // set on an EventResult the provider refused for a usage limit
+}
+
+// UsageLimit describes a turn the agent's provider refused because a usage
+// limit (such as a subscription's session or weekly limit) has been reached.
+type UsageLimit struct {
+	ResetsAt time.Time // when the limit resets; zero if the agent did not say
+	Prompt   string    // the refused prompt as the agent sent it, attachment paths included
 }
 
 // HistoryEntry is one turn in a conversation.
