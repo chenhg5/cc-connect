@@ -506,6 +506,10 @@ type ProjectConfig struct {
 	// the current session has been inactive for the specified number of minutes.
 	// 0 or nil disables the behavior.
 	ResetOnIdleMins *int `toml:"reset_on_idle_mins,omitempty"`
+	// IdleResetNotice: nil/true = an idle rotation (reset_on_idle_mins) posts
+	// its notices to the chat; false = rotate without posting. The rotation
+	// itself and its log line are not affected.
+	IdleResetNotice *bool `toml:"idle_reset_notice,omitempty"`
 	// AgentSessionIdleTimeoutMins 在指定分钟数后关闭空闲的 live agent 进程，
 	// 同时保留已保存的 session ID，便于下一条消息继续恢复。0 或 nil 表示禁用。
 	AgentSessionIdleTimeoutMins *int `toml:"agent_session_idle_timeout_mins,omitempty"`

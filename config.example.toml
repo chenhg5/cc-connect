@@ -190,6 +190,17 @@ level = "info" # debug, info, warn, error
 # 默认值为 30 分钟（未设置时）。设为 0 可以禁用此行为，恢复始终继续上次会话。
 # [[projects]]
 # reset_on_idle_mins = 30   # default when unset / 未设置时的默认值；设为 0 表示禁用
+#
+# Each rotation posts a notice to the chat ("Session auto-reset after N
+# minute(s) of inactivity"), preceded by a "wrapping up your previous session"
+# notice when the old agent process is still running. Set idle_reset_notice =
+# false to rotate without posting, for example in a project where every message
+# is a separate task. The rotation itself and its log line are not affected.
+# Default: true.
+# 每次自动切换都会在聊天里发一条提示；旧 agent 进程还在运行时，前面还会先发一条
+# “正在结束上一个会话”。设为 false 则只切换、不发提示，适合每条消息都是独立任务的项目。
+# 切换本身和对应的日志不受影响。默认 true。
+# idle_reset_notice = false
 
 # Close an idle live agent process after a clean turn while preserving the
 # cc-connect session and saved agent session ID. The next message in the same
