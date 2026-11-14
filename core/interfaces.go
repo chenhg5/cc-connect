@@ -390,6 +390,14 @@ type AgentSession interface {
 	Close() error
 }
 
+// CapacityFallbackSession optionally continues a terminal model-capacity failure
+// in the same session. The engine sends the returned continuation once, without
+// replaying the original message or attachments, and restores the model afterward.
+type CapacityFallbackSession interface {
+	TryCapacityFallback(err error) (from, to, continuation string, ok bool)
+	RestoreCapacityFallback()
+}
+
 // PermissionResult represents the user's decision on a permission request.
 type PermissionResult struct {
 	Behavior     string         `json:"behavior"`               // "allow" or "deny"
