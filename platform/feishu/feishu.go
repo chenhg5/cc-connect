@@ -3490,6 +3490,14 @@ func (p *Platform) replyMessage(ctx context.Context, rc replyContext, msgType, c
 			if !resp.Success() {
 				return fmt.Errorf("%s: reply failed code=%d msg=%s", p.tag(), resp.Code, resp.Msg)
 			}
+			// A reply that lands in a topic is how a bot-opened topic comes
+			// into existence; its response names the thread, so mention state
+			// does not have to be guessed or polled for.
+			if resp.Data != nil {
+				if tid := stringValue(resp.Data.ThreadId); tid != "" {
+					p.markThread(tid)
+				}
+			}
 			return nil
 		})
 	})
@@ -3583,21 +3591,9 @@ func (p *Platform) StartCronTopic(ctx context.Context, sessionKey, content strin
 
 	content = stripInternalTags(content)
 	msgType, msgBody := buildReplyContent(content)
-	messageID, threadID, err := p.createMessageReturningID(ctx, rc.chatID, msgType, msgBody, "cron_topic")
+	messageID, _, err := p.createMessageReturningID(ctx, rc.chatID, msgType, msgBody, "cron_topic")
 	if err != nil {
 		return "", nil, err
-	}
-	if threadID == "" {
-		// Feishu omits thread_id on the create response for a brand-new topic
-		// root, so read it back. The mention exemption is the only thing at
-		// stake here: a failed lookup must not fail the cron run.
-		tid, lookupErr := p.lookupMessageThreadID(ctx, messageID)
-		if lookupErr != nil {
-			slog.Warn(p.tag()+": cron topic thread lookup failed", "root_id", messageID, "error", lookupErr)
-		} else {
-			threadID = tid
-			p.markThread(threadID)
-		}
 	}
 
 	newKey := fmt.Sprintf("%s:%s:root:%s", p.tag(), rc.chatID, messageID)
@@ -3605,117 +3601,14 @@ func (p *Platform) StartCronTopic(ctx context.Context, sessionKey, content strin
 		messageID:  messageID,
 		chatID:     rc.chatID,
 		sessionKey: newKey,
-		// Feishu only returns a thread id for chats that support topics; in
-		// plain chats fall back to the platform's normal reply rules.
-		forceThread: threadID != "",
+		// A cron new_topic root owns the conversation, so replies stay in it.
+		// The topic itself is created by the first of those replies: this chat
+		// is not a topic chat, so the root message carries no thread id yet.
+		// Replies register the thread from their API response instead.
+		forceThread: true,
 	}
-	slog.Info(p.tag()+": cron topic created", "chat_id", rc.chatID, "root_id", messageID, "thread_id", threadID)
+	slog.Info(p.tag()+": cron topic created", "chat_id", rc.chatID, "root_id", messageID)
 	return newKey, newRC, nil
-}
-
-const (
-	// cronThreadLookupBudget bounds the whole wait for the thread id of a new
-	// topic root: Feishu exposes it about 0.8-1.2s after create, so one read is
-	// never enough and waiting forever would stall the cron run.
-	cronThreadLookupBudget = 4 * time.Second
-	// A single read gets its own short deadline; a stuck request must not eat
-	// the whole budget and leave no room for another attempt.
-	cronThreadLookupAttemptLimit = time.Second
-	// Feishu exposes the thread id of a brand-new topic root only after the
-	// topic is committed, so poll instead of reading once.
-	cronThreadLookupPollInterval = 200 * time.Millisecond
-)
-
-// lookupMessageThreadID polls until the thread id of a message the bot just
-// posted can be read back. Only cron new-topic roots need this: Feishu returns
-// thread_id in the create response for messages posted into an existing topic,
-// but not for the root message that opens a new one — and not immediately
-// afterwards either (~1s). Returns ("", nil) when the wait runs out; the topic
-// is then adopted from the first unmentioned message instead.
-func (p *Platform) lookupMessageThreadID(ctx context.Context, messageID string) (string, error) {
-	messageID = strings.TrimSpace(messageID)
-	if messageID == "" {
-		return "", fmt.Errorf("%s: empty message id for thread lookup", p.tag())
-	}
-	if p.client == nil {
-		return "", fmt.Errorf("%s: client not initialized", p.tag())
-	}
-
-	cctx, cancel := context.WithTimeout(ctx, cronThreadLookupBudget)
-	defer cancel()
-
-	startedAt := time.Now()
-	attempts := 0
-	var lastErr error
-	for {
-		attempts++
-		tid, err := p.fetchMessageThreadID(cctx, messageID)
-		if err == nil && tid != "" {
-			if attempts > 1 {
-				slog.Info(p.tag()+": cron topic thread became visible",
-					"root_id", messageID, "attempts", attempts,
-					"elapsed_ms", time.Since(startedAt).Milliseconds())
-			}
-			return tid, nil
-		}
-		if err == nil {
-			lastErr = nil
-		} else if lastErr == nil || isTransientError(err) {
-			lastErr = err
-		}
-
-		select {
-		case <-cctx.Done():
-			if lastErr != nil {
-				return "", lastErr
-			}
-			slog.Warn(p.tag()+": cron topic thread still hidden",
-				"root_id", messageID, "attempts", attempts,
-				"elapsed_ms", time.Since(startedAt).Milliseconds())
-			return "", nil
-		case <-time.After(cronThreadLookupPollInterval):
-		}
-	}
-}
-
-// fetchMessageThreadID performs one read of the root message. An empty thread
-// id with no error means the topic is not committed yet, or the chat is not a
-// topic chat at all; the caller decides whether to poll again.
-func (p *Platform) fetchMessageThreadID(ctx context.Context, messageID string) (string, error) {
-	actx, cancel := context.WithTimeout(ctx, cronThreadLookupAttemptLimit)
-	defer cancel()
-
-	req := larkim.NewGetMessageReqBuilder().MessageId(messageID).Build()
-	var threadID string
-	err := p.withFreshTenantAccessTokenRetry(actx, "cron_topic_thread", func(client *lark.Client, options ...larkcore.RequestOptionFunc) error {
-		resp, err := client.Im.Message.Get(actx, req, options...)
-		if err != nil {
-			return fmt.Errorf("%s: get message %s: %w", p.tag(), messageID, err)
-		}
-		if resp == nil {
-			return fmt.Errorf("%s: get message %s: nil response", p.tag(), messageID)
-		}
-		if !resp.Success() {
-			return fmt.Errorf("%s: get message %s failed code=%d msg=%s", p.tag(), messageID, resp.Code, resp.Msg)
-		}
-		if resp.Data == nil {
-			return nil
-		}
-		for _, item := range resp.Data.Items {
-			if item == nil {
-				continue
-			}
-			if tid := strings.TrimSpace(stringValue(item.ThreadId)); tid != "" {
-				threadID = tid
-				return nil
-			}
-		}
-		return nil
-	})
-	if err != nil {
-		return "", err
-	}
-	return threadID, nil
 }
 
 func (p *Platform) withFreshTenantAccessTokenRetry(ctx context.Context, operation string, fn feishuRequestFunc) error {
@@ -4369,8 +4262,13 @@ func (p *Platform) SendPreviewStart(ctx context.Context, rctx any, content strin
 		}); err != nil {
 			return nil, err
 		}
-		if resp.Data != nil && resp.Data.MessageId != nil {
-			msgID = *resp.Data.MessageId
+		if resp.Data != nil {
+			if resp.Data.MessageId != nil {
+				msgID = *resp.Data.MessageId
+			}
+			if tid := stringValue(resp.Data.ThreadId); tid != "" {
+				p.markThread(tid)
+			}
 		}
 	} else {
 		req := larkim.NewCreateMessageReqBuilder().

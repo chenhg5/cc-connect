@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/chenhg5/cc-connect/core"
+	larkim "github.com/larksuite/oapi-sdk-go/v3/service/im/v1"
 )
 
 func stateTestStub() *rootStub {
@@ -244,18 +245,13 @@ func TestStartCronTopicMarksReturnedThreadID(t *testing.T) {
 	}
 }
 
-// Feishu returns no thread_id in the create response for a new topic root, so
-// the cron path reads it back once. When it is already readable, register it.
-func TestStartCronTopicLooksUpThreadIDWhenCreateOmitsIt(t *testing.T) {
+// Feishu returns no thread_id on the create response for a new topic root, and
+// this chat is not a topic chat: the topic is created by the first reply.
+// StartCronTopic must not wait for, or query, a thread id at all.
+func TestStartCronTopicDoesNotLookUpThreadID(t *testing.T) {
 	stub := &rootStub{
 		omitCreateThreadID: true,
 		rootOf:             func(string) (string, bool) { return "", true },
-		threadOf: func(id string) (string, bool) {
-			if id == "om_created" {
-				return "omt_lookup", true
-			}
-			return "", false
-		},
 	}
 	p := newRootTestPlatform(t, stub)
 	p.botOpenID = "ou_bot"
@@ -269,133 +265,50 @@ func TestStartCronTopicLooksUpThreadIDWhenCreateOmitsIt(t *testing.T) {
 	}
 	rc, ok := rawRC.(replyContext)
 	if !ok || !rc.forceThread {
-		t.Fatal("reply context must use the looked up thread")
+		t.Fatal("cron reply context must force a thread so the first reply opens the topic")
 	}
-
-	p.threadSeenMu.Lock()
-	_, threadMarked := p.threadSeen["omt_lookup"]
-	_, messageMarked := p.threadSeen["om_created"]
-	p.threadSeenMu.Unlock()
-	if !threadMarked {
-		t.Fatal("looked up threadID must be recorded")
-	}
-	if messageMarked {
-		t.Fatal("messageID must not be recorded as a thread")
-	}
-}
-
-// The id is not readable immediately after create; the cron path must keep
-// polling until Feishu exposes it instead of giving up on the first empty read.
-func TestStartCronTopicLookUpsThreadIDAfterTopicBecomesVisible(t *testing.T) {
-	var reads int32
-	stub := &rootStub{
-		omitCreateThreadID: true,
-		rootOf:             func(string) (string, bool) { return "", true },
-		threadOf: func(id string) (string, bool) {
-			if id != "om_created" {
-				return "", false
-			}
-			// Hidden for the first reads, like Feishu does after create.
-			if atomic.AddInt32(&reads, 1) <= 2 {
-				return "", true
-			}
-			return "omt_lookup", true
-		},
-	}
-	p := newRootTestPlatform(t, stub)
-	p.botOpenID = "ou_bot"
-
-	key, rawRC, err := p.StartCronTopic(context.Background(), "feishu:oc_test:root:om_old", "定时任务")
-	if err != nil {
-		t.Fatalf("StartCronTopic() error = %v", err)
-	}
-	if key != "feishu:oc_test:root:om_created" {
-		t.Fatalf("session key = %q", key)
-	}
-	rc, ok := rawRC.(replyContext)
-	if !ok || !rc.forceThread {
-		t.Fatal("reply context must use the looked up thread")
-	}
-
-	p.threadSeenMu.Lock()
-	_, threadMarked := p.threadSeen["omt_lookup"]
-	_, messageMarked := p.threadSeen["om_created"]
-	p.threadSeenMu.Unlock()
-	if !threadMarked {
-		t.Fatal("looked up threadID must be recorded")
-	}
-	if messageMarked {
-		t.Fatal("messageID must not be recorded as a thread")
-	}
-	if n := atomic.LoadInt32(&reads); n < 3 {
-		t.Fatalf("reads = %d, want the lookup to poll past the hidden window", n)
-	}
-}
-
-func TestStartCronTopicKeepsRunningWhenThreadLookupFails(t *testing.T) {
-	stub := &rootStub{
-		omitCreateThreadID: true,
-		rootOf:             func(string) (string, bool) { return "", false },
-	}
-	p := newRootTestPlatform(t, stub)
-	p.botOpenID = "ou_bot"
-
-	// Short budget keeps the test fast; production waits up to
-	// cronThreadLookupBudget.
-	ctx, cancel := context.WithTimeout(context.Background(), 900*time.Millisecond)
-	defer cancel()
-	key, rawRC, err := p.StartCronTopic(ctx, "feishu:oc_test:root:om_old", "定时任务")
-	if err != nil {
-		t.Fatalf("StartCronTopic() must not fail on lookup error: %v", err)
-	}
-	if key != "feishu:oc_test:root:om_created" {
-		t.Fatalf("session key = %q", key)
-	}
-	rc, ok := rawRC.(replyContext)
-	if !ok || rc.forceThread {
-		t.Fatal("reply context must not claim a thread when lookup failed")
-	}
-	if n := atomic.LoadInt32(&stub.calls); n < 2 || n > 10 {
-		t.Fatalf("lookups = %d, want a bounded poll after failure", n)
+	if n := atomic.LoadInt32(&stub.calls); n != 0 {
+		t.Fatalf("message lookups = %d, want 0: a non-topic chat has no thread id to read", n)
 	}
 
 	p.threadSeenMu.Lock()
 	entries := len(p.threadSeen)
 	p.threadSeenMu.Unlock()
 	if entries != 0 {
-		t.Fatalf("failed lookup must not write thread state, got %d entries", entries)
+		t.Fatalf("thread state entries = %d, want 0", entries)
 	}
 }
 
-// A readable response without a thread id means the chat is not a topic chat.
-// That is business as usual, not a failure: keep running with no registration.
-func TestStartCronTopicKeepsRunningWhenLookupHasNoThreadID(t *testing.T) {
+// The first reply is what opens the topic, and its response is the only
+// reliable source of the thread id.
+func TestReplyMessageRegistersThreadFromResponse(t *testing.T) {
 	stub := &rootStub{
-		omitCreateThreadID: true,
-		rootOf:             func(string) (string, bool) { return "", true },
+		rootOf:        func(string) (string, bool) { return "", true },
+		replyThreadID: "omt_reply",
 	}
 	p := newRootTestPlatform(t, stub)
-	p.botOpenID = "ou_bot"
 
-	ctx, cancel := context.WithTimeout(context.Background(), 900*time.Millisecond)
-	defer cancel()
-	key, rawRC, err := p.StartCronTopic(ctx, "feishu:oc_test:root:om_old", "定时任务")
-	if err != nil {
-		t.Fatalf("StartCronTopic() error = %v", err)
+	rc := replyContext{messageID: "om_root", chatID: "oc_test", sessionKey: "feishu:oc_test:root:om_root", forceThread: true}
+	if err := p.replyMessage(context.Background(), rc, larkim.MsgTypeText, `{"text":"hi"}`); err != nil {
+		t.Fatalf("replyMessage() error = %v", err)
 	}
-	if key != "feishu:oc_test:root:om_created" {
-		t.Fatalf("session key = %q", key)
+	if !p.threadAllowed("omt_reply") {
+		t.Fatal("thread from the reply response must be registered for mention state")
 	}
-	rc, ok := rawRC.(replyContext)
-	if !ok || rc.forceThread {
-		t.Fatal("reply context must not claim a thread when Feishu returns none")
-	}
+}
 
+func TestReplyMessageWithoutThreadIDRegistersNothing(t *testing.T) {
+	p := newRootTestPlatform(t, &rootStub{rootOf: func(string) (string, bool) { return "", true }})
+
+	rc := replyContext{messageID: "om_root", chatID: "oc_test", sessionKey: "feishu:oc_test:root:om_root"}
+	if err := p.replyMessage(context.Background(), rc, larkim.MsgTypeText, `{"text":"hi"}`); err != nil {
+		t.Fatalf("replyMessage() error = %v", err)
+	}
 	p.threadSeenMu.Lock()
 	entries := len(p.threadSeen)
 	p.threadSeenMu.Unlock()
 	if entries != 0 {
-		t.Fatalf("missing thread id must not write thread state, got %d entries", entries)
+		t.Fatalf("thread state entries = %d, want 0", entries)
 	}
 }
 
@@ -423,25 +336,6 @@ func TestUnmentionedTopicMessageDroppedWhenNotRegistered(t *testing.T) {
 	p.threadSeenMu.Unlock()
 	if entries != 0 {
 		t.Fatalf("topic must not be registered, got %d entries", entries)
-	}
-}
-
-// A cancelled cron must not wait on the read-back: the lookup has to give up
-// promptly instead of blocking the run on a slow Feishu.
-func TestLookupMessageThreadIDGivesUpOnCancelledContext(t *testing.T) {
-	p := newRootTestPlatform(t, &rootStub{
-		rootOf: func(string) (string, bool) { return "", true },
-		slow:   2 * time.Second,
-	})
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel()
-
-	startedAt := time.Now()
-	if _, err := p.lookupMessageThreadID(ctx, "om_created"); err == nil {
-		t.Fatal("cancelled context must return an error")
-	}
-	if elapsed := time.Since(startedAt); elapsed > time.Second {
-		t.Fatalf("lookup blocked for %s after cancellation", elapsed)
 	}
 }
 

@@ -23,7 +23,10 @@ type rootStub struct {
 	// omitCreateThreadID mimics Feishu's create response for a new topic root,
 	// which carries no thread_id even though the message does belong to a topic.
 	omitCreateThreadID bool
-	slow               time.Duration
+	// replyThreadID is returned as thread_id on a successful reply, the way
+	// Feishu names the topic a reply lands in.
+	replyThreadID string
+	slow          time.Duration
 }
 
 func newRootTestPlatform(t *testing.T, stub *rootStub, extraOpts ...map[string]any) *Platform {
@@ -55,6 +58,12 @@ func newRootTestPlatform(t *testing.T, stub *rootStub, extraOpts ...map[string]a
 				"code": 0, "msg": "success",
 				"data": map[string]any{"items": []map[string]any{item}},
 			})
+		case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/reply"):
+			data := map[string]any{"message_id": "om_replied"}
+			if stub.replyThreadID != "" {
+				data["thread_id"] = stub.replyThreadID
+			}
+			writeJSON(t, w, map[string]any{"code": 0, "msg": "success", "data": data})
 		case r.Method == http.MethodPost && r.URL.Path == "/open-apis/im/v1/messages":
 			data := map[string]any{"message_id": "om_created"}
 			if !stub.omitCreateThreadID {
