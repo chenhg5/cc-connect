@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -89,6 +90,285 @@ func TestHandleSend_AllowsTTSTextOnly(t *testing.T) {
 	if _, format, audioCalls := platform.audioSnapshot(); audioCalls != 1 || format != "mp3" {
 		t.Fatalf("audio calls/format = %d/%q", audioCalls, format)
 	}
+}
+
+func TestHandleRelaySendAsync_AcceptsAndQueues(t *testing.T) {
+	api := &APIServer{relay: NewRelayManager("")}
+	body, err := json.Marshal(RelayRequest{
+		From:       "source",
+		To:         "target",
+		SessionKey: "feishu:chat:user",
+		Message:    "please work in the background",
+	})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/relay/send-async", bytes.NewReader(body))
+	rec := httptest.NewRecorder()
+	api.handleRelaySendAsync(rec, req)
+
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("status = %d, body=%s", rec.Code, rec.Body.String())
+	}
+	var got map[string]string
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if got["status"] != "queued" {
+		t.Fatalf("status payload = %q, want queued", got["status"])
+	}
+	if !strings.HasPrefix(got["job"], "relay-") {
+		t.Fatalf("job = %q, want relay-*", got["job"])
+	}
+}
+
+// TestHandleRelaySendAsync_JobIDsAreConcurrentlyUnique pins the fix for the
+// collision the time-based generator hit: 512 concurrent 202s must yield 512
+// distinct job IDs. The old time.Now().UnixNano() scheme produced duplicates
+// on darwin/arm64 under this exact load.
+func TestHandleRelaySendAsync_JobIDsAreConcurrentlyUnique(t *testing.T) {
+	api := &APIServer{relay: NewRelayManager("")}
+	body, err := json.Marshal(RelayRequest{
+		From:       "source",
+		To:         "target",
+		SessionKey: "feishu:chat:user",
+		Message:    "please work in the background",
+	})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+
+	const n = 512
+	ids := make(chan string, n)
+	var wg sync.WaitGroup
+	for i := 0; i < n; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			req := httptest.NewRequest(http.MethodPost, "/relay/send-async", bytes.NewReader(body))
+			rec := httptest.NewRecorder()
+			api.handleRelaySendAsync(rec, req)
+			if rec.Code != http.StatusAccepted {
+				t.Errorf("status = %d, body=%s", rec.Code, rec.Body.String())
+				return
+			}
+			var got map[string]string
+			if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+				t.Errorf("decode response: %v", err)
+				return
+			}
+			ids <- got["job"]
+		}()
+	}
+	wg.Wait()
+	close(ids)
+
+	seen := make(map[string]struct{}, n)
+	for id := range ids {
+		if id == "" {
+			t.Fatal("empty job id")
+		}
+		if _, dup := seen[id]; dup {
+			t.Fatalf("duplicate async relay job id %q", id)
+		}
+		seen[id] = struct{}{}
+	}
+	if len(seen) != n {
+		t.Fatalf("got %d unique job ids, want %d", len(seen), n)
+	}
+}
+
+func TestHandleRelaySendAsync_ValidatesRequest(t *testing.T) {
+	api := &APIServer{relay: NewRelayManager("")}
+	body, err := json.Marshal(RelayRequest{
+		To:         "target",
+		SessionKey: "feishu:chat:user",
+	})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/relay/send-async", bytes.NewReader(body))
+	rec := httptest.NewRecorder()
+	api.handleRelaySendAsync(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, body=%s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "to, session_key, and message are required") {
+		t.Fatalf("body = %q, want validation error", rec.Body.String())
+	}
+}
+
+// blockingVisibilityPlatform blocks inside Send until its context is canceled
+// (or release closes), and signals entry/exit so tests can observe that an
+// async relay job is in flight and that Stop actually unwound it.
+type blockingVisibilityPlatform struct {
+	relayVisibilityPlatform
+	entered     chan struct{}
+	released    chan struct{}
+	enteredOnce sync.Once
+	releaseOnce sync.Once
+}
+
+func (p *blockingVisibilityPlatform) Send(ctx context.Context, _ any, _ string) error {
+	p.enteredOnce.Do(func() { close(p.entered) })
+	<-ctx.Done()
+	p.releaseOnce.Do(func() { close(p.released) })
+	return ctx.Err()
+}
+
+// TestAPIServerStopCancelsAndWaitsForAsyncRelayJobs pins the lifecycle fix:
+// Stop must cancel in-flight async relay work and wait for it to finish so it
+// cannot overlap engine shutdown. With the timeout disabled the only thing
+// that can unwind the blocking visibility send is Stop's cancellation.
+func TestAPIServerStopCancelsAndWaitsForAsyncRelayJobs(t *testing.T) {
+	src := &blockingVisibilityPlatform{
+		relayVisibilityPlatform: relayVisibilityPlatform{stubPlatformEngine: stubPlatformEngine{n: "feishu"}},
+		entered:                 make(chan struct{}),
+		released:                make(chan struct{}),
+	}
+	sourceEngine := NewEngine("source", &stubAgent{}, []Platform{src}, "", LangEnglish)
+	targetSession := newControllableSession("target-session")
+	targetEngine := NewEngine("target", &controllableAgent{nextSession: targetSession},
+		[]Platform{&stubPlatformEngine{n: "feishu"}}, "", LangEnglish)
+
+	rm := NewRelayManager("")
+	rm.SetTimeout(0) // disabled: only Stop's cancel should unwind the job
+	rm.Bind("feishu", "chat-1", map[string]string{"source": "s", "target": "t"})
+	rm.RegisterEngine("source", sourceEngine)
+	rm.RegisterEngine("target", targetEngine)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	api := &APIServer{relay: rm, relayJobCtx: ctx, relayJobCancel: cancel}
+
+	body, err := json.Marshal(RelayRequest{
+		From:       "source",
+		To:         "target",
+		SessionKey: "feishu:chat-1:user",
+		Message:    "go",
+	})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	req := httptest.NewRequest(http.MethodPost, "/relay/send-async", bytes.NewReader(body))
+	rec := httptest.NewRecorder()
+	api.handleRelaySendAsync(rec, req)
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("status = %d, body=%s", rec.Code, rec.Body.String())
+	}
+
+	select {
+	case <-src.entered:
+	case <-time.After(2 * time.Second):
+		t.Fatal("async relay job never reached the visibility send")
+	}
+
+	stopped := make(chan struct{})
+	go func() {
+		api.Stop()
+		close(stopped)
+	}()
+
+	// Once Stop cancels the job context the blocking echo returns, but
+	// HandleRelay only notices cancellation after an event arrives.
+	time.Sleep(50 * time.Millisecond)
+	targetSession.events <- Event{Type: EventThinking, Content: "cancel"}
+
+	select {
+	case <-stopped:
+	case <-time.After(2 * time.Second):
+		t.Fatal("Stop did not wait for the async relay job to finish")
+	}
+	select {
+	case <-src.released:
+	default:
+		t.Fatal("async relay job was not canceled by Stop")
+	}
+}
+
+// stalledVisibilityPlatform blocks until released while ignoring context, to
+// simulate an agent that has stopped producing events so cancellation is never
+// observed.
+type stalledVisibilityPlatform struct {
+	relayVisibilityPlatform
+	entered     chan struct{}
+	release     chan struct{}
+	enteredOnce sync.Once
+}
+
+func (p *stalledVisibilityPlatform) Send(_ context.Context, _ any, _ string) error {
+	p.enteredOnce.Do(func() { close(p.entered) })
+	<-p.release
+	return nil
+}
+
+// TestAPIServerStopBoundedOnStalledRelayJob pins the bounded-shutdown fix: when
+// an in-flight async relay job ignores cancellation (stalled agent), Stop must
+// still return after the grace period instead of hanging the daemon forever.
+func TestAPIServerStopBoundedOnStalledRelayJob(t *testing.T) {
+	old := relayJobShutdownGrace
+	relayJobShutdownGrace = 100 * time.Millisecond
+	defer func() { relayJobShutdownGrace = old }()
+
+	src := &stalledVisibilityPlatform{
+		relayVisibilityPlatform: relayVisibilityPlatform{stubPlatformEngine: stubPlatformEngine{n: "feishu"}},
+		entered:                 make(chan struct{}),
+		release:                 make(chan struct{}),
+	}
+	sourceEngine := NewEngine("source", &stubAgent{}, []Platform{src}, "", LangEnglish)
+	targetSession := newControllableSession("target-session")
+	targetEngine := NewEngine("target", &controllableAgent{nextSession: targetSession},
+		[]Platform{&stubPlatformEngine{n: "feishu"}}, "", LangEnglish)
+
+	rm := NewRelayManager("")
+	rm.SetTimeout(0) // disabled: the job can only unwind if released
+	rm.Bind("feishu", "chat-1", map[string]string{"source": "s", "target": "t"})
+	rm.RegisterEngine("source", sourceEngine)
+	rm.RegisterEngine("target", targetEngine)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	api := &APIServer{relay: rm, relayJobCtx: ctx, relayJobCancel: cancel}
+
+	body, err := json.Marshal(RelayRequest{
+		From:       "source",
+		To:         "target",
+		SessionKey: "feishu:chat-1:user",
+		Message:    "go",
+	})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	req := httptest.NewRequest(http.MethodPost, "/relay/send-async", bytes.NewReader(body))
+	rec := httptest.NewRecorder()
+	api.handleRelaySendAsync(rec, req)
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("status = %d, body=%s", rec.Code, rec.Body.String())
+	}
+
+	select {
+	case <-src.entered:
+	case <-time.After(2 * time.Second):
+		t.Fatal("async relay job never reached the visibility send")
+	}
+
+	start := time.Now()
+	stopped := make(chan struct{})
+	go func() {
+		api.Stop()
+		close(stopped)
+	}()
+	select {
+	case <-stopped:
+	case <-time.After(2 * time.Second):
+		t.Fatal("Stop hung on a stalled async relay job")
+	}
+	if elapsed := time.Since(start); elapsed > time.Second {
+		t.Fatalf("Stop took %v, want it bounded by the %v grace period", elapsed, relayJobShutdownGrace)
+	}
+
+	close(src.release) // let the stalled goroutine unwind
 }
 
 // TestHandleSend_UnknownProjectReturns404 ensures the API does NOT silently
