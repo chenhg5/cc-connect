@@ -6340,17 +6340,47 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				}
 			}
 
-			// Detect NO_REPLY marker on the base response (before indicators/footer are appended).
-			// Three cases:
-			//   1. bare marker (isSilentReply)               → fully silent
-			//   2. trailing marker with non-empty reasoning  → strip marker, deliver reasoning
-			//   3. trailing marker with empty strip result   → fully silent
-			// History records the ORIGINAL baseResponse so the agent retains context of its own
-			// decision; only the outbound platform text gets rewritten/suppressed.
-			session.AddHistory("assistant", baseResponse)
-			sessions.Save()
+			// Text already surfaced to the user in earlier segments: every tool /
+			// thinking / permission boundary flushes textParts[segmentStart:] (as a
+			// detached frozen preview or as sent chunks) and advances segmentStart,
+			// so textParts[:segmentStart] is committed user-facing output. On the
+			// rich-card / streaming-card paths segmentStart stays 0 and the card
+			// keeps the body itself, so they are left untouched.
+			committedText := ""
+			if segmentStart > 0 && segmentStart <= len(textParts) && !hasRichCard {
+				committed := strings.Join(textParts[:segmentStart], "")
+				if stripped, ok := stripTrailingSilent(committed); ok {
+					committed = stripped
+				}
+				committed = strings.TrimRight(committed, " \t\r\n")
+				if strings.TrimSpace(committed) != "" {
+					committedText = committed
+				}
+			}
 
+			// Detect NO_REPLY marker on the base response (before indicators/footer are appended).
+			// Four cases:
+			//   1. bare marker with committed text           → marker only closes the trailing
+			//                                                  continuation; history records the
+			//                                                  committed body, the turn stays silent
+			//   2. bare marker, nothing committed            → fully silent
+			//   3. trailing marker with non-empty reasoning  → strip marker, deliver reasoning
+			//   4. trailing marker with empty strip result   → fully silent
+			// History contract, shared with the abnormal-close path: a turn that delivers
+			// text records what the user saw (marker stripped); a fully silent turn keeps
+			// the raw marker so the agent retains context of its own decision. The committed
+			// body in case 1 was already delivered at its boundary, so it is recorded but
+			// never sent again.
 			isSilent := isSilentReply(baseResponse)
+			historyText := baseResponse
+			if isSilent && committedText != "" {
+				// Case 1: event.Content only carries the last assistant segment
+				// ("NO_REPLY"). The body before the boundary is already on screen, so
+				// the outbound turn stays silent; only history needs repairing, since
+				// collapsing it to the marker loses what the agent said.
+				historyText = committedText
+			}
+
 			if !isSilent {
 				if stripped, ok := stripTrailingSilent(baseResponse); ok {
 					if strings.TrimSpace(stripped) == "" {
@@ -6358,9 +6388,13 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 					} else {
 						baseResponse = stripped
 						cleanResponse = stripped
+						historyText = stripped
 					}
 				}
 			}
+
+			session.AddHistory("assistant", historyText)
+			sessions.Save()
 
 			if !isSilent {
 				e.hooks.Emit(HookEvent{
@@ -6558,6 +6592,12 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				sp.discard()
 				if segmentStart < len(textParts) {
 					unsent := strings.Join(textParts[segmentStart:], "")
+					// The remainder is raw agent text, so it can still carry the
+					// trailing NO_REPLY marker (baseResponse was stripped above but
+					// is not what gets sent here). Never leak the marker.
+					if stripped, ok := stripTrailingSilent(unsent); ok {
+						unsent = strings.TrimRight(stripped, " \t\r\n")
+					}
 					if unsent != "" {
 						if !sendChunksWithStatusFooter(e.ctx, p, replyCtx, unsent, statusFooter, sendWorkspaceWithError) {
 							return
@@ -6858,7 +6898,31 @@ channelClosed:
 		p := state.platform
 		state.mu.Unlock()
 
-		fullResponse := strings.Join(textParts, "")
+		// Apply the NO_REPLY contract before anything is persisted or sent, so
+		// history and the outbound reply agree. Agents emit the marker as its own
+		// chunk, so a trailing bare-marker segment is dropped first; a marker
+		// embedded in the last chunk is then caught by the trailing-marker strip.
+		fullResponse := joinTextParts(textParts)
+		rawResponse := fullResponse
+		silentTurn := strings.TrimSpace(fullResponse) == ""
+		if !silentTurn {
+			if stripped, ok := stripTrailingSilent(fullResponse); ok {
+				if strings.TrimSpace(stripped) == "" {
+					silentTurn = true
+				} else {
+					fullResponse = stripped
+				}
+			}
+		}
+		if silentTurn {
+			// Nothing but the marker: stay silent, and keep the raw marker in
+			// history so the agent retains context of its own decision — the same
+			// contract the normal completion path applies. An abnormal close with
+			// no text at all is treated the same way, so it emits no
+			// HookEventMessageSent: there is no delivered message to report.
+			fullResponse = rawResponse
+		}
+
 		session.AddHistory("assistant", fullResponse)
 		// Persist immediately — this path runs on abnormal channel close,
 		// so deferring the save until the next foreground turn risks losing
@@ -6866,17 +6930,10 @@ channelClosed:
 		sessions.Save()
 
 		// Respect NO_REPLY even on abnormal exit so silent turns stay silent.
-		if isSilentReply(fullResponse) {
+		if silentTurn {
 			sp.discard()
 			slog.Info("silent reply suppressed (channel closed)", "session", session.ID)
 			return
-		}
-		if stripped, ok := stripTrailingSilent(fullResponse); ok {
-			if strings.TrimSpace(stripped) == "" {
-				sp.discard()
-				return
-			}
-			fullResponse = stripped
 		}
 
 		e.hooks.Emit(HookEvent{
@@ -6886,15 +6943,29 @@ channelClosed:
 			Content:    fullResponse,
 		})
 
-		if toolCount > 0 && segmentStart > 0 {
-			sp.discard()
+		// Only what the last flush boundary has not already surfaced is unsent:
+		// every thinking / permission / tool boundary delivered textParts before
+		// segmentStart, so re-sending them would duplicate the turn.
+		undelivered := fullResponse
+		if segmentStart > 0 {
+			undelivered = ""
 			if segmentStart < len(textParts) {
-				unsent := strings.Join(textParts[segmentStart:], "")
-				if unsent != "" {
-					for _, chunk := range SplitMessageCodeFenceAware(unsent, maxPlatformMessageLen) {
-						if err := sendWorkspaceWithError(p, replyCtx, chunk); err != nil {
-							return
-						}
+				undelivered = joinTextParts(textParts[segmentStart:])
+				// The remainder is raw agent text, so it can still carry the
+				// trailing NO_REPLY marker (fullResponse was stripped above, but
+				// this slice is what actually gets sent). Never leak the marker.
+				if stripped, ok := stripTrailingSilent(undelivered); ok {
+					undelivered = strings.TrimRight(stripped, " \t\r\n")
+				}
+			}
+		}
+
+		if segmentStart > 0 {
+			sp.discard()
+			if undelivered != "" {
+				for _, chunk := range SplitMessageCodeFenceAware(undelivered, maxPlatformMessageLen) {
+					if err := sendWorkspaceWithError(p, replyCtx, chunk); err != nil {
+						return
 					}
 				}
 			}
@@ -17844,6 +17915,19 @@ var silentReplyRe = regexp.MustCompile(`(?i)^\s*NO_REPLY\s*$`)
 var silentReplyTrailingRe = regexp.MustCompile(`(?i)(?:^|\s+|\*+)NO_REPLY\s*$`)
 
 // isSilentReply reports whether text is exactly a NO_REPLY marker.
+// joinTextParts concatenates the accumulated text segments, dropping any
+// trailing segment that is nothing but the NO_REPLY marker. Agents emit the
+// marker as its own chunk, so a plain join places it directly after the
+// preceding text ("…。NO_REPLY") where the trailing-marker regex — which needs
+// whitespace or emphasis before the marker — cannot see it.
+func joinTextParts(parts []string) string {
+	end := len(parts)
+	for end > 0 && isSilentReply(parts[end-1]) {
+		end--
+	}
+	return strings.Join(parts[:end], "")
+}
+
 func isSilentReply(text string) bool {
 	return silentReplyRe.MatchString(text)
 }
