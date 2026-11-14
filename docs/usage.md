@@ -274,11 +274,18 @@ env = { CLAUDE_CODE_USE_BEDROCK = "1", AWS_PROFILE = "bedrock" }
 ### CLI Commands
 
 ```bash
+cc-connect agents                         # list all top-level Codex sessions
+cc-connect agents list --json              # machine-readable output
+cc-connect --config /path/config.toml agents --project my-backend
 cc-connect provider add --project my-backend --name relay --api-key sk-xxx --base-url https://api.relay.com
 cc-connect provider list --project my-backend
 cc-connect provider remove --project my-backend --name relay
 cc-connect provider import --project my-backend  # from cc-switch
 ```
+
+`agents` reads Codex's effective `CODEX_HOME` and includes sessions from every
+working directory. It reports Codex top-level sessions only; cc-connect bridge
+sessions and Codex subagent rollouts are excluded.
 
 ### Chat Commands
 

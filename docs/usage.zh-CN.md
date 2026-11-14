@@ -271,11 +271,17 @@ env = { CLAUDE_CODE_USE_BEDROCK = "1", AWS_PROFILE = "bedrock" }
 ### CLI 命令
 
 ```bash
+cc-connect agents                         # 列出所有工作目录中的 Codex 会话
+cc-connect agents list --json              # 输出 JSON，便于脚本处理
+cc-connect --config /path/config.toml agents --project my-backend
 cc-connect provider add --project my-backend --name relay --api-key sk-xxx --base-url https://api.relay.com
 cc-connect provider list --project my-backend
 cc-connect provider remove --project my-backend --name relay
 cc-connect provider import --project my-backend  # 从 cc-switch 导入
 ```
+
+`agents` 读取当前生效的 `CODEX_HOME`，包含所有工作目录中的 Codex 会话；只显示
+Codex 顶层会话，不包含 cc-connect 桥接会话和 Codex 子代理会话。
 
 ### 聊天命令
 

@@ -202,32 +202,39 @@ type providerWiringResult struct {
 	canStartInitialRefresh    bool
 }
 
-var topLevelCommandHandlers = map[string]func([]string){
-	"config-example": func(_ []string) {
+type topLevelCommandHandler func([]string, string)
+
+func withoutConfig(handler func([]string)) topLevelCommandHandler {
+	return func(args []string, _ string) { handler(args) }
+}
+
+var topLevelCommandHandlers = map[string]topLevelCommandHandler{
+	"config-example": func(_ []string, _ string) {
 		fmt.Print(ccconnect.ConfigExampleTOML)
 	},
-	"config": runConfig,
-	"update": func(_ []string) {
+	"config": withoutConfig(runConfig),
+	"update": func(_ []string, _ string) {
 		runUpdate()
 	},
-	"check-update": func(_ []string) {
+	"check-update": func(_ []string, _ string) {
 		checkUpdate()
 	},
-	"provider":  runProviderCommand,
-	"send":      runSend,
-	"cron":      runCron,
-	"timer":     runTimer,
-	"at":        runTimer,
-	"relay":     runRelay,
-	"sessions":  runSessions,
-	"agent-sid": runAgentSID,
-	"daemon":    runDaemon,
-	"feishu":    runFeishu,
-	"tuitui":    runTuiTui,
-	"weixin":    runWeixin,
-	"yuanbao":   runYuanbao,
-	"doctor":    runDoctor,
-	"web":       runWeb,
+	"provider":  withoutConfig(runProviderCommand),
+	"send":      withoutConfig(runSend),
+	"cron":      withoutConfig(runCron),
+	"timer":     withoutConfig(runTimer),
+	"at":        withoutConfig(runTimer),
+	"relay":     withoutConfig(runRelay),
+	"sessions":  withoutConfig(runSessions),
+	"agent-sid": withoutConfig(runAgentSID),
+	"agents":    runAgents,
+	"daemon":    withoutConfig(runDaemon),
+	"feishu":    withoutConfig(runFeishu),
+	"tuitui":    withoutConfig(runTuiTui),
+	"weixin":    withoutConfig(runWeixin),
+	"yuanbao":   withoutConfig(runYuanbao),
+	"doctor":    withoutConfig(runDoctor),
+	"web":       withoutConfig(runWeb),
 }
 
 func main() {
@@ -285,7 +292,7 @@ func main() {
 		return
 	}
 
-	if runTopLevelCommand(rootOpts.args) {
+	if runTopLevelCommand(rootOpts.args, rootOpts.configPath) {
 		return
 	}
 
@@ -1393,7 +1400,7 @@ func main() {
 	slog.Info("bye")
 }
 
-func runTopLevelCommand(args []string) bool {
+func runTopLevelCommand(args []string, configPath string) bool {
 	if len(args) == 0 {
 		return false
 	}
@@ -1401,7 +1408,7 @@ func runTopLevelCommand(args []string) bool {
 	if !ok {
 		return false
 	}
-	handler(args[1:])
+	handler(args[1:], configPath)
 	return true
 }
 
@@ -1713,6 +1720,10 @@ Commands:
     show <id>        Show session messages (-n N for last N)
 
   agent-sid          Print the agent session ID for the current session
+
+  agents             List all top-level Codex sessions across working directories
+    list             Alias for the default agents listing
+                     Supports --project NAME and --json
 
   relay              Cross-project message relay
     send             Send a message to another project and get the response
