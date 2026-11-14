@@ -10,9 +10,27 @@ import (
 	"testing"
 )
 
-type bufWriteCloser struct{ *bytes.Buffer }
+type acknowledgingRPCWriter struct {
+	*bytes.Buffer
+	session *piSession
+}
 
-func (bufWriteCloser) Close() error { return nil }
+func (w acknowledgingRPCWriter) Write(p []byte) (int, error) {
+	var command map[string]any
+	if err := json.Unmarshal(p, &command); err != nil {
+		return 0, err
+	}
+	n, err := w.Buffer.Write(p)
+	if err == nil {
+		w.session.handleEvent(map[string]any{
+			"type": "response", "id": command["id"], "command": command["type"], "success": true,
+			"data": map[string]any{"disposition": "started"},
+		})
+	}
+	return n, err
+}
+
+func (acknowledgingRPCWriter) Close() error { return nil }
 
 func TestSendRPC_SteersWithoutChangingPrompt(t *testing.T) {
 	for _, tt := range []struct {
@@ -34,7 +52,9 @@ func TestSendRPC_SteersWithoutChangingPrompt(t *testing.T) {
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			var buf bytes.Buffer
-			s := &piSession{rpcStdin: bufWriteCloser{&buf}}
+			s := newTestSession(true)
+			defer s.cancel()
+			s.rpcStdin = acknowledgingRPCWriter{&buf, s}
 			if err := s.sendRPC(tt.prompt, tt.images, tt.files); err != nil {
 				t.Fatal(err)
 			}
@@ -64,7 +84,9 @@ func (failingRPCWriter) Close() error                { return nil }
 
 func TestSendRPC_PropagatesWriteError(t *testing.T) {
 	want := errors.New("broken RPC pipe")
-	s := &piSession{rpcStdin: failingRPCWriter{want}}
+	s := newTestSession(true)
+	defer s.cancel()
+	s.rpcStdin = failingRPCWriter{want}
 	if err := s.sendRPC("supplement", nil, nil); !errors.Is(err, want) {
 		t.Fatalf("sendRPC() = %v, want wrapped %v", err, want)
 	}
@@ -85,8 +107,10 @@ func TestSend_TextSupplementPreservesInFlightAttachments(t *testing.T) {
 		}
 	}
 	var buf bytes.Buffer
-	s := &piSession{rpc: true, rpcStdin: bufWriteCloser{&buf}, attachDir: attachDir}
-	s.alive.Store(true)
+	s := newTestSession(true)
+	defer s.cancel()
+	s.rpcStdin = acknowledgingRPCWriter{&buf, s}
+	s.attachDir = attachDir
 	// /ps supplies no message ID or attachments. It must not remove the
 	// entire session attachment directory while the agent is reading it.
 	if err := s.Send("also add unit tests", "", nil, nil); err != nil {
