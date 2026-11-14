@@ -958,6 +958,14 @@ func TestHelperProcess(t *testing.T) {
 	case "stdin-eof-exit":
 		_, _ = io.Copy(io.Discard, os.Stdin)
 		os.Exit(0)
+	case "dump-args":
+		// Write argv to HELPER_ARGS_FILE so a test can assert the flags
+		// newClaudeSession builds, then stay alive like a real CLI.
+		if path := os.Getenv("HELPER_ARGS_FILE"); path != "" {
+			_ = os.WriteFile(path, []byte(strings.Join(os.Args, "\n")), 0o600)
+		}
+		time.Sleep(30 * time.Second)
+		os.Exit(0)
 	case "claude-stdin-echo":
 		// Issue #1736 regression harness: act as a Claude Code stub that
 		//   1. asserts --replay-user-messages is NOT in argv (its presence
@@ -1544,5 +1552,115 @@ func TestHandleResultKeepsLiveAssistantUsage(t *testing.T) {
 	}
 	if u.OutputTokens != 406 {
 		t.Errorf("OutputTokens = %d, want 406 (result is authoritative for output)", u.OutputTokens)
+	}
+}
+
+func resetUltracodeSettings(t *testing.T) {
+	t.Helper()
+	ultracodeSettingsMu.Lock()
+	ultracodeSettingsPath = ""
+	ultracodeSettingsMu.Unlock()
+	t.Cleanup(func() {
+		ultracodeSettingsMu.Lock()
+		ultracodeSettingsPath = ""
+		ultracodeSettingsMu.Unlock()
+	})
+}
+
+func TestWriteUltracodeSettingsFileRetriesAfterFailure(t *testing.T) {
+	resetUltracodeSettings(t)
+
+	blocked := filepath.Join(t.TempDir(), "not-a-dir")
+	if err := os.WriteFile(blocked, []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := writeUltracodeSettingsFile(blocked); err == nil {
+		t.Fatal("expected a failure when ccDataDir is a file")
+	}
+
+	dir := t.TempDir()
+	path, err := writeUltracodeSettingsFile(dir)
+	if err != nil {
+		t.Fatalf("second call did not retry after the failure: %v", err)
+	}
+	if want := filepath.Join(dir, "ultracode-settings.json"); path != want {
+		t.Fatalf("path = %q, want %q", path, want)
+	}
+}
+
+func TestWriteUltracodeSettingsFileReplacesSymlink(t *testing.T) {
+	resetUltracodeSettings(t)
+
+	dir := t.TempDir()
+	victim := filepath.Join(t.TempDir(), "victim.txt")
+	if err := os.WriteFile(victim, []byte("keep"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(dir, "ultracode-settings.json")
+	if err := os.Symlink(victim, link); err != nil {
+		t.Skipf("symlink unsupported: %v", err)
+	}
+
+	if _, err := writeUltracodeSettingsFile(dir); err != nil {
+		t.Fatalf("writeUltracodeSettingsFile() error: %v", err)
+	}
+	if got, _ := os.ReadFile(victim); string(got) != "keep" {
+		t.Errorf("symlink target was overwritten: %q", got)
+	}
+	info, err := os.Lstat(link)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		t.Error("settings path is still a symlink, want a regular file")
+	}
+}
+
+// TestNewClaudeSession_UltracodeArgs pins the two flags an ultracode session
+// needs: the settings key that enables it and the explicit xhigh effort the
+// documentation describes. The CLI's --effort help does not list ultracode, so
+// the settings route plus --effort xhigh is the supported combination.
+func TestNewClaudeSession_UltracodeArgs(t *testing.T) {
+	resetUltracodeSettings(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	helperPath, err := exec.LookPath(os.Args[0])
+	if err != nil {
+		t.Fatalf("cannot locate test binary: %v", err)
+	}
+	argsFile := filepath.Join(t.TempDir(), "argv.txt")
+	ccDataDir := t.TempDir()
+
+	cs, err := newClaudeSession(
+		ctx, t.TempDir(), helperPath,
+		[]string{"-test.run=TestHelperProcess", "--", "dump-args"},
+		"", "", "ultracode", "", "default", "", "", nil, nil, nil,
+		[]string{"GO_WANT_HELPER_PROCESS=1", "HELPER_ARGS_FILE=" + argsFile},
+		"", false, core.SpawnOptions{}, 0, 0, ccDataDir, "",
+	)
+	if err != nil {
+		t.Fatalf("newClaudeSession: %v", err)
+	}
+	t.Cleanup(func() { _ = cs.Close() })
+
+	deadline := time.Now().Add(5 * time.Second)
+	var argv []byte
+	for {
+		argv, err = os.ReadFile(argsFile)
+		if err == nil && len(argv) > 0 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("helper did not dump argv: %v", err)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	got := string(argv)
+	if !strings.Contains(got, "--settings") || !strings.Contains(got, "ultracode-settings.json") {
+		t.Errorf("argv missing the ultracode settings file:\n%s", got)
+	}
+	if !strings.Contains(got, "--effort\nxhigh") {
+		t.Errorf("argv missing --effort xhigh:\n%s", got)
 	}
 }

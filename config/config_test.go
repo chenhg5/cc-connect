@@ -3605,3 +3605,24 @@ func TestRemoveGlobalProvider_CleansUpProviderRefs(t *testing.T) {
 		t.Errorf("proj2 provider_refs: want [], got %v", refs2)
 	}
 }
+
+func TestSaveAgentSubagentModel(t *testing.T) {
+	writeTestConfig(t, providerConfigTOML)
+
+	if err := SaveAgentSubagentModel("demo", "gpt-5.4-mini"); err != nil {
+		t.Fatalf("SaveAgentSubagentModel() error: %v", err)
+	}
+	cfg := readTestConfig(t)
+	if got, _ := cfg.Projects[0].Agent.Options["subagent_model"].(string); got != "gpt-5.4-mini" {
+		t.Fatalf("agent.options.subagent_model = %q, want gpt-5.4-mini", got)
+	}
+
+	// Empty means inherit and must survive a reload as an empty string.
+	if err := SaveAgentSubagentModel("demo", ""); err != nil {
+		t.Fatalf("SaveAgentSubagentModel(empty) error: %v", err)
+	}
+	cfg = readTestConfig(t)
+	if got, ok := cfg.Projects[0].Agent.Options["subagent_model"]; !ok || got != "" {
+		t.Fatalf("agent.options.subagent_model = %v (present=%v), want empty string", got, ok)
+	}
+}

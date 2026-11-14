@@ -872,7 +872,13 @@ mode = "default" # "default" | "acceptEdits" (edit) | "plan" | "auto" | "bypassP
 
 # Optional: set reasoning effort level (passed to claude --effort)
 # 可选：设置推理强度等级（传递给 claude --effort）
-# reasoning_effort = "high"  # "low" | "medium" | "high" | "max"
+# reasoning_effort = "high"  # "low" | "medium" | "high" | "max" | "xhigh" | "ultracode"
+
+# Optional: model used by Claude Code subagents (CLAUDE_CODE_SUBAGENT_MODEL).
+# Leave empty to inherit the main model. /model subagent persists this value;
+# editing the file by hand requires a restart. / 可选：子智能体使用的模型；
+# 留空跟随主模型。/model subagent 会自动写回这里，手改需重启。
+# subagent_model = "claude-haiku-4"
 
 # Optional: override the context-window size used by the "ctx N%" indicator
 # in IM replies. By default cc-connect uses the window Claude Code reports

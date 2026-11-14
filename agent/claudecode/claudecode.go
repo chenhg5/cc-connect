@@ -35,25 +35,26 @@ func init() {
 //   - "auto":              Claude's automatic permission classifier
 //   - "bypassPermissions": auto-approve everything (alias: yolo)
 type Agent struct {
-	workDir          string
-	cmd              string   // CLI binary name (default: "claude")
-	cliExtraArgs     []string // extra args parsed from cmd (e.g. ["code", "-t", "foo"])
-	configEnv        []string // env vars from [projects.agent.options.env] — persists across SetSessionEnv calls
-	cmdArgsFlag      string   // if set, claude args are passed as a single string via this flag (e.g. "-a")
-	model            string
-	reasoningEffort  string // "low" | "medium" | "high" | "max"
-	mode             string // "default" | "acceptEdits" | "plan" | "auto" | "bypassPermissions" | "dontAsk"
-	allowedTools     []string
-	disallowedTools  []string
+	workDir             string
+	cmd                 string   // CLI binary name (default: "claude")
+	cliExtraArgs        []string // extra args parsed from cmd (e.g. ["code", "-t", "foo"])
+	configEnv           []string // env vars from [projects.agent.options.env] — persists across SetSessionEnv calls
+	cmdArgsFlag         string   // if set, claude args are passed as a single string via this flag (e.g. "-a")
+	model               string
+	reasoningEffort     string // "low" | "medium" | "high" | "xhigh" | "max" | "ultracode"
+	subagentModel       string // CLAUDE_CODE_SUBAGENT_MODEL; "" = inherit the main model
+	mode                string // "default" | "acceptEdits" | "plan" | "auto" | "bypassPermissions" | "dontAsk"
+	allowedTools        []string
+	disallowedTools     []string
 	maxContextTokens    int // optional: passed as --max-context-tokens when > 0
 	contextWindowTokens int // optional: override the context-window-size heuristic used by the ctx% indicator. When <= 0, fall back to model-name heuristics.
 	providers           []core.ProviderConfig
-	activeIdx        int // -1 = no provider set
-	sessionEnv       []string
-	routerURL        string   // Claude Code Router URL (e.g., "http://127.0.0.1:3456")
-	routerAPIKey     string   // Claude Code Router API key (optional)
-	systemPrompt     string   // Custom system prompt to pass to Claude CLI
-	pluginDirs       []string // Plugin directories to load via --plugin-dir (repeatable)
+	activeIdx           int // -1 = no provider set
+	sessionEnv          []string
+	routerURL           string   // Claude Code Router URL (e.g., "http://127.0.0.1:3456")
+	routerAPIKey        string   // Claude Code Router API key (optional)
+	systemPrompt        string   // Custom system prompt to pass to Claude CLI
+	pluginDirs          []string // Plugin directories to load via --plugin-dir (repeatable)
 
 	appendSystemPrompt string // Custom text appended to the system prompt (keeps Claude's default)
 
@@ -109,6 +110,10 @@ var claudeProviderManagedEnvVars = map[string]struct{}{
 	"ANTHROPIC_DEFAULT_HAIKU_MODEL_DESCRIPTION":            {},
 	"ANTHROPIC_DEFAULT_HAIKU_MODEL_NAME":                   {},
 	"ANTHROPIC_DEFAULT_HAIKU_MODEL_SUPPORTED_CAPABILITIES": {},
+	"ANTHROPIC_DEFAULT_FABLE_MODEL":                        {},
+	"ANTHROPIC_DEFAULT_FABLE_MODEL_DESCRIPTION":            {},
+	"ANTHROPIC_DEFAULT_FABLE_MODEL_NAME":                   {},
+	"ANTHROPIC_DEFAULT_FABLE_MODEL_SUPPORTED_CAPABILITIES": {},
 	"ANTHROPIC_DEFAULT_OPUS_MODEL":                         {},
 	"ANTHROPIC_DEFAULT_OPUS_MODEL_DESCRIPTION":             {},
 	"ANTHROPIC_DEFAULT_OPUS_MODEL_NAME":                    {},
@@ -154,6 +159,7 @@ func New(opts map[string]any) (core.Agent, error) {
 	}
 	model, _ := opts["model"].(string)
 	reasoningEffort, _ := opts["reasoning_effort"].(string)
+	subagentModel, _ := opts["subagent_model"].(string)
 	mode, _ := opts["mode"].(string)
 	mode = normalizePermissionMode(mode)
 	systemPrompt, _ := opts["system_prompt"].(string)
@@ -297,6 +303,7 @@ func New(opts map[string]any) (core.Agent, error) {
 		cmdArgsFlag:         cmdArgsFlag,
 		model:               model,
 		reasoningEffort:     normalizeEffort(reasoningEffort),
+		subagentModel:       strings.TrimSpace(subagentModel),
 		mode:                mode,
 		systemPrompt:        systemPrompt,
 		pluginDirs:          pluginDirs,
@@ -327,8 +334,14 @@ func normalizeEffort(raw string) string {
 		return "medium"
 	case "high":
 		return "high"
+	case "xhigh", "x-high":
+		return "xhigh"
 	case "max":
 		return "max"
+	case "ultracode":
+		// Not an --effort value: a session-level boolean the spawn path
+		// delivers via --settings.
+		return "ultracode"
 	default:
 		return ""
 	}
@@ -383,6 +396,22 @@ func (a *Agent) GetModel() string {
 	return core.GetProviderModel(a.providers, a.activeIdx, a.model)
 }
 
+// SetSubagentModel sets CLAUDE_CODE_SUBAGENT_MODEL for future spawns.
+// An empty value restores inheritance from the main session model.
+func (a *Agent) SetSubagentModel(model string) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.subagentModel = model
+	slog.Info("claudecode: subagent model changed", "model", model)
+}
+
+// GetSubagentModel returns the configured subagent model ("" = inherit).
+func (a *Agent) GetSubagentModel() string {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.subagentModel
+}
+
 func (a *Agent) SetReasoningEffort(effort string) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
@@ -397,7 +426,7 @@ func (a *Agent) GetReasoningEffort() string {
 }
 
 func (a *Agent) AvailableReasoningEfforts() []string {
-	return []string{"low", "medium", "high", "max"}
+	return []string{"low", "medium", "high", "max", "xhigh", "ultracode"}
 }
 
 func (a *Agent) configuredModels() []core.ModelOption {
@@ -419,14 +448,105 @@ func (a *Agent) AvailableModels(ctx context.Context) []core.ModelOption {
 	if models := a.fetchModelsFromAPI(ctx); len(models) > 0 {
 		return models
 	}
-	return []core.ModelOption{
-		{Name: "sonnet", Desc: "Claude Sonnet (balanced)"},
-		{Name: "sonnet[1m]", Desc: "Claude Sonnet (1M context)"},
-		{Name: "opus", Desc: "Claude Opus (most capable)"},
-		{Name: "opus[1m]", Desc: "Claude Opus (1M context)"},
-		{Name: "fable", Desc: "Claude Fable (frontier)"},
-		{Name: "haiku", Desc: "Claude Haiku (fastest)"},
+	return a.fallbackModels()
+}
+
+// tierEnvVars maps a Claude Code model tier alias to the environment variable
+// that pins it to a concrete model. Claude Code resolves these itself
+// (see https://code.claude.com/docs/en/model-config); reading them here lets
+// the picker show which backend a tier actually runs on.
+var tierEnvVars = map[string]string{
+	"fable":  "ANTHROPIC_DEFAULT_FABLE_MODEL",
+	"opus":   "ANTHROPIC_DEFAULT_OPUS_MODEL",
+	"sonnet": "ANTHROPIC_DEFAULT_SONNET_MODEL",
+	"haiku":  "ANTHROPIC_DEFAULT_HAIKU_MODEL",
+}
+
+// resolveTierModel returns the concrete model a tier alias resolves to, or ""
+// when the tier is not pinned. It reads the environment the spawned CLI will
+// actually see (session, provider, config, then process env), not just the
+// cc-connect process env: the documented way to pin a tier is
+// [projects.agent.options.env] or a provider's env map, and neither is copied
+// into the supervisor's own environment.
+func (a *Agent) resolveTierModel(alias string) string {
+	key, ok := tierEnvVars[alias]
+	if !ok {
+		return ""
 	}
+	return a.effectiveEnvValue(key)
+}
+
+// effectiveEnvValue returns the value the child process will see for key.
+// Later sources win, matching MergeEnv's precedence at spawn time. An explicit
+// empty value at a higher-priority source clears the pin: the child receives
+// KEY=, so the search stops there instead of falling through to a stale lower
+// source.
+func (a *Agent) effectiveEnvValue(key string) string {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	if v, ok := lastEnvValue(a.sessionEnv, key); ok {
+		return v
+	}
+	if a.activeIdx >= 0 && a.activeIdx < len(a.providers) {
+		if v, ok := a.providers[a.activeIdx].Env[key]; ok {
+			return strings.TrimSpace(v)
+		}
+	}
+	if v, ok := lastEnvValue(a.configEnv, key); ok {
+		return v
+	}
+	v, _ := os.LookupEnv(key)
+	return strings.TrimSpace(v)
+}
+
+func lastEnvValue(env []string, key string) (string, bool) {
+	for i := len(env) - 1; i >= 0; i-- {
+		if k, v, ok := strings.Cut(env[i], "="); ok && k == key {
+			return strings.TrimSpace(v), true
+		}
+	}
+	return "", false
+}
+
+// fallbackModels is the picker list used when neither configured providers nor
+// the provider API supply one. It covers the current Claude Code tier aliases
+// (including fable, added with the Claude 5 family) plus their 1M-context
+// variants. Tiers pinned through ANTHROPIC_DEFAULT_*_MODEL carry that model in
+// Desc so the picker shows the real backend instead of a bare alias.
+func (a *Agent) fallbackModels() []core.ModelOption {
+	descs := map[string]string{
+		"fable":  "Claude Fable (frontier)",
+		"opus":   "Claude Opus (most capable)",
+		"sonnet": "Claude Sonnet (balanced)",
+		"haiku":  "Claude Haiku (fastest)",
+	}
+	// The first six entries keep main's order so `/model switch <n>` means the
+	// same model as before; new tiers are appended, never inserted.
+	entries := []struct{ name, tier string }{
+		{"sonnet", "sonnet"},
+		{"sonnet[1m]", "sonnet"},
+		{"opus", "opus"},
+		{"opus[1m]", "opus"},
+		{"fable", "fable"},
+		{"haiku", "haiku"},
+		{"fable[1m]", "fable"},
+	}
+	out := make([]core.ModelOption, 0, len(entries))
+	for _, e := range entries {
+		desc := descs[e.tier]
+		is1m := strings.HasSuffix(e.name, "[1m]")
+		if is1m {
+			desc += " (1M context)"
+		}
+		if real := a.resolveTierModel(e.tier); real != "" {
+			desc = real
+			if is1m {
+				desc += " (1M context)"
+			}
+		}
+		out = append(out, core.ModelOption{Name: e.name, Desc: desc})
+	}
+	return out
 }
 
 func (a *Agent) fetchModelsFromAPI(ctx context.Context) []core.ModelOption {
@@ -964,6 +1084,9 @@ func (a *Agent) WorkspaceAgentOptions() map[string]any {
 	if a.reasoningEffort != "" {
 		opts["reasoning_effort"] = a.reasoningEffort
 	}
+	if a.subagentModel != "" {
+		opts["subagent_model"] = a.subagentModel
+	}
 	if len(a.allowedTools) > 0 {
 		opts["allowed_tools"] = stringsToAny(a.allowedTools)
 	}
@@ -1385,7 +1508,18 @@ func (a *Agent) runtimeEnvLocked() []string {
 		env = append(env, "ANTHROPIC_API_KEY="+a.routerAPIKey)
 	}
 
-	if !claudeEnvManagesProviderRouting(env) {
+	// Evaluate the routing guard before appending the subagent key:
+	// CLAUDE_CODE_SUBAGENT_MODEL is itself in claudeProviderManagedEnvVars, so
+	// checking afterwards would flip the host-managed flag on a model choice
+	// alone, with no provider routing configured.
+	managed := claudeEnvManagesProviderRouting(env)
+
+	// Empty means inherit the main model — the CLI's own default, so nothing is sent.
+	if a.subagentModel != "" {
+		env = append(env, "CLAUDE_CODE_SUBAGENT_MODEL="+a.subagentModel)
+	}
+
+	if !managed {
 		return env
 	}
 	return core.MergeEnv(env, []string{"CLAUDE_CODE_PROVIDER_MANAGED_BY_HOST=1"})

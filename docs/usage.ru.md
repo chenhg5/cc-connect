@@ -47,7 +47,7 @@
 | `/model [switch <alias>]` | Показать доступные модели или переключить модель по псевдониму |
 | `/dir [path]` | Показать или сменить рабочий каталог ИИ-агента |
 | `/allow <tool>` | Заранее разрешить инструмент (для следующей сессии) |
-| `/reasoning [level]` | Просмотреть или изменить уровень усилий на рассуждение (Codex) |
+| `/reasoning [level]` | Просмотреть или изменить уровень усилий на рассуждение (Codex, Claude Code: `low`, `medium`, `high`, `max`, `xhigh`, `ultracode`) |
 | `/mode [name]` | Просмотреть или сменить режим разрешений |
 | `/stop` | Остановить текущее выполнение |
 | `/ps <message>` / `/btw <message>` | Отправить дополнение к выполняющейся задаче |
@@ -301,6 +301,7 @@ alias = "spark"
 /model switch <alias>      Switch to the model matching the alias
 /model switch <name>       Switch to the model by its full name
 /model <alias>             Legacy syntax, still supported
+/model subagent <n>       Subagent model (1 = inherit main)
 ```
 
 Если `models` задан, `/model` показывает именно этот список, не обращаясь к API. Если параметр отсутствует, модели загружаются через API провайдера либо используется встроенный резервный список.

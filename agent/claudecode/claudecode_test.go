@@ -599,7 +599,7 @@ func TestWorkspaceAgentOptions_OmitsZeroValues(t *testing.T) {
 		t.Errorf("snapshot[mode] = %v, want %q", got["mode"], "default")
 	}
 	for _, k := range []string{
-		"cmd", "cmd_args_flag", "model", "reasoning_effort",
+		"cmd", "cmd_args_flag", "model", "reasoning_effort", "subagent_model",
 		"allowed_tools", "disallowed_tools", "max_context_tokens",
 		"router_url", "router_api_key",
 	} {
@@ -1323,4 +1323,31 @@ func setupSessionForHistory(t *testing.T, sessionID, src string) string {
 		t.Fatal(err)
 	}
 	return workDir
+}
+
+func TestNewParsesSubagentModel(t *testing.T) {
+	opts := map[string]any{
+		"work_dir":       t.TempDir(),
+		"run_as_user":    "partseeker-coder",
+		"subagent_model": "  claude-haiku-4  ",
+	}
+	a, err := New(opts)
+	if err != nil {
+		t.Fatalf("New returned error: %v", err)
+	}
+	ag, ok := a.(*Agent)
+	if !ok {
+		t.Fatalf("agent is not *Agent: %T", a)
+	}
+	if got := ag.GetSubagentModel(); got != "claude-haiku-4" {
+		t.Errorf("GetSubagentModel() = %q, want claude-haiku-4", got)
+	}
+}
+
+func TestWorkspaceAgentOptionsIncludesSubagentModel(t *testing.T) {
+	a := &Agent{subagentModel: "claude-haiku-4"}
+	got := a.WorkspaceAgentOptions()
+	if got["subagent_model"] != "claude-haiku-4" {
+		t.Errorf("snapshot[subagent_model] = %v, want claude-haiku-4", got["subagent_model"])
+	}
 }

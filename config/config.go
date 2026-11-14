@@ -1364,6 +1364,14 @@ func SaveAgentModel(projectName, model string) error {
 	return patchProjectAgentOption(projectName, "model", model)
 }
 
+// SaveAgentSubagentModel persists the project-level subagent model override.
+// An empty model means "inherit the main model".
+func SaveAgentSubagentModel(projectName, model string) error {
+	configMu.Lock()
+	defer configMu.Unlock()
+	return patchProjectAgentOption(projectName, "subagent_model", model)
+}
+
 // AddProviderToConfig adds a provider to a project's agent config and saves.
 func AddProviderToConfig(projectName string, provider ProviderConfig) error {
 	configMu.Lock()

@@ -47,7 +47,7 @@ cc-connect 完整功能使用指南。
 | `/dir [路径]` | 查看或切换 Agent 工作目录 |
 | `/show <引用>` | 按引用查看文件、目录或代码片段 |
 | `/allow <工具名>` | 预授权工具 |
-| `/reasoning [等级]` | 查看或切换推理强度（Codex）|
+| `/reasoning [等级]` | 查看或切换推理强度（Codex、Claude Code：`low`、`medium`、`high`、`max`、`xhigh`、`ultracode`）|
 | `/mode [名称]` | 查看或切换权限模式 |
 | `/stop` | 停止当前执行 |
 | `/ps <消息>` / `/btw <消息>` | 向正在执行的任务补充指令 |
@@ -331,6 +331,7 @@ alias = "spark"
 /model switch <alias>      按别名切换模型
 /model switch <name>       按完整名称切换模型
 /model <alias>             兼容旧写法，仍然可用
+/model subagent <序号>     设置子智能体模型（1 = 跟随主模型）
 ```
 
 配置了 `models` 时，`/model` 直接显示该列表，不发起 API 请求。未配置时，自动从 Provider API 获取或使用内置备选列表。

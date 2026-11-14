@@ -268,6 +268,16 @@ func buildAppendSystemPrompt(agentPrompt, platformPrompt, userAppend string) str
 	return strings.Join(parts, "\n")
 }
 
+// The ultracode settings file is written once per process, after the first
+// successful write. ccDataDir is fixed at construction, so one path is valid
+// for every spawn. A failed write is not cached: the next ultracode spawn
+// retries, so a transient read-only window does not disable ultracode for the
+// life of the process.
+var (
+	ultracodeSettingsMu   sync.Mutex
+	ultracodeSettingsPath string
+)
+
 func newClaudeSession(ctx context.Context, workDir, cliBin string, cliExtraArgs []string, cmdArgsFlag string, model, effort, sessionID, mode, systemPrompt, appendSystemPrompt string, allowedTools, disallowedTools []string, pluginDirs []string, extraEnv []string, platformPrompt string, disableVerbose bool, spawnOpts core.SpawnOptions, maxContextTokens int, ctxWindowTokens int, ccDataDir string, lang core.Language) (*claudeSession, error) {
 	sessionCtx, cancel := context.WithCancel(ctx)
 
@@ -371,7 +381,19 @@ func newClaudeSession(ctx context.Context, workDir, cliBin string, cliExtraArgs 
 		innerArgs = append(innerArgs, "--append-system-prompt-file", promptFilePath)
 	}
 
-	if effort != "" {
+	// ultracode is enabled through a settings key, not --effort: this CLI's
+	// --effort help lists low|medium|high|xhigh|max, and the settings key is
+	// the documented switch. A documented ultracode session runs at xhigh, so
+	// pin the effort explicitly instead of leaving the CLI default.
+	if effort == "ultracode" {
+		ucPath, err := writeUltracodeSettingsFile(ccDataDir)
+		if err != nil {
+			slog.Warn("claudeSession: ultracode settings file failed, running without it", "error", err)
+		} else {
+			innerArgs = append(innerArgs, "--settings", ucPath)
+		}
+		innerArgs = append(innerArgs, "--effort", "xhigh")
+	} else if effort != "" {
 		innerArgs = append(innerArgs, "--effort", effort)
 	}
 	if maxContextTokens > 0 {
@@ -1984,4 +2006,31 @@ func filterEnv(env []string, key string) []string {
 		}
 	}
 	return out
+}
+
+// writeUltracodeSettingsFile writes {"ultracode": true} to a per-cc-connect
+// settings file and returns its path. The content never changes, so the path is
+// cached after the first successful write.
+func writeUltracodeSettingsFile(ccDataDir string) (string, error) {
+	ultracodeSettingsMu.Lock()
+	defer ultracodeSettingsMu.Unlock()
+	if ultracodeSettingsPath != "" {
+		return ultracodeSettingsPath, nil
+	}
+
+	dir := ccDataDir
+	if dir == "" {
+		dir = os.TempDir()
+	}
+	path := filepath.Join(dir, "ultracode-settings.json")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return "", err
+	}
+	// Atomic write: rename replaces the path entry itself, so a pre-existing
+	// symlink cannot redirect the write into another file.
+	if err := writeFileAtomic(path, []byte("{\n  \"ultracode\": true\n}\n"), 0o644); err != nil {
+		return "", err
+	}
+	ultracodeSettingsPath = path
+	return path, nil
 }

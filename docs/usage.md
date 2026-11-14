@@ -45,7 +45,7 @@ Each user gets an independent session with full conversation context. Manage ses
 | `/model [switch <alias>]` | List available models or switch by alias |
 | `/dir [path]` | Show or switch the agent work directory |
 | `/allow <tool>` | Pre-allow a tool (next session) |
-| `/reasoning [level]` | View or switch reasoning effort (Codex) |
+| `/reasoning [level]` | View or switch reasoning effort (Codex, Claude Code: `low`, `medium`, `high`, `max`, `xhigh`, `ultracode`) |
 | `/mode [name]` | View or switch permission mode |
 | `/stop` | Stop current execution |
 | `/ps <message>` / `/btw <message>` | Send a supplement to the running task |
@@ -334,6 +334,7 @@ alias = "spark"
 /model switch <alias>      Switch to the model matching the alias
 /model switch <name>       Switch to the model by its full name
 /model <alias>             Legacy syntax, still supported
+/model subagent <n>       Subagent model (1 = inherit main)
 ```
 
 When `models` is configured, `/model` shows exactly that list without making an API round-trip. When omitted, models are fetched from the provider API or fall back to a built-in list.

@@ -82,6 +82,17 @@ func TestAvailableModels_FallbackUsesRollingFableAlias(t *testing.T) {
 	// call, independent of the developer's environment.
 	t.Setenv("ANTHROPIC_API_KEY", "")
 	t.Setenv("ANTHROPIC_BASE_URL", "")
+	// The fallback descriptions surface a tier's pinned backend when one is
+	// configured, so clear those too to keep this assertion environment-free.
+	for _, env := range []string{
+		"ANTHROPIC_DEFAULT_FABLE_MODEL",
+		"ANTHROPIC_DEFAULT_OPUS_MODEL",
+		"ANTHROPIC_DEFAULT_SONNET_MODEL",
+		"ANTHROPIC_DEFAULT_HAIKU_MODEL",
+		"ANTHROPIC_SMALL_FAST_MODEL",
+	} {
+		t.Setenv(env, "")
+	}
 
 	a := &Agent{activeIdx: -1}
 	got := a.AvailableModels(context.Background())

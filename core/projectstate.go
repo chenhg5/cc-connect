@@ -9,9 +9,10 @@ import (
 )
 
 type projectStateData struct {
-	WorkDirOverride         string            `json:"work_dir_override,omitempty"`
-	WorkspaceDirOverrides   map[string]string `json:"workspace_dir_overrides,omitempty"`
-	WorkspaceModelOverrides map[string]string `json:"workspace_model_overrides,omitempty"`
+	WorkDirOverride            string            `json:"work_dir_override,omitempty"`
+	WorkspaceDirOverrides      map[string]string `json:"workspace_dir_overrides,omitempty"`
+	WorkspaceModelOverrides    map[string]string `json:"workspace_model_overrides,omitempty"`
+	WorkspaceSubagentOverrides map[string]string `json:"workspace_subagent_overrides,omitempty"`
 }
 
 // ProjectStateStore persists lightweight runtime state for one project.
@@ -102,6 +103,40 @@ func (ps *ProjectStateStore) ClearWorkspaceModelOverride(workspace string) {
 	delete(ps.state.WorkspaceModelOverrides, workspace)
 	if len(ps.state.WorkspaceModelOverrides) == 0 {
 		ps.state.WorkspaceModelOverrides = nil
+	}
+}
+
+func (ps *ProjectStateStore) WorkspaceSubagentOverride(workspace string) string {
+	ps.mu.RLock()
+	defer ps.mu.RUnlock()
+	if ps.state.WorkspaceSubagentOverrides == nil {
+		return ""
+	}
+	return ps.state.WorkspaceSubagentOverrides[workspace]
+}
+
+func (ps *ProjectStateStore) SetWorkspaceSubagentOverride(workspace, model string) {
+	if model == "" {
+		ps.ClearWorkspaceSubagentOverride(workspace)
+		return
+	}
+	ps.mu.Lock()
+	defer ps.mu.Unlock()
+	if ps.state.WorkspaceSubagentOverrides == nil {
+		ps.state.WorkspaceSubagentOverrides = make(map[string]string)
+	}
+	ps.state.WorkspaceSubagentOverrides[workspace] = model
+}
+
+func (ps *ProjectStateStore) ClearWorkspaceSubagentOverride(workspace string) {
+	ps.mu.Lock()
+	defer ps.mu.Unlock()
+	if ps.state.WorkspaceSubagentOverrides == nil {
+		return
+	}
+	delete(ps.state.WorkspaceSubagentOverrides, workspace)
+	if len(ps.state.WorkspaceSubagentOverrides) == 0 {
+		ps.state.WorkspaceSubagentOverrides = nil
 	}
 }
 

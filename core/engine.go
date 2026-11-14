@@ -376,6 +376,8 @@ type Engine struct {
 	providerRefsSaveFunc    func(refs []string) error
 	listGlobalProvidersFunc func(agentType string) ([]ProviderConfig, error)
 	modelSaveFunc           func(model string) error
+	subagentModelSaveFunc   func(model string) error
+	subagentModelMu         sync.Mutex
 
 	ttsSaveFunc func(mode string) error
 
@@ -1120,6 +1122,10 @@ func (e *Engine) SetListGlobalProvidersFunc(fn func(agentType string) ([]Provide
 
 func (e *Engine) SetModelSaveFunc(fn func(model string) error) {
 	e.modelSaveFunc = fn
+}
+
+func (e *Engine) SetSubagentModelSaveFunc(fn func(model string) error) {
+	e.subagentModelSaveFunc = fn
 }
 
 // AddPlatform appends a platform to the engine after construction.
@@ -4209,6 +4215,9 @@ func (e *Engine) getOrCreateWorkspaceAgent(workspace string) (Agent, *SessionMan
 	if e.projectState != nil {
 		if m := e.projectState.WorkspaceModelOverride(workspace); m != "" {
 			opts["model"] = m
+		}
+		if m := e.projectState.WorkspaceSubagentOverride(workspace); m != "" {
+			opts["subagent_model"] = m
 		}
 	}
 
@@ -10409,6 +10418,8 @@ func (e *Engine) cmdModel(p Platform, msg *Message, args []string) {
 				sb.WriteString("\n")
 			}
 			sb.WriteString("\n")
+			sb.WriteString(e.i18n.T(MsgMainModelLabel))
+			sb.WriteString("\n")
 			sb.WriteString(e.i18n.T(MsgModelListTitle))
 			var buttons [][]ButtonOption
 			var row []ButtonOption
@@ -10417,6 +10428,8 @@ func (e *Engine) cmdModel(p Platform, msg *Message, args []string) {
 				if m.Name == current {
 					marker = "> "
 				}
+				// Same Alias/Desc split as the card: providers set Alias,
+				// fallbackModels() sets Desc.
 				var line string
 				if m.Alias != "" {
 					line = fmt.Sprintf("%s%d. %s - %s\n", marker, i+1, m.Alias, m.Name)
@@ -10447,10 +10460,26 @@ func (e *Engine) cmdModel(p Platform, msg *Message, args []string) {
 			}
 			sb.WriteString("\n")
 			sb.WriteString(e.i18n.T(MsgModelUsage))
+
+			// Subagent model: same numbered-list pattern, one command deeper.
+			// Platforms without a second selector still get it as text + buttons.
+			if sub, ok := agent.(SubagentModelSwitcher); ok {
+				sb.WriteString("\n")
+				sb.WriteString(e.i18n.T(MsgSubagentSelectPlaceholder))
+				sb.WriteString("\n")
+				subButtons, subText := e.subagentChoices(sub, models)
+				sb.WriteString(subText)
+				buttons = append(buttons, subButtons...)
+			}
 			e.replyWithButtons(p, msg.ReplyCtx, sb.String(), buttons)
 			return
 		}
 		e.replyWithCard(p, msg.ReplyCtx, e.renderModelCard(msg.SessionKey))
+		return
+	}
+
+	if strings.EqualFold(strings.TrimSpace(args[0]), "subagent") {
+		e.cmdSubagent(p, msg, args[1:], agent)
 		return
 	}
 
@@ -10521,6 +10550,118 @@ func modelSwitchNeedsLookup(input string) bool {
 		return true
 	}
 	return !strings.Contains(input, "/")
+}
+
+// subagentChoices renders the subagent-model options as a numbered list plus
+// one button row, for platforms without a card. The first entry clears the
+// override so the CLI inherits the main model.
+func (e *Engine) subagentChoices(sub SubagentModelSwitcher, models []ModelOption) ([][]ButtonOption, string) {
+	cur := sub.GetSubagentModel()
+
+	var sb strings.Builder
+	inheritLabel := e.i18n.T(MsgSubagentInherit)
+	if cur == "" {
+		sb.WriteString("> ")
+	} else {
+		sb.WriteString("  ")
+	}
+	sb.WriteString("1. " + inheritLabel + "\n")
+
+	inheritBtn := ButtonOption{Text: inheritLabel, Data: "cmd:/model subagent inherit"}
+	if cur == "" {
+		inheritBtn.Text = "▶ " + inheritBtn.Text
+	}
+	buttons := [][]ButtonOption{{inheritBtn}}
+
+	var row []ButtonOption
+	for i, m := range models {
+		label := m.Name
+		if m.Alias != "" {
+			label = m.Alias
+		}
+		marker := "  "
+		if m.Name == cur {
+			marker = "> "
+			label = "▶ " + label
+		}
+		fmt.Fprintf(&sb, "%s%d. %s\n", marker, i+2, m.Name)
+		row = append(row, ButtonOption{Text: label, Data: fmt.Sprintf("cmd:/model subagent %d", i+2)})
+		if len(row) >= 3 {
+			buttons = append(buttons, row)
+			row = nil
+		}
+	}
+	if len(row) > 0 {
+		buttons = append(buttons, row)
+	}
+	return buttons, sb.String()
+}
+
+// cmdSubagent handles "/model subagent [<n>|inherit]" on platforms without a
+// card, mirroring the selector the card renders.
+func (e *Engine) cmdSubagent(p Platform, msg *Message, args []string, agent Agent) {
+	sub, ok := agent.(SubagentModelSwitcher)
+	if !ok {
+		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgModelNotSupported))
+		return
+	}
+	switcher, ok := agent.(ModelSwitcher)
+	if !ok {
+		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgModelNotSupported))
+		return
+	}
+
+	fetchCtx, cancel := context.WithTimeout(e.ctx, 10*time.Second)
+	defer cancel()
+
+	if len(args) == 0 {
+		models := switcher.AvailableModels(fetchCtx)
+		buttons, text := e.subagentChoices(sub, models)
+		e.replyWithButtons(p, msg.ReplyCtx, text, buttons)
+		return
+	}
+
+	if strings.EqualFold(strings.TrimSpace(args[0]), "inherit") {
+		if err := e.setSubagentModel(agent, "", msg.SessionKey, agent == e.agent); err != nil {
+			e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgModelChangeFailed, err))
+			return
+		}
+		e.resetSessionForEnvChange(msg.SessionKey)
+		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgSubagentInherit))
+		return
+	}
+
+	models := switcher.AvailableModels(fetchCtx)
+	n, err := strconv.Atoi(strings.TrimSpace(args[0]))
+	if err != nil || n < 1 || n > len(models)+1 {
+		buttons, text := e.subagentChoices(sub, models)
+		e.replyWithButtons(p, msg.ReplyCtx, text, buttons)
+		return
+	}
+	if n == 1 {
+		if err := e.setSubagentModel(agent, "", msg.SessionKey, agent == e.agent); err != nil {
+			e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgModelChangeFailed, err))
+			return
+		}
+		e.resetSessionForEnvChange(msg.SessionKey)
+		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgSubagentInherit))
+		return
+	}
+	target := models[n-2].Name
+	if err := e.setSubagentModel(agent, target, msg.SessionKey, agent == e.agent); err != nil {
+		e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgModelChangeFailed, err))
+		return
+	}
+	e.resetSessionForEnvChange(msg.SessionKey)
+	e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgModelChanged), target))
+}
+
+// resetSessionForEnvChange drops the agent session so the next turn spawns with
+// the new environment. CLAUDE_CODE_SUBAGENT_MODEL is read at spawn time and a
+// live session keeps its original env; closing the session is what the main
+// model switch does too. History is kept — only the process is replaced.
+func (e *Engine) resetSessionForEnvChange(sessionKey string) {
+	e.cleanupInteractiveState(e.interactiveKeyForSessionKey(sessionKey))
 }
 
 func parseModelSwitchArgs(args []string) (string, bool) {
@@ -10594,6 +10735,44 @@ func (e *Engine) switchModelOnAgent(agent Agent, target string, persistConfig bo
 	switcher.SetModel(target)
 	providerSwitcher.SetActiveProvider(active.Name)
 	return target, nil
+}
+
+// setSubagentModel applies a subagent-model choice. persistConfig saves the
+// project-level default; workspace-scoped agents store their override in
+// project state instead, mirroring switchModelOnAgent. The lock serialises
+// save and set so two concurrent choices cannot leave the config file and
+// memory on different values.
+func (e *Engine) setSubagentModel(agent Agent, target, sessionKey string, persistConfig bool) error {
+	sub, ok := agent.(SubagentModelSwitcher)
+	if !ok {
+		return nil
+	}
+
+	e.subagentModelMu.Lock()
+	defer e.subagentModelMu.Unlock()
+
+	if persistConfig && e.subagentModelSaveFunc != nil {
+		if err := e.subagentModelSaveFunc(target); err != nil {
+			return fmt.Errorf("save subagent model: %w", err)
+		}
+	}
+	sub.SetSubagentModel(target)
+	if !persistConfig {
+		e.persistWorkspaceSubagentOverride(sessionKey, agent, target)
+	}
+	return nil
+}
+
+func (e *Engine) persistWorkspaceSubagentOverride(sessionKey string, agent Agent, model string) {
+	if e.projectState == nil || !e.multiWorkspace || agent == e.agent {
+		return
+	}
+	workspace := workspaceModelOverrideKey(e.interactiveKeyForSessionKey(sessionKey), sessionKey, agent)
+	if workspace == "" {
+		return
+	}
+	e.projectState.SetWorkspaceSubagentOverride(workspace, model)
+	e.projectState.Save()
 }
 
 func (e *Engine) cmdReasoning(p Platform, msg *Message, args []string) {
@@ -12823,6 +13002,9 @@ func (e *Engine) handleCardNav(action string, sessionKey string) *Card {
 	if prefix == "act" && cmd == "/model" {
 		return e.handleModelCardAction(args, sessionKey)
 	}
+	if prefix == "act" && cmd == "/subagent" {
+		return e.handleSubagentCardAction(args, sessionKey)
+	}
 
 	if prefix == "act" {
 		e.executeCardAction(cmd, args, sessionKey)
@@ -12937,6 +13119,51 @@ func (e *Engine) handleModelCardAction(args, sessionKey string) *Card {
 	}
 
 	return e.renderModelSwitchResultCard(resolved, err)
+}
+
+// handleSubagentCardAction applies a subagent-model choice from the /model card.
+// "inherit" clears the override so the CLI falls back to the main model.
+func (e *Engine) handleSubagentCardAction(args, sessionKey string) *Card {
+	agent, sessions := e.sessionContextForKey(sessionKey)
+	if _, ok := agent.(SubagentModelSwitcher); !ok {
+		return e.renderModelCard(sessionKey)
+	}
+
+	fields := strings.Fields(args)
+	var target string
+	switch {
+	case len(fields) == 1 && strings.EqualFold(fields[0], "inherit"):
+		target = ""
+	case len(fields) == 2 && fields[0] == "switch":
+		n, err := strconv.Atoi(fields[1])
+		if err != nil {
+			return e.renderModelCard(sessionKey)
+		}
+		switcher, ok := agent.(ModelSwitcher)
+		if !ok {
+			return e.renderModelCard(sessionKey)
+		}
+		fetchCtx, cancel := context.WithTimeout(e.ctx, 3*time.Second)
+		models := switcher.AvailableModels(fetchCtx)
+		cancel()
+		if n < 1 || n > len(models)+1 {
+			return e.renderModelCard(sessionKey)
+		}
+		if n == 1 {
+			target = ""
+		} else {
+			target = models[n-2].Name
+		}
+	default:
+		return e.renderModelCard(sessionKey)
+	}
+
+	if err := e.setSubagentModel(agent, target, sessionKey, agent == e.agent); err != nil {
+		return e.renderModelSwitchResultCard(target, err)
+	}
+	e.cleanupInteractiveState(e.interactiveKeyForSessionKey(sessionKey))
+	sessions.Save()
+	return e.renderModelCard(sessionKey)
 }
 
 func (e *Engine) persistWorkspaceModelOverride(interactiveKey, sessionKey string, agent Agent, model string) {
@@ -13797,6 +14024,9 @@ func (e *Engine) renderModelCard(sessionKey string) *Card {
 		sb.WriteString(e.i18n.Tf(MsgModelCurrent, current))
 	}
 
+	// Alias is set by the configured-providers path (config.toml models);
+	// fallbackModels() leaves it empty and carries the resolved backend in
+	// Desc instead.
 	var opts []CardSelectOption
 	initVal := ""
 	for i, m := range models {
@@ -13815,8 +14045,48 @@ func (e *Engine) renderModelCard(sessionKey string) *Card {
 
 	cb := NewCard().Title(e.i18n.T(MsgCardTitleModel), "indigo").
 		Markdown(sb.String()).
-		Select(e.i18n.T(MsgModelSelectPlaceholder), opts, initVal).
-		Buttons(e.cardBackButton())
+		Markdown("**"+e.i18n.T(MsgMainModelLabel)+"**").
+		Select(e.i18n.T(MsgModelSelectPlaceholder), opts, initVal)
+
+	// Subagent model selector: only for agents that support it. Options are
+	// "inherit" (empty value -> CLI default) plus the same model list.
+	if sub, ok := agent.(SubagentModelSwitcher); ok {
+		subOpts := []CardSelectOption{{
+			Text:  e.i18n.T(MsgSubagentInherit),
+			Value: "act:/subagent inherit",
+		}}
+		cur := sub.GetSubagentModel()
+		subInit := subOpts[0].Value
+		curInList := cur == ""
+		for i, m := range models {
+			label := m.Name
+			if m.Alias != "" {
+				label = m.Alias + " - " + m.Name
+			} else if m.Desc != "" {
+				label += " — " + m.Desc
+			}
+			v := fmt.Sprintf("act:/subagent switch %d", i+2)
+			subOpts = append(subOpts, CardSelectOption{Text: label, Value: v})
+			if m.Name == cur {
+				subInit = v
+				curInList = true
+			}
+		}
+		curLabel := cur
+		if cur == "" {
+			curLabel = e.i18n.T(MsgSubagentInherit)
+		}
+		cb = cb.Markdown(e.i18n.Tf(MsgSubagentCurrent, curLabel))
+		if !curInList {
+			// Do not preselect inherit when the override is not in this list:
+			// the dropdown would claim a value the session does not use.
+			subInit = ""
+		}
+		cb = cb.Markdown("**"+e.i18n.T(MsgSubagentSelectPlaceholder)+"**").
+			Select(e.i18n.T(MsgSubagentSelectPlaceholder), subOpts, subInit)
+	}
+
+	cb = cb.Buttons(e.cardBackButton())
 	cb.Note(e.i18n.T(MsgModelUsage))
 	return cb.Build()
 }
