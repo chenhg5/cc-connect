@@ -2601,6 +2601,7 @@ func TestCUJ_STREAM1_StreamingResumesAfterPermissionPrompt(t *testing.T) {
 }
 
 func TestCUJ_H4_FeishuTopicsKeepWorkspaceBindingsIsolated(t *testing.T) {
+	t.Run("ScheduledTimerKeepsWorkspaceAndProviderAfterRestart", scheduledTopicTimerCUJ)
 	baseDir := t.TempDir()
 	defaultWorkspace := normalizeWorkspacePath(filepath.Join(baseDir, "workspace-default"))
 	workspaceA := normalizeWorkspacePath(filepath.Join(baseDir, "workspace-a"))
