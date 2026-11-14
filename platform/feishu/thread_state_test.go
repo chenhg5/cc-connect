@@ -399,112 +399,22 @@ func TestStartCronTopicKeepsRunningWhenLookupHasNoThreadID(t *testing.T) {
 	}
 }
 
-// The create-time poll can still lose the race; the first unmentioned message
-// in that topic is the last chance to adopt it. The bot opened the topic, so
-// Feishu's own thread history says so — no local state to lose on restart.
-func TestUnmentionedTopicMessageAdoptedWhenBotPostedThere(t *testing.T) {
-	var listCalls int32
-	stub := &rootStub{
-		rootOf: func(string) (string, bool) { return "", true },
-		threadMembers: func(threadID string) ([]map[string]any, bool) {
-			atomic.AddInt32(&listCalls, 1)
-			if threadID != "omt_cron" {
-				return nil, false
-			}
-			return []map[string]any{{
-				"message_id": "om_root",
-				"sender":     map[string]any{"sender_type": "app", "id": "cli_test"},
-			}}, true
-		},
-	}
-	p := newRootTestPlatform(t, stub, map[string]any{
+// An unmentioned message in a topic that never got registered is dropped.
+func TestUnmentionedTopicMessageDroppedWhenNotRegistered(t *testing.T) {
+	p := newRootTestPlatform(t, &rootStub{rootOf: func(string) (string, bool) { return "", true }}, map[string]any{
 		"cc_data_dir": t.TempDir(),
-		"cc_project":  "adopt-test",
+		"cc_project":  "no-adopt-test",
 	})
 	p.botOpenID = "ou_bot"
 	handled := make(chan string, 1)
 	p.handler = func(_ core.Platform, msg *core.Message) { handled <- msg.SessionKey }
 
-	if err := p.onMessage(context.Background(), rootTestEventUnmentioned("om_u1", "om_root", "omt_cron", "在吗")); err != nil {
+	if err := p.onMessage(context.Background(), rootTestEventUnmentioned("om_u1", "om_root", "omt_chat", "在吗")); err != nil {
 		t.Fatalf("onMessage() error = %v", err)
 	}
 	select {
 	case <-handled:
-	case <-time.After(2 * time.Second):
-		t.Fatal("unmentioned message in a bot topic must not be dropped")
-	}
-
-	p.threadSeenMu.Lock()
-	_, threadMarked := p.threadSeen["omt_cron"]
-	p.threadSeenMu.Unlock()
-	if !threadMarked {
-		t.Fatal("adopted thread must be registered")
-	}
-	if n := atomic.LoadInt32(&listCalls); n != 1 {
-		t.Fatalf("thread list calls = %d, want 1", n)
-	}
-}
-
-// A mentioned first message needs no fallback: it passes the gate and registers
-// the thread on the normal path. The lookup must not run.
-func TestMentionedFirstMessageSkipsTopicLookup(t *testing.T) {
-	var listCalls int32
-	stub := &rootStub{
-		rootOf: func(string) (string, bool) { return "", true },
-		threadMembers: func(string) ([]map[string]any, bool) {
-			atomic.AddInt32(&listCalls, 1)
-			return nil, true
-		},
-	}
-	p := newRootTestPlatform(t, stub, map[string]any{
-		"cc_data_dir": t.TempDir(),
-		"cc_project":  "adopt-mention-test",
-	})
-	p.botOpenID = "ou_bot"
-	p.handler = func(core.Platform, *core.Message) {}
-
-	if err := p.onMessage(context.Background(), rootTestEvent("om_u1", "om_root", "omt_cron", "@bot 在吗")); err != nil {
-		t.Fatalf("onMessage() error = %v", err)
-	}
-
-	if n := atomic.LoadInt32(&listCalls); n != 0 {
-		t.Fatalf("thread list calls = %d, want none for a mentioned message", n)
-	}
-	p.threadSeenMu.Lock()
-	_, threadMarked := p.threadSeen["omt_cron"]
-	p.threadSeenMu.Unlock()
-	if !threadMarked {
-		t.Fatal("mentioned first message must still register the topic")
-	}
-}
-
-// A bot reply inside a user's topic is not a cron new_topic: its first message
-// carries a root_id, so it must not be adopted.
-func TestBotReplyInUserTopicIsNotAdopted(t *testing.T) {
-	stub := &rootStub{
-		rootOf: func(string) (string, bool) { return "", true },
-		threadMembers: func(string) ([]map[string]any, bool) {
-			return []map[string]any{{
-				"message_id": "om_bot_reply",
-				"root_id":    "om_user_root",
-				"sender":     map[string]any{"sender_type": "app", "id": "cli_test"},
-			}}, true
-		},
-	}
-	p := newRootTestPlatform(t, stub, map[string]any{
-		"cc_data_dir": t.TempDir(),
-		"cc_project":  "adopt-user-topic-test",
-	})
-	p.botOpenID = "ou_bot"
-	handled := make(chan string, 1)
-	p.handler = func(_ core.Platform, msg *core.Message) { handled <- msg.SessionKey }
-
-	if err := p.onMessage(context.Background(), rootTestEventUnmentioned("om_u1", "om_user_root", "omt_user", "帮我看下")); err != nil {
-		t.Fatalf("onMessage() error = %v", err)
-	}
-	select {
-	case <-handled:
-		t.Fatal("a topic opened by a user must not be adopted")
+		t.Fatal("unregistered topic must not be adopted")
 	case <-time.After(200 * time.Millisecond):
 	}
 
@@ -512,54 +422,7 @@ func TestBotReplyInUserTopicIsNotAdopted(t *testing.T) {
 	entries := len(p.threadSeen)
 	p.threadSeenMu.Unlock()
 	if entries != 0 {
-		t.Fatalf("user topic must not be registered, got %d entries", entries)
-	}
-}
-
-// A topic the bot never posted in must behave exactly as before: the message is
-// dropped, nothing is registered, and the miss is remembered so a busy group is
-// not probed on every message.
-func TestUnmentionedTopicMessageDroppedWhenBotAbsent(t *testing.T) {
-	var listCalls int32
-	stub := &rootStub{
-		rootOf: func(string) (string, bool) { return "", true },
-		threadMembers: func(string) ([]map[string]any, bool) {
-			atomic.AddInt32(&listCalls, 1)
-			return []map[string]any{{
-				"message_id": "om_u9",
-				"sender":     map[string]any{"sender_type": "user", "id": "ou_colleague"},
-			}}, true
-		},
-	}
-	p := newRootTestPlatform(t, stub, map[string]any{
-		"cc_data_dir": t.TempDir(),
-		"cc_project":  "adopt-miss-test",
-	})
-	p.botOpenID = "ou_bot"
-	handled := make(chan string, 1)
-	p.handler = func(_ core.Platform, msg *core.Message) { handled <- msg.SessionKey }
-
-	if err := p.onMessage(context.Background(), rootTestEventUnmentioned("om_u1", "om_u9", "omt_chat", "我不是跟你说的")); err != nil {
-		t.Fatalf("onMessage() error = %v", err)
-	}
-	select {
-	case <-handled:
-		t.Fatal("message in a topic the bot never joined must stay dropped")
-	case <-time.After(200 * time.Millisecond):
-	}
-
-	if err := p.onMessage(context.Background(), rootTestEventUnmentioned("om_u2", "om_u9", "omt_chat", "嗯")); err != nil {
-		t.Fatalf("onMessage() error = %v", err)
-	}
-	if n := atomic.LoadInt32(&listCalls); n != 1 {
-		t.Fatalf("thread list calls = %d, want the miss to be cached", n)
-	}
-
-	p.threadSeenMu.Lock()
-	entries := len(p.threadSeen)
-	p.threadSeenMu.Unlock()
-	if entries != 0 {
-		t.Fatalf("rejected topic must not be registered, got %d entries", entries)
+		t.Fatalf("topic must not be registered, got %d entries", entries)
 	}
 }
 

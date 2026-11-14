@@ -175,11 +175,6 @@ type Platform struct {
 	chatMemberCache  sync.Map          // chatID -> *chatMemberEntry
 	recalledMu       sync.Mutex
 	recalledMsgIDs   map[string]time.Time // message_id -> recall time, short TTL race guard
-	// adoptMu guards adoptMissed: threads found without any bot message when
-	// the mention-exemption fallback looked them up. Only misses are stored,
-	// with a short TTL, so a busy group is not probed on every message.
-	adoptMu     sync.Mutex
-	adoptMissed map[string]time.Time
 	// Webhook mode fields (for Lark international version)
 	server       *http.Server
 	port         string
@@ -1058,12 +1053,6 @@ func (p *Platform) onMessage(ctx context.Context, event *larkim.P2MessageReceive
 			// not a direct mention, and in a large group a quote sets RootId
 			// but is not an invitation to the bot.
 			allowed := p.threadReplyWithoutMention && threadID != "" && p.threadAllowed(threadID)
-			if !allowed && p.threadReplyWithoutMention && threadID != "" {
-				// A cron new_topic root can be created before Feishu exposes its
-				// thread id. Only an unmentioned message needs the fallback: a
-				// mentioned one registers the thread further down anyway.
-				allowed = p.adoptBotTopic(ctx, threadID)
-			}
 			if !allowed {
 				slog.Info(p.tag()+": ignoring group message without bot mention",
 					"chat_id", chatID, "user", userID, "thread", threadID,
@@ -1487,6 +1476,7 @@ func (p *Platform) resolveChatName(chatID string) string {
 // --- Mention resolution ---
 
 const chatMemberCacheTTL = 1 * time.Hour
+
 
 type chatMemberEntry struct {
 	members   map[string]string // displayName -> openID
@@ -3627,20 +3617,13 @@ const (
 	// cronThreadLookupBudget bounds the whole wait for the thread id of a new
 	// topic root: Feishu exposes it about 0.8-1.2s after create, so one read is
 	// never enough and waiting forever would stall the cron run.
-	cronThreadLookupBudget = 3 * time.Second
+	cronThreadLookupBudget = 4 * time.Second
 	// A single read gets its own short deadline; a stuck request must not eat
 	// the whole budget and leave no room for another attempt.
 	cronThreadLookupAttemptLimit = time.Second
 	// Feishu exposes the thread id of a brand-new topic root only after the
 	// topic is committed, so poll instead of reading once.
 	cronThreadLookupPollInterval = 200 * time.Millisecond
-	// If the wait above still loses the race, the first unmentioned message in
-	// the topic asks Feishu whether the bot opened it. That state lives on the
-	// server, so a restart cannot lose it. One cheap call, short deadline; a
-	// thread the bot is not in is remembered for a few minutes.
-	adoptTopicTimeout = 800 * time.Millisecond
-	adoptTopicMissTTL = 5 * time.Minute
-	adoptTopicMissMax = 200
 )
 
 // lookupMessageThreadID polls until the thread id of a message the bot just
@@ -3691,112 +3674,6 @@ func (p *Platform) lookupMessageThreadID(ctx context.Context, messageID string) 
 				"elapsed_ms", time.Since(startedAt).Milliseconds())
 			return "", nil
 		case <-time.After(cronThreadLookupPollInterval):
-		}
-	}
-}
-
-// adoptBotTopic is the fallback for a cron new_topic topic that never got
-// registered because its thread id was not readable when it was created. It
-// asks Feishu for the thread's first message and accepts the thread only when
-// that message is a topic root posted by this app — which is exactly what a
-// cron new_topic creates. A bot reply inside someone else's topic carries a
-// root_id and is therefore rejected. Server-side state is used on purpose: a
-// restart cannot lose it. Threads that do not match are remembered for a few
-// minutes so a busy group is not probed on every message.
-func (p *Platform) adoptBotTopic(ctx context.Context, threadID string) bool {
-	threadID = strings.TrimSpace(threadID)
-	if threadID == "" || p.client == nil {
-		return false
-	}
-	if p.adoptMissedRecently(threadID) {
-		return false
-	}
-
-	cctx, cancel := context.WithTimeout(ctx, adoptTopicTimeout)
-	defer cancel()
-
-	// Only the first message matters; asking for one item keeps this cheap.
-	req := larkim.NewListMessageReqBuilder().
-		ContainerIdType("thread").
-		ContainerId(threadID).
-		SortType(larkim.SortTypeListMessageByCreateTimeAsc).
-		PageSize(1).
-		Build()
-
-	var resp *larkim.ListMessageResp
-	err := p.withFreshTenantAccessTokenRetry(cctx, "adopt_topic", func(client *lark.Client, options ...larkcore.RequestOptionFunc) error {
-		var err error
-		resp, err = client.Im.Message.List(cctx, req, options...)
-		if err != nil {
-			return fmt.Errorf("%s: list thread %s: %w", p.tag(), threadID, err)
-		}
-		if resp == nil {
-			return fmt.Errorf("%s: list thread %s: nil response", p.tag(), threadID)
-		}
-		if !resp.Success() {
-			return fmt.Errorf("%s: list thread %s failed code=%d msg=%s", p.tag(), threadID, resp.Code, resp.Msg)
-		}
-		return nil
-	})
-	if err != nil {
-		// No caching on failure: the next message in the thread retries.
-		slog.Warn(p.tag()+": adopt topic lookup failed", "thread", threadID, "error", err)
-		return false
-	}
-
-	if resp.Data != nil {
-		for _, item := range resp.Data.Items {
-			if item == nil || item.Sender == nil {
-				continue
-			}
-			if stringValue(item.Sender.SenderType) != "app" {
-				continue
-			}
-			if appID := stringValue(item.Sender.Id); p.appID != "" && appID != "" && appID != p.appID {
-				continue
-			}
-			// Only a topic root the app opened counts as a cron new_topic. A bot
-			// reply inside a user's topic has this root_id set.
-			if strings.TrimSpace(stringValue(item.RootId)) != "" {
-				continue
-			}
-			p.markThread(threadID)
-			slog.Info(p.tag()+": adopted unregistered bot topic",
-				"thread", threadID, "root_id", stringValue(item.MessageId))
-			return true
-		}
-	}
-	p.noteAdoptMiss(threadID)
-	return false
-}
-
-func (p *Platform) adoptMissedRecently(threadID string) bool {
-	p.adoptMu.Lock()
-	defer p.adoptMu.Unlock()
-	at, ok := p.adoptMissed[threadID]
-	if !ok {
-		return false
-	}
-	if time.Since(at) >= adoptTopicMissTTL {
-		delete(p.adoptMissed, threadID)
-		return false
-	}
-	return true
-}
-
-func (p *Platform) noteAdoptMiss(threadID string) {
-	now := time.Now()
-	p.adoptMu.Lock()
-	defer p.adoptMu.Unlock()
-	if p.adoptMissed == nil {
-		p.adoptMissed = make(map[string]time.Time)
-	}
-	p.adoptMissed[threadID] = now
-	if len(p.adoptMissed) > adoptTopicMissMax {
-		for id, at := range p.adoptMissed {
-			if now.Sub(at) >= adoptTopicMissTTL {
-				delete(p.adoptMissed, id)
-			}
 		}
 	}
 }

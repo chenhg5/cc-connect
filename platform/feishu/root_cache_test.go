@@ -20,9 +20,6 @@ type rootStub struct {
 	rootOf func(string) (string, bool)
 	// threadOf, when set, feeds thread_id into GET message responses.
 	threadOf func(string) (string, bool)
-	// threadMembers, when set, answers the thread message list used by the
-	// mention-exemption fallback.
-	threadMembers func(string) ([]map[string]any, bool)
 	// omitCreateThreadID mimics Feishu's create response for a new topic root,
 	// which carries no thread_id even though the message does belong to a topic.
 	omitCreateThreadID bool
@@ -57,20 +54,6 @@ func newRootTestPlatform(t *testing.T, stub *rootStub, extraOpts ...map[string]a
 			writeJSON(t, w, map[string]any{
 				"code": 0, "msg": "success",
 				"data": map[string]any{"items": []map[string]any{item}},
-			})
-		case r.Method == http.MethodGet && r.URL.Path == "/open-apis/im/v1/messages":
-			items, ok := []map[string]any(nil), true
-			if stub.threadMembers != nil {
-				items, ok = stub.threadMembers(r.URL.Query().Get("container_id"))
-			}
-			if !ok {
-				w.WriteHeader(http.StatusInternalServerError)
-				writeJSON(t, w, map[string]any{"code": 500, "msg": "boom"})
-				return
-			}
-			writeJSON(t, w, map[string]any{
-				"code": 0, "msg": "success",
-				"data": map[string]any{"items": items, "has_more": false},
 			})
 		case r.Method == http.MethodPost && r.URL.Path == "/open-apis/im/v1/messages":
 			data := map[string]any{"message_id": "om_created"}
