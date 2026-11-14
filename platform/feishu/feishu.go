@@ -175,6 +175,10 @@ type Platform struct {
 	chatMemberCache  sync.Map          // chatID -> *chatMemberEntry
 	recalledMu       sync.Mutex
 	recalledMsgIDs   map[string]time.Time // message_id -> recall time, short TTL race guard
+	// adoptMu guards adoptMissed: threads probed for a bot message after a cron
+	// topic failed to register. Only misses are stored, with a short TTL.
+	adoptMu     sync.Mutex
+	adoptMissed map[string]time.Time
 	// Webhook mode fields (for Lark international version)
 	server       *http.Server
 	port         string
@@ -1049,19 +1053,25 @@ func (p *Platform) onMessage(ctx context.Context, event *larkim.P2MessageReceive
 	if chatType == "group" && !p.groupReplyAll && p.botOpenID != "" {
 		if !isBotMentioned(msg.Mentions, p.botOpenID) {
 			threadID := stringValue(msg.ThreadId)
-			switch {
 			// Only an explicit bot mention may waive the requirement. @all is
 			// not a direct mention, and in a large group a quote sets RootId
 			// but is not an invitation to the bot.
-			case p.threadReplyWithoutMention && threadID != "" && p.threadAllowed(threadID):
-				slog.Debug(p.tag()+": thread message without mention accepted",
-					"chat_id", chatID, "thread", threadID, "user", userID)
-			default:
+			allowed := p.threadReplyWithoutMention && threadID != "" && p.threadAllowed(threadID)
+			if !allowed && p.threadReplyWithoutMention && threadID != "" {
+				// Last chance for a cron topic whose thread id only became
+				// readable after the create-time poll gave up: adopt the thread
+				// if the bot already posted there, so the first reply in it is
+				// not dropped.
+				allowed = p.adoptBotTopic(ctx, threadID)
+			}
+			if !allowed {
 				slog.Info(p.tag()+": ignoring group message without bot mention",
 					"chat_id", chatID, "user", userID, "thread", threadID,
 					"hint", "set thread_reply_without_mention or group_reply_all to change")
 				return nil
 			}
+			slog.Debug(p.tag()+": thread message without mention accepted",
+				"chat_id", chatID, "thread", threadID, "user", userID)
 		}
 	}
 
@@ -3613,16 +3623,32 @@ func (p *Platform) StartCronTopic(ctx context.Context, sessionKey, content strin
 	return newKey, newRC, nil
 }
 
-// cronThreadLookupTimeout is the whole budget for the read-back below,
-// retries and token refresh included, so an unhealthy Feishu cannot stall the
-// cron run that is waiting on it.
-const cronThreadLookupTimeout = 3 * time.Second
+const (
+	// cronThreadLookupBudget is the whole time spent waiting for the thread id
+	// to become readable, so an unhealthy Feishu cannot stall the cron run.
+	// Feishu exposes it about 0.8-1.2s after create; 2s keeps headroom without
+	// making a non-topic chat wait long.
+	cronThreadLookupBudget = 2 * time.Second
+	// A single read gets its own short deadline; a stuck request must not eat
+	// the whole budget and leave no room for another attempt.
+	cronThreadLookupAttemptLimit = time.Second
+	// Feishu exposes the thread id of a brand-new topic root only after the
+	// topic is committed, so poll instead of reading once.
+	cronThreadLookupPollInterval = 200 * time.Millisecond
+	// When the poll above runs out, the first unmentioned message in the topic
+	// is the last chance to adopt it. Bounded like the read above; a thread the
+	// bot never posted in is remembered so later messages do not probe again.
+	adoptTopicTimeout = 1500 * time.Millisecond
+	adoptTopicMissTTL = 5 * time.Minute
+	adoptTopicMissMax = 200
+)
 
-// lookupMessageThreadID reads back the thread id of a message the bot just
-// posted. Only cron new-topic roots need this: Feishu returns thread_id in the
-// create response for messages posted into an existing topic, but not for the
-// root message that opens a new one. An unreadable answer is not fatal — the
-// caller keeps running and only loses the mention exemption.
+// lookupMessageThreadID waits until the thread id of a message the bot just
+// posted can be read back. Only cron new-topic roots need this: Feishu returns
+// thread_id in the create response for messages posted into an existing topic,
+// but neither in the create response nor immediately afterwards for the root
+// message that opens a new one. An unreadable answer is not fatal — the caller
+// keeps running and only loses the mention exemption.
 func (p *Platform) lookupMessageThreadID(ctx context.Context, messageID string) (string, error) {
 	messageID = strings.TrimSpace(messageID)
 	if messageID == "" {
@@ -3632,37 +3658,173 @@ func (p *Platform) lookupMessageThreadID(ctx context.Context, messageID string) 
 		return "", fmt.Errorf("%s: client not initialized", p.tag())
 	}
 
-	cctx, cancel := context.WithTimeout(ctx, cronThreadLookupTimeout)
+	cctx, cancel := context.WithTimeout(ctx, cronThreadLookupBudget)
+	defer cancel()
+
+	startedAt := time.Now()
+	attempts := 0
+	var lastErr error
+	for {
+		attempts++
+		tid, err := p.fetchMessageThreadID(cctx, messageID)
+		if err == nil && tid != "" {
+			if attempts > 1 {
+				slog.Info(p.tag()+": cron topic thread became visible",
+					"root_id", messageID, "attempts", attempts,
+					"elapsed_ms", time.Since(startedAt).Milliseconds())
+			}
+			return tid, nil
+		}
+		if err == nil {
+			lastErr = nil
+		} else if lastErr == nil || isTransientError(err) {
+			lastErr = err
+		}
+
+		select {
+		case <-cctx.Done():
+			if lastErr != nil {
+				return "", lastErr
+			}
+			slog.Warn(p.tag()+": cron topic thread still hidden",
+				"root_id", messageID, "attempts", attempts,
+				"elapsed_ms", time.Since(startedAt).Milliseconds())
+			return "", nil
+		case <-time.After(cronThreadLookupPollInterval):
+		}
+	}
+}
+
+// adoptBotTopic is the fallback for a cron topic that never got registered
+// because its thread id was not readable within the create-time budget. When
+// the bot already posted in the thread, the topic counts as joined: register it
+// and let the unmentioned message through. Threads without a bot message are
+// remembered for a short while so a busy group is not probed on every message.
+func (p *Platform) adoptBotTopic(ctx context.Context, threadID string) bool {
+	threadID = strings.TrimSpace(threadID)
+	if threadID == "" || p.client == nil {
+		return false
+	}
+	if p.adoptMissedRecently(threadID) {
+		return false
+	}
+
+	cctx, cancel := context.WithTimeout(ctx, adoptTopicTimeout)
+	defer cancel()
+
+	req := larkim.NewListMessageReqBuilder().
+		ContainerIdType("thread").
+		ContainerId(threadID).
+		SortType(larkim.SortTypeListMessageByCreateTimeAsc).
+		PageSize(20).
+		Build()
+
+	var resp *larkim.ListMessageResp
+	err := p.withFreshTenantAccessTokenRetry(cctx, "adopt_topic", func(client *lark.Client, options ...larkcore.RequestOptionFunc) error {
+		var err error
+		resp, err = client.Im.Message.List(cctx, req, options...)
+		if err != nil {
+			return fmt.Errorf("%s: list thread %s: %w", p.tag(), threadID, err)
+		}
+		if resp == nil {
+			return fmt.Errorf("%s: list thread %s: nil response", p.tag(), threadID)
+		}
+		if !resp.Success() {
+			return fmt.Errorf("%s: list thread %s failed code=%d msg=%s", p.tag(), threadID, resp.Code, resp.Msg)
+		}
+		return nil
+	})
+	if err != nil {
+		slog.Warn(p.tag()+": adopt topic lookup failed", "thread", threadID, "error", err)
+		p.noteAdoptMiss(threadID)
+		return false
+	}
+
+	if resp.Data != nil {
+		for _, item := range resp.Data.Items {
+			if item == nil || item.Sender == nil {
+				continue
+			}
+			if stringValue(item.Sender.SenderType) != "app" {
+				continue
+			}
+			if appID := stringValue(item.Sender.Id); p.appID != "" && appID != "" && appID != p.appID {
+				continue
+			}
+			p.markThread(threadID)
+			slog.Info(p.tag()+": adopted unregistered bot topic",
+				"thread", threadID, "root_id", stringValue(item.MessageId))
+			return true
+		}
+	}
+	p.noteAdoptMiss(threadID)
+	return false
+}
+
+func (p *Platform) adoptMissedRecently(threadID string) bool {
+	p.adoptMu.Lock()
+	defer p.adoptMu.Unlock()
+	at, ok := p.adoptMissed[threadID]
+	if !ok {
+		return false
+	}
+	if time.Since(at) >= adoptTopicMissTTL {
+		delete(p.adoptMissed, threadID)
+		return false
+	}
+	return true
+}
+
+func (p *Platform) noteAdoptMiss(threadID string) {
+	now := time.Now()
+	p.adoptMu.Lock()
+	defer p.adoptMu.Unlock()
+	if p.adoptMissed == nil {
+		p.adoptMissed = make(map[string]time.Time)
+	}
+	p.adoptMissed[threadID] = now
+	if len(p.adoptMissed) > adoptTopicMissMax {
+		for id, at := range p.adoptMissed {
+			if now.Sub(at) >= adoptTopicMissTTL {
+				delete(p.adoptMissed, id)
+			}
+		}
+	}
+}
+
+// fetchMessageThreadID performs one read of the root message. An empty thread
+// id with no error means the topic is not committed yet, or the chat is not a
+// topic chat at all; the caller decides whether to poll again.
+func (p *Platform) fetchMessageThreadID(ctx context.Context, messageID string) (string, error) {
+	actx, cancel := context.WithTimeout(ctx, cronThreadLookupAttemptLimit)
 	defer cancel()
 
 	req := larkim.NewGetMessageReqBuilder().MessageId(messageID).Build()
 	var threadID string
-	err := p.withTransientRetry(cctx, "cron_topic_thread", func() error {
-		return p.withFreshTenantAccessTokenRetry(cctx, "cron_topic_thread", func(client *lark.Client, options ...larkcore.RequestOptionFunc) error {
-			resp, err := client.Im.Message.Get(cctx, req, options...)
-			if err != nil {
-				return fmt.Errorf("%s: get message %s: %w", p.tag(), messageID, err)
+	err := p.withFreshTenantAccessTokenRetry(actx, "cron_topic_thread", func(client *lark.Client, options ...larkcore.RequestOptionFunc) error {
+		resp, err := client.Im.Message.Get(actx, req, options...)
+		if err != nil {
+			return fmt.Errorf("%s: get message %s: %w", p.tag(), messageID, err)
+		}
+		if resp == nil {
+			return fmt.Errorf("%s: get message %s: nil response", p.tag(), messageID)
+		}
+		if !resp.Success() {
+			return fmt.Errorf("%s: get message %s failed code=%d msg=%s", p.tag(), messageID, resp.Code, resp.Msg)
+		}
+		if resp.Data == nil {
+			return nil
+		}
+		for _, item := range resp.Data.Items {
+			if item == nil {
+				continue
 			}
-			if resp == nil {
-				return fmt.Errorf("%s: get message %s: nil response", p.tag(), messageID)
-			}
-			if !resp.Success() {
-				return fmt.Errorf("%s: get message %s failed code=%d msg=%s", p.tag(), messageID, resp.Code, resp.Msg)
-			}
-			if resp.Data == nil {
+			if tid := strings.TrimSpace(stringValue(item.ThreadId)); tid != "" {
+				threadID = tid
 				return nil
 			}
-			for _, item := range resp.Data.Items {
-				if item == nil {
-					continue
-				}
-				if tid := strings.TrimSpace(stringValue(item.ThreadId)); tid != "" {
-					threadID = tid
-					return nil
-				}
-			}
-			return nil
-		})
+		}
+		return nil
 	})
 	if err != nil {
 		return "", err

@@ -244,17 +244,23 @@ func TestStartCronTopicMarksReturnedThreadID(t *testing.T) {
 	}
 }
 
-// Feishu returns no thread_id in the create response for a new topic root, so
-// the cron path reads it back and registers the real thread.
-func TestStartCronTopicLooksUpThreadIDWhenCreateOmitsIt(t *testing.T) {
+// Feishu returns no thread_id in the create response for a new topic root, and
+// the topic is not readable straight away either: the id shows up roughly a
+// second later. The cron path must poll for it instead of reading once.
+func TestStartCronTopicLookUpsThreadIDAfterTopicBecomesVisible(t *testing.T) {
+	var reads int32
 	stub := &rootStub{
 		omitCreateThreadID: true,
 		rootOf:             func(string) (string, bool) { return "", true },
 		threadOf: func(id string) (string, bool) {
-			if id == "om_created" {
-				return "omt_lookup", true
+			if id != "om_created" {
+				return "", false
 			}
-			return "", false
+			// Hidden for the first reads, like Feishu does after create.
+			if atomic.AddInt32(&reads, 1) <= 2 {
+				return "", true
+			}
+			return "omt_lookup", true
 		},
 	}
 	p := newRootTestPlatform(t, stub)
@@ -282,6 +288,9 @@ func TestStartCronTopicLooksUpThreadIDWhenCreateOmitsIt(t *testing.T) {
 	if messageMarked {
 		t.Fatal("messageID must not be recorded as a thread")
 	}
+	if n := atomic.LoadInt32(&reads); n < 3 {
+		t.Fatalf("reads = %d, want the lookup to poll past the hidden window", n)
+	}
 }
 
 func TestStartCronTopicKeepsRunningWhenThreadLookupFails(t *testing.T) {
@@ -292,7 +301,11 @@ func TestStartCronTopicKeepsRunningWhenThreadLookupFails(t *testing.T) {
 	p := newRootTestPlatform(t, stub)
 	p.botOpenID = "ou_bot"
 
-	key, rawRC, err := p.StartCronTopic(context.Background(), "feishu:oc_test:root:om_old", "定时任务")
+	// Short budget keeps the test fast; production waits up to
+	// cronThreadLookupBudget.
+	ctx, cancel := context.WithTimeout(context.Background(), 900*time.Millisecond)
+	defer cancel()
+	key, rawRC, err := p.StartCronTopic(ctx, "feishu:oc_test:root:om_old", "定时任务")
 	if err != nil {
 		t.Fatalf("StartCronTopic() must not fail on lookup error: %v", err)
 	}
@@ -303,8 +316,8 @@ func TestStartCronTopicKeepsRunningWhenThreadLookupFails(t *testing.T) {
 	if !ok || rc.forceThread {
 		t.Fatal("reply context must not claim a thread when lookup failed")
 	}
-	if n := atomic.LoadInt32(&stub.calls); n != 1 {
-		t.Fatalf("lookups = %d, want exactly 1", n)
+	if n := atomic.LoadInt32(&stub.calls); n < 2 || n > 10 {
+		t.Fatalf("lookups = %d, want a bounded poll after failure", n)
 	}
 
 	p.threadSeenMu.Lock()
@@ -325,7 +338,9 @@ func TestStartCronTopicKeepsRunningWhenLookupHasNoThreadID(t *testing.T) {
 	p := newRootTestPlatform(t, stub)
 	p.botOpenID = "ou_bot"
 
-	key, rawRC, err := p.StartCronTopic(context.Background(), "feishu:oc_test:root:om_old", "定时任务")
+	ctx, cancel := context.WithTimeout(context.Background(), 900*time.Millisecond)
+	defer cancel()
+	key, rawRC, err := p.StartCronTopic(ctx, "feishu:oc_test:root:om_old", "定时任务")
 	if err != nil {
 		t.Fatalf("StartCronTopic() error = %v", err)
 	}
@@ -342,6 +357,98 @@ func TestStartCronTopicKeepsRunningWhenLookupHasNoThreadID(t *testing.T) {
 	p.threadSeenMu.Unlock()
 	if entries != 0 {
 		t.Fatalf("missing thread id must not write thread state, got %d entries", entries)
+	}
+}
+
+// The create-time poll can still lose the race; the first unmentioned message
+// in that topic is the last chance to adopt it.
+func TestUnmentionedTopicMessageAdoptedWhenBotPostedThere(t *testing.T) {
+	var listCalls int32
+	stub := &rootStub{
+		rootOf: func(string) (string, bool) { return "", true },
+		threadMembers: func(threadID string) ([]map[string]any, bool) {
+			atomic.AddInt32(&listCalls, 1)
+			if threadID != "omt_cron" {
+				return nil, false
+			}
+			return []map[string]any{{
+				"message_id": "om_root",
+				"sender":     map[string]any{"sender_type": "app", "id": "cli_test"},
+			}}, true
+		},
+	}
+	p := newRootTestPlatform(t, stub, map[string]any{
+		"cc_data_dir": t.TempDir(),
+		"cc_project":  "adopt-test",
+	})
+	p.botOpenID = "ou_bot"
+	handled := make(chan string, 1)
+	p.handler = func(_ core.Platform, msg *core.Message) { handled <- msg.SessionKey }
+
+	if err := p.onMessage(context.Background(), rootTestEventUnmentioned("om_u1", "om_root", "omt_cron", "在吗")); err != nil {
+		t.Fatalf("onMessage() error = %v", err)
+	}
+	select {
+	case <-handled:
+	case <-time.After(2 * time.Second):
+		t.Fatal("unmentioned message in a bot topic must not be dropped")
+	}
+
+	p.threadSeenMu.Lock()
+	_, threadMarked := p.threadSeen["omt_cron"]
+	p.threadSeenMu.Unlock()
+	if !threadMarked {
+		t.Fatal("adopted thread must be registered")
+	}
+	if n := atomic.LoadInt32(&listCalls); n != 1 {
+		t.Fatalf("thread list calls = %d, want 1", n)
+	}
+}
+
+// A topic the bot never posted in must behave exactly as before: the message is
+// dropped, nothing is registered, and the miss is remembered so a busy group is
+// not probed on every message.
+func TestUnmentionedTopicMessageDroppedWhenBotAbsent(t *testing.T) {
+	var listCalls int32
+	stub := &rootStub{
+		rootOf: func(string) (string, bool) { return "", true },
+		threadMembers: func(string) ([]map[string]any, bool) {
+			atomic.AddInt32(&listCalls, 1)
+			return []map[string]any{{
+				"message_id": "om_u9",
+				"sender":     map[string]any{"sender_type": "user", "id": "ou_colleague"},
+			}}, true
+		},
+	}
+	p := newRootTestPlatform(t, stub, map[string]any{
+		"cc_data_dir": t.TempDir(),
+		"cc_project":  "adopt-miss-test",
+	})
+	p.botOpenID = "ou_bot"
+	handled := make(chan string, 1)
+	p.handler = func(_ core.Platform, msg *core.Message) { handled <- msg.SessionKey }
+
+	if err := p.onMessage(context.Background(), rootTestEventUnmentioned("om_u1", "om_u9", "omt_chat", "我不是跟你说的")); err != nil {
+		t.Fatalf("onMessage() error = %v", err)
+	}
+	select {
+	case <-handled:
+		t.Fatal("message in a topic the bot never joined must stay dropped")
+	case <-time.After(200 * time.Millisecond):
+	}
+
+	if err := p.onMessage(context.Background(), rootTestEventUnmentioned("om_u2", "om_u9", "omt_chat", "嗯")); err != nil {
+		t.Fatalf("onMessage() error = %v", err)
+	}
+	if n := atomic.LoadInt32(&listCalls); n != 1 {
+		t.Fatalf("thread list calls = %d, want the miss to be cached", n)
+	}
+
+	p.threadSeenMu.Lock()
+	entries := len(p.threadSeen)
+	p.threadSeenMu.Unlock()
+	if entries != 0 {
+		t.Fatalf("rejected topic must not be registered, got %d entries", entries)
 	}
 }
 
