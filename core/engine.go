@@ -9933,18 +9933,10 @@ func (e *Engine) cmdHistory(p Platform, msg *Message, args []string) {
 		n = v
 	}
 
-	entries := s.GetHistory(n)
-	agentSID := s.GetAgentSessionID()
-	if len(entries) == 0 && agentSID != "" {
-		if hp, ok := agent.(HistoryProvider); ok {
-			agentEntries, err := hp.GetSessionHistory(e.ctx, agentSID, n)
-			if err != nil {
-				slog.Warn("history: agent transcript read failed", "session_id", agentSID, "error", err)
-				e.reply(p, msg.ReplyCtx, e.i18n.T(MsgHistoryReadFailed))
-				return
-			}
-			entries = agentEntries
-		}
+	entries, err := e.loadSessionHistory(agent, s, n)
+	if err != nil {
+		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgHistoryReadFailed))
+		return
 	}
 
 	if len(entries) == 0 {
@@ -9964,6 +9956,24 @@ func (e *Engine) cmdHistory(p Platform, msg *Message, args []string) {
 		sb.WriteString(fmt.Sprintf("%s [%s]\n%s\n\n", icon, h.Timestamp.Format("15:04:05"), content))
 	}
 	e.reply(p, msg.ReplyCtx, sb.String())
+}
+
+func (e *Engine) loadSessionHistory(agent Agent, session *Session, limit int) ([]HistoryEntry, error) {
+	if agentSID := session.GetAgentSessionID(); agentSID != "" {
+		if hp, ok := agent.(HistoryProvider); ok {
+			// The transcript includes turns from other clients that the local
+			// cache cannot know about, including after resuming a session.
+			entries, err := hp.GetSessionHistory(e.ctx, agentSID, limit)
+			if err != nil {
+				slog.Warn("history: agent transcript read failed", "session_id", agentSID, "error", err)
+				return nil, err
+			}
+			if len(entries) > 0 {
+				return entries, nil
+			}
+		}
+	}
+	return session.GetHistory(limit), nil
 }
 
 func (e *Engine) historyEntryMaxLen() int {
@@ -14147,18 +14157,9 @@ func (e *Engine) renderCurrentCard(sessionKey string) *Card {
 func (e *Engine) renderHistoryCard(sessionKey string) *Card {
 	agent, sessions := e.sessionContextForKey(sessionKey)
 	s := sessions.GetOrCreateActive(sessionKey)
-	entries := s.GetHistory(10)
-
-	agentSID := s.GetAgentSessionID()
-	if len(entries) == 0 && agentSID != "" {
-		if hp, ok := agent.(HistoryProvider); ok {
-			agentEntries, err := hp.GetSessionHistory(e.ctx, agentSID, 10)
-			if err != nil {
-				slog.Warn("history: agent transcript read failed", "session_id", agentSID, "error", err)
-				return e.simpleCard(e.i18n.T(MsgCardTitleHistory), "turquoise", e.i18n.T(MsgHistoryReadFailed))
-			}
-			entries = agentEntries
-		}
+	entries, err := e.loadSessionHistory(agent, s, 10)
+	if err != nil {
+		return e.simpleCard(e.i18n.T(MsgCardTitleHistory), "turquoise", e.i18n.T(MsgHistoryReadFailed))
 	}
 
 	if len(entries) == 0 {
