@@ -1271,7 +1271,13 @@ func (p *Platform) StartTyping(ctx context.Context, rctx any) (stop func()) {
 	if rc.receiptMessageID == rc.messageID && rc.receiptEmoji != "" && rc.receiptEmoji == p.reactionEmoji {
 		return func() {}
 	}
-	reactionID := p.addReaction(rc.messageID)
+	// Bound the reaction round-trip: StartTyping is called synchronously on the
+	// turn's goroutine, so a hung reaction API would stall the whole turn. The
+	// stop function keeps using the platform's own context because it only
+	// fires later, after the turn is over.
+	reactionCtx, cancel := context.WithTimeout(ctx, typingReactionTimeout)
+	reactionID := p.addReactionWithEmojiContext(reactionCtx, rc.messageID, p.reactionEmoji)
+	cancel()
 	return func() {
 		go p.removeReaction(rc.messageID, reactionID)
 	}
@@ -1289,6 +1295,10 @@ func (p *Platform) AddDoneReaction(rctx any) {
 	}
 	go p.addReactionWithEmoji(rc.messageID, p.doneEmoji)
 }
+
+// typingReactionTimeout bounds the synchronous reaction that StartTyping adds,
+// so an unresponsive reaction API cannot hold the turn's goroutine.
+const typingReactionTimeout = 5 * time.Second
 
 const recalledMessageTTL = 10 * time.Minute
 

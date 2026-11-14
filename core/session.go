@@ -395,6 +395,21 @@ type SessionManager struct {
 	counter       int64
 	storePath     string // empty = no persistence
 
+	// saveMu serializes snapshot-and-rename. Save() is called synchronously on
+	// turn goroutines and asynchronously from SaveAsync; without this lock two
+	// overlapping writers could rename in the wrong order and revert the file
+	// to an older snapshot.
+	saveMu sync.Mutex
+
+	// asyncSave* coalesce background saves into a single writer goroutine. A
+	// request that arrives mid-write is folded into the next iteration, and
+	// each iteration re-snapshots, so the last write always reflects the
+	// newest state.
+	asyncSaveMu      sync.Mutex
+	asyncSaveQueued  bool
+	asyncSaveRunning bool
+	asyncSaveDone    chan struct{}
+
 	// legacyData is true when sessions were loaded from a snapshot that
 	// predates PastAgentSessionIDs tracking. In this state, many sessions
 	// may have lost their AgentSessionID through /new or provider switches.
@@ -758,10 +773,97 @@ func (sm *SessionManager) deleteByIDLocked(id string) {
 }
 
 // Save persists current state to disk. Safe to call from outside (e.g. after message processing).
+// Concurrent callers are serialized so a snapshot taken earlier can never
+// overwrite a newer one.
 func (sm *SessionManager) Save() {
+	sm.saveMu.Lock()
+	defer sm.saveMu.Unlock()
 	sm.mu.RLock()
 	defer sm.mu.RUnlock()
 	sm.saveLocked()
+}
+
+// SaveAsync schedules a background Save without blocking the caller. Only one
+// writer goroutine runs at a time and repeated requests are coalesced; because
+// each iteration snapshots at write time (and Save holds saveMu), the file can
+// never end up holding an older snapshot than a previous write.
+func (sm *SessionManager) SaveAsync() {
+	if sm.storePath == "" {
+		return
+	}
+	sm.asyncSaveMu.Lock()
+	sm.asyncSaveQueued = true
+	if sm.asyncSaveRunning {
+		sm.asyncSaveMu.Unlock()
+		return
+	}
+	sm.asyncSaveRunning = true
+	done := make(chan struct{})
+	sm.asyncSaveDone = done
+	sm.asyncSaveMu.Unlock()
+	finished := false
+	finish := func() {
+		sm.asyncSaveMu.Lock()
+		sm.asyncSaveRunning = false
+		sm.asyncSaveDone = nil
+		sm.asyncSaveMu.Unlock()
+		close(done)
+		finished = true
+	}
+	go func() {
+		// A panic in the write path must not leave asyncSaveRunning set, or
+		// FlushAsyncSave would block forever and later SaveAsync calls would
+		// never start a writer.
+		defer func() {
+			if !finished {
+				finish()
+			}
+		}()
+		for {
+			sm.asyncSaveMu.Lock()
+			if !sm.asyncSaveQueued {
+				sm.asyncSaveMu.Unlock()
+				finish()
+				return
+			}
+			sm.asyncSaveQueued = false
+			sm.asyncSaveMu.Unlock()
+			sm.Save()
+		}
+	}()
+}
+
+// asyncSaveFlushTimeout bounds how long shutdown waits for a background write
+// before giving up (e.g. a wedged fsync) instead of hanging forever.
+const asyncSaveFlushTimeout = 10 * time.Second
+
+// FlushAsyncSave waits for the background writer, including anything queued
+// while it was running, so callers can shut down without leaving a write that
+// lands after their state is gone. It gives up after asyncSaveFlushTimeout.
+func (sm *SessionManager) FlushAsyncSave() {
+	deadline := time.Now().Add(asyncSaveFlushTimeout)
+	for {
+		sm.asyncSaveMu.Lock()
+		done := sm.asyncSaveDone
+		running := sm.asyncSaveRunning
+		sm.asyncSaveMu.Unlock()
+		if !running || done == nil {
+			return
+		}
+		remaining := time.Until(deadline)
+		if remaining <= 0 {
+			slog.Warn("session: background save still running at shutdown deadline", "path", sm.storePath)
+			return
+		}
+		timer := time.NewTimer(remaining)
+		select {
+		case <-done:
+			timer.Stop()
+		case <-timer.C:
+			slog.Warn("session: background save still running at shutdown deadline", "path", sm.storePath)
+			return
+		}
+	}
 }
 
 func (sm *SessionManager) saveLocked() {
@@ -831,10 +933,14 @@ func (sm *SessionManager) saveLocked() {
 		slog.Error("session: failed to create dir", "error", err)
 		return
 	}
-	if err := AtomicWriteFile(sm.storePath, data, 0o644); err != nil {
+	if err := writeSessionFile(sm.storePath, data, 0o644); err != nil {
 		slog.Error("session: failed to write", "path", sm.storePath, "error", err)
 	}
 }
+
+// writeSessionFile is overridable in tests so they can hold a write open and
+// check that Save serializes writers instead of letting an older snapshot win.
+var writeSessionFile = AtomicWriteFile
 
 func (sm *SessionManager) load() {
 	data, err := os.ReadFile(sm.storePath)

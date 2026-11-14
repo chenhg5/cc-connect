@@ -8469,9 +8469,9 @@ func TestCmdCronExec_TriggersJob(t *testing.T) {
 						if marked {
 							return
 						}
-						time.Sleep(5 * time.Millisecond)
+						time.Sleep(10 * time.Millisecond)
 					}
-					t.Fatal("run output seen but the job was never marked complete")
+					t.Fatalf("timed out waiting for cron persistence, sent=%v", platform.getSent())
 				}
 				time.Sleep(10 * time.Millisecond)
 			}
@@ -14713,6 +14713,91 @@ func (p *slowSendPlatform) Send(ctx context.Context, rc any, content string) err
 	}
 	time.Sleep(p.sendDelay)
 	return p.stubPlatformEngine.Send(ctx, rc, content)
+}
+
+type deadlineBlockingPlatform struct {
+	stubPlatformEngine
+}
+
+func (p *deadlineBlockingPlatform) Send(ctx context.Context, rc any, content string) error {
+	<-ctx.Done()
+	return ctx.Err()
+}
+
+func (p *deadlineBlockingPlatform) Reply(ctx context.Context, rc any, content string) error {
+	<-ctx.Done()
+	return ctx.Err()
+}
+
+// Every path that delivers the final answer — plain send, reply and the rich
+// card fallback that calls Send directly — must return when the platform does
+// not answer, instead of holding the turn's goroutine forever.
+func TestPlatformSendPaths_HonourDeadline(t *testing.T) {
+	old := platformSendTimeout
+	platformSendTimeout = 80 * time.Millisecond
+	t.Cleanup(func() { platformSendTimeout = old })
+
+	p := &deadlineBlockingPlatform{stubPlatformEngine: stubPlatformEngine{n: "test"}}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	defer func() { _ = e.Stop() }()
+
+	cases := []struct {
+		name string
+		call func() error
+	}{
+		{"send", func() error { return e.sendWithError(p, "ctx", "text") }},
+		{"reply", func() error { return e.replyWithError(p, "ctx", "text") }},
+		{"rendered-card-send", func() error { return e.sendAlreadyRenderedWithError(p, "ctx", "text") }},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			start := time.Now()
+			err := tc.call()
+			elapsed := time.Since(start)
+			if !errors.Is(err, context.DeadlineExceeded) {
+				t.Fatalf("err = %v, want context.DeadlineExceeded", err)
+			}
+			if elapsed > 2*time.Second {
+				t.Fatalf("call took %v; deadline was not applied", elapsed)
+			}
+		})
+	}
+}
+
+type footerDeadlinePlatform struct {
+	stubPlatformEngine
+	inlineSends int
+}
+
+func (p *footerDeadlinePlatform) SendWithStatusFooter(ctx context.Context, rc any, content, footer string) error {
+	<-ctx.Done()
+	return ctx.Err()
+}
+
+// A footer send that times out may already have been delivered, so the
+// fallback that resends the same chunk inline must not run: it would use a
+// fresh deadline and show the user a duplicate message.
+func TestSendChunksWithStatusFooter_NoDuplicateAfterDeadline(t *testing.T) {
+	old := platformSendTimeout
+	platformSendTimeout = 80 * time.Millisecond
+	t.Cleanup(func() { platformSendTimeout = old })
+
+	p := &footerDeadlinePlatform{stubPlatformEngine: stubPlatformEngine{n: "test"}}
+	sendFn := func(Platform, any, string) error {
+		p.inlineSends++
+		return nil
+	}
+
+	start := time.Now()
+	if ok := sendChunksWithStatusFooter(context.Background(), p, "ctx", "body", "footer", sendFn); ok {
+		t.Fatal("sendChunksWithStatusFooter = true, want false after footer deadline")
+	}
+	if elapsed := time.Since(start); elapsed > 2*time.Second {
+		t.Fatalf("call took %v; deadline was not applied", elapsed)
+	}
+	if p.inlineSends != 0 {
+		t.Fatalf("inline fallback ran %d time(s); resending after a timeout duplicates the chunk", p.inlineSends)
+	}
 }
 
 // startUnsolicitedReaderWithPartial starts a reader and feeds it a multi-chunk
