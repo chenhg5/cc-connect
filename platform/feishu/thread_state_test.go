@@ -244,9 +244,48 @@ func TestStartCronTopicMarksReturnedThreadID(t *testing.T) {
 	}
 }
 
-// Feishu returns no thread_id in the create response for a new topic root, and
-// the topic is not readable straight away either: the id shows up roughly a
-// second later. The cron path must poll for it instead of reading once.
+// Feishu returns no thread_id in the create response for a new topic root, so
+// the cron path reads it back once. When it is already readable, register it.
+func TestStartCronTopicLooksUpThreadIDWhenCreateOmitsIt(t *testing.T) {
+	stub := &rootStub{
+		omitCreateThreadID: true,
+		rootOf:             func(string) (string, bool) { return "", true },
+		threadOf: func(id string) (string, bool) {
+			if id == "om_created" {
+				return "omt_lookup", true
+			}
+			return "", false
+		},
+	}
+	p := newRootTestPlatform(t, stub)
+	p.botOpenID = "ou_bot"
+
+	key, rawRC, err := p.StartCronTopic(context.Background(), "feishu:oc_test:root:om_old", "定时任务")
+	if err != nil {
+		t.Fatalf("StartCronTopic() error = %v", err)
+	}
+	if key != "feishu:oc_test:root:om_created" {
+		t.Fatalf("session key = %q", key)
+	}
+	rc, ok := rawRC.(replyContext)
+	if !ok || !rc.forceThread {
+		t.Fatal("reply context must use the looked up thread")
+	}
+
+	p.threadSeenMu.Lock()
+	_, threadMarked := p.threadSeen["omt_lookup"]
+	_, messageMarked := p.threadSeen["om_created"]
+	p.threadSeenMu.Unlock()
+	if !threadMarked {
+		t.Fatal("looked up threadID must be recorded")
+	}
+	if messageMarked {
+		t.Fatal("messageID must not be recorded as a thread")
+	}
+}
+
+// The id is not readable immediately after create; the cron path must keep
+// polling until Feishu exposes it instead of giving up on the first empty read.
 func TestStartCronTopicLookUpsThreadIDAfterTopicBecomesVisible(t *testing.T) {
 	var reads int32
 	stub := &rootStub{

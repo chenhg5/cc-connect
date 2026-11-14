@@ -3624,10 +3624,9 @@ func (p *Platform) StartCronTopic(ctx context.Context, sessionKey, content strin
 }
 
 const (
-	// cronThreadLookupBudget is the whole time spent waiting for the thread id
-	// to become readable, so an unhealthy Feishu cannot stall the cron run.
-	// Feishu exposes it about 0.8-1.2s after create; 2s keeps headroom without
-	// making a non-topic chat wait long.
+	// cronThreadLookupBudget bounds the whole wait for the thread id of a new
+	// topic root: Feishu exposes it about 0.8-1.2s after create, so one read is
+	// never enough and waiting forever would stall the cron run.
 	cronThreadLookupBudget = 2 * time.Second
 	// A single read gets its own short deadline; a stuck request must not eat
 	// the whole budget and leave no room for another attempt.
@@ -3635,20 +3634,21 @@ const (
 	// Feishu exposes the thread id of a brand-new topic root only after the
 	// topic is committed, so poll instead of reading once.
 	cronThreadLookupPollInterval = 200 * time.Millisecond
-	// When the poll above runs out, the first unmentioned message in the topic
-	// is the last chance to adopt it. Bounded like the read above; a thread the
-	// bot never posted in is remembered so later messages do not probe again.
-	adoptTopicTimeout = 1500 * time.Millisecond
+	// If the wait above still loses the race, the first unmentioned message in
+	// the topic adopts it. One list call for the topic root only, short
+	// deadline; a thread the bot never posted in is remembered so a busy group
+	// is not probed on every message.
+	adoptTopicTimeout = 800 * time.Millisecond
 	adoptTopicMissTTL = 5 * time.Minute
 	adoptTopicMissMax = 200
 )
 
-// lookupMessageThreadID waits until the thread id of a message the bot just
+// lookupMessageThreadID polls until the thread id of a message the bot just
 // posted can be read back. Only cron new-topic roots need this: Feishu returns
 // thread_id in the create response for messages posted into an existing topic,
-// but neither in the create response nor immediately afterwards for the root
-// message that opens a new one. An unreadable answer is not fatal — the caller
-// keeps running and only loses the mention exemption.
+// but not for the root message that opens a new one — and not immediately
+// afterwards either (~1s). Returns ("", nil) when the wait runs out; the topic
+// is then adopted from the first unmentioned message instead.
 func (p *Platform) lookupMessageThreadID(ctx context.Context, messageID string) (string, error) {
 	messageID = strings.TrimSpace(messageID)
 	if messageID == "" {
@@ -3712,11 +3712,13 @@ func (p *Platform) adoptBotTopic(ctx context.Context, threadID string) bool {
 	cctx, cancel := context.WithTimeout(ctx, adoptTopicTimeout)
 	defer cancel()
 
+	// A cron topic is opened by the bot, so the very first message decides it.
+	// Asking for one item keeps this fallback to a single cheap call.
 	req := larkim.NewListMessageReqBuilder().
 		ContainerIdType("thread").
 		ContainerId(threadID).
 		SortType(larkim.SortTypeListMessageByCreateTimeAsc).
-		PageSize(20).
+		PageSize(1).
 		Build()
 
 	var resp *larkim.ListMessageResp
@@ -3735,8 +3737,9 @@ func (p *Platform) adoptBotTopic(ctx context.Context, threadID string) bool {
 		return nil
 	})
 	if err != nil {
+		// Do not cache failures: the next message in the thread gets another
+		// chance instead of leaving the topic dropped for minutes.
 		slog.Warn(p.tag()+": adopt topic lookup failed", "thread", threadID, "error", err)
-		p.noteAdoptMiss(threadID)
 		return false
 	}
 
