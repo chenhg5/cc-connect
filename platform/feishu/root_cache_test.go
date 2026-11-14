@@ -18,7 +18,12 @@ import (
 type rootStub struct {
 	calls  int32
 	rootOf func(string) (string, bool)
-	slow   time.Duration
+	// threadOf, when set, feeds thread_id into GET message responses.
+	threadOf func(string) (string, bool)
+	// omitCreateThreadID mimics Feishu's create response for a new topic root,
+	// which carries no thread_id even though the message does belong to a topic.
+	omitCreateThreadID bool
+	slow               time.Duration
 }
 
 func newRootTestPlatform(t *testing.T, stub *rootStub, extraOpts ...map[string]any) *Platform {
@@ -40,15 +45,22 @@ func newRootTestPlatform(t *testing.T, stub *rootStub, extraOpts ...map[string]a
 				writeJSON(t, w, map[string]any{"code": 500, "msg": "boom"})
 				return
 			}
+			item := map[string]any{"message_id": id, "root_id": rootID}
+			if stub.threadOf != nil {
+				if tid, has := stub.threadOf(id); has {
+					item["thread_id"] = tid
+				}
+			}
 			writeJSON(t, w, map[string]any{
 				"code": 0, "msg": "success",
-				"data": map[string]any{"items": []map[string]any{{"message_id": id, "root_id": rootID}}},
+				"data": map[string]any{"items": []map[string]any{item}},
 			})
 		case r.Method == http.MethodPost && r.URL.Path == "/open-apis/im/v1/messages":
-			writeJSON(t, w, map[string]any{
-				"code": 0, "msg": "success",
-				"data": map[string]any{"message_id": "om_created", "thread_id": "omt_new"},
-			})
+			data := map[string]any{"message_id": "om_created"}
+			if !stub.omitCreateThreadID {
+				data["thread_id"] = "omt_new"
+			}
+			writeJSON(t, w, map[string]any{"code": 0, "msg": "success", "data": data})
 		default:
 			writeJSON(t, w, map[string]any{"code": 0, "msg": "success", "data": map[string]any{}})
 		}

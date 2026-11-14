@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"os"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -240,6 +241,126 @@ func TestStartCronTopicMarksReturnedThreadID(t *testing.T) {
 	}
 	if messageMarked {
 		t.Fatal("cron new_topic must not mark messageID as a thread")
+	}
+}
+
+// Feishu returns no thread_id in the create response for a new topic root, so
+// the cron path reads it back and registers the real thread.
+func TestStartCronTopicLooksUpThreadIDWhenCreateOmitsIt(t *testing.T) {
+	stub := &rootStub{
+		omitCreateThreadID: true,
+		rootOf:             func(string) (string, bool) { return "", true },
+		threadOf: func(id string) (string, bool) {
+			if id == "om_created" {
+				return "omt_lookup", true
+			}
+			return "", false
+		},
+	}
+	p := newRootTestPlatform(t, stub)
+	p.botOpenID = "ou_bot"
+
+	key, rawRC, err := p.StartCronTopic(context.Background(), "feishu:oc_test:root:om_old", "定时任务")
+	if err != nil {
+		t.Fatalf("StartCronTopic() error = %v", err)
+	}
+	if key != "feishu:oc_test:root:om_created" {
+		t.Fatalf("session key = %q", key)
+	}
+	rc, ok := rawRC.(replyContext)
+	if !ok || !rc.forceThread {
+		t.Fatal("reply context must use the looked up thread")
+	}
+
+	p.threadSeenMu.Lock()
+	_, threadMarked := p.threadSeen["omt_lookup"]
+	_, messageMarked := p.threadSeen["om_created"]
+	p.threadSeenMu.Unlock()
+	if !threadMarked {
+		t.Fatal("looked up threadID must be recorded")
+	}
+	if messageMarked {
+		t.Fatal("messageID must not be recorded as a thread")
+	}
+}
+
+func TestStartCronTopicKeepsRunningWhenThreadLookupFails(t *testing.T) {
+	stub := &rootStub{
+		omitCreateThreadID: true,
+		rootOf:             func(string) (string, bool) { return "", false },
+	}
+	p := newRootTestPlatform(t, stub)
+	p.botOpenID = "ou_bot"
+
+	key, rawRC, err := p.StartCronTopic(context.Background(), "feishu:oc_test:root:om_old", "定时任务")
+	if err != nil {
+		t.Fatalf("StartCronTopic() must not fail on lookup error: %v", err)
+	}
+	if key != "feishu:oc_test:root:om_created" {
+		t.Fatalf("session key = %q", key)
+	}
+	rc, ok := rawRC.(replyContext)
+	if !ok || rc.forceThread {
+		t.Fatal("reply context must not claim a thread when lookup failed")
+	}
+	if n := atomic.LoadInt32(&stub.calls); n != 1 {
+		t.Fatalf("lookups = %d, want exactly 1", n)
+	}
+
+	p.threadSeenMu.Lock()
+	entries := len(p.threadSeen)
+	p.threadSeenMu.Unlock()
+	if entries != 0 {
+		t.Fatalf("failed lookup must not write thread state, got %d entries", entries)
+	}
+}
+
+// A readable response without a thread id means the chat is not a topic chat.
+// That is business as usual, not a failure: keep running with no registration.
+func TestStartCronTopicKeepsRunningWhenLookupHasNoThreadID(t *testing.T) {
+	stub := &rootStub{
+		omitCreateThreadID: true,
+		rootOf:             func(string) (string, bool) { return "", true },
+	}
+	p := newRootTestPlatform(t, stub)
+	p.botOpenID = "ou_bot"
+
+	key, rawRC, err := p.StartCronTopic(context.Background(), "feishu:oc_test:root:om_old", "定时任务")
+	if err != nil {
+		t.Fatalf("StartCronTopic() error = %v", err)
+	}
+	if key != "feishu:oc_test:root:om_created" {
+		t.Fatalf("session key = %q", key)
+	}
+	rc, ok := rawRC.(replyContext)
+	if !ok || rc.forceThread {
+		t.Fatal("reply context must not claim a thread when Feishu returns none")
+	}
+
+	p.threadSeenMu.Lock()
+	entries := len(p.threadSeen)
+	p.threadSeenMu.Unlock()
+	if entries != 0 {
+		t.Fatalf("missing thread id must not write thread state, got %d entries", entries)
+	}
+}
+
+// A cancelled cron must not wait on the read-back: the lookup has to give up
+// promptly instead of blocking the run on a slow Feishu.
+func TestLookupMessageThreadIDGivesUpOnCancelledContext(t *testing.T) {
+	p := newRootTestPlatform(t, &rootStub{
+		rootOf: func(string) (string, bool) { return "", true },
+		slow:   2 * time.Second,
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	startedAt := time.Now()
+	if _, err := p.lookupMessageThreadID(ctx, "om_created"); err == nil {
+		t.Fatal("cancelled context must return an error")
+	}
+	if elapsed := time.Since(startedAt); elapsed > time.Second {
+		t.Fatalf("lookup blocked for %s after cancellation", elapsed)
 	}
 }
 
