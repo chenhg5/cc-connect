@@ -78,7 +78,7 @@ func New(opts map[string]any) (core.Platform, error) {
 	}
 	if apiURL != "" {
 		// Log where both tokens will go, so a typo in base_url is visible.
-		slog.Info("slack: using custom Web API root", "base_url", apiURL)
+		slog.Info("slack: using custom Web API root", "base_url", describeAPIURL(apiURL))
 	}
 	scope := normalizeSessionScope(opts["session_scope"], shareSessionInChannel)
 	if scope == "thread" {
