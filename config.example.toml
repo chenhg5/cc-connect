@@ -133,6 +133,10 @@ level = "info" # debug, info, warn, error
 #                           #          隐藏思考和工具消息，每段文本独立发送
 #                           # quiet: hide thinking/tool, all text in one card, done emoji at end
 #                           #        隐藏思考和工具消息，所有文本合并到同一张卡片，完成后发送 done emoji
+# commentary_messages = true # Standalone user-facing updates (including quiet mode); false disables them
+#                            # 独立的用户进度消息（quiet 模式也显示）；false 可关闭
+# Codex may send several updates per turn; legacy builds classify messages before tools as updates.
+# Codex 每轮可能发送多条更新；旧版本将工具调用之前的消息作为更新。
 # thinking_messages = true  # Show/hide thinking messages (default: true) / 是否显示思考消息（默认 true）
 # thinking_max_len = 300    # Max chars for thinking messages (default: 300) / 思考消息最大字符数（默认 300）
 # tool_max_len = 500        # Max chars for tool use messages (default: 500) / 工具调用消息最大字符数（默认 500）
