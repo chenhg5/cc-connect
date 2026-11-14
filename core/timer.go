@@ -420,6 +420,9 @@ func (ts *TimerScheduler) executeJob(jobID string) {
 		case err = <-done:
 		case <-time.After(timeout):
 			err = fmt.Errorf("job timed out after %v", timeout)
+			if !engine.AbortTimerRun(job.ID) {
+				err = fmt.Errorf("job timed out after %v; no running turn found to stop", timeout)
+			}
 		}
 	} else {
 		err = <-done
