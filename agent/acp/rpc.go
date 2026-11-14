@@ -29,6 +29,15 @@ func (e *rpcErrPayload) Error() string {
 	return fmt.Sprintf("json-rpc %d: %s", e.Code, e.Message)
 }
 
+// pendingCall is an outstanding request. onResponse, when set, runs on the
+// read-loop goroutine right before the outcome is delivered, i.e. after
+// every notification that preceded the response has been dispatched and
+// before any that follows it.
+type pendingCall struct {
+	ch         chan rpcOutcome
+	onResponse func()
+}
+
 type rpcNotifyHandler func(method string, params json.RawMessage)
 type rpcRequestHandler func(method string, id json.RawMessage, params json.RawMessage)
 
@@ -42,7 +51,7 @@ type transport struct {
 	nextID atomic.Int64
 
 	pendingMu sync.Mutex
-	pending   map[string]chan rpcOutcome
+	pending   map[string]pendingCall
 
 	onNotif rpcNotifyHandler
 	onReq   rpcRequestHandler
@@ -53,7 +62,7 @@ func newTransport(in io.Reader, out io.Writer, onNotif rpcNotifyHandler, onReq r
 		in:      bufio.NewReader(in),
 		out:     out,
 		enc:     json.NewEncoder(out),
-		pending: make(map[string]chan rpcOutcome),
+		pending: make(map[string]pendingCall),
 		onNotif: onNotif,
 		onReq:   onReq,
 	}
@@ -142,15 +151,18 @@ func jsonIDKey(id json.RawMessage) string {
 func (t *transport) completePending(id json.RawMessage, result json.RawMessage, rpcErr *rpcErrPayload) {
 	key := jsonIDKey(id)
 	t.pendingMu.Lock()
-	ch, ok := t.pending[key]
+	pc, ok := t.pending[key]
 	delete(t.pending, key)
 	t.pendingMu.Unlock()
 	if !ok {
 		slog.Debug("acp: unmatched rpc response", "id", key)
 		return
 	}
+	if pc.onResponse != nil {
+		pc.onResponse()
+	}
 	select {
-	case ch <- rpcOutcome{result: result, err: rpcErr}:
+	case pc.ch <- rpcOutcome{result: result, err: rpcErr}:
 	default:
 	}
 }
@@ -159,9 +171,9 @@ func (t *transport) cancelAll(err error) {
 	t.pendingMu.Lock()
 	defer t.pendingMu.Unlock()
 	msg := err.Error()
-	for k, ch := range t.pending {
+	for k, pc := range t.pending {
 		select {
-		case ch <- rpcOutcome{err: &rpcErrPayload{Code: -32000, Message: msg}}:
+		case pc.ch <- rpcOutcome{err: &rpcErrPayload{Code: -32000, Message: msg}}:
 		default:
 		}
 		delete(t.pending, k)
@@ -169,11 +181,16 @@ func (t *transport) cancelAll(err error) {
 }
 
 func (t *transport) call(ctx context.Context, method string, params any) (json.RawMessage, error) {
+	return t.callWithHook(ctx, method, params, nil)
+}
+
+// callWithHook is call with an onResponse hook; see pendingCall.
+func (t *transport) callWithHook(ctx context.Context, method string, params any, onResponse func()) (json.RawMessage, error) {
 	id := t.nextID.Add(1)
 	key := fmt.Sprintf("%d", id)
 	ch := make(chan rpcOutcome, 1)
 	t.pendingMu.Lock()
-	t.pending[key] = ch
+	t.pending[key] = pendingCall{ch: ch, onResponse: onResponse}
 	t.pendingMu.Unlock()
 
 	req := map[string]any{
