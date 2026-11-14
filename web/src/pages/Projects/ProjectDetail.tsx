@@ -12,6 +12,7 @@ import {
   type ProjectDetail as ProjectDetailType, type WorkspaceBinding,
 } from '@/api/projects';
 import { listProviders, addProvider, removeProvider, activateProvider, type Provider, listGlobalProviders, type GlobalProvider, saveProviderRefs } from '@/api/providers';
+import { ApiError } from '@/api/client';
 import { getHeartbeat, pauseHeartbeat, resumeHeartbeat, triggerHeartbeat, setHeartbeatInterval, type HeartbeatStatus } from '@/api/heartbeat';
 import { restartSystem } from '@/api/status';
 import { formatTime, cn } from '@/lib/utils';
@@ -61,6 +62,19 @@ const MODE_OPTIONS_BY_AGENT: Record<string, { value: string; label: string }[]> 
 
 const isQRPlatform = (type: string) => type === 'feishu' || type === 'lark' || type === 'weixin';
 
+// The provider-list endpoint answers 400 with this message when the
+// project's agent type does not implement provider switching. The backend
+// carries no machine-readable error code yet, so the unsupported case is
+// identified from the interface result (HTTP status + error message) —
+// never by the agent type name. If the backend later adds an error code,
+// switch this check to the code instead.
+const PROVIDER_SWITCHING_UNSUPPORTED_MESSAGE = 'does not support provider switching';
+
+const isProviderSwitchingUnsupported = (err: unknown): boolean =>
+  err instanceof ApiError &&
+  err.status === 400 &&
+  err.message.includes(PROVIDER_SWITCHING_UNSUPPORTED_MESSAGE);
+
 type Tab = 'overview' | 'providers' | 'heartbeat' | 'workspaces' | 'settings';
 
 export default function ProjectDetail() {
@@ -106,6 +120,12 @@ export default function ProjectDetail() {
   const [globalProviders, setGlobalProviders] = useState<GlobalProvider[]>([]);
   const [providerRefs, setProviderRefs] = useState<string[]>([]);
   const [savingRefs, setSavingRefs] = useState(false);
+
+  // Provider-list fetch outcome. The list endpoint rejects when the agent
+  // type has no provider switching (unsupported) or when the request itself
+  // fails (load error). Neither must be rendered as "no providers".
+  const [providersUnsupported, setProvidersUnsupported] = useState(false);
+  const [providersLoadError, setProvidersLoadError] = useState<string | null>(null);
 
   // Add provider modal
   const [showAddProvider, setShowAddProvider] = useState(false);
@@ -201,6 +221,23 @@ export default function ProjectDetail() {
       if (provs.status === 'fulfilled') {
         setProviders(provs.value.providers || []);
         setActiveProvider(provs.value.active_provider || '');
+        setProvidersUnsupported(false);
+        setProvidersLoadError(null);
+      } else if (isProviderSwitchingUnsupported(provs.reason)) {
+        // The agent type has no provider switching: the list endpoint
+        // rejects for every such project. Keep the tab visible and show
+        // the not-supported notice with the linked refs instead.
+        setProviders([]);
+        setActiveProvider('');
+        setProvidersUnsupported(true);
+        setProvidersLoadError(null);
+      } else {
+        // Any other failure (network, 404, 500, ...) is a load error,
+        // not an empty list and not "unsupported".
+        setProviders([]);
+        setActiveProvider('');
+        setProvidersUnsupported(false);
+        setProvidersLoadError(provs.reason?.message || String(provs.reason));
       }
       if (hb.status === 'fulfilled') {
         const hbVal = hb.value;
@@ -431,8 +468,78 @@ export default function ProjectDetail() {
             <Button size="sm" onClick={() => { setAddMode('pick'); setShowAddProvider(true); }}><Plus size={14} /> {t('providers.add')}</Button>
           </div>
 
-          {/* Unified provider list */}
-          {providers.length === 0 ? (
+          {/* Unified provider list.
+              Four states, judged by the providers request outcome:
+              - unsupported (agent type has no provider switching): notice + read-only refs
+              - load error: a distinct error state, never rendered as empty or unsupported
+              - supported, no providers: the genuine "not configured" empty state
+              - supported, has providers: the normal list */}
+          {providersUnsupported ? (
+            <div className="space-y-4">
+              {/* Not-supported notice */}
+              <Card>
+                <div className="flex items-start gap-3">
+                  <Plug size={20} className="shrink-0 text-amber-500 mt-0.5" />
+                  <div className="min-w-0">
+                    <div className="flex flex-wrap items-center gap-2">
+                      <Badge variant="warning">{t('providers.notSupportedTag', 'Not supported')}</Badge>
+                      <span className="text-sm font-medium text-gray-900 dark:text-white">
+                        {t('providers.notSupportedTitle', 'Provider switching is not supported for this agent type')}
+                      </span>
+                    </div>
+                    <p className="text-xs text-gray-500 dark:text-gray-400 mt-1.5">
+                      {t('providers.notSupportedHint', 'Linked providers below are read-only. Switching, activating or removing providers is not available for this agent type.')}
+                    </p>
+                  </div>
+                </div>
+              </Card>
+              {/* Linked providers, read-only */}
+              <div>
+                <h4 className="text-xs font-semibold text-gray-500 dark:text-gray-400 mb-2">
+                  {t('providers.linkedReadOnly', 'Linked providers (read-only)')}
+                </h4>
+                {providerRefs.length === 0 ? (
+                  <p className="text-sm text-gray-500 dark:text-gray-400">{t('providers.noLinkedRefs', 'No providers linked.')}</p>
+                ) : (
+                  <div className="space-y-2">
+                    {providerRefs.map((ref) => {
+                      const gp = globalProviders.find((g) => g.name === ref);
+                      return (
+                        <div
+                          key={ref}
+                          className="flex items-center justify-between px-4 py-3 rounded-xl border border-gray-200 dark:border-gray-700/60 bg-white dark:bg-gray-800/40"
+                        >
+                          <div className="min-w-0 flex-1">
+                            <div className="flex items-center gap-2">
+                              <span className="text-sm font-medium text-gray-900 dark:text-white">{ref}</span>
+                              {gp && (
+                                <span className="inline-flex items-center gap-0.5 text-[10px] text-gray-400">
+                                  <Link2 size={10} /> {t('providers.global', 'global')}
+                                </span>
+                              )}
+                            </div>
+                            {gp && (
+                              <p className="text-xs text-gray-500 dark:text-gray-400 mt-0.5 truncate">
+                                {gp.model}{gp.base_url ? ` · ${gp.base_url}` : ''}
+                              </p>
+                            )}
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
+              </div>
+            </div>
+          ) : providersLoadError ? (
+            <Card>
+              <div className="py-6 text-center">
+                <p className="text-sm font-medium text-gray-900 dark:text-white">{t('providers.loadFailed', 'Failed to load providers')}</p>
+                <p className="text-xs text-gray-500 dark:text-gray-400 mt-1">{t('providers.loadFailedHint', 'The provider list could not be loaded. This does not mean the project has no providers configured.')}</p>
+                <Button size="sm" variant="secondary" className="mt-3" onClick={fetchAll}>{t('providers.retry', 'Retry')}</Button>
+              </div>
+            </Card>
+          ) : providers.length === 0 ? (
             <Card>
               <div className="py-6 text-center">
                 <Plug size={32} className="mx-auto text-gray-300 dark:text-gray-600 mb-2" />
