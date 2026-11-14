@@ -1747,6 +1747,13 @@ app_secret = "your-feishu-app-secret"
 # [projects.agent.options]
 # work_dir = "/path/to/project"
 # mode = "suggest"  # "suggest" | "auto-edit" | "full-auto" | "yolo"
+# Experimental (exec backend only, disabled by default): continue an active Codex Goal after exec --json exits a turn.
+# This reads Goal status from the Codex rollout and starts an internal
+# continuation only when the incoming-message queue is empty.
+# goal_auto_continue = false
+# goal_continuation_prompt = "Continue toward the active goal and stop when it is complete."
+# goal_max_continuations = 3  # omit or set to 0 for unlimited continuation
+#
 # Optional: app_server supports interactive approvals and named permissions.
 # 可选：app_server 支持交互审批及命名权限配置。
 # backend = "app_server"

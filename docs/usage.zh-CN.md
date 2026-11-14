@@ -128,6 +128,23 @@ enabled = false
 
 `work_dir` 和只读沙箱本身不能将读取范围限制在项目内。选择性读取需要兼容的 Codex 沙箱；Windows 请参考 [MXC 沙箱配置](https://learn.chatgpt.com/docs/windows/windows-sandbox)。权限配置约束本地沙箱工具，不约束独立 MCP 或连接器；获批的权限提升也可能允许额外访问。详见 [官方权限文档](https://learn.chatgpt.com/docs/permissions)。
 
+### 实验性 Codex Goal 自动继续
+
+对于 `type = "codex"` 且使用默认 `exec` 后端的项目，可启用对已有原生 Codex Goal 的自动继续：
+
+```toml
+[projects.agent.options]
+goal_auto_continue = true
+# 可选：省略或设为 0 表示每个用户回合的自动继续次数不限。
+goal_max_continuations = 3
+# 可选的内部提示词（Codex exec 不接受空标准输入）。
+goal_continuation_prompt = "Continue toward the active goal and stop when it is complete."
+```
+
+成功完成一个回合后，cc-connect 会从 Codex rollout 中读取最新的可识别 Goal 快照。只有 `active` 状态会触发下一回合。排队中的用户消息优先处理；内部继续提示词不会出现在 cc-connect 的用户历史中。`/stop`、回合失败、终止状态或无法读取的状态都会停止自动继续。
+
+此实验性选项依赖随 Codex 版本变化的 rollout 记录，包括原生 Goal 事件和序列化的 Goal 工具结果快照。在其他客户端修改的 Goal 可能尚未反映在快照中；rollout 中没有记录的变化无法被检测。此功能不会创建 Goal，也不添加 `/goal` 聊天命令。它仅适用于 exec 后端；app-server 的继续行为由 Codex 管理。无限继续可能持续消耗 token，直到观测到的状态改变；需要限制时请设置正数上限。
+
 ### macOS 上的 Codex CLI 查找
 
 Codex 适配器按以下顺序选择可执行文件：

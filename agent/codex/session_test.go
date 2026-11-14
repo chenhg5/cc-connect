@@ -356,7 +356,7 @@ while (($line = [Console]::In.ReadLine()) -ne $null) {
 	if err != nil {
 		t.Fatalf("newCodexSession: %v", err)
 	}
-	defer cs.Close()
+	defer func() { _ = cs.Close() }()
 
 	if got := cs.GetModel(); got != "gpt-5.4" {
 		t.Fatalf("GetModel() = %q, want gpt-5.4", got)
@@ -412,6 +412,22 @@ func TestRefreshContextUsageFromRollout_UsesLastTokenCount(t *testing.T) {
 	}
 	if usage.ContextWindow != 258400 {
 		t.Fatalf("context window = %d, want 258400", usage.ContextWindow)
+	}
+}
+
+func TestParseGoalStatusRecord_GetGoalToolOutput(t *testing.T) {
+	payload := json.RawMessage(`{"type":"custom_tool_call_output","output":[{"type":"input_text","text":"{\"goal\":{\"status\":\"blocked\"}}"}]}`)
+	status, known, cleared := parseGoalStatusRecord("response_item", payload)
+	if status != "blocked" || !known || cleared {
+		t.Fatalf("got status=%q known=%v cleared=%v, want blocked/true/false", status, known, cleared)
+	}
+}
+
+func TestParseGoalStatusRecord_UnrelatedStatusDoesNotMatch(t *testing.T) {
+	payload := json.RawMessage(`{"type":"custom_tool_call_output","output":[{"type":"input_text","text":"{\"status\":\"active\"}"}]}`)
+	status, known, cleared := parseGoalStatusRecord("response_item", payload)
+	if status != "" || known || cleared {
+		t.Fatalf("got status=%q known=%v cleared=%v, want unknown", status, known, cleared)
 	}
 }
 
@@ -1183,4 +1199,69 @@ func waitForFileLines(t *testing.T, path string, want int) {
 		time.Sleep(20 * time.Millisecond)
 	}
 	t.Fatalf("timed out waiting for %d lines in %s", want, path)
+}
+
+func TestGoalRolloutTerminalSnapshotOverridesActive(t *testing.T) {
+	for _, status := range []string{"blocked", "paused", "complete", "stalled", "usageLimited", "budgetLimited"} {
+		t.Run(status, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "rollout.jsonl")
+			latest := map[string]any{"type": "response_item", "payload": map[string]any{"type": "custom_tool_call_output", "output": []any{map[string]any{"type": "input_text", "text": `{"goal":{"status":"` + status + `"}}`}}}}
+			line, _ := json.Marshal(latest)
+			data := `{"type":"event_msg","payload":{"type":"thread_goal_updated","goal":{"status":"active"}}}` + "\n" + string(line) + "\n"
+			if err := os.WriteFile(path, []byte(data), 0600); err != nil {
+				t.Fatal(err)
+			}
+			got, known, err := readGoalStatusFromRollout(path)
+			if err != nil || !known || got != status {
+				t.Fatalf("got %q %v %v", got, known, err)
+			}
+		})
+	}
+}
+func TestGoalParserIgnoresChatAndToolInputs(t *testing.T) {
+	for _, payload := range []string{
+		`{"type":"message","goal":{"status":"active"}}`,
+		`{"type":"custom_tool_call","input":"{\"goal\":{\"status\":\"active\"}}"}`,
+	} {
+		if _, known, _ := parseGoalStatusRecord("response_item", json.RawMessage(payload)); known {
+			t.Fatal("non-output record matched")
+		}
+	}
+}
+func TestGoalNullClearsSnapshot(t *testing.T) {
+	_, known, cleared := parseGoalStatusRecord("response_item", json.RawMessage(`{"type":"function_call_output","output":"{\"goal\":null}"}`))
+	if known || !cleared {
+		t.Fatal("null must clear previous active state")
+	}
+}
+
+func TestGoalContinuationResultAllowsImmediateNextSend(t *testing.T) {
+	dir := t.TempDir()
+	bin := filepath.Join(dir, "bin")
+	if err := os.MkdirAll(bin, 0755); err != nil {
+		t.Fatal(err)
+	}
+	script := "#!/bin/sh\nprintf '%s\\n' '{\"type\":\"turn.completed\"}'\nsleep 0.1\n"
+	ps := `[Console]::Out.WriteLine('{"type":"turn.completed"}'); Start-Sleep -Milliseconds 100`
+	writeFakeCodexScript(t, bin, script, ps)
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	cs, err := newCodexSession(context.Background(), "codex", nil, dir, "", "", "", "thread-goal", "", nil, "", "", "", goalContinuationOptions{Enabled: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = cs.Close() }()
+	if err := cs.Send("first", "", nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case event := <-cs.Events():
+		if event.Type != core.EventResult {
+			t.Fatalf("event=%v", event)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("no completion")
+	}
+	if err := cs.Send("next", "", nil, nil); err != nil {
+		t.Fatalf("immediate continuation: %v", err)
+	}
 }
