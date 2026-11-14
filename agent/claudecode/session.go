@@ -124,6 +124,19 @@ type claudeSession struct {
 	// when the session reuses the shared file (the common 99% case)
 	// or when there is nothing to append.
 	promptFilePath string
+
+	// treeProbe inspects the OS process table when the session is closed,
+	// so that descendants which outlive the agent process are found and
+	// killed (issue #2209). Test-only seam: nil means the platform probe.
+	treeProbe processTreeProbe
+}
+
+// pid returns the PID of the agent process, or -1 when there is none.
+func (cs *claudeSession) pid() int {
+	if cs.cmd == nil || cs.cmd.Process == nil {
+		return -1
+	}
+	return cs.cmd.Process.Pid
 }
 
 // StartupWarning implements core.StartupWarner. Returns a non-empty string
@@ -1777,6 +1790,22 @@ func (cs *claudeSession) Close() error {
 		}
 	}()
 
+	// Capture the descendant tree while the direct child is still alive.
+	//
+	// Once the child exits, its descendants are re-parented and can no
+	// longer be found by walking down from it — and on Windows taskkill /T
+	// only terminates the tree as it exists at kill time. A descendant that
+	// was re-parented before the kill (its parent died first) or that was
+	// spawned while the kill was in flight therefore survives the whole
+	// escalation and keeps running with the session's credentials: the
+	// orphan tree of issue #2209. The captured list is what makes the
+	// survivors visible after the fact.
+	probe := cs.treeProbe
+	if probe == nil {
+		probe = newProcessTreeProbe()
+	}
+	tree := probe.descendants(cs.pid())
+
 	// Phase 1: Close stdin to signal EOF. Claude Code exits cleanly on
 	// stdin close, running Stop hooks (e.g. claude-mem session summary).
 	cs.stdinMu.Lock()
@@ -1793,11 +1822,16 @@ func (cs *claudeSession) Close() error {
 	select {
 	case <-cs.done:
 		slog.Info("claudeSession: exited cleanly after stdin close")
-		return nil
+		return cs.verifyTreeGone(probe, tree)
 	case <-time.After(graceful):
 		slog.Warn("claudeSession: graceful stop timed out, sending SIGTERM",
 			"timeout", graceful)
 	}
+
+	// The direct child is still alive here, so take another snapshot: a
+	// descendant forked during the graceful window would be missing from the
+	// first one.
+	tree = mergeProcessTree(tree, probe.descendants(cs.pid()))
 
 	// Phase 2: SIGTERM the whole process group — gives the process and its
 	// descendants (e.g. MCP server bridges) a second chance to run cleanup
@@ -1809,10 +1843,15 @@ func (cs *claudeSession) Close() error {
 	select {
 	case <-cs.done:
 		slog.Info("claudeSession: exited after SIGTERM")
-		return nil
+		return cs.verifyTreeGone(probe, tree)
 	case <-time.After(5 * time.Second):
 		slog.Warn("claudeSession: SIGTERM timed out, sending SIGKILL")
 	}
+
+	// One more snapshot before the force kill: a descendant forked while the
+	// SIGTERM phase was running is still reachable while the direct child
+	// lives.
+	tree = mergeProcessTree(tree, probe.descendants(cs.pid()))
 
 	// Phase 3: SIGKILL the whole process group — last resort. Using a
 	// group-wide kill ensures grandchildren (Claude Code's MCP servers
@@ -1845,7 +1884,7 @@ func (cs *claudeSession) Close() error {
 
 	select {
 	case <-cs.done:
-		return nil
+		return cs.verifyTreeGone(probe, tree)
 	case <-time.After(10 * time.Second):
 		pid := -1
 		if cs.cmd != nil && cs.cmd.Process != nil {
@@ -1856,6 +1895,31 @@ func (cs *claudeSession) Close() error {
 		}
 		return fmt.Errorf("process tree (pid %d) still alive 10s after SIGKILL reported success", pid)
 	}
+}
+
+// verifyTreeGone makes sure the descendants captured before the close are
+// really gone.
+//
+// Orphans are killed; the ones that survive the kill are reported so the
+// caller can treat the session as unsafe to resume and tell the user that
+// the process may still be running. On platforms without process-tree
+// enumeration the captured list is empty and this is a no-op.
+func (cs *claudeSession) verifyTreeGone(probe processTreeProbe, tree []processRef) error {
+	if len(tree) == 0 {
+		return nil
+	}
+
+	result := killSurvivingDescendants(probe, tree)
+	if len(result.killed) > 0 {
+		slog.Warn("claudeSession: killed orphaned descendants after session close",
+			"count", len(result.killed), "pids", survivorPIDs(result.killed))
+	}
+	if len(result.survived) == 0 {
+		return nil
+	}
+
+	return fmt.Errorf("process tree (pid %d) still alive after kill: surviving descendant pids %v",
+		cs.pid(), survivorPIDs(result.survived))
 }
 
 // shellJoinArgs joins args into a single string, quoting any arg that
