@@ -43,14 +43,27 @@ type acpSession struct {
 
 	toolInputMu   sync.Mutex
 	toolInputByID map[string]string // toolCallId -> summarized tool input
+	toolNameMu    sync.Mutex
+	toolNameByID  map[toolCallKey]string
 
 	// modesMu guards availableModes and currentMode. Both fields are
 	// populated on handshake (session/new or session/load response) and
 	// updated whenever SetLiveMode succeeds or the server announces a
 	// mode change via session/update.
 	modesMu        sync.RWMutex
+	usageMu        sync.RWMutex
+	lastUsage      core.ContextUsage
+	haveUsage      bool
 	availableModes []acpModeInfo
 	currentMode    string
+
+	// promptInFlight tracks active session/prompt RPCs. Text chunks that
+	// arrive while no prompt is in flight belong to background work (kimi
+	// acp runs /compact asynchronously and reports "Compaction completed"
+	// long after the /compact prompt's turn has ended) — they get a
+	// synthetic EventResult so the engine's unsolicited reader relays them
+	// to the platform instead of buffering them until the next turn.
+	promptInFlight atomic.Int32
 
 	callbacks sessionCallbacks // may be nil (tests, integration harness)
 }
@@ -58,6 +71,10 @@ type acpSession struct {
 type permState struct {
 	RPCID   json.RawMessage
 	Options []permissionOption
+	// Elicitation is non-nil when this pending request arrived via
+	// elicitation/create instead of session/request_permission; it carries
+	// what RespondPermission needs to build a CreateElicitationResponse.
+	Elicitation *elicitationState
 }
 
 // acpSessionConfig bundles the inputs newACPSession needs. It's a
@@ -72,6 +89,7 @@ type acpSessionConfig struct {
 	resumeSessionID string
 	authMethod      string
 	initialMode     string           // if non-empty, applied via session/set_mode after session/new
+	initialModel    string           // if non-empty, applied via session/set_config_option after handshake
 	callbacks       sessionCallbacks // may be nil
 }
 
@@ -155,6 +173,23 @@ func newACPSession(ctx context.Context, cfg acpSessionConfig) (*acpSession, erro
 		}
 	}
 
+	// A model chosen via /model outlives the session it was set on (the
+	// engine closes the session on switch and starts a fresh one for the
+	// next turn), so re-apply it here: session/load would otherwise
+	// restore the model that was persisted when the session was created.
+	if strings.TrimSpace(cfg.initialModel) != "" {
+		if ok := s.SetLiveModel(cfg.initialModel); !ok {
+			slog.Warn("acp: initial model could not be applied",
+				"model", cfg.initialModel,
+				"session_id", s.currentACPSessionID(),
+			)
+		}
+	}
+
+	if s.callbacks != nil {
+		s.callbacks.reportActiveSession(s)
+	}
+
 	return s, nil
 }
 
@@ -170,6 +205,13 @@ func (s *acpSession) handshake(resumeSessionID string, authMethod string) error 
 				"writeTextFile": false,
 			},
 			"terminal": false,
+			// Advertise form-mode elicitation so agents with a structured
+			// question bridge (kimi acp routes AskUserQuestion through
+			// elicitation/create when this is set) use it instead of
+			// degrading to a single-question request_permission prompt.
+			"elicitation": map[string]any{
+				"form": map[string]any{},
+			},
 		},
 		"clientInfo": map[string]any{
 			"name":    "cc-connect",
@@ -186,9 +228,11 @@ func (s *acpSession) handshake(resumeSessionID string, authMethod string) error 
 		return fmt.Errorf("acp: parse initialize result: %w", err)
 	}
 	listSupported := len(initOut.AgentCapabilities.SessionCapabilities.List) > 0
+	resumeSupported := len(initOut.AgentCapabilities.SessionCapabilities.Resume) > 0
 	slog.Debug("acp: initialized",
 		"protocol", initOut.ProtocolVersion,
 		"load_session", initOut.AgentCapabilities.LoadSession,
+		"resume_session", resumeSupported,
 		"list_sessions", listSupported,
 	)
 	if s.callbacks != nil {
@@ -204,24 +248,68 @@ func (s *acpSession) handshake(resumeSessionID string, authMethod string) error 
 		slog.Debug("acp: authenticated", "method_id", authMethod)
 	}
 
-	wantResume := resumeSessionID != "" && resumeSessionID != core.ContinueSession
-	if wantResume && initOut.AgentCapabilities.LoadSession {
-		loadParams := map[string]any{
-			"sessionId":  resumeSessionID,
-			"cwd":        s.workDir,
-			"mcpServers": []any{},
+	// Resume the persisted session when the identifier is a real one and
+	// the server advertises a way to do it. ACP offers two optional
+	// capabilities: `session/load` (loadSession) and `session/resume`
+	// (sessionCapabilities.resume). Servers are free to implement only
+	// the latter, so prefer the newer `session/resume` and fall back to
+	// `session/load`; a server advertising neither is simply started
+	// fresh. Resuming by a new session id would silently drop the
+	// conversation, so this must not degrade to `session/new` while a
+	// resume capability is still on the table.
+	if resumeSessionID != "" && resumeSessionID != core.ContinueSession {
+		var resumeMethod string
+		switch {
+		case resumeSupported:
+			resumeMethod = "session/resume"
+		case initOut.AgentCapabilities.LoadSession:
+			resumeMethod = "session/load"
 		}
-		loadRes, err := s.tr.call(s.ctx, "session/load", loadParams)
-		if err != nil {
-			slog.Warn("acp: session/load failed, starting new session", "error", err)
-		} else {
-			var lr struct {
-				SessionID string         `json:"sessionId"`
-				Modes     *acpModesBlock `json:"modes"`
-			}
-			if json.Unmarshal(loadRes, &lr) == nil && lr.SessionID != "" {
-				s.setACPSessionID(lr.SessionID)
-				s.absorbModes(lr.Modes)
+		// Both resume methods may replay conversation history the way
+		// `session/load` does, and a long replay can fill the bounded
+		// events channel and stall the transport read loop. PR #2038
+		// addresses that with a `replaying` guard on acpSession; it is
+		// not merged yet, so this call site cannot set the flag. When
+		// that guard lands it has to cover this path too, otherwise
+		// servers advertising `resume` reintroduce the deadlock #2038
+		// was written to fix.
+		if resumeMethod != "" {
+			resumeRes, err := s.tr.call(s.ctx, resumeMethod, map[string]any{
+				"sessionId":  resumeSessionID,
+				"cwd":        s.workDir,
+				"mcpServers": []any{},
+			})
+			if err != nil {
+				slog.Warn("acp: session resume failed, starting new session",
+					"method", resumeMethod, "error", err)
+			} else {
+				var rr struct {
+					SessionID     string            `json:"sessionId"`
+					Modes         *acpModesBlock    `json:"modes"`
+					ConfigOptions []acpConfigOption `json:"configOptions"`
+				}
+				if uerr := json.Unmarshal(resumeRes, &rr); uerr != nil {
+					// The body is allowed to be a configOptions-only
+					// object, but a malformed one is worth a trace: we
+					// adopt the requested id regardless, so this line is
+					// the only evidence it happened.
+					slog.Debug("acp: parse resume result failed, keeping requested session id",
+						"method", resumeMethod, "error", uerr)
+				}
+				// A successful resume acknowledges the id we asked for.
+				// Servers may echo it back, but some (e.g. servers that
+				// only return configOptions) omit it - adopting the
+				// requested id is the correct reading either way. Without
+				// this, a server that returns no sessionId would never be
+				// resumed and the conversation would be silently replaced
+				// by a fresh session.
+				resumedID := rr.SessionID
+				if resumedID == "" {
+					resumedID = resumeSessionID
+				}
+				s.setACPSessionID(resumedID)
+				s.absorbModes(rr.Modes)
+				s.absorbConfigOptions(rr.ConfigOptions)
 				return nil
 			}
 		}
@@ -236,8 +324,9 @@ func (s *acpSession) handshake(resumeSessionID string, authMethod string) error 
 		return fmt.Errorf("acp: session/new: %w", err)
 	}
 	var sn struct {
-		SessionID string         `json:"sessionId"`
-		Modes     *acpModesBlock `json:"modes"`
+		SessionID     string            `json:"sessionId"`
+		Modes         *acpModesBlock    `json:"modes"`
+		ConfigOptions []acpConfigOption `json:"configOptions"`
 	}
 	if err := json.Unmarshal(newRes, &sn); err != nil {
 		return fmt.Errorf("acp: parse session/new: %w", err)
@@ -247,6 +336,7 @@ func (s *acpSession) handshake(resumeSessionID string, authMethod string) error 
 	}
 	s.setACPSessionID(sn.SessionID)
 	s.absorbModes(sn.Modes)
+	s.absorbConfigOptions(sn.ConfigOptions)
 	return nil
 }
 
@@ -267,6 +357,68 @@ func (s *acpSession) absorbModes(block *acpModesBlock) {
 	if s.callbacks != nil {
 		s.callbacks.reportModes(*block)
 	}
+}
+
+type acpConfigOption struct {
+	Type         string `json:"type"`
+	ID           string `json:"id"`
+	Name         string `json:"name"`
+	CurrentValue string `json:"currentValue"`
+	Options      []struct {
+		Value       string `json:"value"`
+		Name        string `json:"name"`
+		Description string `json:"description"`
+	} `json:"options"`
+}
+
+func (s *acpSession) absorbConfigOptions(options []acpConfigOption) {
+	for _, opt := range options {
+		if opt.ID == "model" {
+			models := make([]core.ModelOption, 0, len(opt.Options))
+			for _, o := range opt.Options {
+				alias := o.Name
+				if alias == "" {
+					alias = o.Value
+				}
+				models = append(models, core.ModelOption{
+					Name:  o.Value,
+					Alias: alias,
+					Desc:  o.Description,
+				})
+			}
+			if s.callbacks != nil {
+				s.callbacks.reportModels(opt.CurrentValue, models)
+			}
+		}
+	}
+}
+
+// SetLiveModel changes the model of the active session via `session/set_config_option`.
+func (s *acpSession) SetLiveModel(model string) bool {
+	if !s.alive.Load() {
+		return false
+	}
+	sid := s.currentACPSessionID()
+	if sid == "" {
+		return false
+	}
+	res, err := s.tr.call(s.ctx, "session/set_config_option", map[string]any{
+		"sessionId": sid,
+		"configId":  "model",
+		"value":     model,
+	})
+	if err != nil {
+		slog.Warn("acp: session/set_config_option model failed", "error", err, "model", model)
+		return false
+	}
+	var resp struct {
+		ConfigOptions []acpConfigOption `json:"configOptions"`
+	}
+	if json.Unmarshal(res, &resp) == nil && len(resp.ConfigOptions) > 0 {
+		s.absorbConfigOptions(resp.ConfigOptions)
+	}
+	slog.Info("acp: live model applied", "model", model, "session_id", sid)
+	return true
 }
 
 func (s *acpSession) setACPSessionID(id string) {
@@ -371,13 +523,73 @@ func (s *acpSession) onNotification(method string, params json.RawMessage) {
 		return
 	}
 	s.cacheToolCallInput(params)
+	toolName := s.resolveToolCallName(params)
 	s.maybeAbsorbCurrentModeUpdate(params)
+	s.maybeAbsorbUsageUpdate(params)
+	s.maybeAbsorbConfigOptionUpdate(params)
 	sid := s.currentACPSessionID()
 	// Debug log to capture raw session/update JSON for troubleshooting vendor compatibility
 	slog.Debug("acp: session/update", "session_id", sid, "params", string(params))
+	hasVisible := false
 	for _, ev := range mapSessionUpdate(sid, params) {
+		if ev.Type == core.EventToolResult && toolName != "" {
+			ev.ToolName = toolName
+		}
+		if ev.Type == core.EventText && ev.Content != "" {
+			hasVisible = true
+		}
 		s.emit(ev)
 	}
+	// Out-of-turn text (background work reporting after its turn ended —
+	// e.g. kimi acp's "Compaction completed" chunk) would otherwise sit in
+	// the events buffer until the next foreground turn drains and drops it
+	// as stale. Close it with a synthetic result so the unsolicited reader
+	// relays it immediately.
+	if hasVisible && s.promptInFlight.Load() == 0 {
+		s.emit(core.Event{Type: core.EventResult, SessionID: sid, Done: true})
+	}
+}
+
+// maybeAbsorbUsageUpdate watches session/update notifications for
+// `usage_update` (opencode extension: {"used": N, "size": M}) and records
+// real context usage for the reply footer / auto-compress heuristics.
+func (s *acpSession) maybeAbsorbUsageUpdate(params json.RawMessage) {
+	var wrap struct {
+		Update json.RawMessage `json:"update"`
+	}
+	if json.Unmarshal(params, &wrap) != nil || len(wrap.Update) == 0 {
+		return
+	}
+	var head struct {
+		Kind string `json:"sessionUpdate"`
+	}
+	if json.Unmarshal(wrap.Update, &head) != nil || head.Kind != "usage_update" {
+		return
+	}
+	var u struct {
+		Used int `json:"used"`
+		Size int `json:"size"`
+	}
+	if json.Unmarshal(wrap.Update, &u) != nil {
+		return
+	}
+	s.usageMu.Lock()
+	s.lastUsage.UsedTokens = u.Used
+	s.lastUsage.ContextWindow = u.Size
+	s.haveUsage = true
+	s.usageMu.Unlock()
+}
+
+// GetContextUsage implements core.ContextUsageReporter with real figures
+// captured from usage_update + session/prompt responses.
+func (s *acpSession) GetContextUsage() *core.ContextUsage {
+	s.usageMu.RLock()
+	defer s.usageMu.RUnlock()
+	if !s.haveUsage {
+		return nil
+	}
+	cu := s.lastUsage
+	return &cu
 }
 
 // maybeAbsorbCurrentModeUpdate watches session/update notifications
@@ -413,6 +625,19 @@ func (s *acpSession) maybeAbsorbCurrentModeUpdate(params json.RawMessage) {
 			AvailableModes: available,
 		})
 	}
+}
+
+func (s *acpSession) maybeAbsorbConfigOptionUpdate(params json.RawMessage) {
+	var wrap struct {
+		Update struct {
+			Kind          string            `json:"sessionUpdate"`
+			ConfigOptions []acpConfigOption `json:"configOptions"`
+		} `json:"update"`
+	}
+	if json.Unmarshal(params, &wrap) != nil || len(wrap.Update.ConfigOptions) == 0 {
+		return
+	}
+	s.absorbConfigOptions(wrap.Update.ConfigOptions)
 }
 
 // cacheToolCallInput extracts and caches rawInput from tool_call and tool_call_update
@@ -485,6 +710,8 @@ func (s *acpSession) onServerRequest(method string, id json.RawMessage, params j
 	switch method {
 	case "session/request_permission":
 		s.handlePermissionRequest(id, params)
+	case "elicitation/create":
+		s.handleElicitationRequest(id, params)
 	case "cursor/ask_question", "cursor/create_plan", "cursor/update_todos", "cursor/task", "cursor/generate_image":
 		// Cursor CLI extensions — acknowledge so tool flows do not block; IM UX is limited for these.
 		slog.Debug("acp: cursor extension request (no-op ack)", "method", method)
@@ -577,6 +804,42 @@ func (s *acpSession) handlePermissionRequest(id json.RawMessage, params json.Raw
 	}()
 }
 
+// handleElicitationRequest bridges ACP elicitation/create (form mode) into
+// the engine's AskUserQuestion wizard: the form schema becomes
+// []core.UserQuestion and the request id is cached so RespondPermission can
+// translate the collected answers back into a CreateElicitationResponse.
+func (s *acpSession) handleElicitationRequest(id json.RawMessage, params json.RawMessage) {
+	st, err := parseElicitationCreateParams(params)
+	if err != nil {
+		slog.Warn("acp: elicitation/create rejected", "error", err)
+		// A JSON-RPC error lets agents like kimi acp fall back to the
+		// request_permission question bridge.
+		_ = s.tr.respondError(id, -32602, err.Error())
+		return
+	}
+	reqKey := jsonIDKey(id)
+	s.permMu.Lock()
+	s.permByID[reqKey] = permState{RPCID: id, Elicitation: st}
+	s.permMu.Unlock()
+
+	questions := make([]core.UserQuestion, 0, len(st.Questions))
+	for _, q := range st.Questions {
+		questions = append(questions, q.Question)
+	}
+	var rawParams map[string]any
+	_ = json.Unmarshal(params, &rawParams)
+	slog.Info("acp: elicitation request", "request_id", reqKey, "questions", len(questions))
+	s.emit(core.Event{
+		Type:         core.EventPermissionRequest,
+		RequestID:    reqKey,
+		ToolName:     "AskUserQuestion",
+		ToolInput:    questions[0].Question,
+		ToolInputRaw: rawParams,
+		Questions:    questions,
+		SessionID:    s.currentACPSessionID(),
+	})
+}
+
 func (s *acpSession) emit(ev core.Event) {
 	if ev.SessionID == "" {
 		ev.SessionID = s.currentACPSessionID()
@@ -615,19 +878,46 @@ func (s *acpSession) Send(prompt string, messageID string, images []core.ImageAt
 	}
 
 	slog.Debug("acp: sending session/prompt", "session_id", sid, "prompt_len", len(prompt))
+	s.promptInFlight.Add(1)
 	res, err := s.tr.call(s.ctx, "session/prompt", params)
 	if err != nil {
+		s.promptInFlight.Add(-1)
 		s.emit(core.Event{Type: core.EventError, Error: err})
 		return fmt.Errorf("acp: session/prompt: %w", err)
 	}
 	slog.Debug("acp: session/prompt response", "session_id", sid, "response_len", len(res), "response", string(res))
 
+	// Absorb per-turn usage (esp. cachedReadTokens) into the context snapshot.
+	var pr struct {
+		Usage struct {
+			InputTokens      int `json:"inputTokens"`
+			OutputTokens     int `json:"outputTokens"`
+			TotalTokens      int `json:"totalTokens"`
+			CachedReadTokens int `json:"cachedReadTokens"`
+		} `json:"usage"`
+	}
+	if json.Unmarshal(res, &pr) == nil && (pr.Usage.InputTokens > 0 || pr.Usage.TotalTokens > 0) {
+		s.usageMu.Lock()
+		if pr.Usage.CachedReadTokens > 0 {
+			s.lastUsage.CachedInputTokens = pr.Usage.CachedReadTokens
+		}
+		s.lastUsage.InputTokens = pr.Usage.InputTokens
+		s.lastUsage.OutputTokens = pr.Usage.OutputTokens
+		s.lastUsage.TotalTokens = pr.Usage.TotalTokens
+		s.haveUsage = true
+		s.usageMu.Unlock()
+	}
+
 	// Text was streamed via session/update; engine aggregates EventText.
+	// Keep the in-flight mark until after EventResult is queued so a text
+	// chunk racing in from the read loop is not mistaken for out-of-turn
+	// background output.
 	s.emit(core.Event{
 		Type:      core.EventResult,
 		SessionID: sid,
 		Done:      true,
 	})
+	s.promptInFlight.Add(-1)
 	return nil
 }
 
@@ -680,6 +970,12 @@ func (s *acpSession) RespondPermission(requestID string, result core.PermissionR
 	s.permMu.Unlock()
 	if !ok {
 		return fmt.Errorf("acp: unknown permission request %q", requestID)
+	}
+
+	if st.Elicitation != nil {
+		res := buildElicitationResponse(st.Elicitation, result)
+		slog.Debug("acp: elicitation response", "request_id", requestID, "action", res["action"])
+		return s.tr.respondSuccess(st.RPCID, res)
 	}
 
 	allow := strings.EqualFold(result.Behavior, "allow")

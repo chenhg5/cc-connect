@@ -110,6 +110,7 @@ app_secret = "QhkMpxxxxxxxxxxxxxxxxxxxx"
 # domain = "https://open.feishu.cn" # 可选：覆盖运行时 API/WebSocket 域名
 # enable_feishu_card = true  # 可选：关闭后统一回退纯文本回复
 # thread_isolation = true    # 可选：按飞书 thread/root 隔离群聊会话
+# group_reply_all_chats = ["oc_group_a", "oc_group_b"] # 可选：仅指定群无需 @机器人
 # group_chat_history_share = false  # 可选：共享未 @ 机器人的群消息作为下一次触发的上下文；消息本身不会触发回复
 # progress_style = "legacy"  # 可选：legacy | compact | card
 # ack_emoji = "Get"           # 可选：消息被接受处理或入队时立即添加并保留的确认表情；默认禁用
@@ -119,10 +120,12 @@ app_secret = "QhkMpxxxxxxxxxxxxxxxxxxxx"
 ```
 
 > 如果应用没有交互卡片权限，或后台未配置卡片回调，可将 `enable_feishu_card = false`，让所有命令统一走纯文本回复，避免卡片发送失败后用户看不到内容。
+> `group_reply_all_chats` 可使用逗号分隔字符串（如 `"oc_group_a,oc_group_b"`）或字符串数组。非空列表仅让指定群绕过 @ 过滤，并优先于全局 `group_reply_all` 和 `require_mention`；其他群保留原有提及、@all 和已参与话题的附件规则。未配置或为空时沿用原有默认行为。此设置不放宽 `allow_from`、`allow_chat` 或 `group_only`，私聊行为不变。
 > 如果开启 `thread_isolation = true`，群聊里每个根消息 / reply thread 会对应一个独立 agent session；私聊行为保持原样。
 > `group_chat_history_share = true` 时，cc-connect 只在内存中保留当前进程观察到的、允许访问的群聊 text/post 消息，并在下一次明确 @ 机器人且真正进入 agent turn 时注入；未 @ 的消息不会触发回复。`/status` 等由 cc-connect 处理的命令不会消费这段待处理上下文，`/new` 会清空对应主频道或话题的上下文。
 > 在 multi-workspace 模式下，`thread_isolation = true` 也会让每个话题独立绑定 workspace；在话题内执行 `/workspace bind <name>` 不会影响同群的其他话题。已有的群级 binding 会保留为默认值，由尚未显式绑定的话题继承，因此回退到旧版本时仍可使用。
 > `progress_style = "compact"` 会把思考/工具进度合并到一条可更新消息里，减少刷屏；`legacy` 保持原有逐条发送；`card` 会使用结构化卡片（标题 + 进度块）持续更新同一条消息，观感比纯文本更清晰。
+> 已创建的进度卡更新失败时，会保留原卡片并暂存最新进度；短暂退避后，在后续进度事件到来时重试更新同一张卡片，不会退化为逐条工具消息。结束时会忽略进度退避，尝试写入最终状态。飞书卡片 PATCH 返回 `2200` 内部错误时，会先进行最多 3 次退避重试；持续故障仍可能导致卡片暂时停留在旧状态，最终回复会独立发送。
 > `domain` 只影响运行时 API / WebSocket 请求地址；CLI `setup/new/bind` 的引导域名仍然使用内置默认值。
 > `ack_emoji = "Get"` 会在消息通过校验、被引擎接受处理或成功入队后异步添加确认表情，无需等待模型启动或前一轮结束。它表示“请求已接收”，会在完成、失败或取消后保留，不表示模型已开始执行或任务已成功。现有 `reaction_emoji`（默认 `"OnIt"`）仍表示实际处理，`done_emoji` 表示完成；若 `ack_emoji` 与 `reaction_emoji` 相同，该表情由接收确认保留，不再作为临时状态移除。
 > 确认默认关闭；不配置、空值或 `"none"` 保持原有行为。权限或 @ 过滤、重复/过时消息、满队列拒绝、已处理的命令与无用户消息的定时任务不会产生确认。确认从引擎接受消息时开始；若后续消息仍在等待已有的会话启动锁，也会等待接受决定。表情 API 采用 5 秒超时的异步尽力请求，失败不影响模型处理；发送前的附件下载、消息解析以及多图合批仍需先完成，多图批次确认在最后一条（批次的主消息）上。
@@ -172,7 +175,7 @@ app_secret = "QhkMpxxxxxxxxxxxxxxxxxxxx"
 
 配置完权限后，点击「申请发布」使权限生效。
 
-如果启用了 `group_chat_history_share`，必须为应用申请并发布 `im:message.group_msg`，否则飞书只会向机器人推送被 @ 的群消息，未提及消息无法进入共享上下文。该功能不会回溯 cc-connect 启动前的历史，也不会持久化待处理消息。
+如果启用了 `group_reply_all`、`group_reply_all_chats` 或 `group_chat_history_share`，必须为应用申请并发布 `im:message.group_msg`，否则飞书只会向机器人推送被 @ 的群消息，免 @ 回复及未提及消息的共享上下文无法生效。本地配置不会自动授予权限或补齐飞书未推送的事件。群上下文共享不会回溯 cc-connect 启动前的历史，也不会持久化待处理消息。
 
 ---
 
@@ -316,6 +319,32 @@ cc-connect: ✅ 这是一个 Node.js 项目，包含以下目录...
 │                                                              │
 └─────────────────────────────────────────────────────────────┘
 ```
+
+---
+
+## Card 2.0 流式卡片的打字效果
+
+使用 Card 2.0 富卡片时，可以在飞书或 Lark 的平台选项中分别配置打字间隔、每次显示的字符数和刷新策略。三个选项都可省略，也可只设置其中一个；未设置的选项不写入卡片 JSON，由飞书使用其默认值。以下 `50 ms` 仅作调参示例，不表示 CC-Connect 设置了默认间隔；希望保留飞书默认效果时，无需填写这三项。
+
+```toml
+# 全局启用 Card 2.0 富卡片；也可在对应项目的 [projects.display] 中设置
+[display]
+card_mode = "rich"
+
+# 将以下配置加入已有的飞书或 Lark 平台选项
+[projects.platforms.options]
+print_frequency_ms = 50
+print_step = 2
+print_strategy = "fast"
+```
+
+| 配置项 | 取值 | 作用 |
+|---|---|---|
+| `print_frequency_ms` | 整数，`20–1000` ms | 客户端文字上屏间隔，值越小，打字动画越快。 |
+| `print_step` | 整数，`1–1000` | 每次上屏的字符数，值越大，每次显示越多。 |
+| `print_strategy` | `"fast"` 或 `"delay"` | `fast` 在新文字到达时快速显示积压文字；`delay` 将文字排队按打字节奏显示。 |
+
+策略字符串会去除首尾空格且不区分大小写；数字选项必须是整数，不接受字符串或小数。非法配置会在平台初始化时报错，并指出对应字段。这些选项控制客户端的显示动画，不改变模型生成速度或 CC-Connect 向飞书发送更新的频率；长连接与 Webhook 模式均适用。它们只在流式富卡片中生成 `streaming_config`，卡片完成后省略该字段，超大卡片压缩时仍保留配置。
 
 ---
 

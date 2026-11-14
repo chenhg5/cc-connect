@@ -210,11 +210,13 @@ func New(opts map[string]any) (core.Agent, error) {
 		}
 	}
 
-	// context_window_tokens overrides the model-name heuristic used by
-	// the "ctx N%" indicator. Defaults to 0 (= heuristic), accepting the
-	// same numeric types as max_context_tokens because config parsers
-	// surface integer fields through one of these shapes depending on
-	// the source (TOML → float64, programmatic → int / int64).
+	// context_window_tokens overrides the window used by the "ctx N%"
+	// indicator, ahead of both the value Claude Code reports in modelUsage
+	// and the model-name heuristic. Defaults to 0 (= reported value, else
+	// heuristic), accepting the same numeric types as max_context_tokens
+	// because config parsers surface integer fields through one of these
+	// shapes depending on the source (TOML → float64, programmatic → int /
+	// int64).
 	contextWindowTokens := 0
 	switch v := opts["context_window_tokens"].(type) {
 	case int:
@@ -405,6 +407,12 @@ func (a *Agent) configuredModels() []core.ModelOption {
 }
 
 func (a *Agent) AvailableModels(ctx context.Context) []core.ModelOption {
+	a.mu.RLock()
+	minimaxModels := core.GetMiniMaxProviderModels(a.providers, a.activeIdx)
+	a.mu.RUnlock()
+	if len(minimaxModels) > 0 {
+		return minimaxModels
+	}
 	if models := a.configuredModels(); len(models) > 0 {
 		return models
 	}
@@ -416,6 +424,7 @@ func (a *Agent) AvailableModels(ctx context.Context) []core.ModelOption {
 		{Name: "sonnet[1m]", Desc: "Claude Sonnet (1M context)"},
 		{Name: "opus", Desc: "Claude Opus (most capable)"},
 		{Name: "opus[1m]", Desc: "Claude Opus (1M context)"},
+		{Name: "fable", Desc: "Claude Fable (frontier)"},
 		{Name: "haiku", Desc: "Claude Haiku (fastest)"},
 	}
 }
@@ -500,8 +509,8 @@ func (a *Agent) ValidateSessionID(_ context.Context, sessionID string) bool {
 	if sessionID == "" {
 		return false
 	}
-	homeDir, err := os.UserHomeDir()
-	if err != nil {
+	homeDir := a.configHome()
+	if homeDir == "" {
 		return false
 	}
 	a.mu.RLock()
@@ -512,20 +521,21 @@ func (a *Agent) ValidateSessionID(_ context.Context, sessionID string) bool {
 
 // validateSessionIDInProject checks whether sessionID has a .jsonl file
 // under the per-project directory that Claude Code derives from workDir.
-// Split out from (*Agent).ValidateSessionID so the logic can be unit
-// tested without touching the real $HOME.
-func validateSessionIDInProject(homeDir, workDir, sessionID string) bool {
+// configHome is the Claude config directory (~/.claude or a per-project
+// CLAUDE_CONFIG_DIR). Split out from (*Agent).ValidateSessionID so the logic
+// can be unit tested without touching the real $HOME.
+func validateSessionIDInProject(configHome, workDir, sessionID string) bool {
 	if sessionID == "" {
 		return false
 	}
-	if homeDir == "" || workDir == "" {
+	if configHome == "" || workDir == "" {
 		return false
 	}
 	absWorkDir, err := filepath.Abs(workDir)
 	if err != nil {
 		return false
 	}
-	projectDir := findProjectDir(homeDir, absWorkDir)
+	projectDir := findProjectDir(configHome, absWorkDir)
 	if projectDir == "" {
 		return false
 	}
@@ -581,9 +591,9 @@ func (a *Agent) StartSession(ctx context.Context, sessionID string) (core.AgentS
 }
 
 func (a *Agent) ListSessions(ctx context.Context) ([]core.AgentSessionInfo, error) {
-	homeDir, err := os.UserHomeDir()
-	if err != nil {
-		return nil, fmt.Errorf("claudecode: cannot determine home dir: %w", err)
+	configHome := a.configHome()
+	if configHome == "" {
+		return nil, fmt.Errorf("claudecode: cannot determine config home")
 	}
 
 	a.mu.RLock()
@@ -594,7 +604,7 @@ func (a *Agent) ListSessions(ctx context.Context) ([]core.AgentSessionInfo, erro
 		return nil, fmt.Errorf("claudecode: resolve work_dir: %w", err)
 	}
 
-	projectDir := findProjectDir(homeDir, absWorkDir)
+	projectDir := findProjectDir(configHome, absWorkDir)
 	if projectDir == "" {
 		return nil, nil
 	}
@@ -638,9 +648,9 @@ func (a *Agent) ListSessions(ctx context.Context) ([]core.AgentSessionInfo, erro
 }
 
 func (a *Agent) DeleteSession(_ context.Context, sessionID string) error {
-	homeDir, err := os.UserHomeDir()
-	if err != nil {
-		return fmt.Errorf("claudecode: cannot determine home dir: %w", err)
+	configHome := a.configHome()
+	if configHome == "" {
+		return fmt.Errorf("claudecode: cannot determine config home")
 	}
 	a.mu.RLock()
 	workDir := a.workDir
@@ -649,7 +659,7 @@ func (a *Agent) DeleteSession(_ context.Context, sessionID string) error {
 	if err != nil {
 		return fmt.Errorf("claudecode: resolve work_dir: %w", err)
 	}
-	projectDir := findProjectDir(homeDir, absWorkDir)
+	projectDir := findProjectDir(configHome, absWorkDir)
 	if projectDir == "" {
 		return fmt.Errorf("session not found")
 	}
@@ -673,6 +683,14 @@ func extractStringContent(raw json.RawMessage) string {
 	return s
 }
 
+// maxSessionJSONLLineSize is the longest single line read from a Claude Code
+// session transcript. Lines carrying base64 images or prompt snapshots can
+// pass 256KB in normal use. The Codex reader uses the same ceiling. ListSessions
+// scans files one at a time; a future parallel scan must bound its concurrency
+// because each scanner can grow to this size. It is a variable only so tests
+// can use a small ceiling.
+var maxSessionJSONLLineSize = 64 * 1024 * 1024
+
 func scanSessionMeta(path string) (string, int) {
 	f, err := os.Open(path)
 	if err != nil {
@@ -681,7 +699,7 @@ func scanSessionMeta(path string) (string, int) {
 	defer f.Close()
 
 	scanner := bufio.NewScanner(f)
-	scanner.Buffer(make([]byte, 256*1024), 256*1024)
+	scanner.Buffer(make([]byte, 256*1024), maxSessionJSONLLineSize)
 
 	var firstUserMessage string
 	var aiTitle string
@@ -717,6 +735,10 @@ func scanSessionMeta(path string) (string, int) {
 				}
 			}
 		}
+	}
+	if err := scanner.Err(); err != nil {
+		// /list has no error to return, so keep the partial result and log it.
+		slog.Warn("claudecode: session transcript scan stopped early; message count may be low", "path", path, "error", err)
 	}
 
 	summary := customTitle
@@ -756,15 +778,15 @@ func parseHistoryTimestamp(s string) (time.Time, error) {
 
 // GetSessionHistory reads the Claude Code JSONL transcript and returns user/assistant messages.
 func (a *Agent) GetSessionHistory(_ context.Context, sessionID string, limit int) ([]core.HistoryEntry, error) {
-	homeDir, err := os.UserHomeDir()
-	if err != nil {
-		return nil, err
+	configHome := a.configHome()
+	if configHome == "" {
+		return nil, fmt.Errorf("claudecode: cannot determine config home")
 	}
 	a.mu.RLock()
 	workDir := a.workDir
 	a.mu.RUnlock()
 	absWorkDir, _ := filepath.Abs(workDir)
-	projectDir := findProjectDir(homeDir, absWorkDir)
+	projectDir := findProjectDir(configHome, absWorkDir)
 	if projectDir == "" {
 		return nil, fmt.Errorf("claudecode: project dir not found")
 	}
@@ -778,7 +800,7 @@ func (a *Agent) GetSessionHistory(_ context.Context, sessionID string, limit int
 
 	var entries []core.HistoryEntry
 	scanner := bufio.NewScanner(f)
-	scanner.Buffer(make([]byte, 256*1024), 256*1024)
+	scanner.Buffer(make([]byte, 256*1024), maxSessionJSONLLineSize)
 
 	for scanner.Scan() {
 		var raw struct {
@@ -807,6 +829,9 @@ func (a *Agent) GetSessionHistory(_ context.Context, sessionID string, limit int
 			Content:   text,
 			Timestamp: ts,
 		})
+	}
+	if err := scanner.Err(); err != nil {
+		return nil, fmt.Errorf("claudecode: read session file: %w", err)
 	}
 
 	if limit > 0 && len(entries) > limit {
@@ -1084,6 +1109,36 @@ func claudeConfigHomeDir() string {
 		return ""
 	}
 	return filepath.Join(home, ".claude")
+}
+
+// configHomeFromEnv resolves the Claude Code config home from KEY=VALUE env
+// entries, honoring CLAUDE_CONFIG_DIR so that agents configured with a
+// per-project config home ([projects.agent.options.env]) resolve session
+// directories under their own projects tree instead of ~/.claude. Falls back
+// to ~/.claude when the variable is absent or empty.
+func configHomeFromEnv(envEntries []string) string {
+	for _, kv := range envEntries {
+		if v, ok := strings.CutPrefix(kv, "CLAUDE_CONFIG_DIR="); ok {
+			if dir := strings.TrimSpace(v); dir != "" {
+				return dir
+			}
+		}
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return ""
+	}
+	return filepath.Join(home, ".claude")
+}
+
+// configHome returns this agent's Claude Code config home, preferring
+// CLAUDE_CONFIG_DIR from the configured per-project env over the process
+// default. Guarded by mu because configEnv is written during agent (re)start.
+func (a *Agent) configHome() string {
+	a.mu.RLock()
+	env := a.configEnv
+	a.mu.RUnlock()
+	return configHomeFromEnv(env)
 }
 
 func claudeSkillDirs(workDir, configHome string, pluginDirs []string) []string {
@@ -1542,12 +1597,15 @@ func encodeClaudeProjectKey(absPath string) string {
 }
 
 // findProjectDir locates the Claude Code session directory for a given work dir.
-// Claude Code stores sessions at ~/.claude/projects/{projectKey}/ where projectKey
-// is derived from the absolute path. On Windows, the key format may vary (colon
-// handling, slash direction), so we try multiple key candidates and fall back to
-// scanning the projects directory.
-func findProjectDir(homeDir, absWorkDir string) string {
-	projectsBase := filepath.Join(homeDir, ".claude", "projects")
+// Claude Code stores sessions at {configHome}/projects/{projectKey}/ where
+// projectKey is derived from the absolute path and configHome is the Claude
+// config directory — ~/.claude by default, or the value of CLAUDE_CONFIG_DIR
+// when the agent runs with a per-project config home
+// ([projects.agent.options.env]). On Windows, the key format may vary (colon
+// handling, slash direction), so we try multiple key candidates and fall back
+// to scanning the projects directory.
+func findProjectDir(configHome, absWorkDir string) string {
+	projectsBase := filepath.Join(configHome, "projects")
 
 	// Build candidate keys: different ways Claude Code might encode the path.
 	// Primary encoding: Claude Code's actual algorithm (non-ASCII → "-")

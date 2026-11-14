@@ -70,19 +70,19 @@
       "agents": {
         "claudecode": {
           "base_url": "https://api.minimax.io/anthropic",
-          "model": "MiniMax-M3",
-          "models": ["MiniMax-M3", "MiniMax-M3-highspeed", "MiniMax-M2.7"]
+          "model": "MiniMax-M3.1-Flash",
+          "models": ["MiniMax-M3.1-Flash", "MiniMax-M3"]
         },
         "codex": {
           "base_url": "https://api.minimax.io/v1",
-          "model": "MiniMax-M3",
-          "models": ["MiniMax-M3", "MiniMax-M2.7"],
+          "model": "MiniMax-M3.1-Flash",
+          "models": ["MiniMax-M3.1-Flash", "MiniMax-M3"],
           "codex_config": { "wire_api": "responses" }
         },
         "opencode": {
           "base_url": "https://api.minimax.io/v1",
-          "model": "MiniMax-M3",
-          "models": ["MiniMax-M3", "MiniMax-M2.7"]
+          "model": "MiniMax-M3.1-Flash",
+          "models": ["MiniMax-M3.1-Flash", "MiniMax-M3"]
         }
       }
     },
@@ -98,19 +98,19 @@
       "agents": {
         "claudecode": {
           "base_url": "https://api.minimaxi.com/anthropic",
-          "model": "MiniMax-M3",
-          "models": ["MiniMax-M3", "MiniMax-M3-highspeed", "MiniMax-M2.7"]
+          "model": "MiniMax-M3.1-Flash",
+          "models": ["MiniMax-M3.1-Flash", "MiniMax-M3"]
         },
         "codex": {
           "base_url": "https://api.minimaxi.com/v1",
-          "model": "MiniMax-M3",
-          "models": ["MiniMax-M3", "MiniMax-M2.7"],
+          "model": "MiniMax-M3.1-Flash",
+          "models": ["MiniMax-M3.1-Flash", "MiniMax-M3"],
           "codex_config": { "wire_api": "responses" }
         },
         "opencode": {
           "base_url": "https://api.minimaxi.com/v1",
-          "model": "MiniMax-M3",
-          "models": ["MiniMax-M3", "MiniMax-M2.7"]
+          "model": "MiniMax-M3.1-Flash",
+          "models": ["MiniMax-M3.1-Flash", "MiniMax-M3"]
         }
       }
     },
@@ -655,6 +655,98 @@
           "model": "gpt-5.4",
           "models": ["gpt-5.4"],
           "codex_config": { "wire_api": "responses" }
+        }
+      }
+    },
+    {
+      "name": "atlascloud",
+      "display_name": "Atlas Cloud",
+      "description": "Atlas Cloud OpenAI-compatible LLM API with large-context text models for coding agents.",
+      "description_zh": "Atlas Cloud OpenAI 兼容 LLM API，提供适用于编码智能体的大上下文文本模型。",
+      "features": ["OpenAI Compatible", "1M Context", "Text Models"],
+      "tier": 3,
+      "website": "https://atlascloud.ai",
+      "agents": {
+        "codex": {
+          "base_url": "https://api.atlascloud.ai/v1",
+          "model": "qwen/qwen3.5-flash",
+          "models": ["qwen/qwen3.5-flash", "deepseek-ai/deepseek-v4-pro"],
+          "codex_config": { "wire_api": "chat" }
+        },
+        "opencode": {
+          "base_url": "https://api.atlascloud.ai/v1",
+          "model": "qwen/qwen3.5-flash",
+          "models": ["qwen/qwen3.5-flash", "deepseek-ai/deepseek-v4-pro"]
+        }
+      }
+    },
+    {
+      "name": "cloudgpu",
+      "display_name": "CloudGPU",
+      "description": "CloudGPU OpenAI-compatible LLM API with text models for coding agents.",
+      "description_zh": "CloudGPU OpenAI 兼容 LLM API，提供适用于编码智能体的文本模型。",
+      "features": ["OpenAI Compatible", "Text Models"],
+      "tier": 3,
+      "website": "https://cloudgpu.app",
+      "agents": {
+        "codex": {
+          "base_url": "https://cloudgpu.app/v1",
+          "model": "deepseek-v4-flash",
+          "models": ["deepseek-v4-flash", "deepseek-v4-pro"],
+          "codex_config": { "wire_api": "chat" }
+        },
+        "opencode": {
+          "base_url": "https://cloudgpu.app/v1",
+          "model": "deepseek-v4-flash",
+          "models": ["deepseek-v4-flash", "deepseek-v4-pro"]
+        }
+      }
+    },
+    {
+      "name": "opper",
+      "display_name": "Opper",
+      "description": "EU-hosted AI gateway with 700+ models from 50+ providers behind one key, through OpenAI and Anthropic compatible APIs.",
+      "description_zh": "欧盟托管的 AI 网关，一个密钥即可通过 OpenAI 和 Anthropic 兼容 API 使用 50+ 家供应商的 700+ 个模型。",
+      "features": ["EU Hosted", "700+ Models", "OpenAI + Anthropic API"],
+      "tier": 3,
+      "website": "https://opper.ai",
+      "agents": {
+        "claudecode": {
+          "base_url": "https://api.opper.ai/v3/compat",
+          "model": "claude-sonnet-4-6",
+          "models": ["claude-sonnet-4-6", "claude-opus-5"]
+        },
+        "opencode": {
+          "base_url": "https://api.opper.ai/v3/compat",
+          "model": "claude-sonnet-4-6",
+          "models": ["claude-sonnet-4-6", "gpt-5.5"]
+        }
+      }
+    },
+    {
+      "name": "runcrate",
+      "display_name": "Runcrate",
+      "description": "Runcrate inference API for open models, with OpenAI-compatible and Anthropic Messages endpoints for coding agents.",
+      "description_zh": "Runcrate 开源模型推理 API，提供 OpenAI 兼容与 Anthropic Messages 接口，适用于编码智能体。",
+      "features": ["OpenAI Compatible", "Anthropic Compatible", "1M Context", "Open Models"],
+      "tier": 3,
+      "website": "https://www.runcrate.ai",
+      "agents": {
+        "claudecode": {
+          "base_url": "https://api.runcrate.ai",
+          "model": "deepseek-ai/DeepSeek-V4.1-Flash",
+          "models": ["deepseek-ai/DeepSeek-V4.1-Flash", "zai-org/GLM-5.3", "Qwen/Qwen3.8-Flash"]
+        },
+        "codex": {
+          "base_url": "https://api.runcrate.ai/v1",
+          "model": "deepseek-ai/DeepSeek-V4.1-Flash",
+          "models": ["deepseek-ai/DeepSeek-V4.1-Flash", "zai-org/GLM-5.3", "Qwen/Qwen3.8-Flash"],
+          "codex_config": { "wire_api": "responses" }
+        },
+        "opencode": {
+          "base_url": "https://api.runcrate.ai/v1",
+          "model": "deepseek-ai/DeepSeek-V4.1-Flash",
+          "models": ["deepseek-ai/DeepSeek-V4.1-Flash", "zai-org/GLM-5.3", "Qwen/Qwen3.8-Flash"]
         }
       }
     }

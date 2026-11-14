@@ -1,5 +1,7 @@
 # Usage Guide
 
+[English](usage.md) | [中文](usage.zh-CN.md) | [Русский](usage.ru.md)
+
 Complete guide to using cc-connect features.
 
 ## Table of Contents
@@ -46,9 +48,14 @@ Each user gets an independent session with full conversation context. Manage ses
 | `/reasoning [level]` | View or switch reasoning effort (Codex) |
 | `/mode [name]` | View or switch permission mode |
 | `/stop` | Stop current execution |
+| `/ps <message>` / `/btw <message>` | Send a supplement to the running task |
 | `/help` | Show available commands |
 
 During a session, the agent may request tool permissions. Reply **allow** / **deny** / **allow all**.
+
+Use `/ps` (or `/btw`) to add instructions while a task is running. An idle session rejects the command. The delivery confirmation means the bridge sent the request, not that the agent has finished processing it.
+
+With Pi, enable `rpc = true` for native steering: the supplement is queued for the next model call, after the current assistant turn's tool calls. If Pi has already finished while the bridge is still delivering its reply, the supplement starts a follow-up turn. Pi's default JSON mode keeps its existing one-shot sending behavior; it cannot inject into an already running process.
 
 cc-connect rotates to a fresh session automatically after long inactivity:
 
@@ -86,12 +93,42 @@ All agents support permission modes switchable at runtime via `/mode`.
 
 ### Codex Modes
 
-| Mode | Config Value | Behavior |
-|------|-------------|----------|
-| Suggest | `suggest` | Only trusted commands run without approval |
-| Auto Edit | `auto-edit` | Model decides when to ask |
-| Full Auto | `full-auto` | Auto-approve with sandbox |
-| YOLO | `yolo` | Bypass all approvals and sandbox |
+| Mode | Config value | `exec` (default backend) | `app_server` |
+|------|-------------|--------------------------|--------------|
+| Suggest | `suggest` | Read-only; no interactive approvals | Read-only; approval on request |
+| Auto Edit | `auto-edit` | Workspace-write; no approvals | Workspace-write; no approvals |
+| Full Auto | `full-auto` | Workspace-write; no approvals | Workspace-write; no approvals |
+| YOLO | `yolo` | Bypass approvals and sandbox | Bypass approvals and sandbox |
+
+These sandbox selections apply when `permission_profile` is unset. With a named profile, its filesystem and network rules take precedence in every mode.
+
+### Codex permission profiles
+
+With `backend = "app_server"`, set `permission_profile` to select a named profile from the Codex configuration used by that process:
+
+```toml
+[projects.agent.options]
+backend = "app_server"
+mode = "suggest"
+permission_profile = "chat-workspace"
+```
+
+Define the profile in the relevant Codex config (for example, `config.toml` under `codex_home`):
+
+```toml
+default_permissions = "chat-workspace"
+
+[permissions.chat-workspace.filesystem]
+":minimal" = "read"
+":workspace_roots" = "read"
+
+[permissions.chat-workspace.network]
+enabled = false
+```
+
+The profile replaces the mode's legacy sandbox selection for both new and resumed sessions; the mode still determines the approval policy. Without this option, existing behavior is unchanged. The adapter rejects the option on the `exec` backend and refuses to use a session unless Codex confirms the requested profile. This requires a Codex version supporting named profiles and `activePermissionProfile` (verified with 0.164.0).
+
+`work_dir` and a read-only sandbox alone do not restrict reads to the project. Selective read access requires a compatible Codex sandbox; on Windows, use the [MXC sandbox configuration](https://learn.chatgpt.com/docs/windows/windows-sandbox). Permission profiles govern local sandboxed tools, not independent MCP/connectors, and approved escalations may grant additional access. See the [official permissions documentation](https://learn.chatgpt.com/docs/permissions).
 
 ### Codex CLI discovery on macOS
 
@@ -113,6 +150,31 @@ cmd = ["/path with spaces/codex", "--profile", "work"]
 
 This runs the bundled CLI using the existing Codex adapter. Desktop-only tools and shared-thread locking have separate requirements; see [Desktop backend discussion #651](https://github.com/chenhg5/cc-connect/issues/651) and [thread writer conflict #1909](https://github.com/chenhg5/cc-connect/issues/1909).
 
+### Codex home directory (`codex_home`)
+
+By default the Codex adapter uses the same Codex home as your terminal and the Codex desktop app. The adapter resolves the home in this order: the project `codex_home` option, then `CODEX_HOME` from the environment that starts cc-connect, then `~/.codex`. A configured `codex_home` is exported as `CODEX_HOME` to the Codex CLI for both the `exec` and `app_server` backends, and `/list` reads sessions from the same resolved home.
+
+Sharing one home has a cost. When the Codex desktop app holds the thread writer lock for a conversation, a later `codex exec resume` fails with `thread-store conflict: ... already has an active writer (code -32600)`. Give a project its own home when it must not share threads:
+
+```toml
+[projects.agent.options]
+codex_home = "/Users/you/.codex-cc-connect"
+```
+
+- Put the option under `[projects.agent.options]`. Options under `[projects.platforms.options]` are per-platform and never reach the agent.
+- Use an absolute path that already exists. `codex_home` does not expand `~`, so `~/.codex-cc-connect` reaches the CLI literally, and the CLI does not create the directory. cc-connect creates it only when it writes provider configuration, which a subscription login never does.
+- Copy `auth.json` and `config.toml` from your default Codex home to reuse the login and settings. cc-connect writes `auth.json` only for provider API keys and never writes `config.toml` for a subscription login.
+- The trade-off: conversations in the isolated home no longer appear in the Codex desktop app, and the desktop app's conversations cannot be resumed by this project. The two clients stop sharing threads.
+
+Create the directory and copy the login files before the first message:
+
+```sh
+mkdir -p ~/.codex-cc-connect
+cp ~/.codex/auth.json ~/.codex/config.toml ~/.codex-cc-connect/
+```
+
+Then set the absolute path under `[projects.agent.options]`, for example `/Users/you/.codex-cc-connect`. To reuse one isolated home across projects, set `CODEX_HOME` in the environment that starts cc-connect instead; an explicit `codex_home` wins over the environment variable.
+
 ### Cursor Agent Modes
 
 | Mode | Config Value | Behavior |
@@ -121,6 +183,13 @@ This runs the bundled CLI using the existing Codex adapter. Desktop-only tools a
 | Force (YOLO) | `force` / `yolo` | Auto-approve all |
 | Plan | `plan` | Read-only analysis |
 | Ask | `ask` | Q&A style, read-only |
+
+For Cursor projects, the optional `instructions_file` setting under `[projects.agent.options]`
+prepends a UTF-8 file to each prompt, including resumed turns. The file is read again on
+every turn so edits take effect without restarting the agent. An unreadable file rejects
+the turn explicitly. Leave it unset to keep the existing prompt behavior.
+
+`/memory` reads and appends `<work_dir>/AGENTS.md`, which the Cursor CLI loads on every session. `/cron setup` writes the same file. If you set `instructions_file`, point it at that same `AGENTS.md`; `/memory` still writes `<work_dir>/AGENTS.md` when the two paths differ. Cursor has no user-level memory file, so `/memory global` is unsupported.
 
 ### Gemini CLI Modes
 
@@ -194,7 +263,7 @@ name = "minimax"
 api_key = "your-minimax-api-key"
 # Use https://api.minimaxi.com/v1 for China-region accounts.
 base_url = "https://api.minimax.io/v1"
-model = "MiniMax-M2.7"
+model = "MiniMax-M3.1-Flash"
 
 # For Bedrock, Vertex, etc.
 [[projects.agent.providers]]
@@ -1017,6 +1086,8 @@ type = "claudecode"
 
 A full-featured management UI embedded in the binary — project CRUD, session management, cron job editor, global settings, chat interface, and i18n support.
 
+When importing providers from CC-Switch in the dashboard, an import is rejected if a selected name matches multiple source providers. No providers are added in that request. Deselect the ambiguous name to import the remaining unique providers.
+
 ### Quick Setup (Chat Command)
 
 The easiest way to enable web admin:
@@ -1237,51 +1308,21 @@ display_name = "Oh My Pi ACP"
 
 Install and authenticate a version of Oh My Pi that provides the `omp acp` subcommand, and make sure `omp` is available on cc-connect's `PATH`.
 
-### Personal WeChat group chat — finding the right `chat_id` (issue #805)
+### Personal WeChat group chat is not feasible (correction for issue #805 docs)
 
-Personal WeChat (the `weixin` platform) supports group chats. To bind the
-bot to a specific group, set `chat_id` in `[[projects.platforms.options]]`
-to the **group chat ID**, not an individual user ID. Group chat IDs always
-end with `@chatroom`, for example:
+Personal WeChat (`weixin` / ilink) bots are **not normal WeChat contacts**.
+You usually cannot find them via a group's "Add members" search, and there
+is no "invite bot to group" API. **Group chat is therefore not a workable
+path on this channel.** Do not expect `chat_id=…@chatroom` or
+"share the QR into a group like adding a friend" to make group chat work.
 
-```toml
-[[projects.platforms]]
-type = "weixin"
+**Recommended:**
 
-[projects.platforms.options]
-token = "ilink_bot_bearer_token"
-chat_id = "your_group_chat_id@chatroom"   # group chats end with @chatroom
-```
+- Have each person scan / open the bot link and use **private chat**.
+- If you need in-group `@bot` collaboration, use Feishu, DingTalk, or
+  WeCom (those can run alongside `weixin` on the same project).
 
-**How to find the group chat ID:**
-
-1. Start cc-connect and let the bot be in the target group.
-2. Send any message in the group from a known allowed account.
-3. Check the cc-connect logs — the incoming `chat_id` (ending in
-   `@chatroom`) is logged at the moment the message is received. Copy
-   that value into `chat_id`.
-
-Leave `chat_id` empty (or omit the key) to respond to every chat the bot
-is in. Set it to a specific value to restrict the bot to that group or
-user only.
-
-Common pitfalls:
-
-- **"How do I add the bot to a group?"** Personal WeChat bots are added
-  by scanning the QR code *inside* the group with the linked WeChat
-  account, or by sharing the QR via the personal chat and then opening
-  it inside the target group. There is no API-side "invite bot to group"
-  call; the bot becomes a group member the same way any other WeChat
-  contact does.
-- **Bot never receives group messages** — make sure the group is bound
-  to your cc-connect instance. If `allow_from` is set, the first user
-  to message in the group is recorded; if the binding is to a
-  different user, the bot stays silent.
-- **Bot replies in private but ignores the group (or vice versa)** —
-  duplicate the `[[projects.platforms]]` block, one with `chat_id` set
-  to the group and one without, to cover both surfaces.
-
-For more on the `weixin` platform, see [docs/weixin.md](./weixin.md).
+See [docs/weixin.md](./weixin.md) for the full limitation note.
 
 ### Telegram proxy / outbound restrictions (issue #245)
 

@@ -1,5 +1,7 @@
 # cc-connect 管理 API 规范
 
+[English](management-api.md) | [中文](management-api.zh-CN.md) | [Русский](management-api.ru.md)
+
 > **版本：** 1.0-draft  
 > **状态：** 草案 — 实现前可能变更  
 > **最后更新：** 2026-03-10

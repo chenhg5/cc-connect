@@ -456,8 +456,28 @@ const (
 	EventResult            EventType = "result"             // final aggregated result
 	EventError             EventType = "error"              // error occurred
 	EventPermissionRequest EventType = "permission_request" // agent requests permission via stdio protocol
+	EventUserInputRequest  EventType = "user_input_request" // non-blocking question; answer is a user message
 	EventThinking          EventType = "thinking"           // thinking/processing status
+	EventModelSwitch       EventType = "model_switch"       // agent CLI moved the turn to another model on its own (see ModelSwitch)
 )
+
+// ModelSwitch describes a model change the agent CLI made without being asked
+// to, e.g. Claude Code re-running a request that the primary model's
+// safeguards declined on a fallback model. It is carried by EventModelSwitch
+// so the engine can tell the user; a /model switch never produces one.
+type ModelSwitch struct {
+	From string // model the request was sent to
+	To   string // model that answered instead
+	// Reason is the trigger reported by the CLI ("refusal": a safety
+	// classifier declined the request on From).
+	Reason string
+	// Category is the refusal category the API reported ("cyber", "bio", ...).
+	// Empty when the API carried none.
+	Category string
+	// SessionWide is true when the rest of the session stays on To, false when
+	// only this response came from To (e.g. a subagent fell back).
+	SessionWide bool
+}
 
 // UserQuestion represents a structured question from AskUserQuestion.
 type UserQuestion struct {
@@ -495,6 +515,7 @@ type Event struct {
 	CacheReadInputTokens     int            // cache-read tokens (prior context retrieved from cache)
 	Metadata                 map[string]any // optional metadata from agent (e.g. compaction_continue)
 	Synthetic                bool           // true if this is a synthetic/generated message (not from real user)
+	ModelSwitch              *ModelSwitch   // populated for EventModelSwitch
 }
 
 // HistoryEntry is one turn in a conversation.

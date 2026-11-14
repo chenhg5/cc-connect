@@ -445,7 +445,7 @@ func TestFindProjectDir_NonASCIIPath(t *testing.T) {
 	// This test verifies that findProjectDir can handle non-ASCII paths
 	// by creating a mock projects directory structure
 	homeDir := t.TempDir()
-	projectsBase := filepath.Join(homeDir, ".claude", "projects")
+	projectsBase := filepath.Join(homeDir, "projects")
 
 	// Test case: Chinese characters in path
 	chineseWorkDir := "/Users/test/Documents/项目文件夹"
@@ -467,7 +467,7 @@ func TestFindProjectDir_NonASCIIPath(t *testing.T) {
 func TestFindProjectDir_ASCIIPath(t *testing.T) {
 	// Verify ASCII paths still work correctly
 	homeDir := t.TempDir()
-	projectsBase := filepath.Join(homeDir, ".claude", "projects")
+	projectsBase := filepath.Join(homeDir, "projects")
 
 	asciiWorkDir := "/Users/test/Documents/project"
 	expectedKey := encodeClaudeProjectKey(asciiWorkDir)
@@ -500,7 +500,7 @@ func TestFindProjectDir_ICloudPath(t *testing.T) {
 	// must match the on-disk project key that Claude Code CLI generates, which
 	// collapses both spaces and "~" to "-".
 	homeDir := t.TempDir()
-	projectsBase := filepath.Join(homeDir, ".claude", "projects")
+	projectsBase := filepath.Join(homeDir, "projects")
 
 	iCloudWorkDir := "/Users/test/Library/Mobile Documents/com~apple~CloudDocs/my project"
 	// The on-disk key Claude Code CLI actually writes (spaces and "~" → "-").
@@ -825,7 +825,7 @@ func TestValidateSessionIDInProject_ValidSession(t *testing.T) {
 	homeDir := t.TempDir()
 	workDir := filepath.Join(homeDir, "Documents", "myproject")
 	projectKey := encodeClaudeProjectKey(workDir)
-	projectDir := filepath.Join(homeDir, ".claude", "projects", projectKey)
+	projectDir := filepath.Join(homeDir, "projects", projectKey)
 	if err := os.MkdirAll(projectDir, 0o755); err != nil {
 		t.Fatalf("create project dir: %v", err)
 	}
@@ -845,7 +845,7 @@ func TestValidateSessionIDInProject_InvalidSession(t *testing.T) {
 	homeDir := t.TempDir()
 	workDir := filepath.Join(homeDir, "Documents", "myproject")
 	projectKey := encodeClaudeProjectKey(workDir)
-	projectDir := filepath.Join(homeDir, ".claude", "projects", projectKey)
+	projectDir := filepath.Join(homeDir, "projects", projectKey)
 	if err := os.MkdirAll(projectDir, 0o755); err != nil {
 		t.Fatalf("create project dir: %v", err)
 	}
@@ -885,7 +885,7 @@ func TestValidateSessionIDInProject_ProjectDirMissing(t *testing.T) {
 // conversation history.
 func TestValidateSessionIDInProject_CrossProjectLeak(t *testing.T) {
 	homeDir := t.TempDir()
-	projectsBase := filepath.Join(homeDir, ".claude", "projects")
+	projectsBase := filepath.Join(homeDir, "projects")
 
 	projectA := filepath.Join(homeDir, "work", "projectA")
 	projectB := filepath.Join(homeDir, "work", "projectB")
@@ -1040,6 +1040,8 @@ func TestGetSessionHistory_TimestampsAreLocal(t *testing.T) {
 	t.Setenv("HOME", homeDir)
 
 	workDir := t.TempDir()
+	// This test exercises the agent-level fallback path (no per-project
+	// CLAUDE_CONFIG_DIR), so the mock must live under $HOME/.claude/projects.
 	projectsBase := filepath.Join(homeDir, ".claude", "projects")
 	projectKey := encodeClaudeProjectKey(workDir)
 	sessionDir := filepath.Join(projectsBase, projectKey)
@@ -1216,4 +1218,109 @@ func TestClaudeContextWindow(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestConfigHomeFromEnv_HonorsPerProjectConfigDir verifies that session-dir
+// resolution honors CLAUDE_CONFIG_DIR from the per-project env table, so
+// agents with an isolated config home find their own projects tree instead
+// of ~/.claude (regression test for /list showing empty on multi-home setups).
+func TestConfigHomeFromEnv_HonorsPerProjectConfigDir(t *testing.T) {
+	configHome := t.TempDir()
+	workDir := t.TempDir()
+
+	projectKey := encodeClaudeProjectKey(workDir)
+	sessionDir := filepath.Join(configHome, "projects", projectKey)
+	if err := os.MkdirAll(sessionDir, 0o755); err != nil {
+		t.Fatalf("mkdir sessionDir: %v", err)
+	}
+
+	env := []string{"PATH=/usr/bin", "CLAUDE_CONFIG_DIR=" + configHome}
+	if got := configHomeFromEnv(env); got != configHome {
+		t.Errorf("configHomeFromEnv(env) = %q, want %q", got, configHome)
+	}
+
+	if got := findProjectDir(configHomeFromEnv(env), workDir); got != sessionDir {
+		t.Errorf("findProjectDir(configHome, workDir) = %q, want %q", got, sessionDir)
+	}
+
+	// Without the variable it must fall back to ~/.claude (HOME-based).
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	if got, want := configHomeFromEnv(nil), filepath.Join(home, ".claude"); got != want {
+		t.Errorf("configHomeFromEnv(nil) = %q, want %q", got, want)
+	}
+}
+
+// writeLongLineSession writes a transcript with a user record, one line of
+// padLen bytes (a prompt_snapshot attachment), then an assistant record.
+func writeLongLineSession(t *testing.T, padLen int) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "long.jsonl")
+	long := `{"type":"attachment","pad":"` + strings.Repeat("x", padLen) + `"}`
+	lines := []string{
+		`{"type":"user","message":{"role":"user","content":"before"}}`,
+		long,
+		`{"type":"assistant","message":{"role":"assistant","content":"after"}}`,
+	}
+	if err := os.WriteFile(path, []byte(strings.Join(lines, "\n")+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+func TestScanSessionMeta_LineOver256KBStillCountsLaterRecords(t *testing.T) {
+	path := writeLongLineSession(t, 300*1024)
+	summary, count := scanSessionMeta(path)
+	if count != 2 {
+		t.Errorf("count = %d, want 2 (records after the 300KB line must be counted)", count)
+	}
+	if summary != "before" {
+		t.Errorf("summary = %q, want %q", summary, "before")
+	}
+}
+
+func TestGetSessionHistory_LineOver256KBStillReadsLaterRecords(t *testing.T) {
+	a := &Agent{workDir: setupSessionForHistory(t, "s1", writeLongLineSession(t, 300*1024))}
+	entries, err := a.GetSessionHistory(t.Context(), "s1", 0)
+	if err != nil {
+		t.Fatalf("GetSessionHistory: %v", err)
+	}
+	if len(entries) != 2 || entries[1].Content != "after" {
+		t.Errorf("entries = %+v, want before+after", entries)
+	}
+}
+
+func TestGetSessionHistory_LineOverCeilingReturnsError(t *testing.T) {
+	// Use a small ceiling so the test doesn't write a 64MB file. It must stay
+	// above the scanner's 256KB starting buffer to be enforced.
+	old := maxSessionJSONLLineSize
+	maxSessionJSONLLineSize = 512 * 1024
+	t.Cleanup(func() { maxSessionJSONLLineSize = old })
+
+	a := &Agent{workDir: setupSessionForHistory(t, "s2", writeLongLineSession(t, maxSessionJSONLLineSize+1024))}
+	entries, err := a.GetSessionHistory(t.Context(), "s2", 0)
+	if err == nil {
+		t.Fatalf("want error for line over the ceiling, got %d entries", len(entries))
+	}
+}
+
+// setupSessionForHistory copies src into the temp HOME project dir for a new
+// work dir and returns that work dir.
+func setupSessionForHistory(t *testing.T, sessionID, src string) string {
+	t.Helper()
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	workDir := t.TempDir()
+	dir := filepath.Join(home, ".claude", "projects", encodeClaudeProjectKey(workDir))
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(src)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, sessionID+".jsonl"), data, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return workDir
 }

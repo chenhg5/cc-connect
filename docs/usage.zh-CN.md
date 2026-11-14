@@ -1,5 +1,7 @@
 # 使用指南
 
+[English](usage.md) | [中文](usage.zh-CN.md) | [Русский](usage.ru.md)
+
 cc-connect 完整功能使用指南。
 
 ## 目录
@@ -48,9 +50,14 @@ cc-connect 完整功能使用指南。
 | `/reasoning [等级]` | 查看或切换推理强度（Codex）|
 | `/mode [名称]` | 查看或切换权限模式 |
 | `/stop` | 停止当前执行 |
+| `/ps <消息>` / `/btw <消息>` | 向正在执行的任务补充指令 |
 | `/help` | 显示可用命令 |
 
 会话中 Agent 请求工具权限时，回复 **允许** / **拒绝** / **允许所有**。
+
+任务运行时，可用 `/ps`（或 `/btw`）补充指令；会话空闲时会拒绝该命令。送达确认表示桥接已发送请求，不表示 Agent 已完成处理。
+
+使用 Pi 时，设置 `rpc = true` 可启用原生中途引导：补充内容会在当前助手回合的工具调用结束后、下一次模型调用前送入。如果 Pi 已经结束、桥接仍在发送最终回复，补充内容会启动后续回合。Pi 默认的 JSON 模式保留原有的一次性发送行为，无法向已经运行的进程注入消息。
 
 也可以为项目开启“空闲后自动切换新会话”：
 
@@ -84,12 +91,42 @@ reset_on_idle_mins = 60
 
 ### Codex 模式
 
-| 模式 | 配置值 | 行为 |
-|------|--------|------|
-| 建议 | `suggest` | 仅受信命令自动执行 |
-| 自动编辑 | `auto-edit` | 模型自行决定 |
-| 全自动 | `full-auto` | 自动通过 + 沙箱保护 |
-| YOLO | `yolo` | 跳过所有审批 |
+| 模式 | 配置值 | `exec`（默认后端） | `app_server` |
+|------|--------|-------------------|--------------|
+| 建议 | `suggest` | 只读，无交互审批 | 只读，按需请求审批 |
+| 自动编辑 | `auto-edit` | 工作区可写，无审批 | 工作区可写，无审批 |
+| 全自动 | `full-auto` | 工作区可写，无审批 | 工作区可写，无审批 |
+| YOLO | `yolo` | 跳过审批与沙箱 | 跳过审批与沙箱 |
+
+以上沙箱选项适用于未设置 `permission_profile` 的情况。设置命名权限配置后，所有模式均优先使用该配置的文件系统和网络规则。
+
+### Codex 权限配置
+
+使用 `backend = "app_server"` 时，可通过 `permission_profile` 选择该 Codex 进程配置中的命名权限配置：
+
+```toml
+[projects.agent.options]
+backend = "app_server"
+mode = "suggest"
+permission_profile = "chat-workspace"
+```
+
+在对应 Codex 配置中定义该配置，例如 `codex_home` 下的 `config.toml`：
+
+```toml
+default_permissions = "chat-workspace"
+
+[permissions.chat-workspace.filesystem]
+":minimal" = "read"
+":workspace_roots" = "read"
+
+[permissions.chat-workspace.network]
+enabled = false
+```
+
+新建和恢复会话时，该配置替代模式对应的旧式沙箱选项；审批策略仍由模式决定。未设置时保持原有行为。`exec` 后端不支持此选项；Codex 未确认实际使用所选配置时，适配器会拒绝继续使用会话。需要支持命名权限配置及 `activePermissionProfile` 的 Codex 版本，已验证 0.164.0。
+
+`work_dir` 和只读沙箱本身不能将读取范围限制在项目内。选择性读取需要兼容的 Codex 沙箱；Windows 请参考 [MXC 沙箱配置](https://learn.chatgpt.com/docs/windows/windows-sandbox)。权限配置约束本地沙箱工具，不约束独立 MCP 或连接器；获批的权限提升也可能允许额外访问。详见 [官方权限文档](https://learn.chatgpt.com/docs/permissions)。
 
 ### macOS 上的 Codex CLI 查找
 
@@ -111,6 +148,31 @@ cmd = ["/path with spaces/codex", "--profile", "work"]
 
 此功能通过现有 Codex 适配器运行应用内置 CLI。桌面专有工具和共享会话写锁有独立的适配要求，参见 [桌面后端讨论 #651](https://github.com/chenhg5/cc-connect/issues/651) 和 [会话写锁冲突 #1909](https://github.com/chenhg5/cc-connect/issues/1909)。
 
+### Codex home 目录（`codex_home`）
+
+默认情况下，Codex 适配器与终端和 Codex 桌面应用使用同一个 Codex home。解析顺序是：项目的 `codex_home` 选项，启动 cc-connect 的进程环境中的 `CODEX_HOME`，最后是 `~/.codex`。配置 `codex_home` 后，适配器会把它导出为子进程的 `CODEX_HOME`，`exec` 和 `app_server` 两种后端都如此；`/list` 也从同一个解析出的 home 读取会话。
+
+共用同一个 home 有代价。当 Codex 桌面应用持有某个会话的 thread writer 锁时，之后的 `codex exec resume` 会以 `thread-store conflict: ... already has an active writer (code -32600)` 失败。项目不能与桌面应用共享线程时，可以为它配置独立的 home：
+
+```toml
+[projects.agent.options]
+codex_home = "/Users/you/.codex-cc-connect"
+```
+
+- 选项放在 `[projects.agent.options]` 下。`[projects.platforms.options]` 下的选项只属于具体平台，不会传给 agent。
+- 使用已存在的绝对路径。`codex_home` 不展开 `~`，`~/.codex-cc-connect` 会原样传给 CLI，CLI 也不会创建目录。cc-connect 只在写 provider 配置时创建目录，订阅登录不会走到这一步。
+- 从默认 Codex home 复制 `auth.json` 和 `config.toml`，以复用登录和配置。cc-connect 只为 provider API key 写 `auth.json`，订阅登录不会生成 `config.toml`。
+- 取舍：独立 home 中的会话不再出现在 Codex 桌面应用，桌面应用中的会话也无法被这个项目恢复；两个客户端不再共享线程。
+
+在第一条消息之前创建目录并复制登录文件：
+
+```sh
+mkdir -p ~/.codex-cc-connect
+cp ~/.codex/auth.json ~/.codex/config.toml ~/.codex-cc-connect/
+```
+
+然后在 `[projects.agent.options]` 中填写绝对路径，例如 `/Users/you/.codex-cc-connect`。如果多个项目要共用一个独立 home，也可以改用启动 cc-connect 的进程环境中的 `CODEX_HOME`；显式配置的 `codex_home` 优先于环境变量。
+
 ### Cursor Agent 模式
 
 | 模式 | 配置值 | 行为 |
@@ -119,6 +181,12 @@ cmd = ["/path with spaces/codex", "--profile", "work"]
 | 强制执行 | `force` / `yolo` | 自动批准所有 |
 | 规划模式 | `plan` | 只读分析 |
 | 问答模式 | `ask` | 问答风格，只读 |
+
+Cursor 项目可在 `[projects.agent.options]` 中设置可选的 `instructions_file`，
+将 UTF-8 文件附到每轮请求之前，包括续接会话。每轮都会重新读取，修改后无需重启 Agent；
+文件不可读时该轮明确失败。未设置时保持原有请求行为。
+
+`/memory` 读写项目根目录的 `AGENTS.md`，Cursor CLI 每次会话都会加载这个文件。`/cron setup` 写入的也是它。如果设置了 `instructions_file`，应指向同一个 `AGENTS.md`；两者路径不同时，`/memory` 仍写入项目根目录的 `AGENTS.md`。Cursor 没有用户级记忆文件，因此不支持 `/memory global`。
 
 ### Gemini CLI 模式
 
@@ -192,7 +260,7 @@ name = "minimax"
 api_key = "your-minimax-api-key"
 # 中国区账号可使用 https://api.minimaxi.com/v1
 base_url = "https://api.minimax.io/v1"
-model = "MiniMax-M2.7"
+model = "MiniMax-M3.1-Flash"
 
 # Bedrock、Vertex 等
 [[projects.agent.providers]]
@@ -930,6 +998,8 @@ type = "claudecode"
 
 内嵌在二进制中的全功能管理界面，支持项目管理、会话管理、定时任务编辑、全局设置、聊天界面、多语言等。
 
+在管理后台从 CC-Switch 导入 Provider 时，如果选中的名称对应多个源 Provider，整个导入请求会在添加任何 Provider 前被拒绝。取消选择有歧义的名称后，可以继续导入其余名称唯一的 Provider。
+
 ### 快速启用（聊天命令）
 
 最简单的方式，在聊天中发送：
@@ -1152,43 +1222,20 @@ display_name = "Oh My Pi ACP"
 
 请先单独安装并完成 Oh My Pi 的认证，使用提供 `omp acp` 子命令的版本，并确保 cc-connect 启动时的 `PATH` 中可以找到 `omp`。
 
-### 个人微信群聊 — 如何获取正确的 `chat_id`(issue #805)
+### 个人微信群聊不可行（issue #805 相关说明更正）
 
-个人微信（`weixin` 平台）支持群聊。要把机器人绑定到某个群，需要把
-`[[projects.platforms.options]]` 里的 `chat_id` 设置为**群聊 ID**，
-而不是个人用户 ID。群聊 ID 一定以 `@chatroom` 结尾，例如：
+个人微信（`weixin` / ilink）机器人**不是普通微信好友**，无法通过群
+「添加成员」搜索并拉入群聊，也没有「邀请机器人入群」API。因此
+**群聊在本通道上不可行**；请勿再按 `chat_id=…@chatroom` 或「把二维码
+发到群里当普通好友拉群」的方式期望跑通群聊。
 
-```toml
-[[projects.platforms]]
-type = "weixin"
+**推荐：**
 
-[projects.platforms.options]
-token = "ilink_bot_bearer_token"
-chat_id = "your_group_chat_id@chatroom"   # 群聊 ID 以 @chatroom 结尾
-```
+- 需要使用的人各自扫码 / 打开机器人链接，在**私聊**中使用。
+- 若必须群内 @ 机器人协作，改用飞书、钉钉、企业微信等支持群机器人
+  的平台（可与 `weixin` 同时挂在同一项目下）。
 
-**获取群聊 ID 的方法：**
-
-1. 启动 cc-connect，并让机器人加入目标群。
-2. 让群里任意已知允许的用户在群里发一条消息。
-3. 查看 cc-connect 日志，消息到达时会打印带 `@chatroom` 后缀的
-   `chat_id`。把那个值原样填到 `chat_id` 即可。
-
-把 `chat_id` 留空（或不写这个键）就表示响应机器人所在的所有聊天。
-填具体值则只响应那个群/个人。
-
-常见坑：
-
-- **「怎么把机器人加进群？」** 个人微信机器人没有"邀请机器人入群"
-  的 API；只能由已经扫码绑定 ilink 的微信号，在群里发起"添加"或把
-  机器人的二维码发到群里、让群里的人扫码添加。和把普通好友拉进群
-  一样。
-- **群里发消息机器人不响应** — 检查是否把 `chat_id` 绑到了别的用户/
-  群，或 `allow_from` 限制了别的用户，把当前用户也加入。
-- **私聊能回、群聊不回（或反之）** — 复制一份 `[[projects.platforms]]`
-  块，一份 `chat_id` 填群 ID、另一份留空，就能同时覆盖私聊和群聊。
-
-更多关于 `weixin` 平台的内容见 [docs/weixin.md](./weixin.md)。
+更多限制说明见 [docs/weixin.md](./weixin.md)。
 
 ### Telegram 代理 / 出站限制 (issue #245)
 
