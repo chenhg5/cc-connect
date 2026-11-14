@@ -5072,12 +5072,76 @@ func (e *Engine) runUnsolicitedReader(ctx context.Context, cancel context.Cancel
 	defer close(done)
 	defer cancel()
 
-	flushHandedOff := false
+	// Flushed chunks are delivered by ONE sender goroutine fed from flushCh;
+	// it closes flushDone exactly once (sync.Once) after the queue drains.
+	// A single closer keeps flushPartial multi-call safe: every flush must be
+	// delivered in order and close(flushDone) must run exactly once — a second
+	// close would panic the process. The previous design relied on the
+	// implicit convention that flushPartial is only called from an exit path.
+	type flushItem struct {
+		chunks   []string
+		p        Platform
+		replyCtx any
+	}
+	flushCh := make(chan flushItem, 4)
+	senderStarted := false
+	var flushDoneOnce sync.Once
+	closeFlushDone := func() { flushDoneOnce.Do(func() { close(flushDone) }) }
 	defer func() {
-		if !flushHandedOff {
-			close(flushDone)
+		close(flushCh) // sender drains what is queued, then signals completion
+		if !senderStarted {
+			closeFlushDone()
 		}
 	}()
+
+	// deliverChunks hands every platform message this reader emits to the
+	// single sender goroutine, keeping strict FIFO order (flushed partial text
+	// must not be overtaken by the error notice that follows it, nor by later
+	// results) and letting close(flushDone) run exactly once after the queue
+	// drains at exit. stopUnsolicitedReader waits for flushDone within its
+	// bounded timeout, which keeps flushed text ahead of the next foreground
+	// turn's reply while a slow platform call can never extend that wait
+	// (some callers hold interactiveMu) beyond the bound.
+	deliverChunks := func(p Platform, replyCtx any, chunks []string) bool {
+		if p == nil || len(chunks) == 0 {
+			return true
+		}
+		if !senderStarted {
+			senderStarted = true
+			go func() {
+				defer closeFlushDone()
+				for item := range flushCh {
+					for _, chunk := range item.chunks {
+						e.send(item.p, item.replyCtx, chunk)
+					}
+				}
+			}()
+		}
+		// Deliver when there is room; only when the queue is full (a stalled
+		// platform send has stopped the sender) does the enqueue wait, and
+		// that wait is interruptible so a full queue cannot pin the reader
+		// goroutine outside its select — with an unconditional send, the
+		// reader and the deferred close(flushCh) would be stuck until the
+		// stalled send returns. A chunk dropped during cancellation is the
+		// trade-off for keeping the reader cancelable.
+		item := flushItem{chunks: chunks, p: p, replyCtx: replyCtx}
+		select {
+		case flushCh <- item:
+			return true
+		default:
+			select {
+			case flushCh <- item:
+				return true
+			case <-ctx.Done():
+				// Backpressure plus cancellation: the chunk is dropped.
+				// Make that visible — the caller's log line must not claim
+				// a flush that never reached the platform.
+				slog.Warn("unsolicited reader: dropping queued chunks on cancellation",
+					"chunks", len(item.chunks))
+				return false
+			}
+		}
+	}
 
 	events := agentSession.Events()
 
@@ -5114,26 +5178,11 @@ func (e *Engine) runUnsolicitedReader(ctx context.Context, cancel context.Cancel
 		p := state.platform
 		replyCtx := state.replyCtx
 		state.mu.Unlock()
-		if p != nil {
-			// Send off the reader goroutine and signal flushDone when finished.
-			// stopUnsolicitedReader waits for flushDone within its bounded
-			// timeout, which keeps the flushed text ahead of the next
-			// foreground turn's reply in the common case while a slow
-			// platform call can never extend that wait (some callers hold
-			// interactiveMu) beyond the bound.
-			chunks := SplitMessageCodeFenceAware(partial, maxPlatformMessageLen)
-			flushHandedOff = true
-			go func() {
-				defer close(flushDone)
-				for _, chunk := range chunks {
-					e.send(p, replyCtx, chunk)
-				}
-			}()
-		}
+		queued := deliverChunks(p, replyCtx, SplitMessageCodeFenceAware(partial, maxPlatformMessageLen))
 		session.AddHistory("assistant", partial)
 		sessions.Save()
 		slog.Info("unsolicited reader: flushed partial turn",
-			"session", sessionKey, "reason", reason, "response_len", len(partial))
+			"session", sessionKey, "reason", reason, "response_len", len(partial), "queued", queued)
 	}
 
 	for {
@@ -5232,9 +5281,7 @@ func (e *Engine) runUnsolicitedReader(ctx context.Context, cancel context.Cancel
 				}
 
 				if fullResponse != "" {
-					for _, chunk := range SplitMessageCodeFenceAware(fullResponse, maxPlatformMessageLen) {
-						e.send(p, replyCtx, chunk)
-					}
+					deliverChunks(p, replyCtx, SplitMessageCodeFenceAware(fullResponse, maxPlatformMessageLen))
 				}
 
 				// Safety note: concurrent writes to session.History by the
@@ -5245,14 +5292,15 @@ func (e *Engine) runUnsolicitedReader(ctx context.Context, cancel context.Cancel
 				// exits — so a foreground AddHistory is always ordered after
 				// any unsolicited AddHistory.
 				//
-				// Platform message ordering is guaranteed here because the
-				// sends above are synchronous. Partial text flushed on exit
-				// (flushPartial) is sent from a separate goroutine;
-				// stopUnsolicitedReader also waits for it via flushDone, but
-				// only within unsolicitedReaderStopTimeout. If that bound
-				// fires, flushed chunks may arrive after or interleave with
-				// the next foreground turn's reply (delivery is still
-				// guaranteed; only ordering degrades).
+				// Platform message ordering is guaranteed by the single FIFO
+				// queue every message this reader emits goes through (see
+				// deliverChunks). stopUnsolicitedReader waits on flushDone —
+				// closed only after the queue drains — within
+				// unsolicitedReaderStopTimeout. If that bound fires, chunks
+				// may arrive after or interleave with the next foreground
+				// turn's reply (ordering degrades; delivery is guaranteed
+				// except for chunks dropped during an in-flight cancellation,
+				// see deliverChunks).
 				session.AddHistory("assistant", fullResponse)
 				sessions.Save()
 
@@ -5324,21 +5372,14 @@ func (e *Engine) runUnsolicitedReader(ctx context.Context, cancel context.Cancel
 					if toolName == "" {
 						toolName = "(unknown)"
 					}
-					e.send(p, replyCtx, fmt.Sprintf(e.i18n.T(MsgBackgroundAutoDenied), toolName))
+					deliverChunks(p, replyCtx, []string{fmt.Sprintf(e.i18n.T(MsgBackgroundAutoDenied), toolName)})
 				}
 
 			case EventError:
 				// A turn can fail while the persistent session and its background
 				// tasks keep running. Deliver buffered text before the error and
 				// keep consuming the live stream instead of abandoning its events.
-				if partial := strings.Join(textParts, ""); strings.TrimSpace(partial) != "" {
-					for _, chunk := range SplitMessageCodeFenceAware(partial, maxPlatformMessageLen) {
-						e.send(p, replyCtx, chunk)
-					}
-					session.AddHistory("assistant", partial)
-					sessions.Save()
-				}
-				textParts = nil
+				flushPartial("agent error")
 				toolsUsed = nil
 				turnActive = false
 				if workspaceDir != "" && e.workspacePool != nil {
@@ -5348,7 +5389,7 @@ func (e *Engine) runUnsolicitedReader(ctx context.Context, cancel context.Cancel
 				}
 				if event.Error != nil {
 					slog.Error("unsolicited agent error", "error", event.Error, "session", sessionKey)
-					e.send(p, replyCtx, fmt.Sprintf(e.i18n.T(MsgError), event.Error))
+					deliverChunks(p, replyCtx, []string{fmt.Sprintf(e.i18n.T(MsgError), event.Error)})
 				}
 				state.mu.Lock()
 				alive := agentSession.Alive() && !state.stopped
