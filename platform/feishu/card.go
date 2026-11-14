@@ -64,6 +64,10 @@ func (p *interactivePlatform) RefreshCard(ctx context.Context, sessionKey string
 		return fmt.Errorf("%s: no tracked card messageID for session %q", p.tag(), sessionKey)
 	}
 
+	return p.refreshQuestionCard(ctx, msgID, sessionKey, card)
+}
+
+func (p *Platform) refreshQuestionCard(ctx context.Context, msgID, sessionKey string, card *core.Card) error {
 	cardJSON := renderCard(card, sessionKey)
 	req := larkim.NewPatchMessageReqBuilder().
 		MessageId(msgID).
