@@ -327,6 +327,10 @@ func TestAppServerSession_ReadLoopHandlesLargeResponseLine(t *testing.T) {
 	s.wg.Add(1)
 	go s.readLoop(&input)
 
+	// readLoop parses the 11 MiB line twice (probe envelope + full
+	// response). Under -race on a loaded CI runner that takes well over
+	// the previous 2s budget; give it generous headroom so the test stays
+	// green while still catching genuine hangs.
 	select {
 	case resp := <-ch:
 		if resp.Error != nil {
