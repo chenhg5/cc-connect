@@ -90,7 +90,8 @@ func TestAvailableModels_UsesAgyModels(t *testing.T) {
 }
 
 func TestReasoningEffort(t *testing.T) {
-	a := &Agent{}
+	script := writeFakeAgy(t, "  --effort <low|medium|high>  Reasoning effort\n", "")
+	a := &Agent{cmd: script, activeIdx: -1}
 	a.SetReasoningEffort("HIGH")
 	if got := a.GetReasoningEffort(); got != "high" {
 		t.Fatalf("effort = %q, want high", got)
