@@ -20,6 +20,7 @@ Beta since v1.5.0 stable — 16 merged PRs focused on Feishu/Weixin reliability,
 ## Unreleased
 
 ### Fixed
+- **Feishu**: Report WebSocket disconnect and reconnect state to the engine, including shared connections, so health checks and recovery reflect the connection (#693).
 - **Pi**: Merge custom providers with the built-in model catalog, resolve ambiguous aliases using the default provider, and filter duplicate or empty model entries. Reasoning levels follow the selected model, and switching models clears unsupported thinking overrides. Context windows now use catalog values for catalog-only models, with custom definitions taking precedence (#1872).
 
 ### Added

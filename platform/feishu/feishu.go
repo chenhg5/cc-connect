@@ -187,13 +187,16 @@ type Platform struct {
 	recalledMu             sync.Mutex
 	recalledMsgIDs         map[string]time.Time // message_id -> recall time, short TTL race guard
 	// Webhook mode fields (for Lark international version)
-	server       *http.Server
-	port         string
-	callbackPath string
-	encryptKey   string
-	eventHandler *dispatcher.EventDispatcher
-	sharedGroup  *sharedWSGroup // non-nil when sharing WebSocket with other platforms
-	isWSPrimary  bool           // true if this platform owns the shared WebSocket connection
+	server            *http.Server
+	port              string
+	callbackPath      string
+	encryptKey        string
+	eventHandler      *dispatcher.EventDispatcher
+	sharedGroup       *sharedWSGroup // non-nil when sharing WebSocket with other platforms
+	isWSPrimary       bool           // true if this platform owns the shared WebSocket connection
+	lifecycleHandler  core.PlatformLifecycleHandler
+	lifecycleReady    bool
+	lifecycleStopping bool
 	// cardActionMessageIDs tracks the most recent card-action messageID per
 	// session key, enabling async card refreshes via the Patch API.
 	cardActionMsgMu  sync.Mutex
@@ -672,9 +675,45 @@ func (p *Platform) KeepPreviewOnFinish() bool {
 	return p.useInteractiveCard
 }
 
+func (p *Platform) SetLifecycleHandler(h core.PlatformLifecycleHandler) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.lifecycleHandler = h
+}
+
+func (p *Platform) notifyUnavailable(err error) {
+	p.mu.Lock()
+	if p.lifecycleStopping || !p.lifecycleReady {
+		p.mu.Unlock()
+		return
+	}
+	p.lifecycleReady = false
+	handler := p.lifecycleHandler
+	p.mu.Unlock()
+	if handler != nil {
+		handler.OnPlatformUnavailable(p, err)
+	}
+}
+
+func (p *Platform) notifyReady() {
+	p.mu.Lock()
+	if p.lifecycleStopping || p.lifecycleReady {
+		p.mu.Unlock()
+		return
+	}
+	p.lifecycleReady = true
+	handler := p.lifecycleHandler
+	p.mu.Unlock()
+	if handler != nil {
+		handler.OnPlatformReady(p)
+	}
+}
+
 func (p *Platform) Start(handler core.MessageHandler) error {
 	p.mu.Lock()
 	p.handler = handler
+	p.lifecycleStopping = false
+	p.lifecycleReady = false
 	p.mu.Unlock()
 
 	// In webhook mode (private/self-hosted Feishu/Lark), startup must not depend
@@ -717,6 +756,7 @@ func (p *Platform) Start(handler core.MessageHandler) error {
 	// Secondary platforms skip connection creation — the primary's connection
 	// fans out events to all platforms in the shared group.
 	if !isPrimary {
+		group.syncLifecycle(p)
 		return nil
 	}
 
@@ -784,7 +824,12 @@ func (p *Platform) Start(handler core.MessageHandler) error {
 	}
 
 	if p.shouldUseWebhookMode() {
-		return p.startWebhookMode()
+		if err := p.startWebhookMode(); err != nil {
+			unregisterSharedWS(p)
+			p.stopGroupFilterSupervisor()
+			return err
+		}
+		return nil
 	}
 
 	return p.startWebSocketMode()
@@ -800,6 +845,30 @@ func (p *Platform) startWebSocketMode() error {
 		larkws.WithEventHandler(p.eventHandler),
 		larkws.WithLogLevel(larkcore.LogLevelInfo),
 		larkws.WithLogger(&sanitizingLogger{inner: larkcore.NewEventLogger()}),
+		// Use SDK-provided lifecycle callbacks to track connection state.
+		// These fire on actual WebSocket state transitions, solving the
+		// silent-disconnect problem where the SDK reconnects internally
+		// but the engine has no visibility into the state change.
+		larkws.WithOnReady(func() {
+			slog.Info(p.tag() + ": websocket connected, platform ready")
+			p.sharedGroup.setLifecycle(true, nil)
+		}),
+		larkws.WithOnDisconnected(func() {
+			slog.Warn(p.tag() + ": websocket disconnected")
+			p.sharedGroup.setLifecycle(false, fmt.Errorf("feishu: websocket disconnected"))
+		}),
+		larkws.WithOnReconnecting(func() {
+			slog.Warn(p.tag() + ": websocket reconnecting")
+			p.sharedGroup.setLifecycle(false, fmt.Errorf("feishu: websocket reconnecting"))
+		}),
+		larkws.WithOnReconnected(func() {
+			slog.Info(p.tag() + ": websocket reconnected, platform ready")
+			p.sharedGroup.setLifecycle(true, nil)
+		}),
+		larkws.WithOnError(func(err error) {
+			slog.Error(p.tag()+": websocket error", "error", err)
+			p.sharedGroup.setLifecycle(false, err)
+		}),
 	}
 	if p.domain != lark.FeishuBaseUrl {
 		wsOpts = append(wsOpts, larkws.WithDomain(p.domain))
@@ -813,7 +882,8 @@ func (p *Platform) startWebSocketMode() error {
 
 	go func() {
 		if err := p.wsClient.Start(ctx); err != nil && !errors.Is(err, context.Canceled) {
-			slog.Error(p.tag()+": websocket error", "error", err)
+			slog.Error(p.tag()+": websocket fatal error, platform unavailable", "error", err)
+			p.sharedGroup.setLifecycle(false, err)
 		}
 	}()
 
@@ -835,13 +905,18 @@ func (p *Platform) startWebhookMode() error {
 	p.cancel = cancel
 	p.mu.Unlock()
 
+	listener, err := net.Listen("tcp", p.server.Addr)
+	if err != nil {
+		return fmt.Errorf("feishu: webhook listen: %w", err)
+	}
+	p.sharedGroup.setLifecycle(true, nil)
 	go func() {
 		slog.Info(p.tag()+": webhook server listening", "port", p.port, "path", p.callbackPath)
-		if err := p.server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+		if err := p.server.Serve(listener); err != nil && err != http.ErrServerClosed {
 			slog.Error(p.tag()+": webhook server error", "error", err)
+			p.sharedGroup.setLifecycle(false, err)
 		}
 	}()
-
 	return nil
 }
 
@@ -5843,6 +5918,12 @@ func (p *Platform) updateCardEntity(ctx context.Context, h *feishuPreviewHandle,
 }
 
 func (p *Platform) Stop() error {
+	p.mu.Lock()
+	p.lifecycleStopping = true
+	p.mu.Unlock()
+	if p.isWSPrimary && p.sharedGroup != nil {
+		p.sharedGroup.stopLifecycle(fmt.Errorf("feishu: primary connection stopped"))
+	}
 	// Issue #1618: stop the background supervisor that retries the
 	// bot-info API when startup discovery fails. Without this the
 	// goroutine could outlive the platform and leak into the next
