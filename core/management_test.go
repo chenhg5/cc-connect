@@ -2206,12 +2206,15 @@ func TestMgmt_ProjectPatch_AdminFrom(t *testing.T) {
 
 func TestMgmt_ProjectPatch_Language(t *testing.T) {
 	_, ts, e := testManagementServer(t, "tok")
-	for _, lang := range []string{"zh", "ja", "es", "zh-TW", "en"} {
+	for _, lang := range []string{"zh", "ja", "es", "zh-TW", "ru", "en"} {
 		r := mgmtPatch(t, ts.URL+"/api/v1/projects/test-project", "tok", map[string]any{
 			"language": lang,
 		})
 		if !r.OK {
 			t.Fatalf("patch language=%s failed: %s", lang, r.Error)
+		}
+		if got := e.i18n.CurrentLang(); got != Language(lang) {
+			t.Fatalf("patch language=%s left runtime at %s", lang, got)
 		}
 	}
 	if e.i18n.CurrentLang() != LangEnglish {
