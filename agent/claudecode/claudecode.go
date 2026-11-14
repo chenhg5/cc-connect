@@ -1111,11 +1111,51 @@ func claudeConfigHomeDir() string {
 	return filepath.Join(home, ".claude")
 }
 
+// buildSpawnEnv assembles the environment the spawned CLI will see: the
+// supervisor environment (minus CLAUDECODE), overlaid with the per-project
+// extraEnv (which wins on conflicts), cc-connect's hook hint, the chdir hint
+// under isolation, and the spawn allowlist filter. It is computed before the
+// --resume guard so the guard resolves CLAUDE_CONFIG_DIR with exactly the
+// precedence the spawned process uses (per-project env wins — see
+// core.MergeEnv), not the supervisor's.
+func buildSpawnEnv(workDir string, extraEnv []string, spawnOpts core.SpawnOptions) []string {
+	env := filterEnv(os.Environ(), "CLAUDECODE")
+	if len(extraEnv) > 0 {
+		env = core.MergeEnv(env, extraEnv)
+	}
+	env = core.MergeEnv(env, []string{"CC_CONNECT_PERMISSION_HOOK_SKIP=1"})
+	if spawnOpts.IsolationMode() && workDir != "" {
+		env = core.MergeEnv(env, []string{core.RunAsChdirEnv + "=" + workDir})
+	}
+	spawnOpts.WorkDir = workDir
+	return core.FilterEnvForSpawn(env, spawnOpts)
+}
+
 // configHomeFromEnv resolves the Claude Code config home from KEY=VALUE env
 // entries, honoring CLAUDE_CONFIG_DIR so that agents configured with a
 // per-project config home ([projects.agent.options.env]) resolve session
 // directories under their own projects tree instead of ~/.claude. Falls back
 // to ~/.claude when the variable is absent or empty.
+// transcriptExists reports whether the JSONL transcript for sessionID is
+// still present under the project's sessions tree. Claude Code prunes old
+// transcripts after a retention window; resuming a pruned conversation fails
+// with "No conversation found with session ID" and the CLI exits.
+func transcriptExists(configHome, workDir, sessionID string) bool {
+	if sessionID == "" || configHome == "" {
+		return true // nothing to verify — let the CLI decide
+	}
+	abs, err := filepath.Abs(workDir)
+	if err != nil {
+		return true
+	}
+	projectDir := findProjectDir(configHome, abs)
+	if projectDir == "" {
+		return true
+	}
+	_, err = os.Stat(filepath.Join(projectDir, sessionID+".jsonl"))
+	return err == nil
+}
+
 func configHomeFromEnv(envEntries []string) string {
 	for _, kv := range envEntries {
 		if v, ok := strings.CutPrefix(kv, "CLAUDE_CONFIG_DIR="); ok {

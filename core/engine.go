@@ -602,6 +602,14 @@ type interactiveState struct {
 	// the next turn (e.g. after an abnormal exit). Defaults to true (safe);
 	// cleared after EventResult or a turn error on a still-live session.
 	eventsNeedResync bool
+	// resumeFailed is set when a turn died because the stored --resume target
+	// conversation no longer exists ("No conversation found with session ID");
+	// the caller retries the turn once in a fresh session.
+	resumeFailed bool
+	// resumeRetryConsumed is set on the state created for that retry: a
+	// second missing-conversation error must reach the user instead of being
+	// silently swallowed by the recovery path again.
+	resumeRetryConsumed bool
 
 	// lastCompletedUserMessageTimeMs is the max platform user-message create time
 	// (ms) for which an agent turn has finished with EventResult.
@@ -4124,31 +4132,70 @@ func (e *Engine) processInteractiveMessageWith(p Platform, msg *Message, session
 
 	promptContent := e.buildSenderPrompt(msg.Content, msg.UserID, msg.UserName, msg.Platform, msg.SessionKey, msg.ChannelKey)
 
-	sendStart := time.Now()
-	state.mu.Lock()
-	state.currentMessageID = msg.MessageID
-	state.fromVoice = msg.FromVoice
-	state.sideText = ""
-	as := state.agentSession // capture under lock to avoid race with cleanup
-	state.mu.Unlock()
+	for attempt := 0; ; attempt++ {
+		sendStart := time.Now()
+		state.mu.Lock()
+		state.currentMessageID = msg.MessageID
+		state.fromVoice = msg.FromVoice
+		state.sideText = ""
+		as := state.agentSession // capture under lock to avoid race with cleanup
+		state.mu.Unlock()
 
-	// Run Send concurrently with processInteractiveEvents. Some agents block inside
-	// Send until the prompt turn finishes (e.g. ACP session/prompt); they may emit
-	// EventPermissionRequest while blocked — the event loop must run in parallel.
-	sendDone := make(chan error, 1)
-	go func() {
-		if as == nil {
-			sendDone <- fmt.Errorf("agent session became nil")
+		// Run Send concurrently with processInteractiveEvents. Some agents block inside
+		// Send until the prompt turn finishes (e.g. ACP session/prompt); they may emit
+		// EventPermissionRequest while blocked — the event loop must run in parallel.
+		sendDone := make(chan error, 1)
+		go func() {
+			if as == nil {
+				sendDone <- fmt.Errorf("agent session became nil")
+				return
+			}
+			sendDone <- as.Send(promptContent, msg.MessageID, msg.Images, msg.Files)
+		}()
+
+		e.processInteractiveEvents(state, session, sessions, interactiveKey, msg.MessageID, turnStart, stopTyping, sendDone, msg.ReplyCtx, lockGen)
+		if elapsed := time.Since(sendStart); elapsed >= slowAgentSend {
+			slog.Warn("slow agent send", "elapsed", elapsed, "session", msg.SessionKey, "content_len", len(msg.Content))
+		}
+		stopTyping = nil // ownership transferred; prevent defer from double-stopping
+
+		// Auto-recover from a dead --resume: the stored conversation was
+		// pruned and the turn died at startup. Drop the stale reference and
+		// retry the prompt once in a fresh conversation; a second failure is
+		// surfaced to the user as usual.
+		state.mu.Lock()
+		resumeFailed := state.resumeFailed
+		state.mu.Unlock()
+		if !resumeFailed || attempt > 0 {
+			break
+		}
+		slog.Warn("stored agent session conversation is gone; retrying the turn in a fresh session",
+			"session_key", interactiveKey, "agent_session", session.GetAgentSessionID())
+		session.SetAgentSessionID("", e.agent.Name())
+		sessions.Save()
+		// Carry queued messages over to the fresh session instead of letting
+		// cleanup drop them with a "session reset" error — the recovery is
+		// meant to be transparent to the user.
+		state.mu.Lock()
+		queued := state.pendingMessages
+		state.pendingMessages = nil
+		state.mu.Unlock()
+		// Short teardown grace: the CLI already exited (the resume error
+		// killed it), so a hung process must not stall the retry.
+		e.cleanupInteractiveStateGrace(interactiveKey, retryCloseGrace, state)
+		state = e.getOrCreateInteractiveStateWith(interactiveKey, p, msg.ReplyCtx, session, sessions, agentOverride, ccSessionKey)
+		if state == nil || state.agentSession == nil {
+			if len(queued) > 0 {
+				e.notifyDroppedQueuedMessages(&interactiveState{pendingMessages: queued}, fmt.Errorf("session reset"))
+			}
+			e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgError), "failed to restart agent session"))
 			return
 		}
-		sendDone <- as.Send(promptContent, msg.MessageID, msg.Images, msg.Files)
-	}()
-
-	e.processInteractiveEvents(state, session, sessions, interactiveKey, msg.MessageID, turnStart, stopTyping, sendDone, msg.ReplyCtx, lockGen)
-	if elapsed := time.Since(sendStart); elapsed >= slowAgentSend {
-		slog.Warn("slow agent send", "elapsed", elapsed, "session", msg.SessionKey, "content_len", len(msg.Content))
+		state.mu.Lock()
+		state.pendingMessages = append(queued, state.pendingMessages...)
+		state.resumeRetryConsumed = true
+		state.mu.Unlock()
 	}
-	stopTyping = nil // ownership transferred; prevent defer from double-stopping
 
 	// Start unsolicited reader and arm the idle close timer BEFORE draining
 	// queued messages. drainPendingMessages releases the session lock, and
@@ -4566,6 +4613,17 @@ func (e *Engine) getOrCreateInteractiveStateWith(sessionKey string, p Platform, 
 // to avoid race conditions where concurrent requests see an empty map while the
 // agent session is still being shut down (which can take up to 130s for Stop hooks).
 func (e *Engine) cleanupInteractiveState(sessionKey string, expected ...*interactiveState) {
+	e.cleanupInteractiveStateGrace(sessionKey, closeTimeout, expected...)
+}
+
+// retryCloseGrace bounds the teardown on the missing-conversation recovery
+// path: the CLI has already exited (the resume error killed it), so a short
+// grace is enough and a hung process cannot stall the retry for minutes.
+const retryCloseGrace = 10 * time.Second
+
+// cleanupInteractiveStateGrace is cleanupInteractiveState with a caller-chosen
+// teardown budget (see closeAgentSessionBounded).
+func (e *Engine) cleanupInteractiveStateGrace(sessionKey string, grace time.Duration, expected ...*interactiveState) {
 	e.interactiveMu.Lock()
 	state, ok := e.interactiveStates[sessionKey]
 	if len(expected) > 0 && expected[0] != nil && state != expected[0] {
@@ -4617,7 +4675,7 @@ func (e *Engine) cleanupInteractiveState(sessionKey string, expected ...*interac
 	// an empty map and reports "No execution in progress" while
 	// the agent session Close() is still blocking (up to 130s).
 	if agentSession != nil {
-		e.closeAgentSessionWithTimeout(sessionKey, agentSession, closePlatform, closeReplyCtx)
+		e.closeAgentSessionBounded(sessionKey, agentSession, closePlatform, closeReplyCtx, grace)
 	}
 
 	// Now delete the state from the map after the session is closed.
@@ -4853,7 +4911,7 @@ func (e *Engine) closeAgentSessionAsync(sessionKey string, agentSession AgentSes
 	finish := e.beginSessionClose(sessionKey)
 	go func() {
 		defer finish()
-		e.closeAgentSession(sessionKey, agentSession, platform, replyCtx)
+		e.closeAgentSession(sessionKey, agentSession, platform, replyCtx, closeTimeout)
 	}()
 }
 
@@ -4865,17 +4923,24 @@ func (e *Engine) closeAgentSessionAsync(sessionKey string, agentSession AgentSes
 // at all. In both cases the process may still be running with the session's
 // original credentials, so silence here is worse than a noisy warning.
 func (e *Engine) closeAgentSessionWithTimeout(sessionKey string, agentSession AgentSession, platform Platform, replyCtx any) {
+	e.closeAgentSessionBounded(sessionKey, agentSession, platform, replyCtx, closeTimeout)
+}
+
+// closeAgentSessionBounded is closeAgentSessionWithTimeout with a caller-chosen
+// teardown budget. Recovery paths that expect the process to be dead already
+// pass a short grace so a hung CLI cannot stall the retry for minutes.
+func (e *Engine) closeAgentSessionBounded(sessionKey string, agentSession AgentSession, platform Platform, replyCtx any, grace time.Duration) {
 	if agentSession == nil {
 		return
 	}
 	finish := e.beginSessionClose(sessionKey)
 	defer finish()
-	e.closeAgentSession(sessionKey, agentSession, platform, replyCtx)
+	e.closeAgentSession(sessionKey, agentSession, platform, replyCtx, grace)
 }
 
 // closeAgentSession performs the teardown itself. Callers must have registered
 // the in-flight close (beginSessionClose) first.
-func (e *Engine) closeAgentSession(sessionKey string, agentSession AgentSession, platform Platform, replyCtx any) {
+func (e *Engine) closeAgentSession(sessionKey string, agentSession AgentSession, platform Platform, replyCtx any, closeGrace time.Duration) {
 	if agentSession == nil {
 		return
 	}
@@ -4904,12 +4969,12 @@ func (e *Engine) closeAgentSession(sessionKey string, agentSession AgentSession,
 		if elapsed := time.Since(closeStart); elapsed >= slowAgentClose {
 			slog.Warn("slow agent session close", "elapsed", elapsed, "session", sessionKey)
 		}
-	case <-time.After(closeTimeout):
+	case <-time.After(closeGrace):
 		slog.Error("agent session close timed out, abandoning",
-			"timeout", closeTimeout, "session", sessionKey)
+			"timeout", closeGrace, "session", sessionKey)
 		e.markUnsafeResume(sessionKey)
 		e.notifySessionCloseFailure(sessionKey, platform, replyCtx,
-			fmt.Errorf("did not respond within %s", closeTimeout))
+			fmt.Errorf("did not respond within %s", closeGrace))
 	}
 }
 
@@ -5406,6 +5471,13 @@ type agentErrorHandler struct {
 
 var agentErrorHandlers = []agentErrorHandler{
 	{"Session not found", MsgSessionNotFound},
+}
+
+// isMissingConversationError reports whether err means the --resume target
+// conversation no longer exists on disk (Claude Code prunes old session files
+// after a retention window), so the only recovery is a fresh conversation.
+func isMissingConversationError(err error) bool {
+	return err != nil && strings.Contains(err.Error(), "No conversation found with session ID")
 }
 
 func (e *Engine) processInteractiveEvents(state *interactiveState, session *Session, sessions *SessionManager, sessionKey string, msgID string, turnStart time.Time, stopTypingFn func(), sendDone <-chan error, replyCtx any, lockGen uint64) {
@@ -6801,6 +6873,23 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 					session.SetAgentSessionID(currentID, e.agent.Name())
 					sessions.Save()
 				}
+			}
+			// A stale --resume target (conversation pruned by Claude Code after
+			// its retention window) fails with "No conversation found with
+			// session ID" and the process exits. Flag it so the caller retries
+			// the turn once in a fresh conversation instead of surfacing the
+			// error to the user.
+			if isMissingConversationError(event.Error) {
+				state.mu.Lock()
+				firstFailure := !state.resumeRetryConsumed
+				state.resumeFailed = true
+				state.mu.Unlock()
+				if firstFailure {
+					slog.Warn("agent conversation missing; turn will be retried in a fresh session",
+						"session_key", sessionKey, "error", event.Error)
+					return
+				}
+				// The retry already ran out: surface the error to the user.
 			}
 			state.mu.Lock()
 			// A per-turn error does not invalidate a live session's event
