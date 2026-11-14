@@ -3042,6 +3042,9 @@ func (e *Engine) handleMessage(p Platform, msg *Message) {
 	// Resolve aliases on user text BEFORE merging ExtraContent, so reply
 	// quotes and platform context survive alias resolution (PR #420 fix).
 	content = e.resolveAlias(content)
+	if bareCommand := normalizeBareCommand(content); bareCommand != "" {
+		content = bareCommand
+	}
 	if msg.ExtraContent != "" {
 		if content == "" {
 			msg.Content = msg.ExtraContent
@@ -7054,6 +7057,7 @@ var builtinCommands = []struct {
 }{
 	{[]string{"new"}, "new"},
 	{[]string{"list", "sessions"}, "list"},
+	{[]string{"agents"}, "agents"},
 	{[]string{"switch"}, "switch"},
 	{[]string{"name", "rename"}, "name"},
 	{[]string{"current"}, "current"},
@@ -7255,6 +7259,8 @@ func (e *Engine) handleCommand(p Platform, msg *Message, raw string) bool {
 		e.cmdNew(p, msg, args)
 	case "list":
 		e.cmdList(p, msg, args)
+	case "agents":
+		e.cmdAgents(p, msg)
 	case "switch":
 		e.cmdSwitch(p, msg, args)
 	case "name":
@@ -7383,6 +7389,22 @@ func (e *Engine) handleCommand(p Platform, msg *Message, raw string) bool {
 		return false
 	}
 	return true
+}
+
+// normalizeBareCommand accepts the chat-friendly forms that users commonly
+// type without the slash required by the command parser. Keep this list
+// explicit so ordinary messages such as "please help me" still reach Agent.
+func normalizeBareCommand(content string) string {
+	switch strings.ToLower(strings.TrimSpace(content)) {
+	case "help":
+		return "/help"
+	case "agents":
+		return "/agents"
+	case "agents list":
+		return "/agents list"
+	default:
+		return ""
+	}
 }
 
 func (e *Engine) handleWorkspaceCommand(p Platform, msg *Message, args []string) {
@@ -7804,6 +7826,45 @@ func (e *Engine) cmdList(p Platform, msg *Message, args []string) {
 		return
 	}
 	e.replyWithCard(p, msg.ReplyCtx, card)
+}
+
+// cmdAgents lists all top-level Codex sessions across every working directory.
+// It is intentionally separate from /list, which remains project-scoped.
+func (e *Engine) cmdAgents(p Platform, msg *Message) {
+	agent, _, _, err := e.commandContext(p, msg)
+	if err != nil {
+		e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgWsResolutionError, err))
+		return
+	}
+	lister, ok := agent.(AllAgentSessionsLister)
+	if !ok {
+		e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgListError), "agent does not support all-session listing"))
+		return
+	}
+	sessions, err := lister.ListAllSessions(e.ctx)
+	if err != nil {
+		e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgListError), err))
+		return
+	}
+	if len(sessions) == 0 {
+		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgListEmpty))
+		return
+	}
+
+	var sb strings.Builder
+	sb.WriteString(fmt.Sprintf(e.i18n.T(MsgListTitle), "Codex", len(sessions)))
+	for i, session := range sessions {
+		summary := strings.Join(strings.Fields(strings.ReplaceAll(session.Summary, "\n", " ")), " ")
+		if summary == "" {
+			summary = e.i18n.T(MsgUntitled)
+		}
+		if len([]rune(summary)) > 60 {
+			summary = string([]rune(summary)[:60]) + "…"
+		}
+		sb.WriteString(fmt.Sprintf("%d. **%s**\n   ID: `%s`\n   Dir: `%s` · %d msgs · %s\n",
+			i+1, summary, session.ID, session.WorkDir, session.MessageCount, session.ModifiedAt.Format("2006-01-02 15:04")))
+	}
+	e.reply(p, msg.ReplyCtx, sb.String())
 }
 
 func (e *Engine) cmdSwitch(p Platform, msg *Message, args []string) {
@@ -10111,6 +10172,7 @@ func helpCardGroups() []helpCardGroup {
 				{command: "/new", action: "act:/new"},
 				{command: "/cancel", action: "cmd:/cancel"},
 				{command: "/list", action: "nav:/list"},
+				{command: "/agents", action: "cmd:/agents"},
 				{command: "/current", action: "nav:/current"},
 				{command: "/switch", action: "nav:/list"},
 				{command: "/search", action: "cmd:/search"},
