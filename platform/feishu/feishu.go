@@ -3627,7 +3627,7 @@ const (
 	// cronThreadLookupBudget bounds the whole wait for the thread id of a new
 	// topic root: Feishu exposes it about 0.8-1.2s after create, so one read is
 	// never enough and waiting forever would stall the cron run.
-	cronThreadLookupBudget = 2 * time.Second
+	cronThreadLookupBudget = 3 * time.Second
 	// A single read gets its own short deadline; a stuck request must not eat
 	// the whole budget and leave no room for another attempt.
 	cronThreadLookupAttemptLimit = time.Second
