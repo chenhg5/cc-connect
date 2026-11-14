@@ -1558,6 +1558,145 @@ func TestProcessInteractiveEvents_ReplyFooterPrefersSessionRuntimeState(t *testi
 	}
 }
 
+// recordingStreamingCard captures the content each Finalize call delivers.
+type recordingStreamingCard struct {
+	mu        sync.Mutex
+	finalized []string
+}
+
+func (c *recordingStreamingCard) Update(_ context.Context, _ string) error { return nil }
+func (c *recordingStreamingCard) Finalize(_ context.Context, content string) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.finalized = append(c.finalized, content)
+	return nil
+}
+func (c *recordingStreamingCard) Failed() bool { return false }
+
+type recordingStreamingCardPlatform struct {
+	stubPlatformEngine
+	card *recordingStreamingCard
+}
+
+func (p *recordingStreamingCardPlatform) CreateStreamingCard(_ context.Context, _ any) (StreamingCard, error) {
+	return p.card, nil
+}
+
+// Regression: on platforms that route the turn through a StreamingCard
+// (e.g. Slack), the reply footer must reach the finalized card. Previously the
+// footer was built and then dropped, so model/usage never showed up.
+func TestProcessInteractiveEvents_StreamingCardIncludesReplyFooter(t *testing.T) {
+	homeDir := t.TempDir()
+	t.Setenv("HOME", homeDir)
+
+	agent := &stubWorkDirAgent{workDir: homeDir}
+	card := &recordingStreamingCard{}
+	p := &recordingStreamingCardPlatform{stubPlatformEngine: stubPlatformEngine{n: "slack"}, card: card}
+	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+	e.SetReplyFooterEnabled(true)
+
+	sessionKey := "slack:user-card-footer"
+	session := e.sessions.GetOrCreateActive(sessionKey)
+	agentSession := newControllableSession("s-card-footer")
+	agentSession.model = "gpt-5.4"
+	agentSession.reasoningEffort = "xhigh"
+	agentSession.workDir = filepath.Join(homeDir, "codes", "cc-connect")
+	agentSession.contextUsage = &ContextUsage{
+		UsedTokens:     181424,
+		BaselineTokens: 12000,
+		TotalTokens:    50821769,
+		ContextWindow:  258400,
+	}
+	state := &interactiveState{
+		agentSession: agentSession,
+		platform:     p,
+		replyCtx:     "ctx-card-footer",
+		agent:        agent,
+	}
+	e.interactiveStates[sessionKey] = state
+
+	agentSession.events <- Event{Type: EventResult, Content: "answer", Done: true}
+	e.processInteractiveEvents(state, session, e.sessions, sessionKey, "m-card-footer", time.Now(), nil, nil, state.replyCtx, 0)
+
+	card.mu.Lock()
+	defer card.mu.Unlock()
+	if len(card.finalized) != 1 {
+		t.Fatalf("finalized = %#v, want exactly one Finalize", card.finalized)
+	}
+	got := card.finalized[0]
+	if !strings.Contains(got, "answer") {
+		t.Fatalf("finalized card = %q, want the answer body", got)
+	}
+	if !strings.Contains(got, "gpt-5.4") {
+		t.Fatalf("finalized card = %q, want the reply footer (model) appended", got)
+	}
+	if sent := p.getSent(); len(sent) != 0 {
+		t.Fatalf("sent = %#v, want nothing sent outside the card", sent)
+	}
+}
+
+// footerAwareStreamingCard implements StreamingCardStatusFooter so the footer
+// arrives separately from the body.
+type footerAwareStreamingCard struct {
+	recordingStreamingCard
+	bodies  []string
+	footers []string
+}
+
+func (c *footerAwareStreamingCard) FinalizeWithStatusFooter(_ context.Context, content, statusFooter string) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.bodies = append(c.bodies, content)
+	c.footers = append(c.footers, statusFooter)
+	return nil
+}
+
+type footerAwareCardPlatform struct {
+	stubPlatformEngine
+	card *footerAwareStreamingCard
+}
+
+func (p *footerAwareCardPlatform) CreateStreamingCard(_ context.Context, _ any) (StreamingCard, error) {
+	return p.card, nil
+}
+
+// A card that can render the footer itself gets the body and footer separately,
+// so it can style the footer (e.g. small/dim) instead of inlining it.
+func TestProcessInteractiveEvents_StreamingCardStatusFooterRenderedSeparately(t *testing.T) {
+	homeDir := t.TempDir()
+	t.Setenv("HOME", homeDir)
+
+	agent := &stubWorkDirAgent{workDir: homeDir}
+	card := &footerAwareStreamingCard{}
+	p := &footerAwareCardPlatform{stubPlatformEngine: stubPlatformEngine{n: "slack"}, card: card}
+	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+	e.SetReplyFooterEnabled(true)
+
+	sessionKey := "slack:user-card-footer-sep"
+	session := e.sessions.GetOrCreateActive(sessionKey)
+	agentSession := newControllableSession("s-card-footer-sep")
+	agentSession.model = "gpt-5.4"
+	agentSession.workDir = filepath.Join(homeDir, "codes", "cc-connect")
+	agentSession.contextUsage = &ContextUsage{UsedTokens: 181424, ContextWindow: 258400}
+	state := &interactiveState{agentSession: agentSession, platform: p, replyCtx: "ctx", agent: agent}
+	e.interactiveStates[sessionKey] = state
+
+	agentSession.events <- Event{Type: EventResult, Content: "answer", Done: true}
+	e.processInteractiveEvents(state, session, e.sessions, sessionKey, "m-sep", time.Now(), nil, nil, state.replyCtx, 0)
+
+	card.mu.Lock()
+	defer card.mu.Unlock()
+	if len(card.finalized) != 0 {
+		t.Fatalf("plain Finalize called with %#v, want FinalizeWithStatusFooter only", card.finalized)
+	}
+	if len(card.bodies) != 1 || card.bodies[0] != "answer" {
+		t.Fatalf("bodies = %#v, want [\"answer\"] without footer inlined", card.bodies)
+	}
+	if !strings.Contains(card.footers[0], "gpt-5.4") || strings.HasPrefix(card.footers[0], "*") {
+		t.Fatalf("footer = %q, want raw footer text with the model", card.footers[0])
+	}
+}
+
 // Regression: an agent that only exposes a workdir (no model/effort/usage)
 // must not emit a footer at all. Previously this produced a footer like
 // "*~*" when the agent was running in the user's home directory, which
