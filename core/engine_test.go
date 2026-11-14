@@ -4150,6 +4150,8 @@ func TestCmdDelete_SyncsLocalSessionSnapshot(t *testing.T) {
 
 	victim := e.sessions.NewSession("test:user2", "victim")
 	victim.SetAgentSessionID("session-1", "stub")
+	// user2 has moved on, so the victim is nobody's active session.
+	e.sessions.NewSession("test:user2", "current")
 	keep := e.sessions.NewSession("test:user3", "keep")
 	keep.SetAgentSessionID("session-2", "stub")
 
@@ -4163,6 +4165,52 @@ func TestCmdDelete_SyncsLocalSessionSnapshot(t *testing.T) {
 	}
 	if got := e.sessions.FindByID(keep.ID); got == nil {
 		t.Fatal("keep session should remain")
+	}
+}
+
+func TestCmdDelete_RefusesAnotherChatsActiveSession(t *testing.T) {
+	p := &stubPlatformEngine{n: "plain"}
+	agent := &stubDeleteAgent{stubListAgent: stubListAgent{sessions: []AgentSessionInfo{
+		{ID: "session-1", Summary: "One"},
+		{ID: "session-2", Summary: "Two"},
+	}}}
+	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+	msg := &Message{SessionKey: "test:user1", ReplyCtx: "ctx"}
+	other := e.sessions.GetOrCreateActive("test:user2")
+	other.SetAgentSessionID("session-1", "stub")
+
+	e.cmdDelete(p, msg, []string{"1"})
+
+	if len(agent.deleted) != 0 {
+		t.Fatalf("deleted = %v, want none", agent.deleted)
+	}
+	if got := e.sessions.FindByID(other.ID); got == nil || got.GetAgentSessionID() != "session-1" {
+		t.Fatalf("other chat's session = %+v, want it untouched", got)
+	}
+	if len(p.sent) != 1 || !strings.Contains(p.sent[0], "Cannot delete One: it is the active session of another chat") {
+		t.Fatalf("sent = %v, want in-use refusal", p.sent)
+	}
+}
+
+func TestCmdDelete_BatchSkipsAnotherChatsActiveSession(t *testing.T) {
+	p := &stubPlatformEngine{n: "plain"}
+	agent := &stubDeleteAgent{stubListAgent: stubListAgent{sessions: []AgentSessionInfo{
+		{ID: "session-1", Summary: "One"},
+		{ID: "session-2", Summary: "Two"},
+	}}}
+	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+	msg := &Message{SessionKey: "test:user1", ReplyCtx: "ctx"}
+	old := e.sessions.GetOrCreateActive("test:user2")
+	old.SetAgentSessionID("session-2", "stub")
+	e.sessions.NewSession("test:user2", "current").SetAgentSessionID("session-1", "stub")
+
+	e.cmdDelete(p, msg, []string{"1,2"})
+
+	if got, want := strings.Join(agent.deleted, ","), "session-2"; got != want {
+		t.Fatalf("deleted = %q, want %q", got, want)
+	}
+	if len(p.sent) != 1 || !strings.Contains(p.sent[0], "Cannot delete One") || !strings.Contains(p.sent[0], "Session deleted: Two") {
+		t.Fatalf("sent = %v, want refusal for One and deletion of Two", p.sent)
 	}
 }
 
@@ -4395,6 +4443,34 @@ func TestDeleteMode_SubmitBlocksActiveSession(t *testing.T) {
 	pushedCard := p.getRefreshedCards()[len(p.getRefreshedCards())-1]
 	if !strings.Contains(pushedCard.RenderText(), "Cannot delete the currently active session") {
 		t.Fatalf("result text = %q, want active-session warning", pushedCard.RenderText())
+	}
+}
+
+func TestDeleteMode_SubmitBlocksAnotherChatsActiveSession(t *testing.T) {
+	p := &stubCardPlatform{stubPlatformEngine: stubPlatformEngine{n: "feishu"}}
+	agent := &stubDeleteAgent{stubListAgent: stubListAgent{sessions: []AgentSessionInfo{
+		{ID: "session-1", Summary: "One"},
+		{ID: "session-2", Summary: "Two"},
+	}}}
+	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+	msg := &Message{SessionKey: "feishu:user1", ReplyCtx: "ctx"}
+	e.sessions.GetOrCreateActive("feishu:user2").SetAgentSessionID("session-2", "test")
+
+	e.cmdDelete(p, msg, nil)
+	_ = e.handleCardNav("act:/delete-mode toggle session-2", msg.SessionKey)
+	if resultCard := e.handleCardNav("act:/delete-mode submit", msg.SessionKey); resultCard == nil {
+		t.Fatal("expected deleting card")
+	}
+	waitDeleteModePhase(t, e, msg.SessionKey, "result")
+	if len(agent.deleted) != 0 {
+		t.Fatalf("deleted = %v, want none", agent.deleted)
+	}
+	refreshed := p.getRefreshedCards()
+	if len(refreshed) == 0 {
+		t.Fatal("expected refreshed result card via RefreshCard")
+	}
+	if text := refreshed[len(refreshed)-1].RenderText(); !strings.Contains(text, "active session of another chat") {
+		t.Fatalf("result text = %q, want in-use refusal", text)
 	}
 }
 
