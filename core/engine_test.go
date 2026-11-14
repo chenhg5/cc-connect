@@ -11498,7 +11498,7 @@ func TestEventIdleTimeout_CleansUpSession(t *testing.T) {
 	foundTimeout := false
 	foundQueuedNotice := false
 	for _, s := range sent {
-		if strings.Contains(s, "timed out") && strings.Contains(s, "history was preserved") {
+		if strings.Contains(s, "run timed out after") && strings.Contains(s, "send another message to continue") {
 			foundTimeout = true
 		}
 		if strings.Contains(s, "queued message was not processed") && strings.Contains(s, "send this message again") {
