@@ -1747,6 +1747,13 @@ app_secret = "your-feishu-app-secret"
 # [projects.agent.options]
 # work_dir = "/path/to/project"
 # mode = "suggest"  # "suggest" | "auto-edit" | "full-auto" | "yolo"
+# Optional: use an isolated Codex home instead of the shared ~/.codex.
+# The directory is created when a session starts; "~" is expanded.
+# For a subscription login, copy auth.json (and config.toml) into it first.
+# 可选：使用独立的 Codex home，而不是共享的 ~/.codex。
+# 该目录会在启动会话时自动创建；"~" 会被展开。
+# 使用订阅登录时，请先把 auth.json（以及 config.toml）复制进去。
+# codex_home = "~/.codex-cc-connect"
 # Optional: app_server supports interactive approvals and named permissions.
 # 可选：app_server 支持交互审批及命名权限配置。
 # backend = "app_server"

@@ -8,6 +8,7 @@ Complete guide to using cc-connect features.
 
 - [Session Management](#session-management)
 - [Permission Modes](#permission-modes)
+- [Isolating the Codex home (`codex_home`)](#isolating-the-codex-home-codex_home)
 - [API Provider Management](#api-provider-management)
 - [Model Selection](#model-selection)
 - [Work Directory Switching (`/dir`, `/cd`)](#work-directory-switching-dir-cd)
@@ -221,6 +222,45 @@ Switch at runtime:
 /mode yolo     # switch to YOLO mode
 /mode default  # switch back
 ```
+
+---
+
+## Isolating the Codex home (`codex_home`)
+
+`codex_home` sets the `CODEX_HOME` directory the Codex CLI works in, so a
+project can keep its own Codex state instead of sharing the default `~/.codex`.
+
+```toml
+[[projects]]
+name = "my-codex-project"
+
+[projects.agent]
+type = "codex"
+
+[projects.agent.options]
+codex_home = "~/.codex-cc-connect"   # "~" is expanded; an absolute path works too
+```
+
+- `codex_home` is an **agent** option. It belongs under
+  `[projects.agent.options]` — not under `[projects.platforms.options]`,
+  where it would be ignored.
+- `~` is expanded, so `codex_home = "~/.codex-cc-connect"` behaves exactly
+  like the equivalent absolute path.
+- The directory **does not have to exist in advance**: cc-connect creates it
+  when a session starts. The Codex CLI refuses to start when `CODEX_HOME`
+  points at a missing path ("Error finding codex home: ... but that path does
+  not exist"), so creating it up front is what keeps that raw CLI error out
+  of your chat.
+- **An isolated home means an isolated login.** A ChatGPT subscription login
+  stores its credentials in `auth.json` inside the Codex home. When you point
+  `codex_home` at a fresh directory, copy `auth.json` (and `config.toml`, if
+  you use one) from your normal Codex home into it, or sign in again with the
+  CLI.
+- **The trade-off:** the isolated home has its own session history, so
+  `/list`, `/history` and the session files live there and not in `~/.codex`.
+  Several projects that point at the *same* `codex_home` share that state
+  again — which is also how a shared home ends up conflicting with the Codex
+  desktop app (see [#1909](https://github.com/chenhg5/cc-connect/issues/1909)).
 
 ---
 

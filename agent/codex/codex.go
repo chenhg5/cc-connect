@@ -544,6 +544,15 @@ func (a *Agent) StartSession(ctx context.Context, sessionID string) (core.AgentS
 	provName, provAPIKey, provWireAPI, provHeaders := a.activeProviderCodexConfig()
 	a.mu.Unlock()
 
+	// The Codex CLI refuses to run when CODEX_HOME points at a directory that
+	// does not exist, and reports it as a raw CLI error. Create the configured
+	// home before the CLI starts — the provider path below already does this,
+	// but a subscription login has no provider, so nothing else would (issue
+	// #1909).
+	if err := ensureCodexHomeDir(codexHome); err != nil {
+		return nil, err
+	}
+
 	if provName != "" {
 		if err := ensureCodexProviderConfig(codexHome, provName, baseURL, provWireAPI, provHeaders); err != nil {
 			slog.Warn("codex: failed to write provider config", "provider", provName, "error", err)

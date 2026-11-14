@@ -8,6 +8,7 @@ cc-connect 完整功能使用指南。
 
 - [会话管理](#会话管理)
 - [权限模式](#权限模式)
+- [隔离 Codex home（`codex_home`）](#隔离-codex-homecodex_home)
 - [API Provider 管理](#api-provider-管理)
 - [模型选择](#模型选择)
 - [工作目录切换（`/dir`、`/cd`）](#工作目录切换dircd)
@@ -218,6 +219,40 @@ mode = "default"
 /mode yolo     # 切换到 YOLO 模式
 /mode default  # 切回默认
 ```
+
+---
+
+## 隔离 Codex home（`codex_home`）
+
+`codex_home` 指定 Codex CLI 使用的 `CODEX_HOME` 目录，让项目可以拥有自己独立的
+Codex 状态，而不必与默认的 `~/.codex` 混用。
+
+```toml
+[[projects]]
+name = "my-codex-project"
+
+[projects.agent]
+type = "codex"
+
+[projects.agent.options]
+codex_home = "~/.codex-cc-connect"   # "~" 会展开；也可以直接写绝对路径
+```
+
+- `codex_home` 是 **agent** 选项，必须写在 `[projects.agent.options]` 下——
+  写在 `[projects.platforms.options]` 下会被忽略。
+- `~` 会被展开，所以 `codex_home = "~/.codex-cc-connect"` 与对应的绝对路径
+  行为完全一致。
+- 该目录**不需要事先存在**：cc-connect 会在启动会话时创建它。当 `CODEX_HOME`
+  指向一个不存在的路径时，Codex CLI 会直接拒绝启动
+  （"Error finding codex home: ... but that path does not exist"），
+  提前创建正是为了避免这条原始 CLI 报错出现在你的聊天里。
+- **隔离 home 也就隔离了登录态。** ChatGPT 订阅登录的凭据保存在 Codex home 里的
+  `auth.json`。把 `codex_home` 指向一个新目录时，请把正常 Codex home 里的
+  `auth.json`（以及用到的 `config.toml`）复制过去，或者用 CLI 重新登录。
+- **取舍：**独立的 home 有自己的会话历史，`/list`、`/history` 以及会话文件都在那里，
+  而不在 `~/.codex`。多个项目指向**同一个** `codex_home` 时又会共享这份状态——
+  这也是共享 home 与 Codex 桌面端发生线程写锁冲突的根源，参见
+  [#1909](https://github.com/chenhg5/cc-connect/issues/1909)。
 
 ---
 
