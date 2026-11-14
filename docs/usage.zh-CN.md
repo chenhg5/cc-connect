@@ -1201,6 +1201,27 @@ OpenClaw 回复空消息几乎都是漏掉了配对步骤（issue #432）。在�
 原因之前，先重跑 `openclaw pair` 并在 UI 中重新授权一次。
 参考：<https://zhuanlan.zhihu.com/p/2005687480976970296>
 
+### cc-connect 是否支持 Oh My Pi？
+
+支持。Oh My Pi 通过 `omp acp` 子命令提供 ACP 服务，因此可以使用通用的 `acp` agent 类型接入。
+这与 cc-connect 的原生 Pi agent 集成不是同一条路径。
+
+```toml
+[[projects]]
+name = "oh-my-pi-acp"
+
+[projects.agent]
+type = "acp"
+
+[projects.agent.options]
+work_dir = "/path/to/project"
+cmd = "omp"
+args = ["acp"]
+display_name = "Oh My Pi ACP"
+```
+
+请先单独安装并完成 Oh My Pi 的认证，使用提供 `omp acp` 子命令的版本，并确保 cc-connect 启动时的 `PATH` 中可以找到 `omp`。
+
 ### 个人微信群聊不可行（issue #805 相关说明更正）
 
 个人微信（`weixin` / ilink）机器人**不是普通微信好友**，无法通过群
