@@ -32,6 +32,7 @@ func init() {
 type Agent struct {
 	workDir      string
 	model        string
+	effort       string // passed as agy --effort
 	mode         string
 	cmd          string   // CLI binary name, default "agy"
 	cliExtraArgs []string // extra args from cmd after the binary name
@@ -49,6 +50,7 @@ func New(opts map[string]any) (core.Agent, error) {
 		workDir = "."
 	}
 	model, _ := opts["model"].(string)
+	effort, _ := opts["reasoning_effort"].(string)
 	mode, _ := opts["mode"].(string)
 	mode = normalizeMode(mode)
 	cmd, extraArgs := core.ParseCmdOpts(opts, "agy")
@@ -78,6 +80,7 @@ func New(opts map[string]any) (core.Agent, error) {
 	return &Agent{
 		workDir:      workDir,
 		model:        model,
+		effort:       normalizeEffort(effort),
 		mode:         mode,
 		cmd:          cmd,
 		cliExtraArgs: extraArgs,
@@ -126,6 +129,56 @@ func (a *Agent) GetModel() string {
 	return core.GetProviderModel(a.providers, a.activeIdx, a.model)
 }
 
+// normalizeEffort only canonicalizes the spelling. Whether agy accepts the
+// value is decided against the CLI's own help text (see capabilities.go).
+func normalizeEffort(raw string) string {
+	raw = strings.ToLower(strings.TrimSpace(raw))
+	if !agyEffortToken.MatchString(raw) {
+		return ""
+	}
+	return raw
+}
+
+// capabilities reports what the configured agy CLI accepts (probed once per
+// process and cached).
+func (a *Agent) capabilities() agyCapabilities {
+	a.mu.RLock()
+	cmdName := a.cmd
+	extraArgs := append([]string(nil), a.cliExtraArgs...)
+	env := core.MergeEnv(os.Environ(), append(append([]string(nil), a.configEnv...), a.providerEnvLocked()...))
+	a.mu.RUnlock()
+	return agyCapabilitiesFor(context.Background(), cmdName, extraArgs, env)
+}
+
+func (a *Agent) SetReasoningEffort(effort string) {
+	normalized := normalizeEffort(effort)
+	if normalized != "" {
+		// A failed probe says nothing about the CLI: keep the user's choice
+		// and let the per-turn gate decide whether it can be passed.
+		if caps := a.capabilities(); caps.probed && !caps.supportsEffort(normalized) {
+			slog.Warn("antigravity: reasoning effort not supported by this agy, ignoring",
+				"effort", normalized, "supported", caps.supportedEfforts())
+			normalized = ""
+		}
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.effort = normalized
+	slog.Info("antigravity: reasoning effort changed", "effort", a.effort)
+}
+
+func (a *Agent) GetReasoningEffort() string {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	return a.effort
+}
+
+// AvailableReasoningEfforts lists the values the installed agy accepts for
+// --effort. It is empty when agy has no --effort flag.
+func (a *Agent) AvailableReasoningEfforts() []string {
+	return a.capabilities().supportedEfforts()
+}
+
 func (a *Agent) configuredModels() []core.ModelOption {
 	a.mu.RLock()
 	defer a.mu.RUnlock()
@@ -134,6 +187,9 @@ func (a *Agent) configuredModels() []core.ModelOption {
 
 func (a *Agent) AvailableModels(ctx context.Context) []core.ModelOption {
 	if models := a.configuredModels(); len(models) > 0 {
+		return models
+	}
+	if models := a.fetchModelsFromCLI(ctx); len(models) > 0 {
 		return models
 	}
 	if models := a.fetchModelsFromAPI(ctx); len(models) > 0 {
@@ -145,6 +201,39 @@ func (a *Agent) AvailableModels(ctx context.Context) []core.ModelOption {
 		{Name: "gemini-2.5-pro", Desc: "Gemini 2.5 Pro"},
 		{Name: "gemini-2.5-flash", Desc: "Gemini 2.5 Flash"},
 	}
+}
+
+// fetchModelsFromCLI asks agy for the models available to the signed-in
+// account ("agy models" prints "<id>\t<display name>" per line).
+func (a *Agent) fetchModelsFromCLI(ctx context.Context) []core.ModelOption {
+	a.mu.RLock()
+	cmdName := a.cmd
+	env := core.MergeEnv(os.Environ(), append(append([]string(nil), a.configEnv...), a.providerEnvLocked()...))
+	a.mu.RUnlock()
+
+	ctx, cancel := context.WithTimeout(ctx, 20*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, cmdName, "models")
+	cmd.Env = env
+	out, err := cmd.Output()
+	if err != nil {
+		slog.Debug("antigravity: agy models failed", "error", err)
+		return nil
+	}
+	return parseAgyModels(string(out))
+}
+
+func parseAgyModels(out string) []core.ModelOption {
+	var models []core.ModelOption
+	for _, line := range strings.Split(out, "\n") {
+		id, desc, ok := strings.Cut(strings.TrimSpace(line), "\t")
+		id = strings.TrimSpace(id)
+		if !ok || id == "" || strings.ContainsAny(id, " ") {
+			continue
+		}
+		models = append(models, core.ModelOption{Name: id, Desc: strings.TrimSpace(desc)})
+	}
+	return models
 }
 
 func (a *Agent) fetchModelsFromAPI(ctx context.Context) []core.ModelOption {
@@ -205,6 +294,7 @@ func (a *Agent) SetSessionEnv(env []string) {
 func (a *Agent) StartSession(ctx context.Context, sessionID string) (core.AgentSession, error) {
 	a.mu.Lock()
 	model := a.model
+	effort := a.effort
 	mode := a.mode
 	cmd := a.cmd
 	extraArgs := append([]string{}, a.cliExtraArgs...)
@@ -220,14 +310,22 @@ func (a *Agent) StartSession(ctx context.Context, sessionID string) (core.AgentS
 	}
 	a.mu.Unlock()
 
-	return newAntigravitySession(ctx, cmd, extraArgs, workDir, model, mode, sessionID, extraEnv, timeout)
+	return newAntigravitySession(ctx, cmd, extraArgs, workDir, model, effort, mode, sessionID, extraEnv, timeout)
 }
 
 func (a *Agent) ListSessions(_ context.Context) ([]core.AgentSessionInfo, error) {
+	if cliDir, err := agyCLIDir(); err == nil {
+		if sessions, found, err := listAgyConversations(cliDir, a.GetWorkDir()); found {
+			return sessions, err
+		}
+	}
 	return listAntigravitySessions(a.workDir)
 }
 
 func (a *Agent) DeleteSession(_ context.Context, sessionID string) error {
+	if found, err := deleteAgyConversation(sessionID); found {
+		return err
+	}
 	homeDir, err := os.UserHomeDir()
 	if err != nil {
 		return fmt.Errorf("antigravity: cannot determine home dir: %w", err)

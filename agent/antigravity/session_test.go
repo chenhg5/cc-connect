@@ -61,7 +61,7 @@ func TestNormalizeMode(t *testing.T) {
 func TestSession_ContinueSessionTreatedAsFresh(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 
-	s, err := newAntigravitySession(context.Background(), "echo", nil, "/tmp", "", "default", core.ContinueSession, nil, 0)
+	s, err := newAntigravitySession(context.Background(), "echo", nil, "/tmp", "", "", "default", core.ContinueSession, nil, 0)
 	if err != nil {
 		t.Fatalf("newAntigravitySession: %v", err)
 	}
@@ -73,8 +73,8 @@ func TestSession_ContinueSessionTreatedAsFresh(t *testing.T) {
 }
 
 func TestBuildAntigravityArgs_PromptAtEnd(t *testing.T) {
-	s, _ := newAntigravitySession(context.Background(), "echo", []string{"--verbose"}, "/tmp", "", "default", "", nil, 0)
-	args := s.buildAntigravityArgs("sid-1", true, "plan", "/tmp/agy-config", "What is 1+1?")
+	s, _ := newAntigravitySession(context.Background(), "echo", []string{"--verbose"}, "/tmp", "", "", "default", "", nil, 0)
+	args := s.buildAntigravityArgs("sid-1", true, "plan", "/tmp/agy-config", "", "", "What is 1+1?")
 	if len(args) < 2 {
 		t.Fatalf("args too short: %v", args)
 	}
@@ -121,6 +121,7 @@ func TestAntigravitySession_ResumePassesConversationID(t *testing.T) {
 		os.Args[0],
 		[]string{"-test.run=TestAntigravitySession_ResumePassesConversationID", "--"},
 		workDir,
+		"",
 		"",
 		"default",
 		"conversation-1",
@@ -182,7 +183,7 @@ streamComplete:
 func TestDefaultModeCreatesPermissionBridge(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 
-	s, err := newAntigravitySession(context.Background(), "echo", nil, "/tmp", "", "default", "", nil, 0)
+	s, err := newAntigravitySession(context.Background(), "echo", nil, "/tmp", "", "", "default", "", nil, 0)
 	if err != nil {
 		t.Fatalf("newAntigravitySession: %v", err)
 	}
@@ -201,7 +202,7 @@ func TestNonDefaultModesDoNotCreatePermissionBridge(t *testing.T) {
 		t.Run(mode, func(t *testing.T) {
 			t.Setenv("HOME", t.TempDir())
 
-			s, err := newAntigravitySession(context.Background(), "echo", nil, "/tmp", "", mode, "", nil, 0)
+			s, err := newAntigravitySession(context.Background(), "echo", nil, "/tmp", "", "", mode, "", nil, 0)
 			if err != nil {
 				t.Fatalf("newAntigravitySession: %v", err)
 			}
@@ -215,7 +216,7 @@ func TestNonDefaultModesDoNotCreatePermissionBridge(t *testing.T) {
 }
 
 func TestRespondPermissionRequiresDefaultMode(t *testing.T) {
-	s, err := newAntigravitySession(context.Background(), "echo", nil, "/tmp", "", "plan", "", nil, 0)
+	s, err := newAntigravitySession(context.Background(), "echo", nil, "/tmp", "", "", "plan", "", nil, 0)
 	if err != nil {
 		t.Fatalf("newAntigravitySession: %v", err)
 	}
@@ -238,7 +239,7 @@ func TestSendDoesNotHoldStdinOpen(t *testing.T) {
 		t.Fatalf("WriteFile fake agy: %v", err)
 	}
 
-	s, err := newAntigravitySession(context.Background(), cmdPath, nil, workDir, "", "default", "", nil, 2*time.Second)
+	s, err := newAntigravitySession(context.Background(), cmdPath, nil, workDir, "", "", "default", "", nil, 2*time.Second)
 	if err != nil {
 		t.Fatalf("newAntigravitySession: %v", err)
 	}
@@ -273,6 +274,96 @@ func TestSendDoesNotHoldStdinOpen(t *testing.T) {
 func contains(xs []string, want string) bool {
 	for _, x := range xs {
 		if strings.TrimSpace(x) == want {
+			return true
+		}
+	}
+	return false
+}
+
+func TestBuildAntigravityArgs_ModelAndEffort(t *testing.T) {
+	s, _ := newAntigravitySession(context.Background(), "echo", nil, "/tmp", "", "", "yolo", "", nil, 0)
+	args := s.buildAntigravityArgs("", false, "yolo", "", "gemini-3.8-flash", "high", "hi")
+	if !containsPair(args, "--model", "gemini-3.8-flash") {
+		t.Fatalf("expected --model gemini-3.8-flash, got: %v", args)
+	}
+	if !containsPair(args, "--effort", "high") {
+		t.Fatalf("expected --effort high, got: %v", args)
+	}
+	if args[len(args)-2] != "-p" || args[len(args)-1] != "hi" {
+		t.Fatalf("expected prompt to stay last, got: %v", args)
+	}
+}
+
+func TestAntigravitySession_RemembersStreamConversationID(t *testing.T) {
+	if os.Getenv("GO_WANT_ANTIGRAVITY_STREAM_ID_HELPER") == "1" {
+		argsPath := os.Getenv("CC_ANTIGRAVITY_ARGS_FILE")
+		f, err := os.OpenFile(argsPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600)
+		if err != nil {
+			os.Exit(2)
+		}
+		_, _ = f.WriteString(strings.Join(os.Args, "\x00") + "\n")
+		_ = f.Close()
+		_, _ = io.WriteString(os.Stdout,
+			"{\"event\":\"init\",\"conversation_id\":\"conv-new\"}\n"+
+				"{\"event\":\"result\",\"result\":{\"conversation_id\":\"conv-new\",\"status\":\"SUCCESS\",\"response\":\"ok\"}}\n")
+		os.Exit(0)
+	}
+
+	t.Setenv("HOME", t.TempDir())
+	argsPath := filepath.Join(t.TempDir(), "args")
+	s, err := newAntigravitySession(context.Background(), os.Args[0],
+		[]string{"-test.run=TestAntigravitySession_RemembersStreamConversationID", "--"},
+		t.TempDir(), "", "", "yolo", "",
+		[]string{"GO_WANT_ANTIGRAVITY_STREAM_ID_HELPER=1", "CC_ANTIGRAVITY_ARGS_FILE=" + argsPath}, 0)
+	if err != nil {
+		t.Fatalf("newAntigravitySession: %v", err)
+	}
+	defer func() { _ = s.Close() }()
+
+	for _, prompt := range []string{"first", "second"} {
+		if err := s.Send(prompt, "", nil, nil); err != nil {
+			t.Fatalf("Send(%s): %v", prompt, err)
+		}
+		waitForResult(t, s)
+	}
+	if got := s.CurrentSessionID(); got != "conv-new" {
+		t.Fatalf("CurrentSessionID = %q, want conv-new", got)
+	}
+
+	data, err := os.ReadFile(argsPath)
+	if err != nil {
+		t.Fatalf("read args: %v", err)
+	}
+	runs := strings.Split(strings.TrimSpace(string(data)), "\n")
+	if len(runs) != 2 {
+		t.Fatalf("expected 2 runs, got %d", len(runs))
+	}
+	if strings.Contains(runs[0], "--conversation") {
+		t.Fatalf("first turn should not resume: %q", runs[0])
+	}
+	if !containsPair(strings.Split(runs[1], "\x00"), "--conversation", "conv-new") {
+		t.Fatalf("second turn should resume conv-new: %q", runs[1])
+	}
+}
+
+func waitForResult(t *testing.T, s *antigravitySession) {
+	t.Helper()
+	deadline := time.After(3 * time.Second)
+	for {
+		select {
+		case ev := <-s.Events():
+			if ev.Type == core.EventResult && ev.Done {
+				return
+			}
+		case <-deadline:
+			t.Fatal("timeout waiting for result")
+		}
+	}
+}
+
+func containsPair(args []string, flag, value string) bool {
+	for i := 0; i+1 < len(args); i++ {
+		if args[i] == flag && args[i+1] == value {
 			return true
 		}
 	}
