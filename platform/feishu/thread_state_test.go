@@ -400,26 +400,38 @@ func TestStartCronTopicKeepsRunningWhenLookupHasNoThreadID(t *testing.T) {
 }
 
 // The create-time poll can still lose the race; the first unmentioned message
-// in that topic is the last chance to adopt it.
-func TestUnmentionedTopicMessageAdoptedForCronRoot(t *testing.T) {
-	stub := &rootStub{rootOf: func(string) (string, bool) { return "", true }}
+// in that topic is the last chance to adopt it. The bot opened the topic, so
+// Feishu's own thread history says so — no local state to lose on restart.
+func TestUnmentionedTopicMessageAdoptedWhenBotPostedThere(t *testing.T) {
+	var listCalls int32
+	stub := &rootStub{
+		rootOf: func(string) (string, bool) { return "", true },
+		threadMembers: func(threadID string) ([]map[string]any, bool) {
+			atomic.AddInt32(&listCalls, 1)
+			if threadID != "omt_cron" {
+				return nil, false
+			}
+			return []map[string]any{{
+				"message_id": "om_root",
+				"sender":     map[string]any{"sender_type": "app", "id": "cli_test"},
+			}}, true
+		},
+	}
 	p := newRootTestPlatform(t, stub, map[string]any{
 		"cc_data_dir": t.TempDir(),
 		"cc_project":  "adopt-test",
 	})
 	p.botOpenID = "ou_bot"
-	// StartCronTopic leaves the root here when the thread id is not readable.
-	p.noteCronHead("om_cron_root")
 	handled := make(chan string, 1)
 	p.handler = func(_ core.Platform, msg *core.Message) { handled <- msg.SessionKey }
 
-	if err := p.onMessage(context.Background(), rootTestEventUnmentioned("om_u1", "om_cron_root", "omt_cron", "在吗")); err != nil {
+	if err := p.onMessage(context.Background(), rootTestEventUnmentioned("om_u1", "om_root", "omt_cron", "在吗")); err != nil {
 		t.Fatalf("onMessage() error = %v", err)
 	}
 	select {
 	case <-handled:
 	case <-time.After(2 * time.Second):
-		t.Fatal("unmentioned message in a cron topic must not be dropped")
+		t.Fatal("unmentioned message in a bot topic must not be dropped")
 	}
 
 	p.threadSeenMu.Lock()
@@ -428,13 +440,26 @@ func TestUnmentionedTopicMessageAdoptedForCronRoot(t *testing.T) {
 	if !threadMarked {
 		t.Fatal("adopted thread must be registered")
 	}
+	if n := atomic.LoadInt32(&listCalls); n != 1 {
+		t.Fatalf("thread list calls = %d, want 1", n)
+	}
 }
 
 // A topic the bot never posted in must behave exactly as before: the message is
 // dropped, nothing is registered, and the miss is remembered so a busy group is
 // not probed on every message.
-func TestUnmentionedTopicMessageDroppedForUnknownRoot(t *testing.T) {
-	stub := &rootStub{rootOf: func(string) (string, bool) { return "", true }}
+func TestUnmentionedTopicMessageDroppedWhenBotAbsent(t *testing.T) {
+	var listCalls int32
+	stub := &rootStub{
+		rootOf: func(string) (string, bool) { return "", true },
+		threadMembers: func(string) ([]map[string]any, bool) {
+			atomic.AddInt32(&listCalls, 1)
+			return []map[string]any{{
+				"message_id": "om_u9",
+				"sender":     map[string]any{"sender_type": "user", "id": "ou_colleague"},
+			}}, true
+		},
+	}
 	p := newRootTestPlatform(t, stub, map[string]any{
 		"cc_data_dir": t.TempDir(),
 		"cc_project":  "adopt-miss-test",
@@ -443,13 +468,20 @@ func TestUnmentionedTopicMessageDroppedForUnknownRoot(t *testing.T) {
 	handled := make(chan string, 1)
 	p.handler = func(_ core.Platform, msg *core.Message) { handled <- msg.SessionKey }
 
-	if err := p.onMessage(context.Background(), rootTestEventUnmentioned("om_u1", "om_human_root", "omt_chat", "我不是跟你说的")); err != nil {
+	if err := p.onMessage(context.Background(), rootTestEventUnmentioned("om_u1", "om_u9", "omt_chat", "我不是跟你说的")); err != nil {
 		t.Fatalf("onMessage() error = %v", err)
 	}
 	select {
 	case <-handled:
-		t.Fatal("message in a topic the bot never opened must stay dropped")
+		t.Fatal("message in a topic the bot never joined must stay dropped")
 	case <-time.After(200 * time.Millisecond):
+	}
+
+	if err := p.onMessage(context.Background(), rootTestEventUnmentioned("om_u2", "om_u9", "omt_chat", "嗯")); err != nil {
+		t.Fatalf("onMessage() error = %v", err)
+	}
+	if n := atomic.LoadInt32(&listCalls); n != 1 {
+		t.Fatalf("thread list calls = %d, want the miss to be cached", n)
 	}
 
 	p.threadSeenMu.Lock()
@@ -457,19 +489,6 @@ func TestUnmentionedTopicMessageDroppedForUnknownRoot(t *testing.T) {
 	p.threadSeenMu.Unlock()
 	if entries != 0 {
 		t.Fatalf("rejected topic must not be registered, got %d entries", entries)
-	}
-}
-
-// A root is good for exactly one adoption: later messages in the same topic are
-// served by the normal threadSeen path.
-func TestCronRootIsConsumedOnce(t *testing.T) {
-	p := newRootTestPlatform(t, &rootStub{rootOf: func(string) (string, bool) { return "", true }})
-	p.noteCronHead("om_cron_root")
-	if !p.adoptCronTopic("omt_cron", "om_cron_root") {
-		t.Fatal("first message naming the cron root must be adopted")
-	}
-	if p.adoptCronTopic("omt_other", "om_cron_root") {
-		t.Fatal("the same root must not register a second thread")
 	}
 }
 
