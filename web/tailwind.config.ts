@@ -10,6 +10,8 @@ export default {
           DEFAULT: 'rgb(var(--color-accent) / <alpha-value>)',
           dim: 'rgb(var(--color-accent-dim) / <alpha-value>)',
         },
+        surface: 'rgb(var(--color-surface) / <alpha-value>)',
+        ink: 'rgb(var(--color-ink) / <alpha-value>)',
       },
       animation: {
         'fade-in': 'fadeIn 0.4s ease',
