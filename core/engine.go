@@ -6435,8 +6435,25 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 
 			replyStart := time.Now()
 
-			// --- StreamingCard path ---
-			if streamCard != nil && !streamCard.Failed() {
+			completion, supportsCompletion := p.(TaskCompletionSender)
+			completionWorkspace, sendCompletion := "", false
+			if !isSilent && !suppressDuplicate && supportsCompletion {
+				completionWorkspace, sendCompletion = completion.TaskCompletionWorkspace(replyCtx)
+			}
+			if sendCompletion {
+				sp.discard()
+				body := fullResponse
+				if segmentStart > 0 && segmentStart < len(textParts) {
+					body = strings.Join(textParts[segmentStart:], "")
+				}
+				body, files := completionFiles(body, completionWorkspace, turnStart, e.attachmentSendEnabled)
+				if err := e.waitOutgoing(p); err != nil {
+					return
+				}
+				if err := completion.SendTaskCompletion(e.ctx, replyCtx, body, files); err != nil {
+					slog.Error("task completion delivery failed", "platform", p.Name(), "error", err)
+				}
+			} else if streamCard != nil && !streamCard.Failed() {
 				sp.finish("", "") // cleanup preview (should be no-op if card was active)
 				// Silent reply: never render the NO_REPLY marker into the card.
 				// cardAnswerText holds only the text streamed BEFORE the marker
