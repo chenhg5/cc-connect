@@ -122,11 +122,20 @@ type Platform struct {
 	cancel              context.CancelFunc
 	stopping            bool
 	generation          uint64
+	epoch               uint64
 	unavailableNotified bool
 	everConnected       bool
 	newBot              botFactory
 	newBackoffTimer     func(time.Duration) backoffTimer
 	newTypingTicker     func(time.Duration) typingTicker
+
+	// lanes serializes the updates of each session. See telegram_lane.go.
+	lanesMu sync.Mutex
+	lanes   map[string]*updateLane
+
+	// stallTimeout overrides the budget for a single core message handler
+	// call. Zero means defaultHandlerStallTimeout.
+	stallTimeout time.Duration
 }
 
 const (
@@ -134,6 +143,31 @@ const (
 	maxReconnectBackoff     = 30 * time.Second
 	stableConnectionWindow  = 10 * time.Second
 )
+
+// slowUpdateThreshold is how long a single Telegram update may take before we
+// log a warning. Update dispatch itself is deliberately unbounded (a stuck
+// update must never stop the bot), so this warning is the only signal that an
+// update got stuck.
+const slowUpdateThreshold = 60 * time.Second
+
+// nextEpoch starts a new polling generation and returns its number.
+//
+// Every bot connection gets its own epoch, so updates that arrive from a
+// connection that has been replaced are dropped instead of being dispatched
+// against the current bot.
+func (p *Platform) nextEpoch() uint64 {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.epoch++
+	return p.epoch
+}
+
+// isCurrentEpoch reports whether epoch is still the live polling generation.
+func (p *Platform) isCurrentEpoch(epoch uint64) bool {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	return !p.stopping && p.epoch == epoch
+}
 
 func New(opts map[string]any) (core.Platform, error) {
 	token, _ := opts["token"].(string)
@@ -256,6 +290,11 @@ func defaultNewBot(token string, onUpdate func(context.Context, *models.Update),
 	}
 	opts := []tgbot.Option{
 		tgbot.WithDefaultHandler(handler),
+		// Keep the library's handler on the polling goroutine: the session
+		// lanes own the async boundary (see telegram_lane.go). The
+		// concurrency policy for updates then lives in code we control — and
+		// can unit test — instead of inside the library, and one lane worker
+		// serves a whole session instead of a goroutine per update.
 		tgbot.WithNotAsyncHandlers(),
 	}
 	if httpClient != nil {
@@ -358,7 +397,17 @@ func (p *Platform) connectLoop(ctx context.Context) {
 
 func (p *Platform) runConnection(ctx context.Context) error {
 	factory := p.getNewBot()
-	b, me, startPoll, err := factory(p.token, p.processUpdate, p.httpClient)
+	// Bind the updates of this connection to its own polling generation, so
+	// an update that arrives from a connection that has been replaced is
+	// dropped instead of being dispatched against the current bot.
+	epoch := p.nextEpoch()
+	b, me, startPoll, err := factory(p.token, func(ctx context.Context, update *models.Update) {
+		if !p.isCurrentEpoch(epoch) {
+			slog.Debug("telegram: dropping update from a stale polling generation", "epoch", epoch)
+			return
+		}
+		p.processUpdate(ctx, update)
+	}, p.httpClient)
 	if err != nil {
 		cause := retryCauseInitialConnectFailure
 		if p.hasEverConnected() {
@@ -388,7 +437,35 @@ func (p *Platform) runConnection(ctx context.Context) error {
 	return nil
 }
 
+// processUpdate handles one Telegram update.
+//
+// Telegram delivers updates through a single polling goroutine. Handling the
+// update inline on that goroutine means a slow or stuck handler — a built-in
+// command that blocks, a slow platform call — stops the bot from receiving
+// anything else: every later update piles up behind it and the bot stays
+// silent until cc-connect restarts (issue #2015).
+//
+// The update is therefore handed to the lane of its session and this returns
+// to the polling loop immediately. A lane processes the updates of one
+// session one at a time, so the messages of a chat keep their order, while
+// the polling loop never waits for user-triggered work.
 func (p *Platform) processUpdate(ctx context.Context, update *models.Update) {
+	p.enqueueUpdate(ctx, p.laneKey(update), update)
+}
+
+// dispatchUpdate runs a single Telegram update to completion.
+//
+// It runs on the worker of the update's session lane, so it must not let a
+// panic escape: a panicking update is recovered and logged, a hanging one
+// only holds its own lane.
+func (p *Platform) dispatchUpdate(ctx context.Context, update *models.Update) {
+	started := time.Now()
+	defer func() {
+		if elapsed := time.Since(started); elapsed >= slowUpdateThreshold {
+			slog.Warn("telegram: update handling slow", "duration", elapsed)
+		}
+	}()
+
 	if update.CallbackQuery != nil {
 		p.handleCallbackQuery(ctx, update.CallbackQuery)
 		return
@@ -415,18 +492,10 @@ func (p *Platform) handleMessage(ctx context.Context, msg *models.Message) {
 		userName = strings.TrimSpace(msg.From.FirstName + " " + msg.From.LastName)
 	}
 
-	// Use MessageThreadID only when it meaningfully isolates a sub-session:
-	//  - Forum groups (IsForum=true): Topics feature — thread ID is the topic ID.
-	//  - Non-group chats (private, channel): thread ID is safe to use since
-	//    there are no "reply threads" that would accidentally fragment sessions.
-	// Regular groups (IsForum=false): thread replies produce a non-zero
-	// MessageThreadID, but using it would split an existing session each time
-	// a user replies to a specific message — so we ignore it there.
+	// Use MessageThreadID only when it meaningfully isolates a sub-session.
+	// See messageThreadID for the rationale.
+	threadID := messageThreadID(msg.Chat, msg.MessageThreadID)
 	isGroup := msg.Chat.Type == models.ChatTypeGroup || msg.Chat.Type == models.ChatTypeSupergroup
-	threadID := 0
-	if msg.Chat.IsForum || !isGroup {
-		threadID = msg.MessageThreadID
-	}
 	sessionKey := p.buildSessionKey(msg.Chat.ID, threadID, msg.From.ID)
 	channelKey := buildChannelKey(msg.Chat.ID, threadID)
 
@@ -617,7 +686,7 @@ func (p *Platform) dispatchMessage(msg *core.Message, tgMsg *models.Message) {
 	if handler == nil {
 		return
 	}
-	handler(p, msg)
+	p.callHandler(handler, msg)
 }
 
 func (p *Platform) messageHandler() core.MessageHandler {
@@ -868,6 +937,14 @@ func (p *Platform) handleCallbackQuery(ctx context.Context, cb *models.CallbackQ
 		return
 	}
 
+	// Read the handler under the lock: callbacks are dispatched from their own
+	// goroutine, so an unguarded read races with Start installing the handler.
+	handler := p.messageHandler()
+	if handler == nil {
+		slog.Debug("telegram: ignoring callback, no message handler installed")
+		return
+	}
+
 	data := cb.Data
 	chatID := msg.Chat.ID
 	msgID := msg.ID
@@ -889,13 +966,9 @@ func (p *Platform) handleCallbackQuery(ctx context.Context, cb *models.CallbackQ
 	}
 
 	isGroupChat := msg.Chat.Type == models.ChatTypeGroup || msg.Chat.Type == models.ChatTypeSupergroup
-	threadID := 0
-	// IsForum is not reliably present in the Chat object embedded in a CallbackQuery
-	// message. Use MessageThreadID directly: non-zero means we're in a forum topic,
-	// zero means a regular group (no topic isolation needed).
-	if !isGroupChat || msg.MessageThreadID != 0 {
-		threadID = msg.MessageThreadID
-	}
+	// IsForum is not reliably present in the Chat object embedded in a
+	// CallbackQuery message. See callbackThreadID for the rationale.
+	threadID := callbackThreadID(msg.Chat, msg.MessageThreadID)
 	sessionKey := p.buildSessionKey(chatID, threadID, cb.From.ID)
 	channelKey := buildChannelKey(chatID, threadID)
 
@@ -925,7 +998,7 @@ func (p *Platform) handleCallbackQuery(ctx context.Context, cb *models.CallbackQ
 			slog.Debug("telegram: callback edit failed", "error", err)
 		}
 
-		p.handler(p, &core.Message{
+		p.callHandler(handler, &core.Message{
 			SessionKey: sessionKey,
 			Platform:   "telegram",
 			UserID:     userID,
@@ -968,7 +1041,7 @@ func (p *Platform) handleCallbackQuery(ctx context.Context, cb *models.CallbackQ
 			slog.Debug("telegram: callback edit failed", "error", err)
 		}
 
-		p.handler(p, &core.Message{
+		p.callHandler(handler, &core.Message{
 			SessionKey: sessionKey,
 			Platform:   "telegram",
 			UserID:     userID,
@@ -1019,7 +1092,7 @@ func (p *Platform) handleCallbackQuery(ctx context.Context, cb *models.CallbackQ
 		slog.Debug("telegram: permission callback edit failed", "error", err)
 	}
 
-	p.handler(p, &core.Message{
+	p.callHandler(handler, &core.Message{
 		SessionKey:           sessionKey,
 		Platform:             "telegram",
 		UserID:               userID,
@@ -1941,6 +2014,10 @@ func (p *Platform) Stop() error {
 	p.bot = nil
 	p.selfUser = nil
 	p.mu.Unlock()
+
+	// Drop the updates that are still queued: they would be handled by a bot
+	// that is no longer connected.
+	p.dropPendingLanes()
 
 	if cancel != nil {
 		cancel()
