@@ -1051,20 +1051,21 @@ func (p *Platform) onMessage(ctx context.Context, event *larkim.P2MessageReceive
 		"thread_isolation", p.threadIsolation,
 	)
 
+	threadID := stringValue(msg.ThreadId)
+	// A cron new_topic root can be created before Feishu exposes its thread id,
+	// leaving the topic unregistered. Check it once per thread, whether or not
+	// this first message mentions the bot: Feishu itself knows who opened the
+	// topic, so no local state is involved.
+	if chatType == "group" && p.threadReplyWithoutMention && threadID != "" && !p.threadAllowed(threadID) {
+		p.adoptBotTopic(ctx, threadID)
+	}
+
 	if chatType == "group" && !p.groupReplyAll && p.botOpenID != "" {
 		if !isBotMentioned(msg.Mentions, p.botOpenID) {
-			threadID := stringValue(msg.ThreadId)
 			// Only an explicit bot mention may waive the requirement. @all is
 			// not a direct mention, and in a large group a quote sets RootId
 			// but is not an invitation to the bot.
-			allowed := p.threadReplyWithoutMention && threadID != "" && p.threadAllowed(threadID)
-			if !allowed && p.threadReplyWithoutMention && threadID != "" {
-				// Last chance for a cron topic whose thread id could not be
-				// read when it was created: ask Feishu whether the bot has
-				// posted in this thread, which is the same rule used elsewhere.
-				allowed = p.adoptBotTopic(ctx, threadID)
-			}
-			if !allowed {
+			if !(p.threadReplyWithoutMention && threadID != "" && p.threadAllowed(threadID)) {
 				slog.Info(p.tag()+": ignoring group message without bot mention",
 					"chat_id", chatID, "user", userID, "thread", threadID,
 					"hint", "set thread_reply_without_mention or group_reply_all to change")
@@ -3695,13 +3696,14 @@ func (p *Platform) lookupMessageThreadID(ctx context.Context, messageID string) 
 	}
 }
 
-// adoptBotTopic is the fallback for a cron topic that never got registered
-// because its thread id was not readable when it was created. It asks Feishu
-// for the thread's first message: the bot opens a cron topic, so an app sender
-// there means the topic is the bot's and the unmentioned message is let in.
-// Server-side state is used on purpose — a restart cannot lose it. Threads
-// without a bot message are remembered for a few minutes so a busy group is
-// not probed on every message.
+// adoptBotTopic is the fallback for a cron new_topic topic that never got
+// registered because its thread id was not readable when it was created. It
+// asks Feishu for the thread's first message and accepts the thread only when
+// that message is a topic root posted by this app — which is exactly what a
+// cron new_topic creates. A bot reply inside someone else's topic carries a
+// root_id and is therefore rejected. Server-side state is used on purpose: a
+// restart cannot lose it. Threads that do not match are remembered for a few
+// minutes so a busy group is not probed on every message.
 func (p *Platform) adoptBotTopic(ctx context.Context, threadID string) bool {
 	threadID = strings.TrimSpace(threadID)
 	if threadID == "" || p.client == nil {
@@ -3752,6 +3754,11 @@ func (p *Platform) adoptBotTopic(ctx context.Context, threadID string) bool {
 				continue
 			}
 			if appID := stringValue(item.Sender.Id); p.appID != "" && appID != "" && appID != p.appID {
+				continue
+			}
+			// Only a topic root the app opened counts as a cron new_topic. A bot
+			// reply inside a user's topic has this root_id set.
+			if strings.TrimSpace(stringValue(item.RootId)) != "" {
 				continue
 			}
 			p.markThread(threadID)

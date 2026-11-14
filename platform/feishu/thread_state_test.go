@@ -445,6 +445,75 @@ func TestUnmentionedTopicMessageAdoptedWhenBotPostedThere(t *testing.T) {
 	}
 }
 
+// The check runs on the first message in the thread even when it mentions the
+// bot, so the topic is registered before the reply is processed.
+func TestMentionedFirstMessageAlsoAdoptsCronTopic(t *testing.T) {
+	stub := &rootStub{
+		rootOf: func(string) (string, bool) { return "", true },
+		threadMembers: func(string) ([]map[string]any, bool) {
+			return []map[string]any{{
+				"message_id": "om_root",
+				"sender":     map[string]any{"sender_type": "app", "id": "cli_test"},
+			}}, true
+		},
+	}
+	p := newRootTestPlatform(t, stub, map[string]any{
+		"cc_data_dir": t.TempDir(),
+		"cc_project":  "adopt-mention-test",
+	})
+	p.botOpenID = "ou_bot"
+	p.handler = func(core.Platform, *core.Message) {}
+
+	if err := p.onMessage(context.Background(), rootTestEvent("om_u1", "om_root", "omt_cron", "@bot 在吗")); err != nil {
+		t.Fatalf("onMessage() error = %v", err)
+	}
+
+	p.threadSeenMu.Lock()
+	_, threadMarked := p.threadSeen["omt_cron"]
+	p.threadSeenMu.Unlock()
+	if !threadMarked {
+		t.Fatal("mentioned first message must still register the cron topic")
+	}
+}
+
+// A bot reply inside a user's topic is not a cron new_topic: its first message
+// carries a root_id, so it must not be adopted.
+func TestBotReplyInUserTopicIsNotAdopted(t *testing.T) {
+	stub := &rootStub{
+		rootOf: func(string) (string, bool) { return "", true },
+		threadMembers: func(string) ([]map[string]any, bool) {
+			return []map[string]any{{
+				"message_id": "om_bot_reply",
+				"root_id":    "om_user_root",
+				"sender":     map[string]any{"sender_type": "app", "id": "cli_test"},
+			}}, true
+		},
+	}
+	p := newRootTestPlatform(t, stub, map[string]any{
+		"cc_data_dir": t.TempDir(),
+		"cc_project":  "adopt-user-topic-test",
+	})
+	p.botOpenID = "ou_bot"
+	handled := make(chan string, 1)
+	p.handler = func(_ core.Platform, msg *core.Message) { handled <- msg.SessionKey }
+
+	if err := p.onMessage(context.Background(), rootTestEventUnmentioned("om_u1", "om_user_root", "omt_user", "帮我看下")); err != nil {
+		t.Fatalf("onMessage() error = %v", err)
+	}
+	select {
+	case <-handled:
+		t.Fatal("a topic opened by a user must not be adopted")
+	case <-time.After(200 * time.Millisecond):
+	}
+
+	p.threadSeenMu.Lock()
+	entries := len(p.threadSeen)
+	p.threadSeenMu.Unlock()
+	if entries != 0 {
+		t.Fatalf("user topic must not be registered, got %d entries", entries)
+	}
+}
+
 // A topic the bot never posted in must behave exactly as before: the message is
 // dropped, nothing is registered, and the miss is remembered so a busy group is
 // not probed on every message.
