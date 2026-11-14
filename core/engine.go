@@ -5417,7 +5417,14 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 
 	var textParts []string
 	var segmentStart int // index into textParts: text before this has been sent/displayed
-	silentHold := false  // true while accumulated segment text could still resolve to a bare NO_REPLY marker
+	// textSegmentStart is the index into textParts where the current text segment
+	// begins. A healthy streaming card closes segments without delivering their
+	// text, so it can run ahead of segmentStart.
+	var textSegmentStart int
+	silentHold := false // true while accumulated segment text could still resolve to a bare NO_REPLY marker
+	// droppedSilentMarker is set when a healthy streaming card closed a segment
+	// that held a bare NO_REPLY marker.
+	droppedSilentMarker := false
 	toolCount := 0
 	waitStart := time.Now()
 	firstEventLogged := false
@@ -5487,6 +5494,24 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			replyContent = e.i18n.T(MsgStarting)
 		}
 		e.send(state.platform, state.replyCtx, replyContent)
+	}
+
+	// closeCardSegment ends the current text segment while a healthy streaming
+	// card renders the turn. segmentStart stays where it is, so the finalized
+	// card and the history include the text, followed by a blank line. A
+	// segment still held as a possible NO_REPLY marker is dropped.
+	closeCardSegment := func() {
+		if silentHold {
+			if isSilentReply(strings.Join(textParts[textSegmentStart:], "")) {
+				droppedSilentMarker = true
+			}
+			textParts = textParts[:textSegmentStart]
+			silentHold = false
+			return
+		}
+		textParts = append(textParts, "\n\n")
+		cardAnswerText.WriteString("\n\n")
+		textSegmentStart = len(textParts)
 	}
 
 	// Idle timeout: resets on every received event (0 = disabled)
@@ -5665,12 +5690,22 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 		case EventHookRejected:
 			// Claude Code emits this between a Stop-hook-rejected draft and its
 			// rewritten answer. Discard only per-segment assistant text state so
-			// final aggregation cannot concatenate the invalid draft.
-			textParts = nil
-			segmentStart = 0
+			// final aggregation cannot concatenate the invalid draft. Earlier
+			// segments in a healthy streaming card are still unsent, so they stay.
+			if streamCard != nil && !streamCard.Failed() {
+				textParts = textParts[:textSegmentStart]
+				cardAnswerText.Reset()
+				cardAnswerText.WriteString(strings.Join(textParts, ""))
+				_ = streamCard.Update(e.ctx, buildCardContent(cardThinkingText, cardToolCalls, cardAnswerText.String()))
+			} else {
+				textParts = nil
+				segmentStart = 0
+				textSegmentStart = 0
+				droppedSilentMarker = false
+				cardAnswerText.Reset()
+			}
 			silentHold = false
 			partialText = ""
-			cardAnswerText.Reset()
 			lastRichCardUpdate = time.Time{}
 			lastRichCardLen = 0
 
@@ -5711,12 +5746,15 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			}
 			// When thinking messages are hidden, behavior depends on display mode:
 			//   quiet:   append separator to keep all text in one card
-			//   compact: freeze+detach to split text into separate cards
-			if !e.display.ThinkingMessages && len(textParts) > segmentStart {
+			//   compact: freeze+detach to split text into separate cards, or
+			//            keep every segment in a healthy streaming card
+			if !e.display.ThinkingMessages && len(textParts) > textSegmentStart {
 				if e.display.Mode == "quiet" {
 					if sp.canPreview() && sp.appendSeparator("\n\n") {
 						textParts = append(textParts, "\n\n")
 					}
+				} else if streamCard != nil && !streamCard.Failed() {
+					closeCardSegment()
 				} else {
 					if sp.canPreview() {
 						sp.freeze()
@@ -5730,6 +5768,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 						}
 					}
 					segmentStart = len(textParts)
+					textSegmentStart = segmentStart
 				}
 				silentHold = false
 			}
@@ -5753,6 +5792,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 						}
 					}
 					segmentStart = len(textParts)
+					textSegmentStart = segmentStart
 					silentHold = false
 				}
 				sp.freeze()
@@ -5798,12 +5838,15 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			}
 			// When tool messages are hidden, behavior depends on display mode:
 			//   quiet:   append separator to keep all text in one card
-			//   compact: freeze+detach to split text into separate cards
-			if !e.display.ToolMessages && len(textParts) > segmentStart {
+			//   compact: freeze+detach to split text into separate cards, or
+			//            keep every segment in a healthy streaming card
+			if !e.display.ToolMessages && len(textParts) > textSegmentStart {
 				if e.display.Mode == "quiet" {
 					if sp.canPreview() && sp.appendSeparator("\n\n") {
 						textParts = append(textParts, "\n\n")
 					}
+				} else if streamCard != nil && !streamCard.Failed() {
+					closeCardSegment()
 				} else {
 					if sp.canPreview() {
 						sp.freeze()
@@ -5817,6 +5860,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 						}
 					}
 					segmentStart = len(textParts)
+					textSegmentStart = segmentStart
 				}
 				silentHold = false
 			}
@@ -5861,6 +5905,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 						}
 					}
 					segmentStart = len(textParts)
+					textSegmentStart = segmentStart
 					silentHold = false
 				}
 				sp.freeze()
@@ -5956,7 +6001,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				// paths share this single transition; couldBeSilentPrefix is
 				// monotonically decreasing as segments grow, so the transition
 				// is held → released at most once per segment.
-				peekSegment := strings.Join(textParts[segmentStart:], "") + content
+				peekSegment := strings.Join(textParts[textSegmentStart:], "") + content
 				prevHold := silentHold
 				silentHold = couldBeSilentPrefix(peekSegment)
 				releasedNow := prevHold && !silentHold
@@ -6106,7 +6151,11 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 
 			// Flush accumulated text segment before permission prompt
 			previewActive := sp.canPreview()
-			if len(textParts) > segmentStart {
+			if streamCard != nil && !streamCard.Failed() {
+				if len(textParts) > textSegmentStart {
+					closeCardSegment()
+				}
+			} else if len(textParts) > segmentStart {
 				if !previewActive {
 					segment := strings.Join(textParts[segmentStart:], "")
 					if segment != "" {
@@ -6116,6 +6165,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 					}
 				}
 				segmentStart = len(textParts)
+				textSegmentStart = segmentStart
 				silentHold = false
 			}
 			sp.freeze()
@@ -6224,10 +6274,26 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			// When tool progress is hidden, segmentStart stays 0 and textParts
 			// contains ALL text across tool boundaries. Prefer the full accumulated
 			// text over event.Content which only contains the last assistant segment.
-			if len(textParts) > 0 && segmentStart == 0 && !e.display.ToolMessages {
+			// A healthy streaming card that closed earlier segments with no text
+			// streamed since takes the result content as the last segment, unless
+			// the closed text already ends with it as a whole paragraph.
+			if streamCard != nil && !streamCard.Failed() && textSegmentStart > 0 &&
+				strings.TrimSpace(strings.Join(textParts[textSegmentStart:], "")) == "" {
+				closed := strings.Join(textParts[:textSegmentStart], "")
+				closedText := strings.TrimSpace(closed)
+				result := strings.TrimSpace(fullResponse)
+				if result == "" || closedText == result || strings.HasSuffix(closedText, "\n\n"+result) {
+					fullResponse = closed
+				} else {
+					fullResponse = closed + fullResponse
+				}
+			} else if len(textParts) > 0 && segmentStart == 0 && !e.display.ToolMessages {
 				fullResponse = strings.Join(textParts, "")
 			} else if fullResponse == "" && len(textParts) > 0 {
 				fullResponse = strings.Join(textParts, "")
+			}
+			if fullResponse == "" && droppedSilentMarker {
+				fullResponse = "NO_REPLY"
 			}
 			if fullResponse == "" {
 				state.mu.Lock()
@@ -6345,6 +6411,8 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			//   1. bare marker (isSilentReply)               → fully silent
 			//   2. trailing marker with non-empty reasoning  → strip marker, deliver reasoning
 			//   3. trailing marker with empty strip result   → fully silent
+			// A marker held through a boundary was dropped from textParts when its
+			// segment closed; only a marker that ends the response is stripped here.
 			// History records the ORIGINAL baseResponse so the agent retains context of its own
 			// decision; only the outbound platform text gets rewritten/suppressed.
 			session.AddHistory("assistant", baseResponse)
@@ -6700,6 +6768,8 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				msgID = queued.messageID
 				textParts = nil
 				segmentStart = 0
+				textSegmentStart = 0
+				droppedSilentMarker = false
 				toolCount = 0
 				turnStart = time.Now()
 				firstEventLogged = false
@@ -6858,7 +6928,7 @@ channelClosed:
 		p := state.platform
 		state.mu.Unlock()
 
-		fullResponse := strings.Join(textParts, "")
+		fullResponse := strings.TrimRight(strings.Join(textParts, ""), "\n ")
 		session.AddHistory("assistant", fullResponse)
 		// Persist immediately — this path runs on abnormal channel close,
 		// so deferring the save until the next foreground turn risks losing
