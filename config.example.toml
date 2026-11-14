@@ -133,6 +133,16 @@ level = "info" # debug, info, warn, error
 #                           #          隐藏思考和工具消息，每段文本独立发送
 #                           # quiet: hide thinking/tool, all text in one card, done emoji at end
 #                           #        隐藏思考和工具消息，所有文本合并到同一张卡片，完成后发送 done emoji
+# narration = "message"     # Where text before a tool call or thinking block goes: "message" (default) sends it
+#                           # as messages of its own; "progress" puts it in the progress card as updates, without
+#                           # streaming preview, and the answer is the turn's only message (the last narration when
+#                           # nothing follows the last tool call). Applies to card_mode = "legacy" with the default
+#                           # display mode; card_mode = "rich" and display.mode = "quiet" keep their existing paths.
+#                           # Platforms without progress cards still get it as messages. Aborted turns stay silent.
+#                           # 工具调用/思考之前的文字发到哪里："message"（默认）单独发消息；"progress" 写进进度卡片的更新
+#                           # 条目、不做流式预览，每轮只单独发结论（最后一次工具调用之后没有文字时取最后一段旁白）。
+#                           # 仅对 card_mode = "legacy" 且默认 display 模式生效；card_mode = "rich" 与 display.mode = "quiet"
+#                           # 仍走原有路径。没有进度卡片的平台仍单独发送。被中止的回合保持静默。
 # thinking_messages = true  # Show/hide thinking messages (default: true) / 是否显示思考消息（默认 true）
 # thinking_max_len = 300    # Max chars for thinking messages (default: 300) / 思考消息最大字符数（默认 300）
 # tool_max_len = 500        # Max chars for tool use messages (default: 500) / 工具调用消息最大字符数（默认 500）
