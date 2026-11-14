@@ -5236,6 +5236,12 @@ func (e *Engine) runUnsolicitedReader(ctx context.Context, cancel context.Cancel
 						e.send(p, replyCtx, chunk)
 					}
 				}
+				if len(event.Images) > 0 || len(event.Files) > 0 {
+					if err := e.sendEventResultAttachments(p, replyCtx, event.Images, event.Files); err != nil {
+						slog.Error("unsolicited: failed to send EventResult attachments", "platform", p.Name(), "error", err)
+						e.send(p, replyCtx, fmt.Sprintf(e.i18n.T(MsgError), err))
+					}
+				}
 
 				// Safety note: concurrent writes to session.History by the
 				// unsolicited reader and a foreground turn cannot overlap.
@@ -6217,6 +6223,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			state.eventsNeedResync = false
 			state.mu.Unlock()
 
+			hasResultAttachments := len(event.Images) > 0 || len(event.Files) > 0
 			fullResponse := event.Content
 			if e.display.HideAgentFooter {
 				fullResponse = stripAgentFooterLines(fullResponse)
@@ -6240,7 +6247,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 					// the /stop ack already told the user. Reuses the NO_REPLY
 					// silent-delivery path so no "(empty response)" noise is sent.
 					fullResponse = "NO_REPLY"
-				} else {
+				} else if !hasResultAttachments {
 					fullResponse = e.i18n.T(MsgEmptyResponse)
 				}
 			}
@@ -6584,6 +6591,12 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 
 			if elapsed := time.Since(replyStart); elapsed >= slowPlatformSend {
 				slog.Warn("slow final reply send", "platform", p.Name(), "elapsed", elapsed, "response_len", len(fullResponse))
+			}
+			if !isSilent && hasResultAttachments {
+				if err := e.sendEventResultAttachments(p, replyCtx, event.Images, event.Files); err != nil {
+					slog.Error("failed to send EventResult attachments", "platform", p.Name(), "error", err)
+					e.send(p, replyCtx, fmt.Sprintf(e.i18n.T(MsgError), err))
+				}
 			}
 
 			// TTS: async voice reply if enabled (skipped for silent replies)
@@ -11887,6 +11900,51 @@ func (e *Engine) SendToSessionWithOptions(sessionKey, message string, images []I
 			state.mu.Unlock()
 		}
 	}
+	for _, img := range images {
+		if err := e.waitOutgoing(p); err != nil {
+			return err
+		}
+		if err := imageSender.SendImage(e.ctx, replyCtx, img); err != nil {
+			return err
+		}
+	}
+	for _, file := range files {
+		if err := e.waitOutgoing(p); err != nil {
+			return err
+		}
+		if err := fileSender.SendFile(e.ctx, replyCtx, file); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (e *Engine) sendEventResultAttachments(p Platform, replyCtx any, images []ImageAttachment, files []FileAttachment) error {
+	if len(images) == 0 && len(files) == 0 {
+		return nil
+	}
+	if !e.attachmentSendEnabled {
+		return ErrAttachmentSendDisabled
+	}
+
+	var imageSender ImageSender
+	if len(images) > 0 {
+		var ok bool
+		imageSender, ok = p.(ImageSender)
+		if !ok {
+			return fmt.Errorf("platform %s: %w", p.Name(), ErrNotSupported)
+		}
+	}
+
+	var fileSender FileSender
+	if len(files) > 0 {
+		var ok bool
+		fileSender, ok = p.(FileSender)
+		if !ok {
+			return fmt.Errorf("platform %s: %w", p.Name(), ErrNotSupported)
+		}
+	}
+
 	for _, img := range images {
 		if err := e.waitOutgoing(p); err != nil {
 			return err

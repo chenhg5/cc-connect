@@ -1180,6 +1180,81 @@ func TestStripAgentFooterLines(t *testing.T) {
 	}
 }
 
+func TestProcessInteractiveEvents_AttachmentOnlyAndSilentResults(t *testing.T) {
+	for _, tc := range []struct {
+		name, content                        string
+		cancelled, stopped, disabled, silent bool
+	}{
+		{name: "attachment only"},
+		{name: "explicit silence", content: "NO_REPLY", silent: true},
+		{name: "cancelled", cancelled: true, silent: true},
+		{name: "stopped", stopped: true, silent: true},
+		{name: "disabled", disabled: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			p := &stubMediaPlatform{stubPlatformEngine: stubPlatformEngine{n: "test"}}
+			e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+			e.SetAttachmentSendEnabled(!tc.disabled)
+			const key = "test:attachment-only"
+			session := e.sessions.GetOrCreateActive(key)
+			as := newControllableSession("attachments")
+			state := &interactiveState{agentSession: as, platform: p, replyCtx: "ctx", turnCancelled: tc.cancelled, stopped: tc.stopped}
+			e.interactiveStates[key] = state
+			as.events <- Event{
+				Type: EventResult, Content: tc.content, Done: true,
+				Images: []ImageAttachment{{MimeType: "image/png", Data: []byte("img"), FileName: "picture.png"}},
+				Files:  []FileAttachment{{MimeType: "application/pdf", Data: []byte("pdf"), FileName: "report.pdf"}},
+			}
+			e.processInteractiveEvents(state, session, e.sessions, key, "m", time.Now(), nil, nil, state.replyCtx, 0)
+			want := 1
+			if tc.silent || tc.disabled {
+				want = 0
+			}
+			if len(p.images) != want || len(p.files) != want {
+				t.Fatalf("delivered images=%d files=%d, want %d each", len(p.images), len(p.files), want)
+			}
+			for _, text := range p.getSent() {
+				if strings.Contains(text, e.i18n.T(MsgEmptyResponse)) || strings.Contains(text, "NO_REPLY") {
+					t.Fatalf("unexpected reply: %q", text)
+				}
+			}
+		})
+	}
+}
+
+func TestProcessInteractiveEvents_SendsEventResultAttachments(t *testing.T) {
+	p := &stubMediaPlatform{stubPlatformEngine: stubPlatformEngine{n: "test"}}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	sessionKey := "test:user1"
+	session := e.sessions.GetOrCreateActive(sessionKey)
+	agentSession := newControllableSession("s1")
+	state := &interactiveState{
+		agentSession: agentSession,
+		platform:     p,
+		replyCtx:     "ctx-1",
+	}
+	e.interactiveStates[sessionKey] = state
+
+	agentSession.events <- Event{
+		Type:    EventResult,
+		Content: "已生成。",
+		Images:  []ImageAttachment{{MimeType: "image/png", Data: []byte("img"), FileName: "generated.png"}},
+		Files:   []FileAttachment{{MimeType: "text/plain", Data: []byte("doc"), FileName: "report.txt"}},
+		Done:    true,
+	}
+	e.processInteractiveEvents(state, session, e.sessions, sessionKey, "m1", time.Now(), nil, nil, state.replyCtx, 0)
+
+	if got := p.getSent(); len(got) != 1 || got[0] != "已生成。" {
+		t.Fatalf("sent text = %#v, want generated text", got)
+	}
+	if len(p.images) != 1 || p.images[0].FileName != "generated.png" {
+		t.Fatalf("images = %#v", p.images)
+	}
+	if len(p.files) != 1 || p.files[0].FileName != "report.txt" {
+		t.Fatalf("files = %#v", p.files)
+	}
+}
+
 // TestProcessInteractiveEvents_NonTerminalResultContinuesTurn pins issue #481:
 // when Claude Code emits a mid-turn compaction result (Done=false), the engine
 // must NOT treat it as turn completion. Subsequent EventText (analogous to a
