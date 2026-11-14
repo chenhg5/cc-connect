@@ -5774,9 +5774,10 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 					break
 				}
 				toolSteps = append(toolSteps, ToolStep{
-					Kind:    ToolStepKindTool,
-					Name:    event.ToolName,
-					Summary: truncateIf(event.ToolInput, e.display.ToolMaxLen),
+					Kind:       ToolStepKindTool,
+					Name:       event.ToolName,
+					ToolCallID: toolCallID(event),
+					Summary:    toolInputPreview(event.ToolInput, e.display.ToolMaxLen),
 				})
 				if cardMessageID == nil {
 					card := buildResolvedRichCard(CardStatusWorking, "", toolSteps, partialText, true, e.composeRichStatusFooter(true, turnStart, e.agent, state.agentSession, state.workspaceDir))
@@ -5888,8 +5889,8 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				// Truncate the tool input that goes into the progress card payload so
 				// tool_max_len applies uniformly to progress_style=card, matching
 				// the rich-card path. event.ToolInput itself is left untouched.
-				cardToolInput := truncateIf(toolInput, e.display.ToolMaxLen)
-				if !cp.AppendEvent(ProgressEntryToolUse, cardToolInput, event.ToolName, toolMsg) {
+				cardToolInput := toolInputPreview(toolInput, e.display.ToolMaxLen)
+				if !cp.AppendStructured(ProgressCardEntry{Kind: ProgressEntryToolUse, Text: cardToolInput, Tool: event.ToolName, ToolCallID: toolCallID(event)}, toolMsg) {
 					for _, chunk := range SplitMessageCodeFenceAware(toolMsg, maxPlatformMessageLen) {
 						sendWorkspace(p, replyCtx, chunk)
 					}
@@ -5903,7 +5904,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 					result = strings.TrimSpace(event.Content)
 				}
 				if result != "" {
-					result = truncateIf(result, e.display.ToolMaxLen)
+					result = TruncateToolOutput(result, e.display.ToolMaxLen)
 				}
 				if result != "" || event.ToolStatus != "" || event.ToolExitCode != nil || event.ToolSuccess != nil {
 					if hasRichCard {
@@ -5928,12 +5929,14 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 					}
 					resultMsg := e.formatToolResultEventFallback(event.ToolName, result, event.ToolStatus, event.ToolExitCode, event.ToolSuccess)
 					entry := ProgressCardEntry{
-						Kind:     ProgressEntryToolResult,
-						Tool:     event.ToolName,
-						Text:     result,
-						Status:   event.ToolStatus,
-						ExitCode: event.ToolExitCode,
-						Success:  event.ToolSuccess,
+						ToolCallID: toolCallID(event),
+						Input:      toolInputPreview(event.ToolInput, e.display.ToolMaxLen),
+						Kind:       ProgressEntryToolResult,
+						Tool:       event.ToolName,
+						Text:       result,
+						Status:     event.ToolStatus,
+						ExitCode:   event.ToolExitCode,
+						Success:    event.ToolSuccess,
 					}
 					if !cp.AppendStructured(entry, resultMsg) {
 						if !SuppressStandaloneToolResultEvent(p) {
@@ -6917,24 +6920,39 @@ func mergeRichToolResult(steps []ToolStep, event Event, result string, maxLen in
 	}
 
 	idx := -1
+	callID := toolCallID(event)
 	for i := len(steps) - 1; i >= 0; i-- {
 		if steps[i].Kind == ToolStepKindThinking {
 			continue
 		}
+		if callID != "" {
+			if steps[i].ToolCallID == callID {
+				idx = i
+				break
+			}
+			continue
+		}
+		if steps[i].Done {
+			continue
+		}
 		if strings.TrimSpace(steps[i].Name) == "" || strings.TrimSpace(steps[i].Name) == toolName {
+			if idx >= 0 {
+				idx = -1
+				break
+			}
 			idx = i
-			break
 		}
 	}
 	if idx == -1 {
 		summary := strings.TrimSpace(event.ToolInput)
 		if summary != "" {
-			summary = truncateIf(summary, maxLen)
+			summary = toolInputPreview(summary, maxLen)
 		}
 		steps = append(steps, ToolStep{
-			Kind:    ToolStepKindTool,
-			Name:    toolName,
-			Summary: summary,
+			ToolCallID: callID,
+			Kind:       ToolStepKindTool,
+			Name:       toolName,
+			Summary:    summary,
 		})
 		idx = len(steps) - 1
 	}
@@ -6946,7 +6964,7 @@ func mergeRichToolResult(steps []ToolStep, event Event, result string, maxLen in
 		steps[idx].Kind = ToolStepKindTool
 	}
 	if strings.TrimSpace(steps[idx].Summary) == "" && strings.TrimSpace(event.ToolInput) != "" {
-		steps[idx].Summary = truncateIf(strings.TrimSpace(event.ToolInput), maxLen)
+		steps[idx].Summary = toolInputPreview(strings.TrimSpace(event.ToolInput), maxLen)
 	}
 	steps[idx].Result = result
 	steps[idx].Status = strings.TrimSpace(event.ToolStatus)

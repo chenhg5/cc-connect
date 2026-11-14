@@ -1157,7 +1157,7 @@ func TestBuildRichCard_RendersThinkingAndToolResultRows(t *testing.T) {
 		},
 	}, "done", true, "")
 
-	for _, want := range []string{"Inspecting event routing", "echo hi", "completed", "exit: 0", "hi"} {
+	for _, want := range []string{"Inspecting event routing", "echo hi", "completed", "exit code: `0`", "hi"} {
 		if !strings.Contains(cardJSON, want) {
 			t.Fatalf("rich card should contain %q, got %q", want, cardJSON)
 		}

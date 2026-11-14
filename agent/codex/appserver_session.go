@@ -1323,6 +1323,7 @@ func (s *appServerSession) acceptsTurnNotification(method, threadID, turnID stri
 
 func (s *appServerSession) handleItemStarted(item map[string]any) {
 	itemType, _ := item["type"].(string)
+	callID, _ := item["id"].(string)
 	if itemType == "" {
 		return
 	}
@@ -1337,24 +1338,24 @@ func (s *appServerSession) handleItemStarted(item map[string]any) {
 	switch itemType {
 	case "commandExecution":
 		command, _ := item["command"].(string)
-		s.emit(core.Event{Type: core.EventToolUse, ToolName: "Bash", ToolInput: command})
+		s.emit(core.Event{Type: core.EventToolUse, ToolCallID: callID, ToolName: "Bash", ToolInput: command})
 
 	case "mcpToolCall":
 		server, _ := item["server"].(string)
 		tool, _ := item["tool"].(string)
 		name := strings.Trim(strings.Join([]string{server, tool}, ":"), ":")
-		s.emit(core.Event{Type: core.EventToolUse, ToolName: "MCP", ToolInput: name + "\n" + appServerJSON(item["arguments"])})
+		s.emit(core.Event{Type: core.EventToolUse, ToolCallID: callID, ToolName: name, ToolInput: appServerJSON(item["arguments"])})
 
 	case "webSearch":
-		query, _ := item["query"].(string)
-		s.emit(core.Event{Type: core.EventToolUse, ToolName: "WebSearch", ToolInput: query})
+		query := codexExtractToolInput(item)
+		s.emit(core.Event{Type: core.EventToolUse, ToolCallID: callID, ToolName: "WebSearch", ToolInput: query})
 
 	case "dynamicToolCall":
 		tool, _ := item["tool"].(string)
-		s.emit(core.Event{Type: core.EventToolUse, ToolName: tool, ToolInput: appServerJSON(item["arguments"])})
+		s.emit(core.Event{Type: core.EventToolUse, ToolCallID: callID, ToolName: tool, ToolInput: appServerJSON(item["arguments"])})
 
 	case "fileChange":
-		s.emit(core.Event{Type: core.EventToolUse, ToolName: "Patch", ToolInput: appServerJSON(item["changes"])})
+		s.emit(core.Event{Type: core.EventToolUse, ToolCallID: callID, ToolName: "Patch", ToolInput: appServerJSON(item["changes"])})
 	}
 }
 
@@ -1364,6 +1365,10 @@ func (s *appServerSession) handleItemCompleted(item map[string]any) {
 		return
 	}
 
+	if result, ok := appServerToolResultEvent(item); ok {
+		s.emit(result)
+		return
+	}
 	switch itemType {
 	case "reasoning":
 		text := appServerReasoningText(item)
@@ -1382,6 +1387,14 @@ func (s *appServerSession) handleItemCompleted(item map[string]any) {
 			s.stateMu.Unlock()
 		}
 
+	}
+}
+
+// appServerToolResultEvent decodes tool results for both parent and child cards.
+func appServerToolResultEvent(item map[string]any) (core.Event, bool) {
+	itemType, _ := item["type"].(string)
+	callID, _ := item["id"].(string)
+	switch itemType {
 	case "commandExecution":
 		command, _ := item["command"].(string)
 		status, _ := item["status"].(string)
@@ -1392,53 +1405,70 @@ func (s *appServerSession) handleItemCompleted(item map[string]any) {
 			exitCodePtr = &exitCode
 		}
 		success := appServerToolSuccess(status, exitCodePtr)
-		s.emit(core.Event{
+		return core.Event{
 			Type:         core.EventToolResult,
+			ToolCallID:   callID,
 			ToolName:     "Bash",
 			ToolInput:    command,
-			ToolResult:   truncate(strings.TrimSpace(output), 500),
+			ToolResult:   core.RedactToolText(strings.TrimSpace(output)),
 			ToolStatus:   strings.TrimSpace(status),
 			ToolExitCode: exitCodePtr,
 			ToolSuccess:  &success,
-		})
+		}, true
+
+	case "fileChange":
+		status, _ := item["status"].(string)
+		success := appServerToolSuccess(status, nil)
+		return core.Event{Type: core.EventToolResult, ToolCallID: callID, ToolName: "Patch", ToolInput: appServerJSON(item["changes"]), ToolStatus: status, ToolSuccess: &success}, true
 
 	case "mcpToolCall":
 		tool, _ := item["tool"].(string)
+		server, _ := item["server"].(string)
+		tool = strings.Trim(strings.Join([]string{server, tool}, ":"), ":")
 		status, _ := item["status"].(string)
-		result := appServerJSON(item["result"])
+		result := appServerToolResultText(item["result"])
 		if errText := appServerJSON(item["error"]); strings.TrimSpace(errText) != "" && result == "" {
 			result = errText
 		}
 		success := appServerToolSuccess(status, nil)
-		s.emit(core.Event{
+		if result, ok := item["result"].(map[string]any); ok {
+			if isError, _ := result["isError"].(bool); isError {
+				success = false
+			}
+		}
+		return core.Event{
 			Type:        core.EventToolResult,
+			ToolCallID:  callID,
 			ToolName:    tool,
-			ToolResult:  truncate(strings.TrimSpace(result), 500),
+			ToolResult:  core.RedactToolText(strings.TrimSpace(result)),
 			ToolStatus:  strings.TrimSpace(status),
 			ToolSuccess: &success,
-		})
+		}, true
 
 	case "webSearch":
-		query, _ := item["query"].(string)
-		s.emit(core.Event{
+		query := codexExtractToolInput(item)
+		return core.Event{
 			Type:       core.EventToolResult,
+			ToolCallID: callID,
 			ToolName:   "WebSearch",
-			ToolResult: truncate(strings.TrimSpace(query), 500),
-		})
+			ToolResult: core.RedactToolText(strings.TrimSpace(query)),
+		}, true
 
 	case "dynamicToolCall":
 		tool, _ := item["tool"].(string)
 		status, _ := item["status"].(string)
 		result := appServerDynamicToolText(item["contentItems"])
 		success := appServerToolSuccess(status, nil)
-		s.emit(core.Event{
+		return core.Event{
 			Type:        core.EventToolResult,
+			ToolCallID:  callID,
 			ToolName:    tool,
-			ToolResult:  truncate(strings.TrimSpace(result), 500),
+			ToolResult:  core.RedactToolText(strings.TrimSpace(result)),
 			ToolStatus:  strings.TrimSpace(status),
 			ToolSuccess: &success,
-		})
+		}, true
 	}
+	return core.Event{}, false
 }
 
 func appServerReasoningText(item map[string]any) string {
@@ -1475,12 +1505,52 @@ func appServerDynamicToolText(raw any) string {
 		}
 		if text, _ := m["text"].(string); strings.TrimSpace(text) != "" {
 			parts = append(parts, text)
+		} else if kind, _ := m["type"].(string); kind != "" {
+			parts = append(parts, "["+kind+"]")
 		}
 	}
 	if len(parts) == 0 {
-		return appServerJSON(raw)
+		return ""
 	}
 	return strings.Join(parts, "\n")
+}
+
+// MCP results wrap readable text in content blocks. Render those blocks rather
+// than spending the card's output budget on transport JSON and escaped newlines.
+func appServerToolResultText(raw any) string {
+	if result, ok := raw.(map[string]any); ok {
+		var parts []string
+		if content, ok := result["content"].([]any); ok {
+			for _, block := range content {
+				if block, ok := block.(map[string]any); ok {
+					if text, ok := block["text"].(string); ok {
+						parts = append(parts, core.RedactToolText(text))
+					} else if kind, _ := block["type"].(string); kind != "" {
+						parts = append(parts, "["+kind+"]")
+					}
+				}
+			}
+		}
+		if structured, ok := result["structuredContent"]; ok && appServerJSON(structured) != "" {
+			if data, err := json.MarshalIndent(structured, "", "  "); err == nil {
+				parts = append(parts, core.RedactToolText(string(data)))
+			}
+		}
+		if len(parts) > 0 {
+			return strings.Join(parts, "\n")
+		}
+	}
+	if text, ok := raw.(string); ok {
+		return text
+	}
+	if raw == nil {
+		return ""
+	}
+	data, err := json.MarshalIndent(raw, "", "  ")
+	if err != nil {
+		return ""
+	}
+	return string(data)
 }
 
 func appServerToolSuccess(status string, exitCode *int) bool {
