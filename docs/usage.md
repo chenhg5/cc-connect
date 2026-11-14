@@ -150,6 +150,31 @@ cmd = ["/path with spaces/codex", "--profile", "work"]
 
 This runs the bundled CLI using the existing Codex adapter. Desktop-only tools and shared-thread locking have separate requirements; see [Desktop backend discussion #651](https://github.com/chenhg5/cc-connect/issues/651) and [thread writer conflict #1909](https://github.com/chenhg5/cc-connect/issues/1909).
 
+### Codex home directory (`codex_home`)
+
+By default the Codex adapter uses the same Codex home as your terminal and the Codex desktop app. The adapter resolves the home in this order: the project `codex_home` option, then `CODEX_HOME` from the environment that starts cc-connect, then `~/.codex`. A configured `codex_home` is exported as `CODEX_HOME` to the Codex CLI for both the `exec` and `app_server` backends, and `/list` reads sessions from the same resolved home.
+
+Sharing one home has a cost. When the Codex desktop app holds the thread writer lock for a conversation, a later `codex exec resume` fails with `thread-store conflict: ... already has an active writer (code -32600)`. Give a project its own home when it must not share threads:
+
+```toml
+[projects.agent.options]
+codex_home = "/Users/you/.codex-cc-connect"
+```
+
+- Put the option under `[projects.agent.options]`. Options under `[projects.platforms.options]` are per-platform and never reach the agent.
+- Use an absolute path that already exists. `codex_home` does not expand `~`, so `~/.codex-cc-connect` reaches the CLI literally, and the CLI does not create the directory. cc-connect creates it only when it writes provider configuration, which a subscription login never does.
+- Copy `auth.json` and `config.toml` from your default Codex home to reuse the login and settings. cc-connect writes `auth.json` only for provider API keys and never writes `config.toml` for a subscription login.
+- The trade-off: conversations in the isolated home no longer appear in the Codex desktop app, and the desktop app's conversations cannot be resumed by this project. The two clients stop sharing threads.
+
+Create the directory and copy the login files before the first message:
+
+```sh
+mkdir -p ~/.codex-cc-connect
+cp ~/.codex/auth.json ~/.codex/config.toml ~/.codex-cc-connect/
+```
+
+Then set the absolute path under `[projects.agent.options]`, for example `/Users/you/.codex-cc-connect`. To reuse one isolated home across projects, set `CODEX_HOME` in the environment that starts cc-connect instead; an explicit `codex_home` wins over the environment variable.
+
 ### Cursor Agent Modes
 
 | Mode | Config Value | Behavior |
