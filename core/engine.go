@@ -5226,12 +5226,37 @@ func (e *Engine) runUnsolicitedReader(ctx context.Context, cancel context.Cancel
 				e.relayModelSwitch(p, replyCtx, sessionKey, event.ModelSwitch)
 
 			case EventResult:
+				// Prefer the full accumulated text over event.Content, which only
+				// contains the last assistant segment — mirroring the foreground
+				// EventResult handling. Without this, text the agent wrote earlier
+				// in the turn is silently dropped on unsolicited turns whenever the
+				// turn ends with any final text (e.g. a NO_REPLY marker), because
+				// event.Content is just that last segment.
 				fullResponse := event.Content
-				if fullResponse == "" && len(textParts) > 0 {
+				if len(textParts) > 0 {
 					fullResponse = strings.Join(textParts, "")
 				}
+				originalResponse := fullResponse
 
-				if fullResponse != "" {
+				// Respect NO_REPLY semantics with the same three cases as the
+				// foreground path:
+				//   1. bare marker (isSilentReply)              → fully silent
+				//   2. trailing marker with non-empty reasoning → strip marker, deliver reasoning
+				//   3. trailing marker with empty strip result  → fully silent
+				// Before this check the raw marker was relayed verbatim, and text
+				// preceding a trailing marker was lost.
+				isSilent := isSilentReply(fullResponse)
+				if !isSilent {
+					if stripped, ok := stripTrailingSilent(fullResponse); ok {
+						if strings.TrimSpace(stripped) == "" {
+							isSilent = true
+						} else {
+							fullResponse = stripped
+						}
+					}
+				}
+
+				if !isSilent && fullResponse != "" {
 					for _, chunk := range SplitMessageCodeFenceAware(fullResponse, maxPlatformMessageLen) {
 						e.send(p, replyCtx, chunk)
 					}
@@ -5253,7 +5278,10 @@ func (e *Engine) runUnsolicitedReader(ctx context.Context, cancel context.Cancel
 				// fires, flushed chunks may arrive after or interleave with
 				// the next foreground turn's reply (delivery is still
 				// guaranteed; only ordering degrades).
-				session.AddHistory("assistant", fullResponse)
+				// History records the ORIGINAL (pre-NO_REPLY-strip) text so the
+				// agent retains context of its own decision, matching the
+				// foreground path.
+				session.AddHistory("assistant", originalResponse)
 				sessions.Save()
 
 				// Reset for potential subsequent unsolicited turn.
