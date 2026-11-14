@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -44,7 +45,8 @@ type opencodeSession struct {
 	expectingContinue atomic.Bool // true when compaction_continue received, waiting for next step
 	resultSent        atomic.Bool // true when EventResult has been sent for this turn
 	prepareMu         sync.Mutex
-	prepared          bool // true once the resumed session's question permission has been checked
+	prepared          bool // true once the resumed session's question permission is settled (applied or given up)
+	prepareAttempts   int  // preparation attempts made so far; guarded by prepareMu, like prepared
 }
 
 func newOpencodeSession(ctx context.Context, cmd string, extraArgs []string, workDir, model, mode, agentName, resumeID string, extraEnv []string) (*opencodeSession, error) {
@@ -72,12 +74,10 @@ func newOpencodeSession(ctx context.Context, cmd string, extraArgs []string, wor
 }
 
 func (s *opencodeSession) Send(prompt string, messageID string, images []core.ImageAttachment, files []core.FileAttachment) error {
-	// Prepare before staging attachments so a failure here leaves no temp copies behind.
+	// Best effort: a failed preparation is logged and the turn goes on.
 	chatID := s.CurrentSessionID()
 	isResume := chatID != ""
-	if err := s.prepareHeadlessSession(chatID, isResume); err != nil {
-		return err
-	}
+	s.prepareHeadlessSession(chatID, isResume)
 
 	if len(files) > 0 {
 		filePaths := core.SaveFilesToDisk(s.workDir, messageID, files)
@@ -132,40 +132,91 @@ func (s *opencodeSession) Send(prompt string, messageID string, images []core.Im
 	return nil
 }
 
+// maxHeadlessPrepareAttempts bounds how often one opencodeSession tries to
+// prepare a resumed session. A single attempt can take up to about a minute
+// (server start plus the API calls), so a failed preparation gets exactly one
+// more chance on a later Send, which covers a one-off hiccup, and is then
+// given up for good instead of delaying every following message.
+const maxHeadlessPrepareAttempts = 2
+
+var (
+	// errOpenCodeServerStart marks a preparation failure where the temporary
+	// `opencode serve` could not be started at all.
+	errOpenCodeServerStart = errors.New("temporary opencode server did not start")
+	// errQuestionDenyUnsupported marks a preparation that cannot work against
+	// this OpenCode build (unknown route, rejected payload, unknown permission
+	// shape). Retrying would not help.
+	errQuestionDenyUnsupported = errors.New("session permission API not supported")
+)
+
 // prepareHeadlessSession makes sure a resumed OpenCode session cannot call the
-// interactive `question` tool. It runs once per opencodeSession; a failed
-// attempt is retried on the next Send.
+// interactive `question` tool. It is best effort and never fails the turn: if
+// the deny cannot be applied the message is still sent, which is the behavior
+// cc-connect had before this check existed (the turn can only hang if the
+// model really calls the tool).
+//
+// It runs until it succeeds or is given up: an unsupported OpenCode build is
+// given up immediately, any other failure after maxHeadlessPrepareAttempts.
 //
 // New sessions need no preparation: OPENCODE_PERMISSION (see
 // withHeadlessQuestionDenied) already denies the tool. A resumed session can
 // carry its own persisted permission rules, which OpenCode evaluates after the
 // config-level ones, so those are checked through the OpenCode server API.
-func (s *opencodeSession) prepareHeadlessSession(sessionID string, resume bool) error {
+func (s *opencodeSession) prepareHeadlessSession(sessionID string, resume bool) {
 	s.prepareMu.Lock()
 	defer s.prepareMu.Unlock()
 	if s.prepared {
-		return nil
+		return
 	}
-	if resume {
-		if err := s.denyHeadlessSessionQuestion(sessionID); err != nil {
-			return err
-		}
+	if !resume {
+		s.prepared = true
+		return
 	}
-	s.prepared = true
-	return nil
+
+	s.prepareAttempts++
+	err := s.denyHeadlessSessionQuestion(sessionID)
+	if err == nil {
+		s.prepared = true
+		return
+	}
+
+	const consequence = "sending the message anyway; the turn can hang if the model calls the question tool"
+	if errors.Is(err, errQuestionDenyUnsupported) {
+		s.prepared = true
+		slog.Warn("opencode: this OpenCode build does not support denying the question tool on a resumed session; "+consequence,
+			"session", sessionID, "err", err)
+		return
+	}
+
+	willRetry := s.prepareAttempts < maxHeadlessPrepareAttempts
+	if !willRetry {
+		s.prepared = true
+	}
+	if errors.Is(err, errOpenCodeServerStart) {
+		slog.Warn("opencode: temporary `opencode serve` did not start, question tool not denied on the resumed session; "+consequence,
+			"session", sessionID, "attempt", s.prepareAttempts, "will_retry", willRetry, "err", err)
+		return
+	}
+	slog.Warn("opencode: question deny could not be applied to the resumed session; "+consequence,
+		"session", sessionID, "attempt", s.prepareAttempts, "will_retry", willRetry, "err", err)
 }
 
 // denyHeadlessSessionQuestion reads the persisted permission rules of an
 // existing OpenCode session through a temporary loopback `opencode serve` and,
 // unless the last rule matching the question tool is already a wildcard deny,
 // appends one. Unrelated rules are left untouched.
+//
+// Errors wrap errOpenCodeServerStart when the server never came up and
+// errQuestionDenyUnsupported when this OpenCode build does not offer the
+// session permission API in a form we understand; anything else is a failure
+// that may be transient.
 func (s *opencodeSession) denyHeadlessSessionQuestion(sessionID string) error {
 	const maxSessionResponseBytes = 8 << 20
 
 	env := core.MergeEnv(os.Environ(), s.extraEnv)
 	baseURL, stopServer, err := startOpenCodeServer(s.ctx, s.cmd, s.extraArgs, s.workDir, env)
 	if err != nil {
-		return fmt.Errorf("opencode: prepare resumed session permissions: %w", err)
+		return fmt.Errorf("%w: %w", errOpenCodeServerStart, err)
 	}
 	defer stopServer()
 
@@ -197,30 +248,24 @@ func (s *opencodeSession) denyHeadlessSessionQuestion(sessionID string) error {
 	if len(responseBody) > maxSessionResponseBytes {
 		return fmt.Errorf("opencode: resumed session response exceeds %d bytes", maxSessionResponseBytes)
 	}
-	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
-		return fmt.Errorf("opencode: get resumed session permissions returned %s: %s", resp.Status, truncate(strings.TrimSpace(string(responseBody)), 300))
+	if err := openCodeSessionStatusError("get resumed session permissions", resp, responseBody); err != nil {
+		return err
 	}
 
 	var sessionInfo struct {
-		Permission []map[string]any `json:"permission"`
+		Permission json.RawMessage `json:"permission"`
 	}
 	if err := json.Unmarshal(responseBody, &sessionInfo); err != nil {
-		return fmt.Errorf("opencode: decode resumed session permissions: %w", err)
+		// A 2xx answer that is not a session object (for example a web UI
+		// fallback page) means the route is not the API we expect.
+		return fmt.Errorf("%w: decode resumed session: %w", errQuestionDenyUnsupported, err)
 	}
-	// OpenCode applies the last matching rule, so only the final rule that
-	// targets the question tool (or every tool) decides the outcome.
-	for i := len(sessionInfo.Permission) - 1; i >= 0; i-- {
-		rule := sessionInfo.Permission[i]
-		permission, _ := rule["permission"].(string)
-		if permission != "question" && permission != "*" {
-			continue
-		}
-		pattern, _ := rule["pattern"].(string)
-		action, _ := rule["action"].(string)
-		if pattern == "*" && action == "deny" {
-			return nil
-		}
-		break
+	denied, err := sessionQuestionDenied(sessionInfo.Permission)
+	if err != nil {
+		return err
+	}
+	if denied {
+		return nil
 	}
 
 	denyRule := map[string]any{
@@ -244,10 +289,54 @@ func (s *opencodeSession) denyHeadlessSessionQuestion(sessionID string) error {
 	}
 	defer func() { _ = resp.Body.Close() }()
 	responseBody, _ = io.ReadAll(io.LimitReader(resp.Body, 64*1024))
-	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
-		return fmt.Errorf("opencode: update resumed session permissions returned %s: %s", resp.Status, truncate(strings.TrimSpace(string(responseBody)), 300))
+	return openCodeSessionStatusError("update resumed session permissions", resp, responseBody)
+}
+
+// openCodeSessionStatusError turns a non-2xx answer of the session API into an
+// error. 400, 404, 405 and 422 mean this OpenCode build does not offer the
+// route or rejects the payload, which no retry will fix, so they wrap
+// errQuestionDenyUnsupported. Every other status (auth, timeout, rate limit,
+// 5xx) may be transient.
+func openCodeSessionStatusError(action string, resp *http.Response, body []byte) error {
+	if resp.StatusCode >= http.StatusOK && resp.StatusCode < http.StatusMultipleChoices {
+		return nil
 	}
-	return nil
+	detail := truncate(strings.TrimSpace(string(body)), 300)
+	switch resp.StatusCode {
+	case http.StatusBadRequest, http.StatusNotFound, http.StatusMethodNotAllowed, http.StatusUnprocessableEntity:
+		return fmt.Errorf("%w: %s returned %s: %s", errQuestionDenyUnsupported, action, resp.Status, detail)
+	}
+	return fmt.Errorf("opencode: %s returned %s: %s", action, resp.Status, detail)
+}
+
+// sessionQuestionDenied reports whether the `permission` value of an OpenCode
+// session already denies the question tool.
+//
+// The value is an array of {permission, pattern, action} rules. It may also be
+// absent or null: a session without rules of its own, or an older build that
+// has no such field. Both count as "not denied". OpenCode applies the last
+// matching rule, so only the final rule that targets the question tool (or
+// every tool) decides the outcome. Any other shape wraps
+// errQuestionDenyUnsupported.
+func sessionQuestionDenied(raw json.RawMessage) (bool, error) {
+	trimmed := bytes.TrimSpace(raw)
+	if len(trimmed) == 0 || bytes.Equal(trimmed, []byte("null")) {
+		return false, nil
+	}
+	var rules []map[string]any
+	if err := json.Unmarshal(trimmed, &rules); err != nil {
+		return false, fmt.Errorf("%w: unexpected session permission value %s", errQuestionDenyUnsupported, truncate(string(trimmed), 80))
+	}
+	for i := len(rules) - 1; i >= 0; i-- {
+		permission, _ := rules[i]["permission"].(string)
+		if permission != "question" && permission != "*" {
+			continue
+		}
+		pattern, _ := rules[i]["pattern"].(string)
+		action, _ := rules[i]["action"].(string)
+		return pattern == "*" && action == "deny", nil
+	}
+	return false, nil
 }
 
 func setOpenCodeServerAuth(req *http.Request, env []string) {

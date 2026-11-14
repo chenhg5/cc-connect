@@ -184,7 +184,9 @@ Cursor 项目可在 `[projects.agent.options]` 中设置可选的 `instructions_
 > cc-connect 会在 OpenCode 会话中禁用该工具（在 `OPENCODE_PERMISSION` 中设置
 > `"question": "deny"`，你在其中配置的其他权限保持不变）。恢复已有会话时，还会通过
 > 临时的本地回环 `opencode serve` 检查该会话持久化的权限规则，必要时追加一条针对
-> `question` 的通配 deny。模型仍然可以用普通聊天文字向用户提问和确认。
+> `question` 的通配 deny。这项针对已有会话的检查是尽力而为：如果无法生效，cc-connect
+> 会记录一条警告并照常发送消息，此时模型若调用 `question`，这一轮仍可能卡住。模型仍然
+> 可以用普通聊天文字向用户提问和确认。
 
 ### 配置示例
 

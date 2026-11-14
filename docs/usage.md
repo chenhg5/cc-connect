@@ -189,7 +189,10 @@ the turn explicitly. Leave it unset to keep the existing prompt behavior.
 > keeping any other permissions you configured there). When resuming an existing
 > session, it also checks the session's persisted permission rules through a
 > temporary loopback `opencode serve` and appends a wildcard deny for `question`
-> if needed. The model can still ask for clarification as ordinary chat text.
+> if needed. That resumed-session check is best effort: if it cannot be applied,
+> cc-connect logs a warning and still sends the message, and the turn can still
+> hang if the model calls `question`. The model can still ask for clarification
+> as ordinary chat text.
 
 ### Configuration
 
