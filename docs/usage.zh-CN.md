@@ -19,6 +19,7 @@ cc-connect 完整功能使用指南。
 - [语音消息（语音转文字）](#语音消息语音转文字)
 - [语音回复（文字转语音）](#语音回复文字转语音)
 - [图片与文件回传](#图片与文件回传)
+- [生命周期钩子](#生命周期钩子)
 - [定时任务 (Cron)](#定时任务-cron)
 - [Shell 配置](#shell-配置)
 - [多机器人中继](#多机器人中继)
@@ -785,6 +786,26 @@ cc-connect send --tts "你好"
 - 目标平台在投递时还会校验自己的文件大小/类型上限；实际生效的是它与 `max_attachment_size_mb` 中**更小**的那个（通过了 cc-connect 的文件仍可能在投递时被平台拒绝）。
 
 ---
+
+## 生命周期钩子
+
+`[[hooks]]` 规则可以在生命周期事件发生时执行 shell 命令或向 HTTP 端点 POST 数据。事件名包括 `message.received`、`message.sent`、`session.started`、`session.ended`、`turn.cancelled`、`cron.triggered`、`timer.triggered`、`permission.requested`、`error`，以及通配符 `*`。
+
+### `/stop` 与 `turn.cancelled`
+
+对于支持优雅取消的 Agent（Claude Code 与 ACP 系 Agent），`/stop` 只中断当前这一轮，Agent 进程与会话保持存活，因此之后 `/compress`、`/clear`、`/resume` 仍然可用。也就是说，一次 stop 不再必然意味着会话结束。
+
+`stop_hook_event` 决定 `/stop` 触发哪个事件：
+
+```toml
+# 默认值：保持历史行为，已有规则照常触发。
+stop_hook_event = "session.ended"
+
+# 可选：仅当这一轮被优雅取消、会话被保留时，触发更精确的事件。
+stop_hook_event = "turn.cancelled"
+```
+
+两种模式下，当会话真正被销毁时（Agent 不支持优雅取消，或取消失败、进程被杀死）都会触发 `session.ended`。一次 `/stop` 只触发两者之一，因此 `event = "*"` 的规则每次 stop 仍然只收到一个事件。
 
 ## 定时任务 (Cron)
 
