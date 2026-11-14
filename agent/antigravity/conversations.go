@@ -158,35 +158,53 @@ func snapshotAgyConversations() map[string]bool {
 	return seen
 }
 
-// detectNewAgyConversation returns the newest conversation file created since
-// the snapshot, or "".
-func detectNewAgyConversation(pre map[string]bool, since time.Time) string {
+// agyConversationMtimeSlack absorbs filesystem timestamp granularity and the
+// delay between a turn exiting and its conversation file being flushed.
+const agyConversationMtimeSlack = 2 * time.Second
+
+// detectNewAgyConversation is the fallback for turns whose stream did not
+// report a conversation id. The conversations directory is shared with every
+// other agy process of the user, so guessing is only safe when it is
+// unambiguous: exactly one conversation file appeared since the pre-turn
+// snapshot, and it was last written inside the turn window [since, until].
+// Otherwise it returns "" and a reason, and the next turn starts a fresh
+// conversation rather than resuming somebody else's.
+func detectNewAgyConversation(pre map[string]bool, since, until time.Time) (id, reason string) {
 	dir := agyConversationsDir()
 	if dir == "" {
-		return ""
+		return "", ""
 	}
 	entries, err := os.ReadDir(dir)
 	if err != nil {
-		return ""
+		return "", ""
 	}
-	var best string
-	var bestMod time.Time
+	var created []os.DirEntry
 	for _, e := range entries {
 		if e.IsDir() || !strings.HasSuffix(e.Name(), ".db") || pre[e.Name()] {
 			continue
 		}
-		info, err := e.Info()
-		if err != nil {
-			continue
-		}
-		if !since.IsZero() && info.ModTime().Before(since.Add(-2*time.Second)) {
-			continue
-		}
-		if best == "" || info.ModTime().After(bestMod) {
-			best, bestMod = strings.TrimSuffix(e.Name(), ".db"), info.ModTime()
-		}
+		created = append(created, e)
 	}
-	return best
+	switch len(created) {
+	case 0:
+		return "", ""
+	case 1:
+	default:
+		return "", fmt.Sprintf("%d new conversation files, cannot tell which one belongs to this turn", len(created))
+	}
+
+	info, err := created[0].Info()
+	if err != nil {
+		return "", ""
+	}
+	mod := info.ModTime()
+	if !since.IsZero() && mod.Before(since.Add(-agyConversationMtimeSlack)) {
+		return "", fmt.Sprintf("%s was modified before this turn started", created[0].Name())
+	}
+	if !until.IsZero() && mod.After(until.Add(agyConversationMtimeSlack)) {
+		return "", fmt.Sprintf("%s was modified after this turn ended", created[0].Name())
+	}
+	return strings.TrimSuffix(created[0].Name(), ".db"), ""
 }
 
 // deleteAgyConversation removes a conversation file. found=false means no

@@ -129,22 +129,41 @@ func (a *Agent) GetModel() string {
 	return core.GetProviderModel(a.providers, a.activeIdx, a.model)
 }
 
-var agyEfforts = []string{"low", "medium", "high", "xhigh", "max"}
-
+// normalizeEffort only canonicalizes the spelling. Whether agy accepts the
+// value is decided against the CLI's own help text (see capabilities.go).
 func normalizeEffort(raw string) string {
 	raw = strings.ToLower(strings.TrimSpace(raw))
-	for _, e := range agyEfforts {
-		if raw == e {
-			return e
-		}
+	if !agyEffortToken.MatchString(raw) {
+		return ""
 	}
-	return ""
+	return raw
+}
+
+// capabilities reports what the configured agy CLI accepts (probed once per
+// process and cached).
+func (a *Agent) capabilities() agyCapabilities {
+	a.mu.RLock()
+	cmdName := a.cmd
+	extraArgs := append([]string(nil), a.cliExtraArgs...)
+	env := core.MergeEnv(os.Environ(), append(append([]string(nil), a.configEnv...), a.providerEnvLocked()...))
+	a.mu.RUnlock()
+	return agyCapabilitiesFor(context.Background(), cmdName, extraArgs, env)
 }
 
 func (a *Agent) SetReasoningEffort(effort string) {
+	normalized := normalizeEffort(effort)
+	if normalized != "" {
+		// A failed probe says nothing about the CLI: keep the user's choice
+		// and let the per-turn gate decide whether it can be passed.
+		if caps := a.capabilities(); caps.probed && !caps.supportsEffort(normalized) {
+			slog.Warn("antigravity: reasoning effort not supported by this agy, ignoring",
+				"effort", normalized, "supported", caps.supportedEfforts())
+			normalized = ""
+		}
+	}
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	a.effort = normalizeEffort(effort)
+	a.effort = normalized
 	slog.Info("antigravity: reasoning effort changed", "effort", a.effort)
 }
 
@@ -154,8 +173,10 @@ func (a *Agent) GetReasoningEffort() string {
 	return a.effort
 }
 
+// AvailableReasoningEfforts lists the values the installed agy accepts for
+// --effort. It is empty when agy has no --effort flag.
 func (a *Agent) AvailableReasoningEfforts() []string {
-	return append([]string(nil), agyEfforts...)
+	return a.capabilities().supportedEfforts()
 }
 
 func (a *Agent) configuredModels() []core.ModelOption {

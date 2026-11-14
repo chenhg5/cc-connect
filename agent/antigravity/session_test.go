@@ -74,7 +74,7 @@ func TestSession_ContinueSessionTreatedAsFresh(t *testing.T) {
 
 func TestBuildAntigravityArgs_PromptAtEnd(t *testing.T) {
 	s, _ := newAntigravitySession(context.Background(), "echo", []string{"--verbose"}, "/tmp", "", "", "default", "", nil, 0)
-	args := s.buildAntigravityArgs("sid-1", true, "plan", "/tmp/agy-config", "What is 1+1?")
+	args := s.buildAntigravityArgs("sid-1", true, "plan", "/tmp/agy-config", "", "", "What is 1+1?")
 	if len(args) < 2 {
 		t.Fatalf("args too short: %v", args)
 	}
@@ -281,8 +281,8 @@ func contains(xs []string, want string) bool {
 }
 
 func TestBuildAntigravityArgs_ModelAndEffort(t *testing.T) {
-	s, _ := newAntigravitySession(context.Background(), "echo", nil, "/tmp", "gemini-3.8-flash", "high", "yolo", "", nil, 0)
-	args := s.buildAntigravityArgs("", false, "yolo", "", "hi")
+	s, _ := newAntigravitySession(context.Background(), "echo", nil, "/tmp", "", "", "yolo", "", nil, 0)
+	args := s.buildAntigravityArgs("", false, "yolo", "", "gemini-3.8-flash", "high", "hi")
 	if !containsPair(args, "--model", "gemini-3.8-flash") {
 		t.Fatalf("expected --model gemini-3.8-flash, got: %v", args)
 	}

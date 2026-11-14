@@ -95,18 +95,81 @@ func TestAgentListAndDeleteUseConversationStore(t *testing.T) {
 }
 
 func TestDetectNewAgyConversation(t *testing.T) {
-	home := t.TempDir()
-	t.Setenv("HOME", home)
-	dir := filepath.Join(home, ".gemini", "antigravity-cli", "conversations")
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		t.Fatal(err)
+	newDir := func(t *testing.T) string {
+		t.Helper()
+		home := t.TempDir()
+		t.Setenv("HOME", home)
+		dir := filepath.Join(home, ".gemini", "antigravity-cli", "conversations")
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, "old.db"), nil, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		return dir
 	}
-	_ = os.WriteFile(filepath.Join(dir, "old.db"), nil, 0o600)
-	pre := snapshotAgyConversations()
-	start := time.Now()
-	_ = os.WriteFile(filepath.Join(dir, "fresh.db"), nil, 0o600)
+	touch := func(t *testing.T, dir, name string, mod time.Time) {
+		t.Helper()
+		path := filepath.Join(dir, name)
+		if err := os.WriteFile(path, nil, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chtimes(path, mod, mod); err != nil {
+			t.Fatal(err)
+		}
+	}
+	start := time.Now().Add(-10 * time.Second)
+	end := start.Add(5 * time.Second)
+	inside := start.Add(2 * time.Second)
 
-	if got := detectNewAgyConversation(pre, start); got != "fresh" {
-		t.Fatalf("detectNewAgyConversation = %q, want fresh", got)
-	}
+	t.Run("single new file inside the turn window", func(t *testing.T) {
+		dir := newDir(t)
+		pre := snapshotAgyConversations()
+		touch(t, dir, "fresh.db", inside)
+		// SQLite side files must not count as extra conversations.
+		touch(t, dir, "fresh.db-wal", inside)
+		touch(t, dir, "fresh.db-shm", inside)
+		if got, reason := detectNewAgyConversation(pre, start, end); got != "fresh" {
+			t.Fatalf("detectNewAgyConversation = %q (%s), want fresh", got, reason)
+		}
+	})
+
+	t.Run("two new files are ambiguous", func(t *testing.T) {
+		dir := newDir(t)
+		pre := snapshotAgyConversations()
+		touch(t, dir, "mine.db", inside)
+		touch(t, dir, "someone-else.db", inside.Add(time.Second))
+		got, reason := detectNewAgyConversation(pre, start, end)
+		if got != "" || reason == "" {
+			t.Fatalf("detectNewAgyConversation = %q (%q), want none with a reason", got, reason)
+		}
+	})
+
+	t.Run("new file modified before the turn", func(t *testing.T) {
+		dir := newDir(t)
+		pre := snapshotAgyConversations()
+		touch(t, dir, "stale.db", start.Add(-time.Minute))
+		got, reason := detectNewAgyConversation(pre, start, end)
+		if got != "" || reason == "" {
+			t.Fatalf("detectNewAgyConversation = %q (%q), want none with a reason", got, reason)
+		}
+	})
+
+	t.Run("new file modified after the turn", func(t *testing.T) {
+		dir := newDir(t)
+		pre := snapshotAgyConversations()
+		touch(t, dir, "late.db", end.Add(time.Minute))
+		got, reason := detectNewAgyConversation(pre, start, end)
+		if got != "" || reason == "" {
+			t.Fatalf("detectNewAgyConversation = %q (%q), want none with a reason", got, reason)
+		}
+	})
+
+	t.Run("no new file", func(t *testing.T) {
+		newDir(t)
+		pre := snapshotAgyConversations()
+		if got, reason := detectNewAgyConversation(pre, start, end); got != "" || reason != "" {
+			t.Fatalf("detectNewAgyConversation = %q (%q), want none", got, reason)
+		}
+	})
 }

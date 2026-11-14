@@ -37,6 +37,8 @@ type antigravitySession struct {
 	cancel           context.CancelFunc
 	wg               sync.WaitGroup
 	alive            atomic.Bool
+	warnedModel      atomic.Bool
+	warnedEffort     atomic.Bool
 	permissionBridge *agyPermissionBridge
 }
 
@@ -145,7 +147,8 @@ func (as *antigravitySession) Send(prompt string, messageID string, images []cor
 	if as.permissionBridge != nil {
 		agyConfigDir = as.permissionBridge.AgyConfigDir()
 	}
-	args := as.buildAntigravityArgs(chatID, isResume, as.mode, agyConfigDir, fullPrompt)
+	model, effort := as.supportedModelAndEffort()
+	args := as.buildAntigravityArgs(chatID, isResume, as.mode, agyConfigDir, model, effort, fullPrompt)
 
 	var ctx context.Context
 	var cancel context.CancelFunc
@@ -199,7 +202,43 @@ func (as *antigravitySession) Send(prompt string, messageID string, images []cor
 	return nil
 }
 
-func (as *antigravitySession) buildAntigravityArgs(chatID string, isResume bool, mode, agyConfigDir, fullPrompt string) []string {
+// supportedModelAndEffort returns the model and effort that the installed agy
+// CLI accepts. A value the CLI does not support is dropped with a warning, so
+// an older agy keeps working with its default model instead of failing the
+// turn on an unknown flag.
+func (as *antigravitySession) supportedModelAndEffort() (model, effort string) {
+	model = strings.TrimSpace(as.model)
+	effort = strings.ToLower(strings.TrimSpace(as.effort))
+	if model == "" && effort == "" {
+		return "", ""
+	}
+
+	env := os.Environ()
+	if len(as.extraEnv) > 0 {
+		env = core.MergeEnv(env, as.extraEnv)
+	}
+	caps := agyCapabilitiesFor(as.ctx, as.cmd, as.extraArgs, env)
+
+	if model != "" && !caps.model {
+		if as.warnedModel.CompareAndSwap(false, true) {
+			slog.Warn("antigravitySession: model is configured but ignored because this agy does not support --model",
+				"model", model, "probed", caps.probed)
+		}
+		model = ""
+	}
+	if effort != "" && !caps.supportsEffort(effort) {
+		if as.warnedEffort.CompareAndSwap(false, true) {
+			slog.Warn("antigravitySession: reasoning effort is configured but ignored because this agy does not support it",
+				"effort", effort, "supported", caps.supportedEfforts(), "probed", caps.probed)
+		}
+		effort = ""
+	}
+	return model, effort
+}
+
+// buildAntigravityArgs builds the agy command line. model and effort must
+// already be checked against the CLI (see supportedModelAndEffort).
+func (as *antigravitySession) buildAntigravityArgs(chatID string, isResume bool, mode, agyConfigDir, model, effort, fullPrompt string) []string {
 	// Prepend extra args from cmd so wrappers like "timeout 3600 agy" work.
 	// Keep "-p <prompt>" at the very end because agy consumes the immediate next arg.
 	args := append([]string{}, as.extraArgs...)
@@ -210,11 +249,11 @@ func (as *antigravitySession) buildAntigravityArgs(chatID string, isResume bool,
 	if isResume {
 		args = append(args, "--conversation", chatID)
 	}
-	if m := strings.TrimSpace(as.model); m != "" {
-		args = append(args, "--model", m)
+	if model != "" {
+		args = append(args, "--model", model)
 	}
-	if e := strings.TrimSpace(as.effort); e != "" {
-		args = append(args, "--effort", e)
+	if effort != "" {
+		args = append(args, "--effort", effort)
 	}
 	args = append(args, "--output-format=stream-json")
 	switch mode {
@@ -240,9 +279,10 @@ func (as *antigravitySession) readLoop(ctx context.Context, cmd *exec.Cmd, stdou
 		// agy may flush the chat file only while the process is exiting, so wait
 		// for process reaping before scanning the chat directory.
 		if as.CurrentSessionID() == "" {
-			var sid string
+			var sid, rejected string
+			exitedAt := time.Now()
 			for attempt := 0; attempt < 15; attempt++ {
-				sid = detectNewAgyConversation(preConversations, sendStartedAt)
+				sid, rejected = detectNewAgyConversation(preConversations, sendStartedAt, exitedAt)
 				if sid == "" {
 					sid = as.detectNewSessionID(preEntries, sendStartedAt)
 				}
@@ -250,6 +290,9 @@ func (as *antigravitySession) readLoop(ctx context.Context, cmd *exec.Cmd, stdou
 					break
 				}
 				time.Sleep(20 * time.Millisecond)
+			}
+			if sid == "" && rejected != "" {
+				slog.Debug("antigravitySession: conversation fallback did not pick a file", "reason", rejected)
 			}
 			if sid != "" {
 				as.chatID.Store(sid)
