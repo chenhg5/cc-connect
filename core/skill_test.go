@@ -2,6 +2,7 @@ package core
 
 import (
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"testing"
@@ -128,6 +129,33 @@ func TestSkillRegistryListAll_FollowsDirectorySymlinks(t *testing.T) {
 	}
 	if r.Resolve("hf-papers") == nil {
 		t.Fatalf("expected symlinked depth-1 skill to resolve")
+	}
+}
+
+func TestSkillRegistryListAll_FollowsWindowsJunctions(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("Windows junctions only exist on Windows")
+	}
+	root := t.TempDir()
+	target := t.TempDir()
+	// depth-1 layout: the junction itself is the skill dir; SKILL.md sits at the target root.
+	writeSkillFile(t, filepath.Join(target, "SKILL.md"), "Visual skill")
+
+	cmd := exec.Command("cmd", "/c", "mklink", "/J", filepath.Join(root, "visual"), target)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("junction visual: %v\n%s", err, out)
+	}
+
+	r := NewSkillRegistry()
+	r.SetDirs([]string{root})
+
+	skills := r.ListAll()
+
+	if len(skills) != 1 {
+		t.Fatalf("skills discovered = %d, want 1", len(skills))
+	}
+	if r.Resolve("visual") == nil {
+		t.Fatalf("expected junction skill to resolve")
 	}
 }
 
