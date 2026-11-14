@@ -128,6 +128,10 @@ enabled = false
 
 `work_dir` 和只读沙箱本身不能将读取范围限制在项目内。选择性读取需要兼容的 Codex 沙箱；Windows 请参考 [MXC 沙箱配置](https://learn.chatgpt.com/docs/windows/windows-sandbox)。权限配置约束本地沙箱工具，不约束独立 MCP 或连接器；获批的权限提升也可能允许额外访问。详见 [官方权限文档](https://learn.chatgpt.com/docs/permissions)。
 
+### Codex 托管 daemon 共享会话
+
+需要与 CLI 或 IDE 共享正在运行的 Codex thread 时，参见 [托管 daemon 使用指南](codex-managed-daemon.zh-CN.md)，了解显式启用配置、`/attach`、`/detach`、审批、推理展示和 daemon 生命周期。
+
 ### macOS 上的 Codex CLI 查找
 
 Codex 适配器按以下顺序选择可执行文件：

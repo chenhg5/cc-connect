@@ -1,11 +1,16 @@
 package feishu
 
 import (
+	"context"
 	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 
 	"github.com/chenhg5/cc-connect/core"
+	lark "github.com/larksuite/oapi-sdk-go/v3"
+	larkim "github.com/larksuite/oapi-sdk-go/v3/service/im/v1"
 )
 
 func decodeRenderedCard(t *testing.T, card *core.Card) map[string]any {
@@ -16,6 +21,141 @@ func decodeRenderedCard(t *testing.T, card *core.Card) map[string]any {
 		t.Fatalf("renderCard JSON decode failed: %v", err)
 	}
 	return got
+}
+
+func TestRenderCard_ResolvedApprovalCollapsesDetails(t *testing.T) {
+	card := core.NewCard().RichMarkdown().Title("Approved", "green").
+		CollapsedDetails("Bash · Approval details").Markdown("**Bash**: `ls`").
+		Markdown("**Reason**: inspect files").Note("Working directory: /project").Build()
+	got := decodeRenderedCard(t, card)
+	if got["schema"] != "2.0" {
+		t.Fatalf("schema = %v", got["schema"])
+	}
+	els := got["body"].(map[string]any)["elements"].([]any)
+	if len(els) != 1 {
+		t.Fatalf("body = %#v", els)
+	}
+	panel := els[0].(map[string]any)
+	if panel["tag"] != "collapsible_panel" || panel["expanded"] != false {
+		t.Fatalf("details not collapsed: %#v", panel)
+	}
+	if panel["header"].(map[string]any)["title"].(map[string]any)["content"] != card.CollapsedDetailsTitle {
+		t.Fatal("missing details title")
+	}
+	nested, _ := json.Marshal(panel["elements"])
+	for _, want := range []string{"`ls`", "inspect files", "/project"} {
+		if !strings.Contains(string(nested), want) {
+			t.Fatalf("details lost %q: %s", want, nested)
+		}
+	}
+	if !strings.Contains(card.RenderText(), "inspect files") {
+		t.Fatal("text fallback lost details")
+	}
+}
+
+func TestSendRichCard_UsesInteractiveMessageType(t *testing.T) {
+	for _, reply := range []bool{false, true} {
+		t.Run(map[bool]string{false: "new message", true: "reply"}[reply], func(t *testing.T) {
+			wantPath := "/open-apis/im/v1/messages"
+			if reply {
+				wantPath += "/om_trigger/reply"
+			}
+			const rendered = `{"schema":"2.0","body":{"elements":[{"tag":"markdown","content":"final answer"}]}}`
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				if r.URL.Path == "/open-apis/auth/v3/tenant_access_token/internal" {
+					writeJSON(t, w, map[string]any{"code": 0, "expire": 7200, "tenant_access_token": "test-token"})
+					return
+				}
+				if r.Method != http.MethodPost || r.URL.Path != wantPath {
+					t.Errorf("request = %s %s, want POST %s", r.Method, r.URL.Path, wantPath)
+					writeJSON(t, w, map[string]any{"code": 0})
+					return
+				}
+				var body struct {
+					MsgType string `json:"msg_type"`
+					Content string `json:"content"`
+				}
+				if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+					t.Error(err)
+				}
+				if body.MsgType != larkim.MsgTypeInteractive || body.Content != rendered {
+					t.Errorf("sent message = type %q content %q", body.MsgType, body.Content)
+				}
+				writeJSON(t, w, map[string]any{"code": 0, "data": map[string]any{"message_id": "om_latest"}})
+			}))
+			defer srv.Close()
+			base := &Platform{
+				platformName: "feishu",
+				client:       lark.NewClient("cli_rich_send", "test-secret", lark.WithOpenBaseUrl(srv.URL), lark.WithHttpClient(srv.Client())),
+			}
+			p := &interactivePlatform{Platform: base}
+			rc := replyContext{chatID: "oc_chat"}
+			if reply {
+				rc.messageID = "om_trigger"
+			}
+			if err := p.SendRichCard(context.Background(), rc, rendered); err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+}
+
+func TestRenderCardMap_PermissionCommandUsesInlineCodeSchema(t *testing.T) {
+	command := "/bin/bash -lc ls"
+	buttons := []core.CardButton{
+		core.PrimaryBtn("Allow", "cmd:/decision token allow"),
+		core.DefaultBtn("Cancel", "cmd:/decision token cancel"),
+	}
+	card := core.NewCard().RichMarkdown().Title("Permission Request", "orange").
+		Markdown("**Bash**: `" + command + "`").Buttons(buttons...).Build()
+	got := renderCardMap(card, "feishu:thread")
+	if got["schema"] != "2.0" {
+		t.Fatalf("schema = %v, want 2.0 so inline code renders", got["schema"])
+	}
+	body := got["body"].(map[string]any)
+	elements := body["elements"].([]map[string]any)
+	if len(elements) != 2 || elements[0]["content"] != "**Bash**: `"+command+"`" {
+		t.Fatalf("inline command changed: %#v", elements)
+	}
+	if elements[1]["tag"] != "column_set" {
+		t.Fatalf("v2 buttons must use columns: %#v", elements[1])
+	}
+	columns := elements[1]["columns"].([]map[string]any)
+	if len(columns) != len(buttons) {
+		t.Fatalf("columns = %d, want %d", len(columns), len(buttons))
+	}
+	for i, want := range buttons {
+		button := columns[i]["elements"].([]map[string]any)[0]
+		value := button["value"].(map[string]string)
+		if button["tag"] != "button" || value["action"] != want.Value || value["session_key"] != "feishu:thread" {
+			t.Fatalf("button %d lost callback: %#v", i, button)
+		}
+	}
+	resolved := core.NewCard().RichMarkdown().Title("Allow", "green").Markdown("**Bash**: `" + command + "`").Build()
+	updated := renderCardMap(resolved, "feishu:thread")
+	if updated["schema"] != "2.0" || len(updated["body"].(map[string]any)["elements"].([]map[string]any)) != 1 {
+		t.Fatalf("resolved card lost inline code schema: %#v", updated)
+	}
+}
+
+func TestRenderCardMap_PermissionMetadataUsesNotationText(t *testing.T) {
+	card := core.NewCard().RichMarkdown().Title("Permission Request", "orange").
+		Markdown("**Bash**: `ls`").
+		Note("Working directory: /project\nAllow similar commands: [\"ls\"]").
+		Buttons(core.PrimaryBtn("Allow", "cmd:/decision token allow")).Build()
+	got := renderCardMap(card, "feishu:thread")
+	elements := got["body"].(map[string]any)["elements"].([]map[string]any)
+	if len(elements) != 3 || elements[1]["tag"] != "markdown" || elements[1]["text_size"] != "notation" {
+		t.Fatalf("metadata is not small notation text: %#v", elements)
+	}
+	if elements[1]["content"] != "Working directory: /project\nAllow similar commands: [\"ls\"]" {
+		t.Fatalf("metadata content changed: %#v", elements[1])
+	}
+	button := elements[2]["columns"].([]map[string]any)[0]["elements"].([]map[string]any)[0]
+	if button["value"].(map[string]string)["action"] != "cmd:/decision token allow" {
+		t.Fatalf("permission button lost callback: %#v", button)
+	}
 }
 
 func TestRenderCardMap_EqualColumnsActionsUseColumnSet(t *testing.T) {
@@ -310,5 +450,79 @@ func TestBuildCardJSONWithStatusFooter_EmptyFooterFallsThrough(t *testing.T) {
 	// whitespace-only footer also falls through
 	if got := buildCardJSONWithStatusFooter(body, "   \n  "); got != b {
 		t.Errorf("whitespace footer should fall through to buildCardJSON")
+	}
+}
+
+func TestTrackedPermissionCard_UpdatesSentMessageWithoutClick(t *testing.T) {
+	for _, thread := range []bool{false, true} {
+		name := "chat"
+		if thread {
+			name = "thread"
+		}
+		t.Run(name, func(t *testing.T) {
+			var patchedPath string
+			var patchedContent string
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				switch {
+				case r.URL.Path == "/open-apis/auth/v3/tenant_access_token/internal":
+					writeJSON(t, w, map[string]any{"code": 0, "expire": 7200, "tenant_access_token": "test-token"})
+				case r.Method == http.MethodPost:
+					wantPath := "/open-apis/im/v1/messages"
+					if thread {
+						wantPath += "/om_trigger/reply"
+					}
+					if r.URL.Path != wantPath {
+						t.Errorf("send path = %q, want %q", r.URL.Path, wantPath)
+					}
+					writeJSON(t, w, map[string]any{"code": 0, "data": map[string]any{"message_id": "om_permission"}})
+				case r.Method == http.MethodPatch:
+					patchedPath = r.URL.Path
+					var body struct {
+						Content string `json:"content"`
+					}
+					if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+						t.Error(err)
+					}
+					patchedContent = body.Content
+					writeJSON(t, w, map[string]any{"code": 0})
+				default:
+					t.Errorf("unexpected request %s %s", r.Method, r.URL.Path)
+				}
+			}))
+			defer srv.Close()
+			base := &Platform{
+				platformName: "feishu", threadIsolation: thread,
+				client: lark.NewClient("cli_card_handle_"+name, "test-secret", lark.WithOpenBaseUrl(srv.URL), lark.WithHttpClient(srv.Client())),
+				// A more recent click must not redirect this update.
+				cardActionMsgIDs: map[string]string{"feishu:chat:user": "om_other_card"},
+			}
+			p := &interactivePlatform{Platform: base}
+			sessionKey := "feishu:chat:user"
+			if thread {
+				sessionKey = "feishu:chat:root:om_trigger"
+			}
+			handle, err := p.SendCardWithHandle(context.Background(), replyContext{messageID: "om_trigger", chatID: "oc_chat", sessionKey: sessionKey}, core.NewCard().Markdown("pending").Build())
+			if err != nil {
+				t.Fatal(err)
+			}
+			resolved := core.NewCard().Title("Request handled", "grey").Markdown("original context").Build()
+			if err := p.UpdateCard(context.Background(), handle, resolved); err != nil {
+				t.Fatal(err)
+			}
+			if patchedPath != "/open-apis/im/v1/messages/om_permission" {
+				t.Fatalf("updated %q instead of the sent permission card", patchedPath)
+			}
+			if patchedContent != renderCard(resolved, sessionKey) {
+				t.Fatalf("patched content = %s", patchedContent)
+			}
+		})
+	}
+}
+
+func TestTrackedPermissionCard_RejectsInvalidHandle(t *testing.T) {
+	p := &interactivePlatform{Platform: &Platform{platformName: "feishu"}}
+	if err := p.UpdateCard(context.Background(), "om_untracked", core.NewCard().Build()); err == nil {
+		t.Fatal("accepted a handle that was not returned by tracked send")
 	}
 }

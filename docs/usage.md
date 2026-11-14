@@ -130,6 +130,10 @@ The profile replaces the mode's legacy sandbox selection for both new and resume
 
 `work_dir` and a read-only sandbox alone do not restrict reads to the project. Selective read access requires a compatible Codex sandbox; on Windows, use the [MXC sandbox configuration](https://learn.chatgpt.com/docs/windows/windows-sandbox). Permission profiles govern local sandboxed tools, not independent MCP/connectors, and approved escalations may grant additional access. See the [official permissions documentation](https://learn.chatgpt.com/docs/permissions).
 
+### Codex managed daemon shared sessions
+
+To share a live Codex thread with CLI or IDE clients, see the [managed daemon guide](codex-managed-daemon.md). It covers opt-in configuration, `/attach`, `/detach`, approvals, thinking visibility and daemon lifecycle.
+
 ### Codex CLI discovery on macOS
 
 The Codex adapter resolves its executable in this order:
