@@ -57,6 +57,8 @@ Use `/ps` (or `/btw`) to add instructions while a task is running. An idle sessi
 
 With Pi, enable `rpc = true` for native steering: the supplement is queued for the next model call, after the current assistant turn's tool calls. If Pi has already finished while the bridge is still delivering its reply, the supplement starts a follow-up turn. Pi's default JSON mode keeps its existing one-shot sending behavior; it cannot inject into an already running process.
 
+Codex `/ps` steering requires an app-server that implements `turn/steer` (codex-cli 0.166.0 or newer). Older CLIs return a method-not-supported error; upgrade the Codex CLI to use this feature.
+
 cc-connect rotates to a fresh session automatically after long inactivity:
 
 ```toml
