@@ -669,6 +669,14 @@ level = "info" # debug, info, warn, error
 # exec = "npm run build"
 # work_dir = "/path/to/project"  # Optional: override working directory / 可选：指定工作目录
 
+# [[commands]]
+# name = "deploy"
+# description = "Deploy and report on its own / 部署并自行回报结果"
+# exec = "./scripts/deploy.sh {{args}}"
+# quiet = true  # Optional: no progress message; stdout sent as plain text, nothing when empty;
+#               # failures are still reported
+#               # 可选：不发进度消息；stdout 原样作为文本发送，为空时什么都不发；失败仍会报告
+
 #
 # You can also add/remove commands at runtime via chat:
 # 也可以在聊天中动态添加/删除命令：
