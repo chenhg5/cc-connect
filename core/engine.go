@@ -474,6 +474,7 @@ type Engine struct {
 	initFlowsMu                  sync.Mutex
 	sendWorkDirMu                sync.RWMutex
 	sendWorkDirs                 map[string]string // sessionKey → work_dir assigned by send --cwd
+	desktopThreads               sync.Map          // (destination, notified thread) → expiring validated workspace
 
 	// Terminal observation (--observe)
 	observeEnabled    bool
@@ -1266,7 +1267,7 @@ func (e *Engine) SetAdminFrom(adminFrom string) {
 	shellDisabled := e.disabledCmds["shell"]
 	e.userRolesMu.Unlock()
 	if af == "" && !shellDisabled {
-		slog.Warn("admin_from is not set — privileged commands (/shell, /show, /dir, /restart, /upgrade) are blocked. "+
+		slog.Warn("admin_from is not set — privileged commands (/shell, /show, /dir, /restart, /upgrade, /reply, /answer) are blocked. "+
 			"Set admin_from in config to enable them, or use disabled_commands to hide them.",
 			"project", e.name)
 	}
@@ -1274,6 +1275,8 @@ func (e *Engine) SetAdminFrom(adminFrom string) {
 
 // privilegedCommands are commands that require admin_from authorization.
 var privilegedCommands = map[string]bool{
+	"reply":   true,
+	"answer":  true,
 	"shell":   true,
 	"show":    true,
 	"dir":     true,
@@ -3066,6 +3069,31 @@ func (e *Engine) handleMessage(p Platform, msg *Message) {
 			slog.Info("message blocked by banned word", "word", word, "user", msg.UserName)
 			e.reply(p, msg.ReplyCtx, e.i18n.T(MsgBannedWordBlocked))
 			return
+		}
+	}
+
+	// Thread commands resolve their registered destination before ordinary workspace setup.
+	if strings.HasPrefix(content, "/") {
+		id := matchPrefix(strings.ToLower(strings.TrimPrefix(strings.Fields(content)[0], "/")), builtinCommands)
+		if id == "reply" || id == "answer" {
+			key := e.interactiveKeyForSessionKey(msg.SessionKey)
+			e.interactiveMu.Lock()
+			state := e.interactiveStates[key]
+			e.interactiveMu.Unlock()
+			questionContent := content
+			if state != nil {
+				_, sessions := e.sessionContextForKey(msg.SessionKey)
+				var handled bool
+				content, handled = e.handleAsyncUserInput(p, msg, content, key, sessions)
+				if handled || e.handlePendingPermission(p, msg, content, key) {
+					return
+				}
+			}
+			if content == questionContent {
+				e.handleCommand(p, msg, content)
+				return
+			}
+			msg.Content = content
 		}
 	}
 
@@ -7052,6 +7080,8 @@ var builtinCommands = []struct {
 	names []string
 	id    string
 }{
+	{[]string{"reply"}, "reply"},
+	{[]string{"answer"}, "answer"},
 	{[]string{"new"}, "new"},
 	{[]string{"list", "sessions"}, "list"},
 	{[]string{"switch"}, "switch"},
@@ -7251,6 +7281,8 @@ func (e *Engine) handleCommand(p Platform, msg *Message, raw string) bool {
 	}
 
 	switch cmdID {
+	case "reply", "answer":
+		e.cmdDesktop(p, msg, cmdID, raw)
 	case "new":
 		e.cmdNew(p, msg, args)
 	case "list":
