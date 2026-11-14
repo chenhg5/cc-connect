@@ -445,16 +445,15 @@ func TestUnmentionedTopicMessageAdoptedWhenBotPostedThere(t *testing.T) {
 	}
 }
 
-// The check runs on the first message in the thread even when it mentions the
-// bot, so the topic is registered before the reply is processed.
-func TestMentionedFirstMessageAlsoAdoptsCronTopic(t *testing.T) {
+// A mentioned first message needs no fallback: it passes the gate and registers
+// the thread on the normal path. The lookup must not run.
+func TestMentionedFirstMessageSkipsTopicLookup(t *testing.T) {
+	var listCalls int32
 	stub := &rootStub{
 		rootOf: func(string) (string, bool) { return "", true },
 		threadMembers: func(string) ([]map[string]any, bool) {
-			return []map[string]any{{
-				"message_id": "om_root",
-				"sender":     map[string]any{"sender_type": "app", "id": "cli_test"},
-			}}, true
+			atomic.AddInt32(&listCalls, 1)
+			return nil, true
 		},
 	}
 	p := newRootTestPlatform(t, stub, map[string]any{
@@ -468,11 +467,14 @@ func TestMentionedFirstMessageAlsoAdoptsCronTopic(t *testing.T) {
 		t.Fatalf("onMessage() error = %v", err)
 	}
 
+	if n := atomic.LoadInt32(&listCalls); n != 0 {
+		t.Fatalf("thread list calls = %d, want none for a mentioned message", n)
+	}
 	p.threadSeenMu.Lock()
 	_, threadMarked := p.threadSeen["omt_cron"]
 	p.threadSeenMu.Unlock()
 	if !threadMarked {
-		t.Fatal("mentioned first message must still register the cron topic")
+		t.Fatal("mentioned first message must still register the topic")
 	}
 }
 

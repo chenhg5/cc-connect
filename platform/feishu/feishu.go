@@ -1052,20 +1052,19 @@ func (p *Platform) onMessage(ctx context.Context, event *larkim.P2MessageReceive
 	)
 
 	threadID := stringValue(msg.ThreadId)
-	// A cron new_topic root can be created before Feishu exposes its thread id,
-	// leaving the topic unregistered. Check it once per thread, whether or not
-	// this first message mentions the bot: Feishu itself knows who opened the
-	// topic, so no local state is involved.
-	if chatType == "group" && p.threadReplyWithoutMention && threadID != "" && !p.threadAllowed(threadID) {
-		p.adoptBotTopic(ctx, threadID)
-	}
-
 	if chatType == "group" && !p.groupReplyAll && p.botOpenID != "" {
 		if !isBotMentioned(msg.Mentions, p.botOpenID) {
 			// Only an explicit bot mention may waive the requirement. @all is
 			// not a direct mention, and in a large group a quote sets RootId
 			// but is not an invitation to the bot.
-			if !(p.threadReplyWithoutMention && threadID != "" && p.threadAllowed(threadID)) {
+			allowed := p.threadReplyWithoutMention && threadID != "" && p.threadAllowed(threadID)
+			if !allowed && p.threadReplyWithoutMention && threadID != "" {
+				// A cron new_topic root can be created before Feishu exposes its
+				// thread id. Only an unmentioned message needs the fallback: a
+				// mentioned one registers the thread further down anyway.
+				allowed = p.adoptBotTopic(ctx, threadID)
+			}
+			if !allowed {
 				slog.Info(p.tag()+": ignoring group message without bot mention",
 					"chat_id", chatID, "user", userID, "thread", threadID,
 					"hint", "set thread_reply_without_mention or group_reply_all to change")
