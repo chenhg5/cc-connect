@@ -501,6 +501,7 @@ type Event struct {
 	ToolInput                string         // human-readable summary of tool input
 	ToolInputRaw             map[string]any // raw tool input (for EventPermissionRequest, used in allow response)
 	ToolResult               string         // populated for EventToolResult
+	ToolResultTail           string         // bounded original output tail, captured before adapter summary truncation
 	ToolStatus               string         // optional status for EventToolResult (e.g. completed/failed)
 	ToolExitCode             *int           // optional exit code for EventToolResult
 	ToolSuccess              *bool          // optional success flag for EventToolResult

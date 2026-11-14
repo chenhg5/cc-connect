@@ -581,11 +581,12 @@ func (cs *copilotSession) emitToolExecutionComplete(inner sessionEventInner) {
 		result = data.Error.Message
 	}
 	evt := core.Event{
-		Type:        core.EventToolResult,
-		ToolName:    toolName,
-		ToolResult:  result,
-		ToolStatus:  status,
-		ToolSuccess: data.Success,
+		Type:           core.EventToolResult,
+		ToolName:       toolName,
+		ToolResult:     result,
+		ToolResultTail: core.ToolOutputTail(result),
+		ToolStatus:     status,
+		ToolSuccess:    data.Success,
 	}
 	select {
 	case cs.events <- evt:

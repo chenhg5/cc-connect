@@ -1202,10 +1202,11 @@ func (cs *claudeSession) handleUser(raw map[string]any) {
 				code = 1
 			}
 			evt := core.Event{
-				Type:         core.EventToolResult,
-				ToolResult:   truncateStr(strings.TrimSpace(result), 500),
-				ToolExitCode: &code,
-				ToolSuccess:  &success,
+				Type:           core.EventToolResult,
+				ToolResult:     truncateStr(strings.TrimSpace(result), 500),
+				ToolResultTail: core.ToolOutputTail(result),
+				ToolExitCode:   &code,
+				ToolSuccess:    &success,
 			}
 			select {
 			case cs.events <- evt:
