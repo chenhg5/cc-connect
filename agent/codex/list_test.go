@@ -53,6 +53,63 @@ func TestAgentListSessions_ExcludesSubagentRollouts(t *testing.T) {
 	}
 }
 
+func TestAgentListAllSessionsAcrossWorkDirs(t *testing.T) {
+	firstWorkDir := filepath.Join(t.TempDir(), "first")
+	secondWorkDir := filepath.Join(t.TempDir(), "second")
+	codexHome := t.TempDir()
+	sessionsDir := filepath.Join(codexHome, "sessions", "2026", "08", "03")
+	if err := os.MkdirAll(sessionsDir, 0o755); err != nil {
+		t.Fatalf("create sessions directory: %v", err)
+	}
+
+	writeRollout := func(name, sessionID, workDir, source, prompt string) {
+		t.Helper()
+		workDirJSON, err := json.Marshal(workDir)
+		if err != nil {
+			t.Fatalf("encode work directory: %v", err)
+		}
+		body := `{"type":"session_meta","payload":{"id":"` + sessionID + `","cwd":` + string(workDirJSON) + `,"source":` + source + `}}` + "\n" +
+			`{"type":"response_item","payload":{"role":"user","content":[{"type":"input_text","text":"` + prompt + `"}]}}` + "\n"
+		if err := os.WriteFile(filepath.Join(sessionsDir, name), []byte(body), 0o644); err != nil {
+			t.Fatalf("write rollout %s: %v", name, err)
+		}
+	}
+
+	writeRollout("rollout-first.jsonl", "first-session", firstWorkDir, `"cli"`, "first prompt")
+	writeRollout("rollout-second.jsonl", "second-session", secondWorkDir, `"cli"`, "second prompt")
+	writeRollout("rollout-subagent.jsonl", "subagent-session", secondWorkDir,
+		`{"subagent":{"thread_spawn":{"parent_thread_id":"second-session"}}}`, "subagent prompt")
+
+	agent := &Agent{workDir: firstWorkDir, codexHome: codexHome}
+	sessions, err := agent.ListAllSessions(context.Background())
+	if err != nil {
+		t.Fatalf("ListAllSessions() error: %v", err)
+	}
+	if len(sessions) != 2 {
+		t.Fatalf("ListAllSessions() returned %d sessions, want 2: %+v", len(sessions), sessions)
+	}
+	seen := map[string]bool{}
+	workDirs := map[string]string{}
+	for _, session := range sessions {
+		seen[session.ID] = true
+		workDirs[session.ID] = session.WorkDir
+	}
+	if !seen["first-session"] || !seen["second-session"] {
+		t.Fatalf("ListAllSessions() IDs = %#v, want both top-level sessions", seen)
+	}
+	if workDirs["first-session"] != firstWorkDir || workDirs["second-session"] != secondWorkDir {
+		t.Fatalf("ListAllSessions() work directories = %#v, want both source directories", workDirs)
+	}
+
+	scoped, err := agent.ListSessions(context.Background())
+	if err != nil {
+		t.Fatalf("ListSessions() error: %v", err)
+	}
+	if len(scoped) != 1 || scoped[0].ID != "first-session" {
+		t.Fatalf("ListSessions() = %+v, want only first-session", scoped)
+	}
+}
+
 func TestAgentListSessions_ExcludesSubagentRolloutWithCopiedParentMeta(t *testing.T) {
 	workDir := t.TempDir()
 	codexHome := t.TempDir()

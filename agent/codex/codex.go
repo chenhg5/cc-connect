@@ -571,6 +571,16 @@ func (a *Agent) ListSessions(_ context.Context) ([]core.AgentSessionInfo, error)
 	return listCodexSessions(workDir, codexHome)
 }
 
+// ListAllSessions returns all top-level Codex sessions across every working
+// directory in the effective Codex home. The bridge-facing ListSessions method
+// remains work-directory scoped so /list does not mix unrelated projects.
+func (a *Agent) ListAllSessions(_ context.Context) ([]core.AgentSessionInfo, error) {
+	a.mu.RLock()
+	codexHome := a.codexHome
+	a.mu.RUnlock()
+	return listCodexSessions("", codexHome)
+}
+
 func (a *Agent) GetSessionHistory(_ context.Context, sessionID string, limit int) ([]core.HistoryEntry, error) {
 	a.mu.RLock()
 	codexHome := a.codexHome
