@@ -3770,6 +3770,16 @@ func (p *Platform) SendWithStatusFooter(ctx context.Context, rctx any, content, 
 	if !ok {
 		return fmt.Errorf("%s: invalid reply context type %T", p.tag(), rctx)
 	}
+	// A pre-built card is already a complete interactive message. Merge the
+	// footer into its elements instead of wrapping the card JSON in another
+	// markdown element, which would make the client render raw JSON.
+	if isCardJSON(content) {
+		merged, mergedOK := appendCardFooterElements(content, footer)
+		if !mergedOK {
+			merged = content
+		}
+		return p.Send(ctx, rctx, merged)
+	}
 	// Resolve mentions first so we can detect whether a real @mention is
 	content = p.resolveMentionsInContent(ctx, rc.chatID, content)
 	if strings.TrimSpace(footer) == "" || strings.Contains(content, `<at user_id=`) || strings.Contains(content, `<at id=`) {
@@ -3988,6 +3998,17 @@ func detectMimeType(data []byte) string {
 }
 
 func buildReplyContent(content string) (msgType string, body string) {
+	// A pre-built card (Card 2.0 rich card) must be passed through untouched.
+	//
+	// Without this check the card JSON is treated as markdown: buildCardJSON
+	// wraps it in another markdown element, so the card ends up nested inside
+	// itself and the client renders the raw JSON — escaped quotes and literal
+	// \n included — instead of the card. That happens whenever a turn produces
+	// no intermediate text: the rich card is only built at the end and sent
+	// through p.Send, never patched onto an existing preview card.
+	if isCardJSON(content) {
+		return larkim.MsgTypeInteractive, content
+	}
 	// Feishu does not generate mention events for <at> tags in card/post
 	// messages sent by bots. Force MsgTypeText when a real mention is present
 	// (resolved to an <at user_id="..."> or <at id=...> tag) so Feishu
@@ -5119,6 +5140,53 @@ func buildCardJSONWithStatusFooter(content, footer string) string {
 	}, content)
 }
 
+// appendCardFooterElements appends the status footer as a dim ("notation")
+// markdown block to an existing Card 2.0 JSON, separated from the body by a
+// horizontal rule. Returns the updated card and true on success; on failure
+// the original card is returned unchanged so the caller can fall back.
+//
+// A pre-built card already carries its own header and body, so the footer
+// cannot be appended the way buildCardJSONWithStatusFooter does it — it has
+// to be merged into the existing elements list.
+func appendCardFooterElements(cardJSON, footer string) (string, bool) {
+	if strings.TrimSpace(footer) == "" {
+		return cardJSON, false
+	}
+	var card map[string]any
+	if err := json.Unmarshal([]byte(cardJSON), &card); err != nil {
+		return cardJSON, false
+	}
+	body, ok := card["body"].(map[string]any)
+	if !ok {
+		return cardJSON, false
+	}
+	elements, ok := body["elements"].([]any)
+	if !ok {
+		return cardJSON, false
+	}
+	footerElements := []any{map[string]any{"tag": "hr"}}
+	for _, line := range strings.Split(sanitizeCardMarkdownForCard(footer), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		footerElements = append(footerElements, map[string]any{
+			"tag":       "markdown",
+			"content":   line,
+			"text_size": "notation",
+		})
+	}
+	if len(footerElements) == 1 {
+		return cardJSON, false
+	}
+	body["elements"] = append(elements, footerElements...)
+	out, err := json.Marshal(card)
+	if err != nil {
+		return cardJSON, false
+	}
+	return string(out), true
+}
+
 func isZhLikeProgressLang(lang string) bool {
 	l := strings.ToLower(strings.TrimSpace(lang))
 	return strings.HasPrefix(l, "zh")
@@ -5854,6 +5922,17 @@ func (p *Platform) UpdateMessageWithStatusFooter(ctx context.Context, previewHan
 	}
 	if strings.TrimSpace(footer) == "" {
 		return p.UpdateMessage(ctx, previewHandle, content)
+	}
+	// A pre-built card must not be re-wrapped: buildCardJSONWithStatusFooter
+	// would nest the card JSON inside itself and the client would render the
+	// raw JSON instead of the card. Merge the footer into the card instead.
+	if isCardJSON(content) {
+		merged, mergedOK := appendCardFooterElements(content, footer)
+		if !mergedOK {
+			return p.UpdateMessage(ctx, previewHandle, content)
+		}
+		content = merged
+		footer = ""
 	}
 	h, ok := previewHandle.(*feishuPreviewHandle)
 	if !ok {
@@ -7516,17 +7595,22 @@ func isCardJSON(content string) bool {
 
 // buildCardJSONWithStatus builds a Feishu card JSON with a colored header
 // reflecting the given status. Used as a fallback when rich-card assembly fails.
-func buildCardJSONWithStatus(content string, status core.CardStatus) string {
-	content = sanitizeCardMarkdownForCard(content)
-	template := "grey"
+// statusTemplateColor maps a card status to its header template color.
+func statusTemplateColor(status core.CardStatus) string {
 	switch status {
 	case core.CardStatusWorking, core.CardStatusThinking:
-		template = "blue"
+		return "blue"
 	case core.CardStatusDone:
-		template = "green"
+		return "green"
 	case core.CardStatusError:
-		template = "red"
+		return "red"
 	}
+	return "grey"
+}
+
+func buildCardJSONWithStatus(content string, status core.CardStatus) string {
+	content = sanitizeCardMarkdownForCard(content)
+	template := statusTemplateColor(status)
 	card := map[string]any{
 		"schema": "2.0",
 		"config": map[string]any{
@@ -7891,6 +7975,36 @@ func (p *Platform) SplitMarkdownByTables(md string, maxTables int) []string {
 	return splitMarkdownByTables(md, maxTables)
 }
 
+// previewStatusCardJSON returns the card JSON used to patch the preview
+// message for a status change.
+//
+// lastContent is whatever was last handed to UpdateMessage. On the rich card
+// path that is itself a complete card JSON, so it must not be wrapped in
+// another markdown element — wrapping nests the card inside itself and the
+// client renders the raw JSON (escaped quotes, literal \n) instead of the
+// card. For a pre-built card only the header template is changed; the body is
+// left exactly as it was.
+func previewStatusCardJSON(lastContent string, status core.CardStatus) string {
+	if !isCardJSON(lastContent) {
+		return buildCardJSONWithStatus(lastContent, status)
+	}
+	var card map[string]any
+	if err := json.Unmarshal([]byte(lastContent), &card); err != nil {
+		return lastContent
+	}
+	header, ok := card["header"].(map[string]any)
+	if !ok {
+		header = map[string]any{}
+	}
+	header["template"] = statusTemplateColor(status)
+	card["header"] = header
+	out, err := json.Marshal(card)
+	if err != nil {
+		return lastContent
+	}
+	return string(out)
+}
+
 // SetPreviewStatus updates the card header color to reflect the agent's current state.
 func (p *Platform) SetPreviewStatus(previewHandle any, status core.CardStatus) {
 	h, ok := previewHandle.(*feishuPreviewHandle)
@@ -7906,7 +8020,7 @@ func (p *Platform) SetPreviewStatus(previewHandle any, status core.CardStatus) {
 	if lastContent == "" {
 		return
 	}
-	cardJSON := buildCardJSONWithStatus(lastContent, status)
+	cardJSON := previewStatusCardJSON(lastContent, status)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
