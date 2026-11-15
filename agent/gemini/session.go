@@ -320,9 +320,13 @@ func (gs *geminiSession) handleMessage(raw map[string]any) {
 		return
 	}
 
-	// Gemini CLI can flatten thought parts into ordinary text and append
-	// "[Thought: true]" after each thought. Buffer text until a result/tool
-	// boundary so those markers cannot leak through streaming EventText.
+	// Gemini CLI can flatten thought parts into ordinary text tagged with
+	// "[Thought: true]". The marker may sit at the start or the end of a
+	// thought segment, but the final thought segment always ends with it, so
+	// everything before the last marker is thinking and only the text after
+	// the last marker is the answer. Buffer text until a result/tool boundary
+	// so the cut is made on the whole turn and neither thoughts nor markers
+	// leak through streaming EventText.
 	gs.pendingMsgs = append(gs.pendingMsgs, text)
 }
 
