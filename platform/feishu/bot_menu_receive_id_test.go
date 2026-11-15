@@ -1,6 +1,12 @@
 package feishu
 
 import (
+	"context"
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"sync"
 	"testing"
 
 	lark "github.com/larksuite/oapi-sdk-go/v3"
@@ -107,10 +113,109 @@ func TestReconstructReplyCtx_ReceiveIDTypeFromPrefix(t *testing.T) {
 	}
 }
 
+// TestBotMenuReply_SendsCreateMessageWithOpenIDType pins the outgoing request
+// itself: the reply context and the mapping can both look right while the
+// CreateMessage call still posts the wrong receive_id_type, which is exactly
+// where the original bug lived.
+func TestBotMenuReply_SendsCreateMessageWithOpenIDType(t *testing.T) {
+	type sentCreateMessage struct {
+		receiveIDType string
+		receiveID     string
+		msgType       string
+	}
+	var mu sync.Mutex
+	var sent []sentCreateMessage
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.URL.Path == "/open-apis/auth/v3/tenant_access_token/internal":
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"code": 0, "msg": "ok", "expire": 7200, "tenant_access_token": "t-test",
+			})
+		case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/open-apis/im/v1/messages"):
+			var body struct {
+				ReceiveID string `json:"receive_id"`
+				MsgType   string `json:"msg_type"`
+			}
+			_ = json.NewDecoder(r.Body).Decode(&body)
+			mu.Lock()
+			sent = append(sent, sentCreateMessage{
+				receiveIDType: r.URL.Query().Get("receive_id_type"),
+				receiveID:     body.ReceiveID,
+				msgType:       body.MsgType,
+			})
+			mu.Unlock()
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"code": 0, "msg": "success",
+				"data": map[string]any{"message_id": "om_test_reply", "msg_type": body.MsgType},
+			})
+		default:
+			_ = json.NewEncoder(w).Encode(map[string]any{"code": 0, "msg": "success"})
+		}
+	}))
+	defer server.Close()
+
+	p := newFeishuReceiveIDTestPlatformAt(t, "feishu", server.URL)
+	const openID = "ou_bot_menu_user"
+	p.userNameCache.Store(openID, "Menu User")
+
+	var dispatched *core.Message
+	p.handler = func(_ core.Platform, m *core.Message) { dispatched = m }
+	event := &larkapplication.P2BotMenuV6{
+		Event: &larkapplication.P2BotMenuV6Data{
+			EventKey: strPtr("/status"),
+			Operator: &larkapplication.Operator{
+				OperatorId: &larkapplication.UserId{OpenId: strPtr(openID)},
+			},
+		},
+	}
+	if err := p.onBotMenu(event); err != nil {
+		t.Fatalf("onBotMenu() error = %v", err)
+	}
+	if dispatched == nil {
+		t.Fatal("onBotMenu() dispatched no message")
+	}
+	if err := p.Send(context.Background(), dispatched.ReplyCtx, "hello from menu"); err != nil {
+		t.Fatalf("Send() error = %v", err)
+	}
+
+	// A normal chat session must keep the previous chat_id behaviour.
+	chatCtx := replyContext{chatID: "oc_chat123", sessionKey: "feishu:oc_chat123:ou_user123"}
+	if err := p.Send(context.Background(), chatCtx, "hello from chat"); err != nil {
+		t.Fatalf("Send(chat) error = %v", err)
+	}
+
+	mu.Lock()
+	got := append([]sentCreateMessage(nil), sent...)
+	mu.Unlock()
+	if len(got) != 2 {
+		t.Fatalf("CreateMessage calls = %d, want 2: %+v", len(got), got)
+	}
+	if got[0].receiveIDType != "open_id" {
+		t.Errorf("bot menu receive_id_type = %q, want open_id", got[0].receiveIDType)
+	}
+	if got[0].receiveID != openID {
+		t.Errorf("bot menu receive_id = %q, want %q", got[0].receiveID, openID)
+	}
+	if got[1].receiveIDType != "chat_id" {
+		t.Errorf("chat receive_id_type = %q, want chat_id", got[1].receiveIDType)
+	}
+	if got[1].receiveID != "oc_chat123" {
+		t.Errorf("chat receive_id = %q, want oc_chat123", got[1].receiveID)
+	}
+}
+
 func newFeishuReceiveIDTestPlatform(t *testing.T, name string) *Platform {
 	t.Helper()
-	p, err := newPlatform(name, lark.FeishuBaseUrl, map[string]any{
+	return newFeishuReceiveIDTestPlatformAt(t, name, lark.FeishuBaseUrl)
+}
+
+func newFeishuReceiveIDTestPlatformAt(t *testing.T, name, domain string) *Platform {
+	t.Helper()
+	p, err := newPlatform(name, domain, map[string]any{
 		"app_id": "cli_xxx", "app_secret": "secret", "enable_feishu_card": false,
+		"domain": domain,
 	})
 	if err != nil {
 		t.Fatalf("newPlatform(%s) error = %v", name, err)
