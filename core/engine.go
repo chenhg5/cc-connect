@@ -16633,17 +16633,32 @@ func (e *Engine) relayContextForSourceSessionKey(fromProject, sourceSessionKey s
 	}
 
 	platform := e.platformForName(platformName)
-	workspaceChannelID := e.workspaceChannelIDFromSessionKey(sourceSessionKey)
-	channelKey := workspaceChannelKey(platformName, workspaceChannelID)
-	workspace, _, err := e.resolveWorkspace(platform, workspaceChannelID)
-	if err != nil {
-		return nil, nil, "", fmt.Errorf("resolve relay workspace: %w", err)
+	channelIDs := e.workspaceChannelIDsFromSessionKey(sourceSessionKey)
+	primaryChannelKey := ""
+	var workspace string
+	for _, channelID := range channelIDs {
+		channelKey := workspaceChannelKey(platformName, channelID)
+		if primaryChannelKey == "" {
+			primaryChannelKey = channelKey
+		}
+		if binding, _, usable := e.lookupEffectiveWorkspaceBinding(channelKey); binding != nil {
+			if !usable {
+				return nil, nil, "", fmt.Errorf("workspace binding unavailable for source channel %q", channelKey)
+			}
+			workspace = normalizeWorkspacePath(binding.Workspace)
+		} else {
+			var err error
+			workspace, _, err = e.resolveWorkspace(platform, channelID)
+			if err != nil {
+				return nil, nil, "", fmt.Errorf("resolve relay workspace: %w", err)
+			}
+		}
+		if workspace != "" {
+			break
+		}
 	}
 	if workspace == "" {
-		if b, _, usable := e.lookupEffectiveWorkspaceBinding(channelKey); b != nil && !usable {
-			return nil, nil, "", fmt.Errorf("workspace binding unavailable for source channel %q", channelKey)
-		}
-		return nil, nil, "", fmt.Errorf("no workspace binding for source channel %q", channelKey)
+		return nil, nil, "", fmt.Errorf("no workspace binding for source channel %q", primaryChannelKey)
 	}
 
 	agent, sessions, err := e.getOrCreateWorkspaceAgent(workspace)
@@ -17177,6 +17192,23 @@ func (e *Engine) workspaceChannelIDFromSessionKey(sessionKey string) string {
 	return extractChannelID(sessionKey)
 }
 
+// workspaceChannelIDsFromSessionKey returns the platform-scoped channel first,
+// then the chat-level channel as a default-binding fallback. A thread-specific
+// workspace therefore wins, while topics without their own binding inherit the
+// chat workspace.
+func (e *Engine) workspaceChannelIDsFromSessionKey(sessionKey string) []string {
+	channelID := e.workspaceChannelIDFromSessionKey(sessionKey)
+	if channelID == "" {
+		return nil
+	}
+	ids := []string{channelID}
+	chatID := extractChannelID(sessionKey)
+	if chatID != "" && chatID != channelID {
+		ids = append(ids, chatID)
+	}
+	return ids
+}
+
 // effectiveChannelID returns the channel identifier from a Message.
 // It prefers the platform-provided ChannelKey (e.g. "chatID:threadID" for forum topics)
 // and falls back to parsing the session key.
@@ -17262,8 +17294,13 @@ func (e *Engine) sessionContextForKey(sessionKey string) (Agent, *SessionManager
 	if !e.multiWorkspace || e.workspaceBindings == nil {
 		return e.agent, e.sessions
 	}
-	if channelKey := e.extractWorkspaceChannelKey(sessionKey); channelKey != "" {
-		if b, _, usable := e.lookupEffectiveWorkspaceBinding(channelKey); usable {
+	platformName := extractPlatformName(sessionKey)
+	for _, channelID := range e.workspaceChannelIDsFromSessionKey(sessionKey) {
+		channelKey := workspaceChannelKey(platformName, channelID)
+		if b, _, usable := e.lookupEffectiveWorkspaceBinding(channelKey); b != nil {
+			if !usable {
+				break
+			}
 			workspace := normalizeWorkspacePath(b.Workspace)
 			// Resolve through workspaceContext so a /dir inside the topic is
 			// honoured: multi-workspace /dir records a per-interactive-key
@@ -17409,8 +17446,13 @@ func (e *Engine) interactiveKeyForSessionKeyLocked(sessionKey string) string {
 	if _, ok := e.interactiveStates[sessionKey]; ok {
 		return sessionKey
 	}
-	if channelKey := e.extractWorkspaceChannelKey(sessionKey); channelKey != "" {
-		if b, _, usable := e.lookupEffectiveWorkspaceBinding(channelKey); usable {
+	platformName := extractPlatformName(sessionKey)
+	for _, channelID := range e.workspaceChannelIDsFromSessionKey(sessionKey) {
+		channelKey := workspaceChannelKey(platformName, channelID)
+		if b, _, usable := e.lookupEffectiveWorkspaceBinding(channelKey); b != nil {
+			if !usable {
+				break
+			}
 			return normalizeWorkspacePath(b.Workspace) + ":" + sessionKey
 		}
 	}

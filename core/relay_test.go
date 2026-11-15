@@ -662,7 +662,11 @@ func (p *relayTopicPlatform) ChannelKeyFromSessionKey(sessionKey string) (string
 func TestHandleRelay_MultiWorkspaceUsesTopicWorkspaceAndChatRelaySession(t *testing.T) {
 	baseDir := t.TempDir()
 	wsDir := filepath.Join(baseDir, "topic-workspace")
+	chatDir := filepath.Join(baseDir, "chat-workspace")
 	if err := os.MkdirAll(wsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(chatDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
 
@@ -676,11 +680,18 @@ func TestHandleRelay_MultiWorkspaceUsesTopicWorkspaceAndChatRelaySession(t *test
 
 	normalizedWorkspace := normalizeWorkspacePath(wsDir)
 	topicChannelKey := workspaceChannelKey("telegram", chatID+":"+threadID)
+	chatChannelKey := workspaceChannelKey("telegram", chatID)
 	e.workspaceBindings.Bind("project:test", topicChannelKey, "topic", normalizedWorkspace)
+	e.workspaceBindings.Bind("project:test", chatChannelKey, "chat", normalizeWorkspacePath(chatDir))
 	workspaceAgent := &sessionEnvRecordingAgent{session: newResultAgentSession("workspace")}
 	ws := e.workspacePool.GetOrCreate(normalizedWorkspace)
 	ws.agent = workspaceAgent
 	ws.sessions = NewSessionManager("")
+	chatWorkspace := normalizeWorkspacePath(chatDir)
+	chatAgent := &sessionEnvRecordingAgent{session: newResultAgentSession("chat")}
+	chatWS := e.workspacePool.GetOrCreate(chatWorkspace)
+	chatWS.agent = chatAgent
+	chatWS.sessions = NewSessionManager("")
 
 	resp, err := e.HandleRelay(context.Background(), "source", sourceSessionKey, "hello")
 	if err != nil {
@@ -697,6 +708,70 @@ func TestHandleRelay_MultiWorkspaceUsesTopicWorkspaceAndChatRelaySession(t *test
 	}
 	if got := ws.sessions.ActiveSessionID("relay:source:telegram:" + chatID); got == "" {
 		t.Fatal("expected relay session to retain the existing chat-scoped key in the topic workspace")
+	}
+	if got := chatWS.sessions.ActiveSessionID("relay:source:telegram:" + chatID); got != "" {
+		t.Fatal("topic-specific workspace should take precedence over the chat fallback")
+	}
+}
+
+func TestHandleRelay_MultiWorkspaceFallsBackToChatWorkspaceWhenTopicUnbound(t *testing.T) {
+	baseDir := t.TempDir()
+	chatDir := filepath.Join(baseDir, "chat-workspace")
+	if err := os.MkdirAll(chatDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	const chatID = "-100123"
+	const sourceSessionKey = "telegram:-100123:42:7"
+	platform := &relayTopicPlatform{mockChannelResolver: &mockChannelResolver{name: "telegram"}}
+	globalAgent := &sessionEnvRecordingAgent{session: newResultAgentSession("global")}
+	e := NewEngine("test", globalAgent, []Platform{platform}, "", LangEnglish)
+	e.SetMultiWorkspace(baseDir, filepath.Join(t.TempDir(), "bindings.json"))
+
+	chatWorkspace := normalizeWorkspacePath(chatDir)
+	chatChannelKey := workspaceChannelKey("telegram", chatID)
+	e.workspaceBindings.Bind("project:test", chatChannelKey, "chat", chatWorkspace)
+	chatAgent := &sessionEnvRecordingAgent{session: newResultAgentSession("chat")}
+	chatWS := e.workspacePool.GetOrCreate(chatWorkspace)
+	chatWS.agent = chatAgent
+	chatWS.sessions = NewSessionManager("")
+
+	resp, err := e.HandleRelay(context.Background(), "source", sourceSessionKey, "hello")
+	if err != nil {
+		t.Fatalf("HandleRelay() error = %v", err)
+	}
+	if resp != "chat" {
+		t.Fatalf("HandleRelay() response = %q, want chat-level fallback agent response", resp)
+	}
+	if got := chatWS.sessions.ActiveSessionID("relay:source:telegram:" + chatID); got == "" {
+		t.Fatal("expected relay conversation to use the chat-level binding when no topic binding exists")
+	}
+}
+
+func TestHandleRelay_MultiWorkspaceDoesNotFallBackWhenTopicBindingIsUnavailable(t *testing.T) {
+	baseDir := t.TempDir()
+	chatDir := filepath.Join(baseDir, "chat-workspace")
+	if err := os.MkdirAll(chatDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	const chatID = "-100123"
+	const threadID = "42"
+	const sourceSessionKey = "telegram:-100123:42:7"
+	platform := &relayTopicPlatform{mockChannelResolver: &mockChannelResolver{name: "telegram"}}
+	e := NewEngine("test", &sessionEnvRecordingAgent{}, []Platform{platform}, "", LangEnglish)
+	e.SetMultiWorkspace(baseDir, filepath.Join(t.TempDir(), "bindings.json"))
+	e.workspaceBindings.Bind(
+		"project:test",
+		workspaceChannelKey("telegram", chatID+":"+threadID),
+		"topic",
+		filepath.Join(baseDir, "missing-topic-workspace"),
+	)
+	e.workspaceBindings.Bind("project:test", workspaceChannelKey("telegram", chatID), "chat", chatDir)
+
+	_, _, _, err := e.relayContextForSourceSessionKey("source", sourceSessionKey)
+	if err == nil || !strings.Contains(err.Error(), "workspace binding unavailable for source channel") {
+		t.Fatalf("relayContextForSourceSessionKey() error = %v, want unavailable topic binding", err)
 	}
 }
 

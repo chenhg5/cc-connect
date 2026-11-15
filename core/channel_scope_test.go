@@ -192,6 +192,64 @@ func TestSessionContextForKey_TwoTopicsIsolated(t *testing.T) {
 	}
 }
 
+func TestSessionContextForKey_TelegramTopicPrefersTopicThenFallsBackToChat(t *testing.T) {
+	const sessionKey = "telegram:-100123:42:7"
+	for _, topicBinding := range []bool{true, false} {
+		name := "chat fallback"
+		if topicBinding {
+			name = "topic binding takes precedence"
+		}
+		t.Run(name, func(t *testing.T) {
+			baseDir := t.TempDir()
+			chatDir := filepath.Join(baseDir, "chat-workspace")
+			topicDir := filepath.Join(baseDir, "topic-workspace")
+			for _, dir := range []string{chatDir, topicDir} {
+				if err := os.MkdirAll(dir, 0o755); err != nil {
+					t.Fatal(err)
+				}
+			}
+			platform := &scopedKeyPlatform{
+				name:         "telegram",
+				threadScoped: true,
+				supportedKeys: map[string]string{
+					sessionKey: "-100123:42",
+				},
+			}
+			globalAgent := &namedTestAgent{name: "global"}
+			e := NewEngine("test", globalAgent, []Platform{platform}, "", LangEnglish)
+			e.SetMultiWorkspace(baseDir, filepath.Join(t.TempDir(), "bindings.json"))
+
+			chatWorkspace := normalizeWorkspacePath(chatDir)
+			topicWorkspace := normalizeWorkspacePath(topicDir)
+			e.workspaceBindings.Bind("project:test", workspaceChannelKey("telegram", "-100123"), "chat", chatWorkspace)
+			if topicBinding {
+				e.workspaceBindings.Bind("project:test", workspaceChannelKey("telegram", "-100123:42"), "topic", topicWorkspace)
+			}
+			chatAgent := &namedTestAgent{name: "chat-workspace"}
+			chatWS := e.workspacePool.GetOrCreate(chatWorkspace)
+			chatWS.agent = chatAgent
+			chatWS.sessions = NewSessionManager("")
+			topicAgent := &namedTestAgent{name: "topic-workspace"}
+			topicWS := e.workspacePool.GetOrCreate(topicWorkspace)
+			topicWS.agent = topicAgent
+			topicWS.sessions = NewSessionManager("")
+
+			agent, sessions := e.sessionContextForKey(sessionKey)
+			wantAgent, wantWorkspace := chatAgent, chatWS
+			if topicBinding {
+				wantAgent, wantWorkspace = topicAgent, topicWS
+			}
+			if agent != wantAgent || sessions != wantWorkspace.sessions {
+				t.Fatalf("sessionContextForKey() = (%T, %p), want (%T, %p)", agent, sessions, wantAgent, wantWorkspace.sessions)
+			}
+			wantInteractiveKey := wantWorkspace.workspace + ":" + sessionKey
+			if got := e.interactiveKeyForSessionKey(sessionKey); got != wantInteractiveKey {
+				t.Fatalf("interactiveKeyForSessionKey() = %q, want %q", got, wantInteractiveKey)
+			}
+		})
+	}
+}
+
 // /dir inside a topic writes a per-interactive-key override rather than a new
 // binding, so the resolved agent must follow that override.
 func TestSessionContextForKey_AppliesDirOverride(t *testing.T) {
