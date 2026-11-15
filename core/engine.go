@@ -494,6 +494,12 @@ type Engine struct {
 	observeSessionKey string // e.g. "slack:C123:U456" — target for forwarding
 	observeCancel     context.CancelFunc
 
+	// Short-lived cache of the agent's native session listing, used by the
+	// management API to resolve display names without a scan per request.
+	mgmtAgentSessionsMu sync.Mutex
+	mgmtAgentSessions   []AgentSessionInfo
+	mgmtAgentSessionsAt time.Time
+
 	// Interactive agent session management
 	interactiveMu     sync.Mutex
 	interactiveStates map[string]*interactiveState // key = sessionKey

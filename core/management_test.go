@@ -14,6 +14,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -26,10 +27,12 @@ type deadlineAwareModelAgent struct {
 
 type mgmtListAgent struct {
 	stubAgent
-	sessions []AgentSessionInfo
+	sessions  []AgentSessionInfo
+	listCalls atomic.Int32
 }
 
 func (a *mgmtListAgent) ListSessions(_ context.Context) ([]AgentSessionInfo, error) {
+	a.listCalls.Add(1)
 	return a.sessions, nil
 }
 
@@ -467,6 +470,60 @@ func TestMgmt_Sessions_DisplayNamePriority(t *testing.T) {
 	}
 	if detail.Name != "custom name" {
 		t.Fatalf("session detail name = %q, want custom name", detail.Name)
+	}
+}
+
+func TestMgmt_Sessions_CachesAgentSessionListing(t *testing.T) {
+	agent := &mgmtListAgent{
+		sessions: []AgentSessionInfo{{ID: "agent-1", Summary: "native title"}},
+	}
+	e := NewEngine("test-project", agent, nil, "", LangEnglish)
+	mgmt := NewManagementServer(0, "tok", nil)
+	mgmt.RegisterEngine("test-project", e)
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/v1/projects/", mgmt.wrap(mgmt.handleProjectRoutes))
+	ts := httptest.NewServer(mux)
+	defer ts.Close()
+
+	s := e.sessions.GetOrCreateActive("user1")
+	s.SetAgentSessionID("agent-1", "stub")
+
+	detailName := func() string {
+		t.Helper()
+		r := mgmtGet(t, ts.URL+"/api/v1/projects/test-project/sessions/"+s.ID, "tok")
+		if !r.OK {
+			t.Fatalf("session detail failed: %s", r.Error)
+		}
+		var detail struct {
+			Name string `json:"name"`
+		}
+		if err := json.Unmarshal(r.Data, &detail); err != nil {
+			t.Fatalf("unmarshal session detail: %v", err)
+		}
+		return detail.Name
+	}
+
+	// List then detail within the TTL: one agent-side listing serves both.
+	if r := mgmtGet(t, ts.URL+"/api/v1/projects/test-project/sessions", "tok"); !r.OK {
+		t.Fatalf("sessions list failed: %s", r.Error)
+	}
+	if got := detailName(); got != "native title" {
+		t.Fatalf("session detail name = %q, want native title", got)
+	}
+	if got := agent.listCalls.Load(); got != 1 {
+		t.Fatalf("ListSessions calls within TTL = %d, want 1", got)
+	}
+
+	// Once the cached listing expires the next request lists again.
+	e.mgmtAgentSessionsMu.Lock()
+	e.mgmtAgentSessionsAt = time.Now().Add(-2 * managementAgentSessionsTTL)
+	e.mgmtAgentSessionsMu.Unlock()
+	if got := detailName(); got != "native title" {
+		t.Fatalf("session detail name after expiry = %q, want native title", got)
+	}
+	if got := agent.listCalls.Load(); got != 2 {
+		t.Fatalf("ListSessions calls after expiry = %d, want 2", got)
 	}
 }
 
