@@ -53,6 +53,17 @@ type claudeSession struct {
 	// reaches the user once.
 	lastModelSwitch atomic.Value // stores string
 
+	// configuredEffort is the --effort value cc-connect passed at spawn time
+	// ("" when it passed none). appliedEffort stores the effort the CLI
+	// reports as actually in force via the get_settings control request, so
+	// the reply footer shows the real level even when it comes from the
+	// user's ~/.claude/settings.json rather than from cc-connect's config.
+	configuredEffort  string
+	effortMu          sync.Mutex
+	appliedEffort     string
+	settingsSequence  uint64
+	settingsRequestID string
+
 	// usageMu guards lastUsage. Populated from the most recent result event.
 	usageMu   sync.Mutex
 	lastUsage *core.ContextUsage
@@ -532,12 +543,14 @@ func newClaudeSession(ctx context.Context, workDir, cliBin string, cliExtraArgs 
 		startupWarning:      rootDowngradeWarning,
 		promptFilePath:      cleanupPromptPath,
 		ctxWindowOverride:   ctxWindowTokens,
+		configuredEffort:    effort,
 	}
 	cs.setPermissionMode(mode)
 	cs.sessionID.Store(sessionID)
 	cs.alive.Store(true)
 
 	go cs.readLoop(stdout, &stderrBuf)
+	cs.requestAppliedSettings()
 
 	return cs, nil
 }
@@ -641,7 +654,7 @@ func (cs *claudeSession) handleReadLoopLine(line string) {
 
 	var raw map[string]any
 	if err := json.Unmarshal([]byte(line), &raw); err != nil {
-		slog.Debug("claudeSession: non-JSON line", "line", line)
+		slog.Debug("claudeSession: non-JSON line", "bytes", len(line))
 		return
 	}
 
@@ -659,17 +672,17 @@ func (cs *claudeSession) handleReadLoopLine(line string) {
 		cs.handleResult(raw)
 	case "control_request":
 		cs.handleControlRequest(raw)
+	case "control_response":
+		// Never log raw here: the get_settings response carries the effective
+		// env block, which includes provider credentials.
+		cs.handleControlResponse(raw)
 	case "control_cancel_request":
 		requestID, _ := raw["request_id"].(string)
 		slog.Debug("claudeSession: permission cancelled", "request_id", requestID)
 	default:
-		// Unknown event types are not silently dropped — they are logged
-		// at debug level with the full payload so future diagnosis of
-		// new Claude Code event shapes (e.g. compaction, hook events)
-		// is possible from the log stream. Compaction events are
-		// recognized in handleResult via their `result` subtype rather
-		// than the top-level event type.
-		slog.Debug("claudeSession: unrecognized event type", "type", eventType, "raw", raw)
+		// Settings responses can contain credentials. Unknown or malformed
+		// envelopes must not make the response body reach debug logs.
+		slog.Debug("claudeSession: unrecognized event type", "bytes", len(line))
 	}
 }
 
@@ -708,7 +721,7 @@ func resultSubtype(raw map[string]any) string {
 
 func (cs *claudeSession) handleSystem(raw map[string]any) {
 	if model, ok := raw["model"].(string); ok && model != "" {
-		cs.activeModel.Store(model)
+		cs.updateActiveModel(model)
 	}
 	if subtype, _ := raw["subtype"].(string); subtype == "model_refusal_fallback" {
 		cs.handleRefusalFallback(raw)
@@ -777,7 +790,7 @@ func (cs *claudeSession) handleRefusalFallback(raw map[string]any) {
 	cs.lastModelSwitch.Store(key)
 
 	if sessionWide {
-		cs.activeModel.Store(to)
+		cs.updateActiveModel(to)
 		// The cached window was reported for the previous model; the next
 		// result event reports the fallback model's own.
 		cs.reportedCtxWindow.Store(0)
@@ -1422,6 +1435,10 @@ func (cs *claudeSession) Send(prompt string, messageID string, images []core.Ima
 		return fmt.Errorf("session process is not running")
 	}
 
+	// Refresh before each turn to pick up settings reloaded by the CLI.
+	// This is best effort: sending the prompt never waits for a response.
+	cs.requestAppliedSettings()
+
 	if len(images) == 0 && len(files) == 0 {
 		return cs.writeJSON(map[string]any{
 			"type":    "user",
@@ -1617,6 +1634,77 @@ func (cs *claudeSession) cmdEnv() []string {
 		return nil
 	}
 	return cs.cmd.Env
+}
+
+// getSettingsRequestID prefixes cc-connect's own settings request IDs.
+const getSettingsRequestID = "cc-connect-get-settings"
+
+// requestAppliedSettings invalidates the previous snapshot and asks the CLI
+// for its current applied effort. Unsupported requests need no response and
+// never block waiting for one; the footer falls back to the spawn-time flag.
+func (cs *claudeSession) requestAppliedSettings() {
+	cs.effortMu.Lock()
+	cs.settingsSequence++
+	requestID := fmt.Sprintf("%s-%d", getSettingsRequestID, cs.settingsSequence)
+	cs.settingsRequestID = requestID
+	cs.appliedEffort = ""
+	cs.effortMu.Unlock()
+	if cs.stdin == nil {
+		return
+	}
+	if err := cs.writeJSON(map[string]any{
+		"type":       "control_request",
+		"request_id": requestID,
+		"request":    map[string]any{"subtype": "get_settings"},
+	}); err != nil {
+		slog.Debug("claudeSession: get_settings request failed")
+	}
+}
+
+// updateActiveModel discards settings read for a previous model. Settings
+// requests are sequenced so a late response cannot restore that stale value.
+func (cs *claudeSession) updateActiveModel(model string) {
+	previous, _ := cs.activeModel.Load().(string)
+	cs.activeModel.Store(model)
+	if previous != "" && previous != model {
+		cs.requestAppliedSettings()
+	}
+}
+
+// handleControlResponse reads only the applied effort. The full response,
+// error text and other untrusted fields may contain credentials; never log
+// them, including for unsupported requests or changed protocol envelopes.
+func (cs *claudeSession) handleControlResponse(raw map[string]any) {
+	resp, _ := raw["response"].(map[string]any)
+	cs.effortMu.Lock()
+	defer cs.effortMu.Unlock()
+	if id, _ := resp["request_id"].(string); id == "" || id != cs.settingsRequestID {
+		return
+	}
+	if subtype, _ := resp["subtype"].(string); subtype != "success" {
+		slog.Debug("claudeSession: get_settings unavailable")
+		return
+	}
+	payload, _ := resp["response"].(map[string]any)
+	applied, _ := payload["applied"].(map[string]any)
+	effort, _ := applied["effort"].(string)
+	// These are display values, deliberately independent of normalizeEffort:
+	// the CLI may support levels not yet offered by cc-connect's menu.
+	switch effort = strings.TrimSpace(effort); effort {
+	case "low", "medium", "high", "xhigh", "max":
+		cs.appliedEffort = effort
+	}
+}
+
+// GetReasoningEffort returns the latest effort reported by the CLI, falling
+// back to the spawn-time --effort flag until a current response is available.
+func (cs *claudeSession) GetReasoningEffort() string {
+	cs.effortMu.Lock()
+	defer cs.effortMu.Unlock()
+	if cs.appliedEffort != "" {
+		return cs.appliedEffort
+	}
+	return cs.configuredEffort
 }
 
 // GetModel returns the model id reported by the CLI's init event (e.g.
