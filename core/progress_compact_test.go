@@ -585,3 +585,15 @@ func TestCompactProgressWriter_RecoversAfterInitialSendFailure(t *testing.T) {
 		t.Fatal("recovered Send should become editable")
 	}
 }
+
+func TestCompactProgressWriter_APITimeoutCapsLongerParentDeadline(t *testing.T) {
+	parent, cancelParent := context.WithTimeout(context.Background(), time.Minute)
+	defer cancelParent()
+	w := newCompactProgressWriter(parent, &previewCapturePlatform{}, progressHintReplyCtx{style: progressStyleCard, payload: true}, "codex", LangEnglish, nil)
+	ctx, cancel := w.withAPITimeout()
+	defer cancel()
+	deadline, ok := ctx.Deadline()
+	if !ok || time.Until(deadline) > compactProgressAPITimeout {
+		t.Fatal("progress API timeout must cap a longer parent deadline")
+	}
+}

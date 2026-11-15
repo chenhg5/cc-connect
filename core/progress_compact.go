@@ -540,9 +540,7 @@ func (w *compactProgressWriter) Finalize(state ProgressCardState) bool {
 }
 
 func (w *compactProgressWriter) withAPITimeout() (context.Context, context.CancelFunc) {
-	if _, hasDeadline := w.ctx.Deadline(); hasDeadline {
-		return w.ctx, func() {}
-	}
+	// WithTimeout keeps an earlier parent deadline while capping a longer one.
 	return context.WithTimeout(w.ctx, compactProgressAPITimeout)
 }
 
