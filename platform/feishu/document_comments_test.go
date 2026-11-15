@@ -28,6 +28,18 @@ func documentEvent(t *testing.T) *documentCommentEvent {
 	return &e
 }
 
+func TestCommentReplyText_PreservesLiteralHTMLEntities(t *testing.T) {
+	// Live reply/list APIs already decode the escaped write payload. A literal
+	// entity in code or prose must survive the inbound path without a second decode.
+	want := "```go\nif a < b && b > 0 { println(\"&lt; &amp; &#39; 中文🙂\") }\n```"
+	content := &larkdrive.ReplyContent{Elements: []*larkdrive.ReplyElement{
+		{Type: ptrString("text_run"), TextRun: &larkdrive.TextRun{Text: &want}},
+	}}
+	if got := commentReplyText(content); got != want {
+		t.Fatalf("API text was decoded twice: got %q, want %q", got, want)
+	}
+}
+
 func TestDocumentCommentFiltering(t *testing.T) {
 	for _, name := range []string{"disabled", "unmentioned", "other_bot", "self", "denied", "missing_sender", "missing_reply", "unknown_bot", "nil_event"} {
 		t.Run(name, func(t *testing.T) {
@@ -139,7 +151,7 @@ func TestDocumentCommentDispatchAndReply(t *testing.T) {
 			if r.URL.Query().Get("page_token") == "" {
 				_, _ = io.WriteString(w, `{"code":0,"data":{"items":[{"reply_id":"older","user_id":"ou_other","content":{"elements":[{"type":"text_run","text_run":{"text":"此前讨论"}}]}}],"has_more":true,"page_token":"page2"}}`)
 			} else {
-				_, _ = fmt.Fprintf(w, `{"code":0,"data":{"items":[{"reply_id":"reply1","user_id":"ou_author","create_time":%d,"content":{"elements":[{"type":"person","person":{"user_id":"ou_bot"}},{"type":"text_run","text_run":{"text":"解释这段 &lt;原文&gt;"}}]}}],"has_more":false}}`, time.Now().Unix())
+				_, _ = fmt.Fprintf(w, `{"code":0,"data":{"items":[{"reply_id":"reply1","user_id":"ou_author","create_time":%d,"content":{"elements":[{"type":"person","person":{"user_id":"ou_bot"}},{"type":"text_run","text_run":{"text":"解释这段 <原文> 与字面量 &lt;"}}]}}],"has_more":false}}`, time.Now().Unix())
 			}
 		case r.URL.Path == "/open-apis/docx/v1/documents/doc1/raw_content":
 			_ = json.NewEncoder(w).Encode(map[string]any{"code": 0, "data": map[string]string{"content": strings.Repeat("正文", 8000)}})
@@ -180,7 +192,7 @@ func TestDocumentCommentDispatchAndReply(t *testing.T) {
 	if d.m.SessionKey != "feishu:doc:cli_doc_test:docx:doc1:comment1" || d.m.UserID != "ou_author" {
 		t.Fatalf("身份或会话错误: %+v", d.m)
 	}
-	if !strings.Contains(d.m.Content, "<原文>") || !strings.Contains(d.m.ExtraContent, "此前讨论") || !strings.Contains(d.m.ExtraContent, "关键原文") || !strings.Contains(d.m.ExtraContent, "[truncated]") {
+	if !strings.Contains(d.m.Content, "<原文> 与字面量 &lt;") || !strings.Contains(d.m.ExtraContent, "此前讨论") || !strings.Contains(d.m.ExtraContent, "关键原文") || !strings.Contains(d.m.ExtraContent, "[truncated]") {
 		t.Fatalf("上下文错误: %+v", d.m)
 	}
 	if _, ok := d.p.(core.CardSender); ok {

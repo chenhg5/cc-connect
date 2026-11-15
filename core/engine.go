@@ -5472,7 +5472,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 	var cardThinkingText string        // latest thinking text
 	var cardAnswerText strings.Builder // accumulated answer text
 
-	if scp, ok := state.platform.(StreamingCardPlatform); ok {
+	if scp, ok := state.platform.(StreamingCardPlatform); ok && !onlyFinal {
 		if sc, err := scp.CreateStreamingCard(e.ctx, state.replyCtx); err != nil {
 			slog.Warn("streaming card creation failed, falling back to normal messages", "error", err)
 		} else {
@@ -5657,7 +5657,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 		richCardSupporter, hasRichCard := p.(RichCardSupporter)
 		// Card 2.0 rich-card path is opt-in via [display] mode = "rich".
 		// Default "legacy" keeps upstream behavior for all platforms.
-		if display.CardMode != "rich" {
+		if display.CardMode != "rich" || onlyFinal {
 			hasRichCard = false
 		}
 		richMarkdownResolver, hasRichMarkdownResolver := p.(RichCardMarkdownResolver)
@@ -5965,7 +5965,9 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			if display.HideAgentFooter {
 				content = stripAgentFooterLines(content)
 			}
-			if content != "" && !isEllipsisOnly(content) {
+			if onlyFinal && content != "" && !isEllipsisOnly(content) {
+				textParts = append(textParts, content)
+			} else if content != "" && !isEllipsisOnly(content) {
 				// Pre-compute silentHold transition including this chunk so the
 				// rich-card path doesn't leak a preview that gets recalled at
 				// end-of-stream when the text resolves to bare NO_REPLY (Lark
@@ -6755,7 +6757,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				cardAnswerText.Reset()
 
 				// Try to create a new streaming card for the queued turn
-				if scp, ok := queued.platform.(StreamingCardPlatform); ok {
+				if scp, ok := queued.platform.(StreamingCardPlatform); ok && !onlyFinal {
 					if sc, err := scp.CreateStreamingCard(e.ctx, queued.replyCtx); err != nil {
 						slog.Warn("streaming card creation failed for queued turn", "error", err)
 					} else {
@@ -6875,6 +6877,15 @@ channelClosed:
 	e.notifyDroppedQueuedMessages(state, fmt.Errorf("agent process exited"))
 	e.cleanupInteractiveState(sessionKey, state)
 
+	if len(textParts) > 0 {
+		session.AddHistory("assistant", strings.Join(textParts, ""))
+	}
+	if len(textParts) > 0 || onlyFinal {
+		// Persist before a final-only surface returns without displaying the
+		// unfinished answer. Preserve late session IDs even if no text arrived.
+		sessions.Save()
+	}
+
 	if onlyFinal {
 		state.mu.Lock()
 		p := state.platform
@@ -6889,11 +6900,6 @@ channelClosed:
 		state.mu.Unlock()
 
 		fullResponse := strings.Join(textParts, "")
-		session.AddHistory("assistant", fullResponse)
-		// Persist immediately — this path runs on abnormal channel close,
-		// so deferring the save until the next foreground turn risks losing
-		// the partial assistant response if the process exits next.
-		sessions.Save()
 
 		// Respect NO_REPLY even on abnormal exit so silent turns stay silent.
 		if isSilentReply(fullResponse) {

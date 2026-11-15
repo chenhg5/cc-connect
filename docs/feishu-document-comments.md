@@ -85,7 +85,9 @@ All API calls use the existing application client, including its configured
 Feishu/Lark base URL and tenant-token handling. Unicode answers are split into
 replies of at most 4,000 Unicode code points after HTML escaping; whole-document
 text elements are also bounded to 1,000 escaped code points. Splitting preserves
-HTML entities and Unicode characters. Comment state is checked again before
+HTML entities and Unicode characters. The API returns decoded plain text, which
+is preserved as-is on reads so literal entities such as `&lt;` in code remain
+unchanged. Comment state is checked again before
 sending, and read/write errors are logged. A readable comment may receive an
 error reply; if the comment channel is also inaccessible, the error is logged
 without silently switching to a private-message channel.
@@ -107,3 +109,11 @@ For a real deployment, authorize a dedicated docx or Sheet, mention the bot in
 a comment and read the resulting reply back through the comment API. Confirm
 the bot identity, resource/parent comment, answer content and follow-up session.
 Configure the agent's required credentials and tools independently.
+
+On 2026-11-15, both reply endpoints were checked against a dedicated live docx:
+an inline reply and a new whole-document comment containing a fenced Go snippet,
+`<`, `>`, `&`, quotes, Chinese text, an emoji and literal `&lt;`. Both accepted
+the escaped payload and returned the original plain text through the comment
+API under the expected application identity. This verifies API write/read
+behavior; client UI rendering and the full comment-to-agent journey were not
+retested in that check.

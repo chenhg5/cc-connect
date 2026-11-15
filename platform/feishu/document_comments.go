@@ -242,7 +242,9 @@ func commentReplyText(content *larkdrive.ReplyContent) string {
 			continue
 		}
 		if element.TextRun != nil {
-			text.WriteString(html.UnescapeString(stringValue(element.TextRun.Text)))
+			// Feishu decodes escaped writes before returning API text. Decode
+			// again here and literal entities in code/prose would be corrupted.
+			text.WriteString(stringValue(element.TextRun.Text))
 		}
 		if element.Person != nil {
 			text.WriteString("@" + stringValue(element.Person.UserId) + " ")
