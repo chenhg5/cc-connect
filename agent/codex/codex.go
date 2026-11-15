@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
 	"sync"
@@ -732,10 +733,30 @@ func sameCodexPath(a, b string) bool {
 	return normalizeCodexPathForCompare(a) == normalizeCodexPathForCompare(b)
 }
 
+// normalizeCodexPathForCompare unifies separators and folds case only where
+// the filesystem is case-insensitive by convention: Windows-style paths (drive
+// letter or backslash separators) or a Windows runtime. Everything else is
+// compared exactly, since /srv/Proj and /srv/proj are different directories on
+// a case-sensitive filesystem.
 func normalizeCodexPathForCompare(path string) string {
+	foldCase := runtime.GOOS == "windows" || isWindowsStylePath(path)
 	clean := filepath.Clean(strings.ReplaceAll(path, "\\", "/"))
 	clean = strings.ReplaceAll(clean, "\\", "/")
-	return strings.ToLower(clean)
+	if foldCase {
+		clean = strings.ToLower(clean)
+	}
+	return clean
+}
+
+func isWindowsStylePath(path string) bool {
+	if strings.Contains(path, "\\") {
+		return true
+	}
+	if len(path) >= 2 && path[1] == ':' {
+		c := path[0]
+		return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')
+	}
+	return false
 }
 
 func uniqueCodexSkillDirs(paths []string) []string {
