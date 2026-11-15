@@ -1036,3 +1036,56 @@ func TestProgressStyleProviderInterface(t *testing.T) {
 	}
 }
 
+func TestHandleMessageDiceDispatchesText(t *testing.T) {
+	handled := make(chan *core.Message, 1)
+	p := &Platform{token: "token", httpClient: &http.Client{}}
+	p.handler = func(_ core.Platform, msg *core.Message) { handled <- msg }
+	p.bot = newStubTelegramBot()
+	p.selfUser = &models.User{ID: 42, Username: "mybot"}
+
+	p.handleMessage(context.Background(), &models.Message{
+		ID:   1,
+		Date: int(time.Now().Unix()),
+		From: &models.User{ID: 7, Username: "alice"},
+		Chat: models.Chat{ID: 100, Type: models.ChatTypePrivate},
+		Dice: &models.Dice{Emoji: "🎰", Value: 64},
+	})
+
+	select {
+	case got := <-handled:
+		if got.Content != "[Rolled 🎰: slot machine JACKPOT (64/64)]" {
+			t.Fatalf("Content = %q, want jackpot dice text", got.Content)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("dice message was not dispatched")
+	}
+}
+
+func TestFormatDiceContentCoversTelegramDiceFamily(t *testing.T) {
+	tests := []struct {
+		name string
+		dice *models.Dice
+		want string
+	}{
+		{"plain dice", &models.Dice{Emoji: "🎲", Value: 3}, "[Rolled 🎲: 3/6]"},
+		{"dart bullseye", &models.Dice{Emoji: "🎯", Value: 6}, "[Rolled 🎯: dart hit the bullseye (6/6)]"},
+		{"dart miss", &models.Dice{Emoji: "🎯", Value: 1}, "[Rolled 🎯: dart missed the board (1/6)]"},
+		{"basketball made", &models.Dice{Emoji: "🏀", Value: 4}, "[Rolled 🏀: basketball scored (4/5)]"},
+		{"football missed", &models.Dice{Emoji: "⚽", Value: 2}, "[Rolled ⚽: football missed (2/5)]"},
+		{"bowling strike", &models.Dice{Emoji: "🎳", Value: 6}, "[Rolled 🎳: bowling strike (6/6)]"},
+		{"slot bar", &models.Dice{Emoji: "🎰", Value: 1}, "[Rolled 🎰: slot machine triple BAR (1/64)]"},
+		{"slot grapes", &models.Dice{Emoji: "🎰", Value: 22}, "[Rolled 🎰: slot machine triple grapes (22/64)]"},
+		{"slot lemons", &models.Dice{Emoji: "🎰", Value: 43}, "[Rolled 🎰: slot machine triple lemons (43/64)]"},
+		{"slot jackpot", &models.Dice{Emoji: "🎰", Value: 64}, "[Rolled 🎰: slot machine JACKPOT (64/64)]"},
+		{"unknown emoji", &models.Dice{Emoji: "🎱", Value: 5}, "[Rolled 🎱: 5]"},
+		{"empty emoji defaults to die", &models.Dice{Value: 2}, "[Rolled 🎲: 2/6]"},
+		{"nil", nil, ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := formatDiceContent(tt.dice); got != tt.want {
+				t.Fatalf("formatDiceContent() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
