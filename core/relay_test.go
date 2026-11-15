@@ -647,6 +647,59 @@ func TestHandleRelay_MultiWorkspaceRoutesBySourceSessionKey(t *testing.T) {
 	}
 }
 
+type relayTopicPlatform struct {
+	*mockChannelResolver
+}
+
+func (p *relayTopicPlatform) ChannelKeyFromSessionKey(sessionKey string) (string, bool) {
+	parts := strings.SplitN(sessionKey, ":", 4)
+	if len(parts) != 4 || parts[0] != p.Name() || parts[2] == "" {
+		return "", false
+	}
+	return parts[1] + ":" + parts[2], true
+}
+
+func TestHandleRelay_MultiWorkspaceUsesTopicWorkspaceAndChatRelaySession(t *testing.T) {
+	baseDir := t.TempDir()
+	wsDir := filepath.Join(baseDir, "topic-workspace")
+	if err := os.MkdirAll(wsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	const chatID = "-100123"
+	const threadID = "42"
+	const sourceSessionKey = "telegram:-100123:42:7"
+	platform := &relayTopicPlatform{mockChannelResolver: &mockChannelResolver{name: "telegram"}}
+	globalAgent := &sessionEnvRecordingAgent{session: newResultAgentSession("global")}
+	e := NewEngine("test", globalAgent, []Platform{platform}, "", LangEnglish)
+	e.SetMultiWorkspace(baseDir, filepath.Join(t.TempDir(), "bindings.json"))
+
+	normalizedWorkspace := normalizeWorkspacePath(wsDir)
+	topicChannelKey := workspaceChannelKey("telegram", chatID+":"+threadID)
+	e.workspaceBindings.Bind("project:test", topicChannelKey, "topic", normalizedWorkspace)
+	workspaceAgent := &sessionEnvRecordingAgent{session: newResultAgentSession("workspace")}
+	ws := e.workspacePool.GetOrCreate(normalizedWorkspace)
+	ws.agent = workspaceAgent
+	ws.sessions = NewSessionManager("")
+
+	resp, err := e.HandleRelay(context.Background(), "source", sourceSessionKey, "hello")
+	if err != nil {
+		t.Fatalf("HandleRelay() error = %v", err)
+	}
+	if resp != "workspace" {
+		t.Fatalf("HandleRelay() response = %q, want workspace agent response", resp)
+	}
+	if got := workspaceAgent.EnvValue("CC_SESSION_KEY"); got != sourceSessionKey {
+		t.Fatalf("workspace CC_SESSION_KEY = %q, want %q", got, sourceSessionKey)
+	}
+	if got := e.sessions.ActiveSessionID("relay:source:telegram:" + chatID); got != "" {
+		t.Fatalf("relay session should not be stored globally, got %q", got)
+	}
+	if got := ws.sessions.ActiveSessionID("relay:source:telegram:" + chatID); got == "" {
+		t.Fatal("expected relay session to retain the existing chat-scoped key in the topic workspace")
+	}
+}
+
 func TestHandleRelay_MultiWorkspaceRequiresWorkspaceBinding(t *testing.T) {
 	baseDir := t.TempDir()
 	globalAgent := &sessionEnvRecordingAgent{session: newResultAgentSession("global")}

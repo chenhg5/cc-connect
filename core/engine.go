@@ -16632,8 +16632,10 @@ func (e *Engine) relayContextForSourceSessionKey(fromProject, sourceSessionKey s
 		return e.agent, e.sessions, relaySessionKey, nil
 	}
 
-	channelKey := workspaceChannelKey(platformName, chatID)
-	workspace, _, err := e.resolveWorkspace(e.platformForName(platformName), chatID)
+	platform := e.platformForName(platformName)
+	workspaceChannelID := e.workspaceChannelIDFromSessionKey(sourceSessionKey)
+	channelKey := workspaceChannelKey(platformName, workspaceChannelID)
+	workspace, _, err := e.resolveWorkspace(platform, workspaceChannelID)
 	if err != nil {
 		return nil, nil, "", fmt.Errorf("resolve relay workspace: %w", err)
 	}
@@ -17157,14 +17159,22 @@ func extractWorkspaceChannelKey(sessionKey string) string {
 // through ChannelScopedSessionKey.
 func (e *Engine) extractWorkspaceChannelKey(sessionKey string) string {
 	platformName := extractPlatformName(sessionKey)
+	return workspaceChannelKey(platformName, e.workspaceChannelIDFromSessionKey(sessionKey))
+}
+
+// workspaceChannelIDFromSessionKey asks the originating platform to recover
+// its channel scope (for example, a Telegram topic) before using the generic
+// chat-level session-key parser.
+func (e *Engine) workspaceChannelIDFromSessionKey(sessionKey string) string {
+	platformName := extractPlatformName(sessionKey)
 	if e != nil {
 		if scoped, ok := e.platformForName(platformName).(ChannelScopedSessionKey); ok {
-			if channelKey, ok := scoped.ChannelKeyFromSessionKey(sessionKey); ok && channelKey != "" {
-				return workspaceChannelKey(platformName, channelKey)
+			if channelID, ok := scoped.ChannelKeyFromSessionKey(sessionKey); ok && channelID != "" {
+				return channelID
 			}
 		}
 	}
-	return workspaceChannelKey(platformName, extractChannelID(sessionKey))
+	return extractChannelID(sessionKey)
 }
 
 // effectiveChannelID returns the channel identifier from a Message.

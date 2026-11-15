@@ -726,6 +726,33 @@ func TestBuildSessionKey(t *testing.T) {
 	}
 }
 
+func TestChannelKeyFromSessionKey(t *testing.T) {
+	tests := []struct {
+		name   string
+		shared bool
+		key    string
+		want   string
+		ok     bool
+	}{
+		{name: "per-user topic", key: "telegram:-100123:42:7", want: "-100123:42", ok: true},
+		{name: "shared topic", shared: true, key: "telegram:-100123:42", want: "-100123:42", ok: true},
+		{name: "per-user chat is not a topic", key: "telegram:-100123:7"},
+		{name: "shared chat is not a topic", shared: true, key: "telegram:-100123"},
+		{name: "wrong platform", shared: true, key: "discord:-100123:42"},
+		{name: "invalid thread id", key: "telegram:-100123:topic:7"},
+		{name: "zero thread id", shared: true, key: "telegram:-100123:0"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			p := &Platform{shareSessionInChannel: tt.shared}
+			got, ok := p.ChannelKeyFromSessionKey(tt.key)
+			if got != tt.want || ok != tt.ok {
+				t.Fatalf("ChannelKeyFromSessionKey(%q) = (%q, %t), want (%q, %t)", tt.key, got, ok, tt.want, tt.ok)
+			}
+		})
+	}
+}
+
 func TestReconstructReplyCtx(t *testing.T) {
 	tests := []struct {
 		name     string
