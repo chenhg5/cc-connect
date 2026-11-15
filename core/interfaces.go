@@ -242,6 +242,19 @@ type AtMentionSender interface {
 	ReplyWithAt(ctx context.Context, replyCtx any, content string, atUsers []string, atAll bool) error
 }
 
+// ImageBatchSender extends ImageSender to optionally group images into one
+// platform message while preserving the input order and reply context.
+// ImageBatchSize <= 1 disables grouping. Single-image requests use ImageSender;
+// the final group of a multi-image request may still contain one image.
+// SendImageBatch must upload the complete group before publishing it, reuse one
+// delivery ID across internal retries, and return nil only after confirmation.
+// An error can leave delivery uncertain: callers must stop, not replay confirmed
+// groups or fall back to individual images. A new call is a new delivery.
+type ImageBatchSender interface {
+	ImageBatchSize() int
+	SendImageBatch(ctx context.Context, replyCtx any, images []ImageAttachment) error
+}
+
 // ImageSender is an optional interface for platforms that support sending images.
 type ImageSender interface {
 	SendImage(ctx context.Context, replyCtx any, img ImageAttachment) error
