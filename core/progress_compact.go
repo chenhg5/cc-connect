@@ -452,36 +452,13 @@ func (w *compactProgressWriter) AppendStructured(item ProgressCardEntry, fallbac
 		return true
 	}
 
-	if w.handle == nil {
-		if w.starter != nil {
-			callCtx, cancel := w.withAPITimeout()
-			handle, err := w.starter.SendPreviewStart(callCtx, w.replyCtx, w.content)
-			cancel()
-			if err != nil || handle == nil {
-				slog.Warn("progress writer: SendPreviewStart failed", "platform", w.platform.Name(), "style", w.style, "error", err, "handle_nil", handle == nil)
-				w.failed = true
-				return false
-			}
-			w.handle = handle
-			w.lastSent = w.content
-			w.lastUpdateAt = time.Now()
-			return true
-		}
-		callCtx, cancel := w.withAPITimeout()
-		err := w.platform.Send(callCtx, w.replyCtx, w.content)
-		cancel()
-		if err != nil {
-			slog.Warn("progress writer: initial Send failed", "platform", w.platform.Name(), "style", w.style, "error", err)
-			w.failed = true
-			return false
-		}
-		w.handle = w.replyCtx
-		w.lastSent = w.content
-		w.lastUpdateAt = time.Now()
+	if w.ctx.Err() != nil || time.Now().Before(w.retryAfter) {
 		return true
 	}
-
-	if w.ctx.Err() != nil || time.Now().Before(w.retryAfter) {
+	if w.handle == nil {
+		// Keep ownership of progress during creation outages instead of emitting
+		// standalone fallback messages for the rest of the turn.
+		w.startMessage()
 		return true
 	}
 	if w.minUpdateInterval > 0 && time.Since(w.lastUpdateAt) < w.minUpdateInterval {
@@ -503,19 +480,53 @@ func (w *compactProgressWriter) AppendStructured(item ProgressCardEntry, fallbac
 	return true
 }
 
-// Finalize updates card progress state (running/completed/failed) without
-// appending a new progress entry.
-func (w *compactProgressWriter) Finalize(state ProgressCardState) bool {
-	if !w.enabled || w.failed || w.style != progressStyleCard || !w.usePayload || w.handle == nil {
+// startMessage attempts creation once. Both progress events and finalization use
+// this path; failures retain buffered content and never start a background loop.
+func (w *compactProgressWriter) startMessage() bool {
+	if w.ctx.Err() != nil {
 		return false
 	}
-	if state == "" {
-		state = ProgressCardStateCompleted
+	callCtx, cancel := w.withAPITimeout()
+	defer cancel()
+	var handle any
+	var err error
+	if w.starter != nil {
+		handle, err = w.starter.SendPreviewStart(callCtx, w.replyCtx, w.content)
+	} else {
+		err = w.platform.Send(callCtx, w.replyCtx, w.content)
+		handle = w.replyCtx
 	}
-	w.state = state
-	w.content = BuildProgressCardPayloadV2(w.items, w.truncated, w.agentName, w.lang, w.state)
+	if err != nil || handle == nil {
+		slog.Warn("progress writer: initial message failed", "platform", w.platform.Name(), "style", w.style, "error", err, "handle_nil", handle == nil)
+		w.retryAfter = time.Now().Add(compactProgressRetryInterval)
+		return false
+	}
+	w.handle = handle
+	w.lastSent = w.content
+	w.lastUpdateAt = time.Now()
+	w.retryAfter = time.Time{}
+	return true
+}
+
+// Finalize flushes pending progress and, for structured cards, the terminal state.
+// It makes one attempt even during cooldown so a recovered connection can create
+// a completed card when all earlier creation attempts failed.
+func (w *compactProgressWriter) Finalize(state ProgressCardState) bool {
+	if !w.enabled || w.failed || w.content == "" || w.ctx.Err() != nil {
+		return false
+	}
+	if w.style == progressStyleCard && w.usePayload {
+		if state == "" {
+			state = ProgressCardStateCompleted
+		}
+		w.state = state
+		w.content = BuildProgressCardPayloadV2(w.items, w.truncated, w.agentName, w.lang, w.state)
+	}
 	if w.content == "" || w.content == w.lastSent {
 		return w.content != ""
+	}
+	if w.handle == nil {
+		return w.startMessage()
 	}
 	callCtx, cancel := w.withAPITimeout()
 	err := w.updater.UpdateMessage(callCtx, w.handle, w.content)

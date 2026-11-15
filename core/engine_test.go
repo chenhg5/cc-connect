@@ -16900,7 +16900,16 @@ func TestProcessInteractiveEvents_StreamingCard_BareNoReply_Suppressed(t *testin
 
 type recoveringEngineProgressPlatform struct {
 	stubCompactProgressPlatform
-	remainingFailures int
+	remainingFailures       int
+	remainingCreateFailures int
+}
+
+func (p *recoveringEngineProgressPlatform) SendPreviewStart(ctx context.Context, replyCtx any, content string) (any, error) {
+	if p.remainingCreateFailures > 0 {
+		p.remainingCreateFailures--
+		return nil, errors.New("temporary card creation failure")
+	}
+	return p.stubCompactProgressPlatform.SendPreviewStart(ctx, replyCtx, content)
 }
 
 func (p *recoveringEngineProgressPlatform) UpdateMessage(ctx context.Context, handle any, content string) error {
