@@ -3941,6 +3941,40 @@ func TestCmdSwitch_ProjectGroupRowDoesNotUseStaleFlatIndex(t *testing.T) {
 	}
 }
 
+func TestCmdSwitch_GroupedVisibleIndexKeepsTargetHistory(t *testing.T) {
+	now := time.Date(2026, 5, 14, 10, 0, 0, 0, time.UTC)
+	nativeSessions := []AgentSessionInfo{
+		{ID: "agent-a", Summary: "Grouped one", MessageCount: 3, ModifiedAt: now},
+		{ID: "agent-b", Summary: "Ungrouped", MessageCount: 4, ModifiedAt: now.Add(-time.Minute)},
+	}
+	p := &stubPlatformEngine{n: "plain"}
+	e := NewEngine("test", &stubListAgent{sessions: nativeSessions}, []Platform{p}, "", LangEnglish)
+	userKey := "telegram:chat:user"
+
+	target := e.sessions.NewSession(userKey, "")
+	target.SetAgentSessionID("agent-b", "stub")
+	target.AddHistory("user", "first question")
+	target.AddHistory("assistant", "first answer")
+
+	grouped := e.sessions.NewSession(userKey, "")
+	grouped.SetAgentSessionID("agent-a", "stub")
+	if _, err := e.sessions.SwitchSession(userKey, grouped.ID); err != nil {
+		t.Fatal(err)
+	}
+	e.sessions.SetActiveSessionProject(userKey, "cc-connect-fix", filepath.Join(t.TempDir(), "cc-connect-fix"))
+
+	e.cmdList(p, &Message{SessionKey: userKey, ReplyCtx: "ctx"}, nil)
+	e.cmdSwitch(p, &Message{SessionKey: userKey, ReplyCtx: "ctx"}, []string{"2"})
+
+	active := e.sessions.GetOrCreateActive(userKey)
+	if got := active.GetAgentSessionID(); got != "agent-b" {
+		t.Fatalf("/switch 2 active = %q, want agent-b", got)
+	}
+	if got := active.HistoryLen(); got != 2 {
+		t.Fatalf("history after grouped /switch = %d entries, want 2 (switching must not clear the target's history)", got)
+	}
+}
+
 func TestCmdSwitch_UsesGroupedVisibleIndexAfterName(t *testing.T) {
 	now := time.Date(2026, 5, 14, 10, 0, 0, 0, time.UTC)
 	nativeSessions := []AgentSessionInfo{
