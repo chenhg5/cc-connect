@@ -188,3 +188,48 @@ func TestProviderPresetsIncludesRuncrate(t *testing.T) {
 		t.Fatalf("opencode base_url = %q", opencode.BaseURL)
 	}
 }
+
+func TestProviderPresetsIncludesTrustedRouter(t *testing.T) {
+	body, err := os.ReadFile("../provider-presets.json")
+	if err != nil {
+		t.Fatalf("read provider-presets.json: %v", err)
+	}
+
+	var presets ProviderPresetsResponse
+	if err := json.Unmarshal(body, &presets); err != nil {
+		t.Fatalf("parse provider-presets.json: %v", err)
+	}
+
+	var trustedrouter *ProviderPreset
+	for i := range presets.Providers {
+		if presets.Providers[i].Name == "trustedrouter" {
+			trustedrouter = &presets.Providers[i]
+			break
+		}
+	}
+	if trustedrouter == nil {
+		t.Fatal("trustedrouter preset not found")
+	}
+	if trustedrouter.InviteURL != "" {
+		t.Fatalf("trustedrouter invite_url = %q, want empty", trustedrouter.InviteURL)
+	}
+
+	claude := trustedrouter.AgentConfig("claudecode")
+	if claude == nil {
+		t.Fatal("trustedrouter claudecode config missing")
+	}
+	if claude.BaseURL != "https://api.trustedrouter.com" {
+		t.Fatalf("claudecode base_url = %q", claude.BaseURL)
+	}
+	if claude.Model != "anthropic/claude-sonnet-4.6" {
+		t.Fatalf("claudecode model = %q", claude.Model)
+	}
+
+	opencode := trustedrouter.AgentConfig("opencode")
+	if opencode == nil {
+		t.Fatal("trustedrouter opencode config missing")
+	}
+	if opencode.BaseURL != "https://api.trustedrouter.com/v1" {
+		t.Fatalf("opencode base_url = %q", opencode.BaseURL)
+	}
+}
