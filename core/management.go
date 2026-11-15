@@ -1117,12 +1117,37 @@ func validateWorkspacePath(baseDir, target string) (string, error) {
 
 // ── Session endpoints ─────────────────────────────────────────
 
+// managementAgentSessionsTTL bounds how stale the native session listing used
+// for display names may be. Agent-side listing can be a full transcript scan,
+// and the web console hits the session list and detail endpoints together, so
+// the listing is shared across requests for a short window.
+const managementAgentSessionsTTL = 15 * time.Second
+
+// managementAgentSessions returns the agent's native session listing, cached
+// per engine for managementAgentSessionsTTL. The lock is held across the scan
+// so concurrent requests wait for one listing instead of each starting their
+// own. Errors are not cached. Callers must not modify the returned slice.
+func (e *Engine) managementAgentSessions() []AgentSessionInfo {
+	e.mgmtAgentSessionsMu.Lock()
+	defer e.mgmtAgentSessionsMu.Unlock()
+	if !e.mgmtAgentSessionsAt.IsZero() && time.Since(e.mgmtAgentSessionsAt) < managementAgentSessionsTTL {
+		return e.mgmtAgentSessions
+	}
+	agentSessions, err := e.agent.ListSessions(e.ctx)
+	if err != nil {
+		return nil
+	}
+	e.mgmtAgentSessions = agentSessions
+	e.mgmtAgentSessionsAt = time.Now()
+	return agentSessions
+}
+
 func (e *Engine) managementSessionDisplayNames() map[string]string {
 	if e == nil || e.agent == nil || e.sessions == nil {
 		return nil
 	}
-	agentSessions, err := e.agent.ListSessions(e.ctx)
-	if err != nil || len(agentSessions) == 0 {
+	agentSessions := e.managementAgentSessions()
+	if len(agentSessions) == 0 {
 		return nil
 	}
 	agentSessions = e.applySessionFilter(agentSessions, e.sessions, "")
