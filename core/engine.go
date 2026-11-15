@@ -9069,8 +9069,8 @@ func (e *Engine) handleListSelectionInput(p Platform, msg *Message, content stri
 
 func (e *Engine) switchToListEntry(p Platform, msg *Message, agent Agent, sessions *SessionManager, interactiveKey string, entry listSessionEntry) {
 	e.cleanupInteractiveState(interactiveKey)
-	session := sessions.SwitchToAgentSession(msg.SessionKey, entry.Info.ID, agent.Name(), entry.Info.Summary)
-	session.ClearHistory()
+	// Keep the stored history of the session being switched to; see the NOTE in cmdSwitch.
+	_ = sessions.SwitchToAgentSession(msg.SessionKey, entry.Info.ID, agent.Name(), entry.Info.Summary)
 	e.clearListSelection(msg.SessionKey)
 
 	shortID := entry.Info.ID
