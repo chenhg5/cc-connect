@@ -2902,6 +2902,15 @@ func TestSaveProjectSettings_WorkspaceModeAndBaseDir(t *testing.T) {
 		t.Fatalf("BaseDir = %q, want %q", proj.BaseDir, wsBaseDir)
 	}
 
+	// The saved file must still load: multi-workspace mode and an agent
+	// work_dir are mutually exclusive, so enabling the mode drops work_dir.
+	if _, ok := proj.Agent.Options["work_dir"]; ok {
+		t.Fatalf("work_dir still set after enabling multi-workspace mode: %v", proj.Agent.Options["work_dir"])
+	}
+	if _, err := Load(configPath); err != nil {
+		t.Fatalf("config saved by SaveProjectSettings no longer loads: %v", err)
+	}
+
 	details := GetProjectConfigDetails("alpha")
 	if details["workspace_mode"] != wsMode {
 		t.Fatalf("workspace_mode = %v, want %q", details["workspace_mode"], wsMode)

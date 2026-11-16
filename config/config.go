@@ -3572,6 +3572,14 @@ func SaveProjectSettings(projectName string, update ProjectSettingsUpdate) error
 				return fmt.Errorf("workspace_base_dir is required to enable multi-workspace mode")
 			}
 			proj.Mode = mode
+			// Multi-workspace mode routes each channel to a directory under
+			// base_dir, and validation rejects an agent work_dir alongside it.
+			// Leaving work_dir in place wrote a config the next start refused
+			// ("conflicts with agent work_dir"), so the restart the dashboard
+			// asks for took the whole service down.
+			if mode == "multi-workspace" && proj.Agent.Options != nil {
+				delete(proj.Agent.Options, "work_dir")
+			}
 		}
 		if update.PlatformAllowFrom != nil {
 			for j := range proj.Platforms {
