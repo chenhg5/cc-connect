@@ -12,7 +12,7 @@ func TestOpenCodeChildUsageScopesNestedSessionsAndSurvivesRestart(t *testing.T) 
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 	for _, statement := range []string{
 		`CREATE TABLE session(id TEXT PRIMARY KEY,parent_id TEXT)`,
 		`CREATE TABLE message(id TEXT PRIMARY KEY,session_id TEXT,data TEXT)`,

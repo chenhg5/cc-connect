@@ -29,7 +29,7 @@ func appendLines(t *testing.T, path string, lines ...string) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 	for _, line := range lines {
 		if _, err := f.WriteString(line + "\n"); err != nil {
 			t.Fatal(err)
@@ -126,7 +126,9 @@ func TestSidechainMeterWaitsForAPartialLine(t *testing.T) {
 	if _, err := f.WriteString(line[len(line)/2:] + "\n"); err != nil {
 		t.Fatal(err)
 	}
-	f.Close()
+	if err := f.Close(); err != nil {
+		t.Fatal(err)
+	}
 	if got := m.collect(dir); got == nil || got.Requests != 1 || got.CacheReadInputTokens != 40 {
 		t.Fatalf("completed line, collect = %+v", got)
 	}

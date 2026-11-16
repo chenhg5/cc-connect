@@ -147,7 +147,7 @@ func (as *antigravitySession) readUsageTranscript(path string) (map[string]agyTr
 	if err != nil {
 		return nil, err
 	}
-	defer file.Close()
+	defer func() { _ = file.Close() }()
 	scanner := bufio.NewScanner(file)
 	scanner.Buffer(make([]byte, 4096), 32*1024*1024)
 	requests := map[string]agyTranscriptUsage{}

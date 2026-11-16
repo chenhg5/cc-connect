@@ -54,7 +54,7 @@ func (m *opencodeSidechainMeter) collect() *core.SidechainUsage {
 		slog.Warn("opencode: open child usage database", "error", err)
 		return nil
 	}
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 	rows, err := db.QueryContext(ctx, `WITH RECURSIVE family(id) AS (
@@ -66,7 +66,7 @@ func (m *opencodeSidechainMeter) collect() *core.SidechainUsage {
 		slog.Warn("opencode: read child usage", "error", err)
 		return nil
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	var total core.TokenUsage
 	byModel := map[string]core.TokenUsage{}
 	requests := 0

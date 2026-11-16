@@ -133,7 +133,7 @@ func (m *UsageMeter) Save() {
 		var file *os.File
 		file, err = os.CreateTemp(filepath.Dir(m.path), ".usage-*")
 		if err == nil {
-			defer os.Remove(file.Name())
+			defer func() { _ = os.Remove(file.Name()) }()
 			_, err = file.Write(data)
 			closeErr := file.Close()
 			if err == nil {
