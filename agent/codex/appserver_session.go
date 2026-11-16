@@ -1200,16 +1200,23 @@ func (s *appServerSession) finishTransport(err error) {
 	s.stateMu.Lock()
 	s.alive.Store(false)
 	active := s.currentTurn != ""
+	var start, end *codexTokenUsage
 	if active {
 		s.currentTurn = ""
 		s.pendingMsgs = s.pendingMsgs[:0]
 		s.turnRevision++
+		start, end = s.turnTokens.finishTurn()
 	}
 	s.stateMu.Unlock()
 	s.rejectPending(err)
 	s.rejectPendingApprovals(err)
-	if active {
-		s.emitError(err)
+	if active && err != nil {
+		// The lost turn consumed tokens too, and the next turn's baseline is
+		// already past them: report them with the error, or they are lost.
+		event := core.Event{Type: core.EventError, Error: err}
+		applyCodexTurnUsage(&event, start, end)
+		event.Sidechain = s.sidechain.collect()
+		s.emit(event)
 	}
 }
 
