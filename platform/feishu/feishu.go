@@ -164,7 +164,6 @@ type Platform struct {
 	client           *lark.Client
 	replayClient     *lark.Client
 	replayClientMu   sync.Mutex
-	wsClient         *larkws.Client
 	handler          core.MessageHandler
 	cardNavHandler   core.CardNavigationHandler
 	cancel           context.CancelFunc
@@ -894,21 +893,50 @@ func (p *Platform) startWebSocketMode() error {
 	if p.domain != lark.FeishuBaseUrl {
 		wsOpts = append(wsOpts, larkws.WithDomain(p.domain))
 	}
-	p.wsClient = larkws.NewClient(p.appID, p.appSecret, wsOpts...)
-
 	ctx, cancel := context.WithCancel(context.Background())
 	p.mu.Lock()
 	p.cancel = cancel
 	p.mu.Unlock()
 
-	go func() {
-		if err := p.wsClient.Start(ctx); err != nil && !errors.Is(err, context.Canceled) {
-			slog.Error(p.tag()+": websocket fatal error, platform unavailable", "error", err)
-			p.sharedGroup.setLifecycle(false, err)
-		}
-	}()
+	go p.runWebSocket(ctx, wsOpts)
 
 	return nil
+}
+
+// runWebSocket owns SDK clients across terminal reconnect failures. The SDK
+// handles ordinary reconnects, but a finite server-provided retry budget can
+// end Start after a temporary outage. A connected SDK client cannot be reused
+// once Start returns, so each recovery attempt needs a fresh client.
+func (p *Platform) runWebSocket(ctx context.Context, opts []larkws.ClientOption) {
+	backoff := time.Second
+	const maxBackoff = 30 * time.Second
+	for ctx.Err() == nil {
+		started := time.Now()
+		client := larkws.NewClient(p.appID, p.appSecret, opts...)
+		err := client.Start(ctx)
+		if ctx.Err() != nil || err == nil {
+			return
+		}
+		p.sharedGroup.setLifecycle(false, err)
+		var clientErr *larkws.ClientError
+		if errors.As(err, &clientErr) {
+			// Invalid credentials/configuration still require operator action.
+			slog.Error(p.tag()+": websocket fatal error, platform unavailable", "error", err)
+			return
+		}
+		if time.Since(started) >= maxBackoff {
+			backoff = time.Second
+		}
+		slog.Warn(p.tag()+": websocket client stopped, restarting", "error", err, "backoff", backoff)
+		timer := time.NewTimer(backoff)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return
+		case <-timer.C:
+		}
+		backoff = min(backoff*2, maxBackoff)
+	}
 }
 
 // startWebhookMode starts the HTTP webhook server mode (for Lark international version)
