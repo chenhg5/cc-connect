@@ -256,6 +256,19 @@ func TestSummarizeInput_AskUserQuestion(t *testing.T) {
 	}
 }
 
+func TestSummarizeInput_PreservesStructuredToolParameters(t *testing.T) {
+	result := summarizeInput("Grep", map[string]any{
+		"pattern": "foo",
+		"include": "*.go",
+		"path":    "platform/feishu",
+	})
+	for _, want := range []string{"\"pattern\":\"foo\"", "\"include\":\"*.go\"", "\"path\":\"platform/feishu\""} {
+		if !strings.Contains(result, want) {
+			t.Errorf("summary %q does not contain %q", result, want)
+		}
+	}
+}
+
 func TestAgent_Name(t *testing.T) {
 	a := &Agent{}
 	if got := a.Name(); got != "claudecode" {
