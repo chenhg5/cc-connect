@@ -346,7 +346,18 @@ func startService(mgr serviceLifecycle, reap func() bool) error {
 // nothing, since schtasksManager.Restart() is literally stopWindowsTask()
 // followed by startWindowsTask(). Reaping before the restart instead would race
 // the wrapper's 10s relaunch.
+//
+// Managers that implement daemon.InPlaceRestarter keep their own restart
+// transaction. On launchd, Stop boots out every label (the legacy
+// com.cc-connect.retry agent included) and Start fails when only the legacy
+// plist exists, so Stop → Start turned a single `daemon restart` on a legacy
+// install into a daemon that stays down. There is nothing to reap there either:
+// kickstart replaces the running job, and launching a second daemon would only
+// lose the instance lock.
 func restartService(mgr serviceLifecycle, reap func() bool) error {
+	if r, ok := mgr.(daemon.InPlaceRestarter); ok {
+		return r.RestartInPlace()
+	}
 	if err := stopService(mgr, reap); err != nil {
 		slog.Warn("daemon: stop before restart failed", "error", err)
 	}
