@@ -1,13 +1,19 @@
 package codex
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"io"
+	"net"
+	"os"
 	"strings"
 	"sync"
 	"testing"
+	"testing/iotest"
 	"time"
 
 	"github.com/chenhg5/cc-connect/core"
@@ -131,6 +137,133 @@ func TestAppServerSession_HandleThreadTokenUsageUpdatedCachesContextUsage(t *tes
 	}
 }
 
+func TestAppServerSession_IgnoresSubagentLifecycleNotifications(t *testing.T) {
+	s := &appServerSession{events: make(chan core.Event, 8)}
+	s.threadID.Store("parent-thread")
+	s.currentTurn = "parent-turn"
+
+	s.handleNotification("turn/started", notificationProbe(t, map[string]any{
+		"threadId": "child-thread",
+		"turn":     map[string]any{"id": "child-turn", "status": "inProgress"},
+	}))
+	if got := appServerCurrentTurn(s); got != "parent-turn" {
+		t.Fatalf("current turn = %q after child turn started, want parent-turn", got)
+	}
+
+	s.handleNotification("item/completed", notificationProbe(t, map[string]any{
+		"threadId": "child-thread",
+		"turnId":   "child-turn",
+		"item":     map[string]any{"type": "agentMessage", "text": "child-only answer"},
+	}))
+	if got := appServerPendingMessages(s); len(got) != 0 {
+		t.Fatalf("pending messages = %v after child item, want none", got)
+	}
+
+	s.handleNotification("turn/completed", notificationProbe(t, map[string]any{
+		"threadId": "child-thread",
+		"turn":     map[string]any{"id": "child-turn", "status": "completed"},
+	}))
+	s.handleNotification("thread/status/changed", notificationProbe(t, map[string]any{
+		"threadId": "child-thread",
+		"status":   map[string]any{"type": "idle"},
+	}))
+	if got := appServerCurrentTurn(s); got != "parent-turn" {
+		t.Fatalf("current turn = %q after child completion, want parent-turn", got)
+	}
+	select {
+	case event := <-s.events:
+		t.Fatalf("child lifecycle emitted event %#v, want none", event)
+	default:
+	}
+
+	s.handleNotification("item/completed", notificationProbe(t, map[string]any{
+		"threadId": "parent-thread",
+		"turnId":   "parent-turn",
+		"item":     map[string]any{"type": "agentMessage", "text": "parent answer"},
+	}))
+	s.handleNotification("turn/completed", notificationProbe(t, map[string]any{
+		"threadId": "parent-thread",
+		"turn":     map[string]any{"id": "parent-turn", "status": "completed"},
+	}))
+
+	textEvent := <-s.events
+	if textEvent.Type != core.EventText || textEvent.Content != "parent answer" {
+		t.Fatalf("text event = %#v, want parent answer", textEvent)
+	}
+	resultEvent := <-s.events
+	if resultEvent.Type != core.EventResult || !resultEvent.Done {
+		t.Fatalf("result event = %#v, want completed parent result", resultEvent)
+	}
+}
+
+func TestAppServerSession_IgnoresSubagentTokenUsageNotifications(t *testing.T) {
+	s := &appServerSession{}
+	s.threadID.Store("parent-thread")
+	s.currentTurn = "parent-turn"
+
+	s.handleNotification("thread/tokenUsage/updated", tokenUsageNotificationProbe(t, "parent-thread", "parent-turn", 1234))
+	s.handleNotification("thread/tokenUsage/updated", tokenUsageNotificationProbe(t, "child-thread", "child-turn", 9876))
+
+	usage := s.GetContextUsage()
+	if usage == nil {
+		t.Fatal("GetContextUsage() = nil, want parent usage")
+	}
+	if usage.UsedTokens != 1234 {
+		t.Fatalf("used tokens = %d after child update, want parent value 1234", usage.UsedTokens)
+	}
+}
+
+func TestAppServerSession_FailedTurnEmitsError(t *testing.T) {
+	s := &appServerSession{
+		events:      make(chan core.Event, 2),
+		currentTurn: "turn-1",
+		pendingMsgs: []string{"partial reasoning"},
+	}
+
+	raw, err := json.Marshal(map[string]any{
+		"threadId": "thread-1",
+		"turn": map[string]any{
+			"id":     "turn-1",
+			"status": "failed",
+			"error":  map[string]any{"message": "service unavailable"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("marshal notification: %v", err)
+	}
+	s.handleNotification("turn/completed", raw)
+
+	event := <-s.events
+	if event.Type != core.EventError || event.Error == nil || event.Error.Error() != "service unavailable" {
+		t.Fatalf("event = %#v, want EventError with service unavailable", event)
+	}
+
+	s.stateMu.Lock()
+	currentTurn := s.currentTurn
+	pendingCount := len(s.pendingMsgs)
+	s.stateMu.Unlock()
+	if currentTurn != "" {
+		t.Fatalf("current turn = %q after failure, want empty", currentTurn)
+	}
+	if pendingCount != 0 {
+		t.Fatalf("pending message count = %d after failure, want 0", pendingCount)
+	}
+
+	idleRaw, err := json.Marshal(map[string]any{
+		"threadId": "thread-1",
+		"status":   map[string]any{"type": "idle"},
+	})
+	if err != nil {
+		t.Fatalf("marshal idle notification: %v", err)
+	}
+	s.handleNotification("thread/status/changed", idleRaw)
+	select {
+	case duplicate := <-s.events:
+		t.Fatalf("idle notification emitted duplicate event %#v", duplicate)
+	default:
+	}
+}
+
 func TestAppServerSession_RequestTimeoutIncludesBlockedStdinWrite(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -174,6 +307,298 @@ func TestAppServerSession_RequestTimeoutIncludesBlockedStdinWrite(t *testing.T) 
 
 	if !stdin.Closed() {
 		t.Fatal("blocked stdin was not closed after timeout")
+	}
+}
+
+func TestAppServerSession_ReadLoopHandlesLargeResponseLine(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	ch := make(chan rpcResponseEnvelope, 1)
+	s := &appServerSession{
+		ctx:     ctx,
+		events:  make(chan core.Event, 1),
+		pending: map[int64]chan rpcResponseEnvelope{1: ch},
+	}
+
+	var input bytes.Buffer
+	input.WriteString(`{"jsonrpc":"2.0","id":1,"result":{"cwd":"/tmp/project","model":"gpt-test","reasoningEffort":"high","thread":{"id":"thread-large"},"initialTurnsPage":{"data":"`)
+	input.WriteString(strings.Repeat("x", 11*1024*1024))
+	input.WriteString(`"}}}` + "\n")
+
+	s.wg.Add(1)
+	go s.readLoop(&input)
+
+	select {
+	case resp := <-ch:
+		if resp.Error != nil {
+			t.Fatalf("response error = %v", resp.Error)
+		}
+		var decoded threadResumeResponse
+		if err := json.Unmarshal(resp.Result, &decoded); err != nil {
+			t.Fatalf("unmarshal result: %v", err)
+		}
+		if decoded.Thread.ID != "thread-large" {
+			t.Fatalf("thread id = %q, want thread-large", decoded.Thread.ID)
+		}
+	case <-time.After(30 * time.Second):
+		// The budget is for a hung read loop, not for machine speed: what this
+		// asserts is that readJSONLines has no 64 KB scanner cap, and decoding
+		// 11 MB on a loaded CI runner can take far longer than the 2 s it used
+		// to allow (2026-10-29: it timed out there while green on every local
+		// run and on the CI re-run of the same commit).
+		t.Fatal("timed out waiting for large response")
+	}
+
+	s.wg.Wait()
+}
+
+func TestAppServerSession_ResumeDoesNotRequestExtendedHistory(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	stdin := &lockedWriteCloser{}
+	s := &appServerSession{
+		ctx:     ctx,
+		stdin:   stdin,
+		pending: make(map[int64]chan rpcResponseEnvelope),
+	}
+
+	done := make(chan error, 1)
+	go func() {
+		done <- s.ensureThread("thread-existing")
+	}()
+
+	line := waitForWrittenJSONLine(t, stdin)
+	var request struct {
+		ID     int64          `json:"id"`
+		Method string         `json:"method"`
+		Params map[string]any `json:"params"`
+	}
+	if err := json.Unmarshal([]byte(line), &request); err != nil {
+		t.Fatalf("decode request %q: %v", line, err)
+	}
+	if request.Method != "thread/resume" {
+		t.Fatalf("method = %q, want thread/resume", request.Method)
+	}
+	if got := request.Params["threadId"]; got != "thread-existing" {
+		t.Fatalf("threadId = %#v, want thread-existing", got)
+	}
+	if got := request.Params["persistExtendedHistory"]; got != false {
+		t.Fatalf("persistExtendedHistory = %#v, want false", got)
+	}
+
+	s.handleResponse(rpcResponseEnvelope{
+		ID: request.ID,
+		Result: json.RawMessage(
+			`{"cwd":"/tmp/project","model":"gpt-test","thread":{"id":"thread-existing"}}`,
+		),
+	})
+
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("ensureThread() error = %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for thread resume")
+	}
+}
+
+func TestAppServerSession_SendSteersActiveTurn(t *testing.T) {
+	s, stdin := newSendTestSession(t, "turn-1", "buffered answer")
+	request, err := sendAndRespond(t, s, stdin, "focus on the requested fix", map[string]any{"turnId": "turn-1"})
+	if err != nil {
+		t.Fatalf("Send() error = %v", err)
+	}
+	if request.Method != "turn/steer" {
+		t.Fatalf("method = %q, want turn/steer", request.Method)
+	}
+	if got := request.Params["threadId"]; got != "thread-1" {
+		t.Fatalf("threadId = %v, want thread-1", got)
+	}
+	if got := request.Params["expectedTurnId"]; got != "turn-1" {
+		t.Fatalf("expectedTurnId = %v, want turn-1", got)
+	}
+	if got := request.Params["input"]; got == nil {
+		t.Fatal("input = nil, want structured steering input")
+	}
+
+	currentTurn, pendingMsgs := sendTestState(s)
+	if currentTurn != "turn-1" {
+		t.Fatalf("current turn = %q, want turn-1", currentTurn)
+	}
+	if len(pendingMsgs) != 1 || pendingMsgs[0] != "buffered answer" {
+		t.Fatalf("pending messages = %v, want buffered answer", pendingMsgs)
+	}
+
+	completedItem, err := json.Marshal(map[string]any{
+		"threadId": "thread-1",
+		"turnId":   "turn-1",
+		"item":     map[string]any{"type": "agentMessage", "text": "complete final answer"},
+	})
+	if err != nil {
+		t.Fatalf("marshal completed item: %v", err)
+	}
+	s.handleNotification("item/completed", completedItem)
+	completedTurn, err := json.Marshal(map[string]any{
+		"threadId": "thread-1",
+		"turn":     map[string]any{"id": "turn-1", "status": "completed"},
+	})
+	if err != nil {
+		t.Fatalf("marshal completed turn: %v", err)
+	}
+	s.handleNotification("turn/completed", completedTurn)
+
+	firstText := waitForEvent(t, s.events)
+	finalText := waitForEvent(t, s.events)
+	resultEvent := waitForEvent(t, s.events)
+	if firstText.Type != core.EventText || firstText.Content != "buffered answer" {
+		t.Fatalf("first text event = %#v, want buffered answer", firstText)
+	}
+	if finalText.Type != core.EventText || finalText.Content != "complete final answer" {
+		t.Fatalf("final text event = %#v, want complete final answer", finalText)
+	}
+	if resultEvent.Type != core.EventResult || !resultEvent.Done {
+		t.Fatalf("result event = %#v, want one completed result", resultEvent)
+	}
+}
+
+func TestAppServerSession_SendStartsIdleTurn(t *testing.T) {
+	s, stdin := newSendTestSession(t, "", "stale message")
+	request, err := sendAndRespond(t, s, stdin, "start new work", map[string]any{"turn": map[string]any{"id": "turn-2"}})
+	if err != nil {
+		t.Fatalf("Send() error = %v", err)
+	}
+	if request.Method != "turn/start" {
+		t.Fatalf("method = %q, want turn/start", request.Method)
+	}
+	currentTurn, pendingMsgs := sendTestState(s)
+	if currentTurn != "turn-2" {
+		t.Fatalf("current turn = %q, want turn-2", currentTurn)
+	}
+	if len(pendingMsgs) != 0 {
+		t.Fatalf("pending messages = %v, want none", pendingMsgs)
+	}
+}
+
+func TestAppServerSession_SendRejectsMismatchedSteeringTurn(t *testing.T) {
+	s, stdin := newSendTestSession(t, "turn-1", "buffered answer")
+	_, err := sendAndRespond(t, s, stdin, "steer current work", map[string]any{"turnId": "turn-other"})
+	if err == nil || !strings.Contains(err.Error(), "turn/steer") || !strings.Contains(err.Error(), "turn-other") {
+		t.Fatalf("Send() error = %v, want mismatched turn/steer error", err)
+	}
+	currentTurn, pendingMsgs := sendTestState(s)
+	if currentTurn != "turn-1" {
+		t.Fatalf("current turn = %q, want turn-1", currentTurn)
+	}
+	if len(pendingMsgs) != 1 || pendingMsgs[0] != "buffered answer" {
+		t.Fatalf("pending messages = %v, want buffered answer", pendingMsgs)
+	}
+}
+
+func TestAppServerSession_SteerFailureReleasesStaleTurnForNextSend(t *testing.T) {
+	s, _ := newSendTestSession(t, "turn-stale", "buffered answer")
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = listener.Close() })
+	s.stdin = nil
+	go func() {
+		conn, err := listener.Accept()
+		if err != nil {
+			return
+		}
+		t.Cleanup(func() { _ = conn.Close() })
+		scanner := bufio.NewScanner(conn)
+		for scanner.Scan() {
+			var request clientRequestProbe
+			if err := json.Unmarshal(scanner.Bytes(), &request); err != nil {
+				return
+			}
+			response := map[string]any{"jsonrpc": "2.0", "id": request.ID}
+			if request.Method == "turn/steer" {
+				response["error"] = map[string]any{"code": -32602, "message": "expectedTurnId does not match active turn"}
+			} else {
+				response["result"] = map[string]any{"turn": map[string]any{"id": "turn-fresh"}}
+			}
+			if err := json.NewEncoder(conn).Encode(response); err != nil {
+				return
+			}
+		}
+	}()
+	conn, err := net.Dial("tcp", listener.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.stdin = conn
+	t.Cleanup(func() { _ = conn.Close() })
+	s.wg.Add(1)
+	go s.readLoop(conn)
+	err = s.Send("guide stale work", "", nil, nil)
+	if err == nil || !strings.Contains(err.Error(), "turn/steer") {
+		t.Fatalf("steer error = %v, want turn/steer failure", err)
+	}
+	currentTurn, pendingMsgs := sendTestState(s)
+	if currentTurn != "" {
+		t.Fatalf("current turn = %q, want stale turn cleared", currentTurn)
+	}
+	if len(pendingMsgs) != 1 || pendingMsgs[0] != "buffered answer" {
+		t.Fatalf("pending messages = %v, want buffered answer preserved", pendingMsgs)
+	}
+
+	err = s.Send("start fresh work", "", nil, nil)
+	if err != nil {
+		t.Fatalf("next Send() error = %v", err)
+	}
+	currentTurn, _ = sendTestState(s)
+	if currentTurn != "turn-fresh" {
+		t.Fatalf("current turn after recovery = %q, want turn-fresh via turn/start", currentTurn)
+	}
+}
+
+func TestAppServerSession_SteerFailureDoesNotClearDifferentActiveTurn(t *testing.T) {
+	s, _ := newSendTestSession(t, "turn-old", "buffered answer")
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = listener.Close() })
+	go func() {
+		conn, err := listener.Accept()
+		if err != nil {
+			return
+		}
+		t.Cleanup(func() { _ = conn.Close() })
+		scanner := bufio.NewScanner(conn)
+		for scanner.Scan() {
+			var request clientRequestProbe
+			if err := json.Unmarshal(scanner.Bytes(), &request); err != nil {
+				return
+			}
+			s.stateMu.Lock()
+			s.currentTurn = "turn-new"
+			s.stateMu.Unlock()
+			if err := json.NewEncoder(conn).Encode(map[string]any{"jsonrpc": "2.0", "id": request.ID, "error": map[string]any{"code": -32602, "message": "expectedTurnId does not match active turn"}}); err != nil {
+				return
+			}
+		}
+	}()
+	conn, err := net.Dial("tcp", listener.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.stdin = conn
+	t.Cleanup(func() { _ = conn.Close() })
+	s.wg.Add(1)
+	go s.readLoop(conn)
+	err = s.steerTurn("thread-1", "turn-old", nil)
+	if err == nil || !strings.Contains(err.Error(), "expectedTurnId") {
+		t.Fatalf("steer error = %v, want expectedTurnId failure without clearing the new turn", err)
+	}
+	if currentTurn, _ := sendTestState(s); currentTurn != "turn-new" {
+		t.Fatalf("current turn = %q, want newer turn retained", currentTurn)
 	}
 }
 
@@ -342,6 +767,104 @@ func TestAppServerSession_HandleRequestUserInputWritesCodexResponse(t *testing.T
 	}
 }
 
+func TestAppServerSession_RejectsInterleavedChildServerRequests(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	stdin := &lockedWriteCloser{}
+	s := &appServerSession{
+		ctx: ctx, stdin: stdin, events: make(chan core.Event, 8),
+		pendingApprovals: make(map[string]chan core.PermissionResult),
+		currentTurn:      "parent-turn",
+	}
+	s.threadID.Store("parent-thread")
+
+	request := func(id, method, threadID, turnID string) {
+		t.Helper()
+		s.handleServerRequest(serverRequestProbe(t, `"`+id+`"`, method, map[string]any{
+			"threadId": threadID, "turnId": turnID,
+			"command": "echo child", "permissions": map[string]any{"network": true},
+			"questions": []any{map[string]any{"id": "q", "header": "Q", "question": "Child question?"}},
+		}))
+	}
+
+	request("child-1-command", "item/commandExecution/requestApproval", "child-thread-1", "child-turn-1")
+	request("parent-command", "item/commandExecution/requestApproval", "parent-thread", "parent-turn")
+	request("child-2-file", "item/fileChange/requestApproval", "child-thread-2", "child-turn-2")
+	request("child-2-permissions", "item/permissions/requestApproval", "child-thread-2", "child-turn-2")
+	request("child-3-question", "item/tool/requestUserInput", "child-thread-3", "child-turn-3")
+	request("child-3-tool", "item/tool/call", "child-thread-3", "child-turn-3")
+	request("stale-parent-turn", "item/commandExecution/requestApproval", "parent-thread", "old-turn")
+
+	select {
+	case event := <-s.events:
+		if event.Type != core.EventPermissionRequest || event.RequestID != `"parent-command"` || event.ToolName != "Bash" {
+			t.Fatalf("event = %#v, want only parent Bash approval", event)
+		}
+		if err := s.RespondPermission(event.RequestID, core.PermissionResult{Behavior: "allow"}); err != nil {
+			t.Fatalf("respond to parent approval: %v", err)
+		}
+	default:
+		t.Fatal("parent approval was not emitted")
+	}
+	select {
+	case event := <-s.events:
+		t.Fatalf("child request leaked event %#v", event)
+	default:
+	}
+	if got := appServerCurrentTurn(s); got != "parent-turn" {
+		t.Fatalf("current turn = %q, want parent-turn", got)
+	}
+
+	var responses map[string]map[string]json.RawMessage
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		responses = make(map[string]map[string]json.RawMessage)
+		for _, line := range strings.Split(strings.TrimSpace(stdin.String()), "\n") {
+			if line == "" {
+				continue
+			}
+			var response struct {
+				ID     string                     `json:"id"`
+				Result map[string]json.RawMessage `json:"result"`
+			}
+			if err := json.Unmarshal([]byte(line), &response); err != nil {
+				t.Fatalf("decode response %q: %v", line, err)
+			}
+			responses[response.ID] = response.Result
+		}
+		if len(responses) == 7 {
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	if len(responses) != 7 {
+		t.Fatalf("responses = %v, want all seven requests answered", responses)
+	}
+	for _, id := range []string{"child-1-command", "child-2-file", "stale-parent-turn"} {
+		if string(responses[id]["decision"]) != `"decline"` {
+			t.Fatalf("%s response = %s, want decline", id, responses[id]["decision"])
+		}
+	}
+	if string(responses["parent-command"]["decision"]) != `"accept"` {
+		t.Fatalf("parent response = %s, want accept", responses["parent-command"]["decision"])
+	}
+	if string(responses["child-2-permissions"]["permissions"]) != `{}` {
+		t.Fatalf("child permissions response = %s, want empty permissions", responses["child-2-permissions"]["permissions"])
+	}
+	if string(responses["child-3-question"]["answers"]) != `{}` {
+		t.Fatalf("child question response = %s, want empty answers", responses["child-3-question"]["answers"])
+	}
+	if string(responses["child-3-tool"]["success"]) != `false` {
+		t.Fatalf("child tool response = %s, want unavailable", responses["child-3-tool"]["success"])
+	}
+	s.approvalsMu.Lock()
+	pendingCount := len(s.pendingApprovals)
+	s.approvalsMu.Unlock()
+	if pendingCount != 0 {
+		t.Fatalf("pending approvals = %d, want none", pendingCount)
+	}
+}
+
 var _ interface {
 	GetUsage(context.Context) (*core.UsageReport, error)
 } = (*appServerSession)(nil)
@@ -370,6 +893,314 @@ func (w *lockedWriteCloser) String() string {
 }
 
 var _ io.WriteCloser = (*lockedWriteCloser)(nil)
+
+func newTransportTestSession(t *testing.T) *appServerSession {
+	t.Helper()
+	ctx, cancel := context.WithCancel(context.Background())
+	s := &appServerSession{
+		ctx: ctx, cancel: cancel, events: make(chan core.Event, 128),
+		currentTurn: "turn-1",
+	}
+	s.threadID.Store("thread-1")
+	s.alive.Store(true)
+	t.Cleanup(func() { _ = s.Close() })
+	return s
+}
+
+func awaitTransportTest(t *testing.T, done <-chan struct{}) {
+	t.Helper()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("app-server operation did not finish")
+	}
+}
+
+func TestAppServerSession_TransportEOFFinishesActiveTurn(t *testing.T) {
+	s := newTransportTestSession(t)
+	rpc := make(chan rpcResponseEnvelope, 1)
+	approval := make(chan core.PermissionResult, 1)
+	s.pending = map[int64]chan rpcResponseEnvelope{1: rpc}
+	s.pendingApprovals = map[string]chan core.PermissionResult{"approval": approval}
+	s.wg.Add(1)
+	s.readLoop(strings.NewReader(""))
+	select {
+	case event := <-s.events:
+		if event.Type != core.EventError || !errors.Is(event.Error, io.EOF) {
+			t.Fatalf("EOF event = %#v, want terminal EOF error", event)
+		}
+	default:
+		t.Fatal("EOF left the active turn waiting without a terminal event")
+	}
+	if s.Alive() || s.currentTurn != "" {
+		t.Fatal("EOF left the transport or turn active")
+	}
+	select {
+	case response := <-rpc:
+		if response.Error == nil {
+			t.Fatal("pending RPC was not rejected")
+		}
+	default:
+		t.Fatal("pending RPC was not released")
+	}
+	select {
+	case result := <-approval:
+		if result.Behavior != "deny" {
+			t.Fatalf("pending approval = %#v", result)
+		}
+	default:
+		t.Fatal("pending approval was not released")
+	}
+}
+
+func TestAppServerSession_TransportEOFDoesNotDuplicateTerminal(t *testing.T) {
+	for _, state := range []string{"idle", "completed", "failed", "error", "canceled"} {
+		t.Run(state, func(t *testing.T) {
+			s := newTransportTestSession(t)
+			switch state {
+			case "idle":
+				s.currentTurn = ""
+			case "completed":
+				s.handleNotification("turn/completed", json.RawMessage(`{"turn":{"id":"turn-1"}}`))
+			case "failed":
+				s.handleNotification("turn/completed", json.RawMessage(`{"turn":{"id":"turn-1","status":"failed"}}`))
+			case "error":
+				s.handleNotification("error", json.RawMessage(`{"message":"failed"}`))
+			case "canceled":
+				s.cancel()
+			}
+			before := len(s.events)
+			s.wg.Add(1)
+			s.readLoop(strings.NewReader(""))
+			if len(s.events) != before {
+				t.Fatalf("EOF emitted an extra terminal event after %s", state)
+			}
+		})
+	}
+}
+
+func TestAppServerSession_TransportReadFailureFinishesTurn(t *testing.T) {
+	s := newTransportTestSession(t)
+	failure := errors.New("broken transport")
+	s.wg.Add(1)
+	s.readLoop(iotest.ErrReader(failure))
+	select {
+	case event := <-s.events:
+		if event.Type != core.EventError || !errors.Is(event.Error, failure) {
+			t.Fatalf("read failure = %#v", event)
+		}
+	default:
+		t.Fatal("read failure did not finish the turn")
+	}
+	if s.Alive() || s.currentTurn != "" {
+		t.Fatal("read failure left the transport or turn active")
+	}
+}
+
+func TestAppServerSession_TransportIdleErrorRemainsVisible(t *testing.T) {
+	s := newTransportTestSession(t)
+	s.currentTurn = ""
+	s.handleNotification("error", json.RawMessage(`{"message":"connection error"}`))
+	select {
+	case event := <-s.events:
+		if event.Type != core.EventError || event.Error.Error() != "connection error" {
+			t.Fatalf("idle error = %#v", event)
+		}
+	default:
+		t.Fatal("connection error outside a turn was suppressed")
+	}
+}
+
+func TestAppServerSession_TerminalSurvivesFullQueue(t *testing.T) {
+	for _, terminal := range []core.Event{
+		{Type: core.EventResult, Done: true},
+		{Type: core.EventError, Error: io.EOF},
+		{Type: core.EventText, Done: true},
+	} {
+		t.Run(string(terminal.Type), func(t *testing.T) {
+			s := newTransportTestSession(t)
+			for i := 0; i < cap(s.events); i++ {
+				s.events <- core.Event{Type: core.EventThinking, Content: "queued"}
+			}
+			done := make(chan struct{})
+			go func() { s.emit(terminal); close(done) }()
+			select {
+			case <-done:
+				t.Fatal("terminal delivery returned while the queue was full")
+			case <-time.After(20 * time.Millisecond):
+			}
+			for i := 0; i < cap(s.events); i++ {
+				if event := <-s.events; event.Type != core.EventThinking || event.Content != "queued" {
+					t.Fatalf("queued event %d was displaced: %#v", i, event)
+				}
+			}
+			awaitTransportTest(t, done)
+			select {
+			case event := <-s.events:
+				if event.Type != terminal.Type || event.Done != terminal.Done || event.Error != terminal.Error {
+					t.Fatalf("terminal = %#v, want %#v", event, terminal)
+				}
+			default:
+				t.Fatal("full queue dropped the terminal event")
+			}
+		})
+	}
+}
+
+func TestAppServerSession_CloseUnblocksTerminalDelivery(t *testing.T) {
+	s := newTransportTestSession(t)
+	for i := 0; i < cap(s.events); i++ {
+		s.events <- core.Event{Type: core.EventThinking}
+	}
+	done := make(chan struct{})
+	s.wg.Add(1)
+	go func() { defer s.wg.Done(); s.emitError(io.EOF); close(done) }()
+	select {
+	case <-done:
+		t.Fatal("terminal delivery returned before cancellation or queue space")
+	case <-time.After(20 * time.Millisecond):
+	}
+	closed := make(chan struct{})
+	go func() { _ = s.Close(); close(closed) }()
+	awaitTransportTest(t, done)
+	awaitTransportTest(t, closed)
+	// A publisher outside readLoop may race with or follow Close.
+	s.emitError(io.EOF)
+}
+
+type transportTestWriter func([]byte) (int, error)
+
+func (w transportTestWriter) Write(p []byte) (int, error) { return w(p) }
+func (transportTestWriter) Close() error                  { return nil }
+
+func TestAppServerSession_LateStartResponseCannotReviveTurn(t *testing.T) {
+	for _, state := range []string{"eof", "completed", "completed_then_eof", "failed"} {
+		t.Run(state, func(t *testing.T) {
+			s := newTransportTestSession(t)
+			s.currentTurn = ""
+			s.stdin = transportTestWriter(func(p []byte) (int, error) {
+				var request struct {
+					ID int64 `json:"id"`
+				}
+				if err := json.Unmarshal(p, &request); err != nil {
+					return 0, err
+				}
+				s.handleResponse(rpcResponseEnvelope{ID: request.ID, Result: json.RawMessage(`{"turn":{"id":"turn-1"}}`)})
+				if state != "eof" {
+					s.handleNotification("turn/started", json.RawMessage(`{"turn":{"id":"turn-1"}}`))
+					status := "completed"
+					if state == "failed" {
+						status = "failed"
+					}
+					s.handleNotification("turn/completed", json.RawMessage(fmt.Sprintf(`{"turn":{"id":"turn-1","status":%q}}`, status)))
+				}
+				if strings.Contains(state, "eof") {
+					s.wg.Add(1)
+					s.readLoop(strings.NewReader(""))
+				}
+				return len(p), nil
+			})
+			err := s.Send("hello", "", nil, nil)
+			if state == "eof" && err == nil {
+				t.Fatal("turn/start succeeded after EOF without a terminal event")
+			}
+			if state != "eof" && err != nil {
+				t.Fatalf("finished turn became a send failure: %v", err)
+			}
+			if s.currentTurn != "" {
+				t.Fatal("late turn/start response revived the finished turn")
+			}
+		})
+	}
+}
+
+func TestAppServerSession_EOFReleasesRPCBeforeTerminalBackpressure(t *testing.T) {
+	s := newTransportTestSession(t)
+	for i := 0; i < cap(s.events); i++ {
+		s.events <- core.Event{Type: core.EventThinking}
+	}
+	rpc := make(chan rpcResponseEnvelope, 1)
+	approval := make(chan core.PermissionResult, 1)
+	s.pending = map[int64]chan rpcResponseEnvelope{1: rpc}
+	s.pendingApprovals = map[string]chan core.PermissionResult{"approval": approval}
+	done := make(chan struct{})
+	s.wg.Add(1)
+	go func() { s.readLoop(strings.NewReader("")); close(done) }()
+	select {
+	case response := <-rpc:
+		if response.Error == nil || s.Alive() {
+			t.Fatal("RPC did not observe a dead transport")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("terminal backpressure prevented pending RPC rejection")
+	}
+	select {
+	case <-approval:
+	case <-time.After(5 * time.Second):
+		t.Fatal("terminal backpressure prevented approval rejection")
+	}
+	for i := 0; i < cap(s.events); i++ {
+		<-s.events
+	}
+	awaitTransportTest(t, done)
+	select {
+	case event := <-s.events:
+		if event.Type != core.EventError || !errors.Is(event.Error, io.EOF) {
+			t.Fatalf("EOF terminal = %#v", event)
+		}
+	default:
+		t.Fatal("EOF terminal was lost under backpressure")
+	}
+}
+
+// Use connect's real pipes and process lifecycle without invoking Codex.
+func TestAppServerSession_ProcessExitFinishesOnce(t *testing.T) {
+	for _, mode := range []string{"eof", "completed", "failed", "completed_then_failed_exit"} {
+		t.Run(mode, func(t *testing.T) {
+			s := newTransportTestSession(t)
+			s.cliBin = os.Args[0]
+			s.cliExtraArgs = []string{"-test.run=^TestAppServerTransportProcessHelper$", "--"}
+			s.workDir = t.TempDir()
+			s.url = "stdio://"
+			s.extraEnv = []string{"CC_CONNECT_TRANSPORT_HELPER=" + mode, "GORACE=atexit_sleep_ms=0"}
+			if err := s.connect(); err != nil {
+				t.Fatal(err)
+			}
+			done := make(chan struct{})
+			go func() { s.wg.Wait(); close(done) }()
+			awaitTransportTest(t, done)
+			want := core.EventError
+			if strings.HasPrefix(mode, "completed") {
+				want = core.EventResult
+			}
+			if len(s.events) != 1 {
+				t.Fatalf("process exit produced %d events, want one terminal", len(s.events))
+			}
+			if event := <-s.events; event.Type != want {
+				t.Fatalf("process exit event = %#v, want %v", event, want)
+			}
+			if s.Alive() || s.currentTurn != "" {
+				t.Fatal("process exit left the transport or turn active")
+			}
+		})
+	}
+}
+
+func TestAppServerTransportProcessHelper(t *testing.T) {
+	mode := os.Getenv("CC_CONNECT_TRANSPORT_HELPER")
+	if mode == "" {
+		return
+	}
+	if strings.HasPrefix(mode, "completed") {
+		if _, err := fmt.Fprintln(os.Stdout, `{"method":"turn/completed","params":{"turn":{"id":"turn-1"}}}`); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if mode == "failed" || mode == "completed_then_failed_exit" {
+		os.Exit(17)
+	}
+	os.Exit(0)
+}
 
 type blockingWriteCloser struct {
 	started   chan struct{}
@@ -432,6 +1263,121 @@ func serverRequestProbe(t *testing.T, idJSON, method string, params any) map[str
 	}
 }
 
+func notificationProbe(t *testing.T, params any) json.RawMessage {
+	t.Helper()
+	raw, err := json.Marshal(params)
+	if err != nil {
+		t.Fatalf("marshal notification: %v", err)
+	}
+	return raw
+}
+
+func tokenUsageNotificationProbe(t *testing.T, threadID, turnID string, totalTokens int) json.RawMessage {
+	t.Helper()
+	return notificationProbe(t, map[string]any{
+		"threadId": threadID,
+		"turnId":   turnID,
+		"tokenUsage": map[string]any{
+			"total": map[string]any{},
+			"last": map[string]any{
+				"totalTokens": totalTokens,
+			},
+			"modelContextWindow": 258400,
+		},
+	})
+}
+
+func appServerCurrentTurn(s *appServerSession) string {
+	s.stateMu.Lock()
+	defer s.stateMu.Unlock()
+	return s.currentTurn
+}
+
+func appServerPendingMessages(s *appServerSession) []string {
+	s.stateMu.Lock()
+	defer s.stateMu.Unlock()
+	return append([]string(nil), s.pendingMsgs...)
+}
+
+type clientRequestProbe struct {
+	ID     any            `json:"id"`
+	Method string         `json:"method"`
+	Params map[string]any `json:"params"`
+}
+
+func newSendTestSession(t *testing.T, currentTurn string, pendingMsgs ...string) (*appServerSession, *lockedWriteCloser) {
+	t.Helper()
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	stdin := &lockedWriteCloser{}
+	s := &appServerSession{
+		ctx:          ctx,
+		cancel:       cancel,
+		events:       make(chan core.Event, 8),
+		stdin:        stdin,
+		pending:      make(map[int64]chan rpcResponseEnvelope),
+		preambleSent: true,
+		currentTurn:  currentTurn,
+		pendingMsgs:  append([]string(nil), pendingMsgs...),
+	}
+	s.alive.Store(true)
+	s.threadID.Store("thread-1")
+	return s, stdin
+}
+
+func sendAndRespond(t *testing.T, s *appServerSession, stdin *lockedWriteCloser, prompt string, result any) (clientRequestProbe, error) {
+	t.Helper()
+	done := make(chan error, 1)
+	go func() {
+		done <- s.Send(prompt, "", nil, nil)
+	}()
+	request := waitForClientRequest(t, stdin)
+	response, ok := result.(rpcResponseEnvelope)
+	if !ok {
+		resultJSON, err := json.Marshal(result)
+		if err != nil {
+			t.Fatalf("marshal response: %v", err)
+		}
+		response = rpcResponseEnvelope{Result: resultJSON}
+	}
+	response.ID = request.ID
+	s.handleResponse(response)
+	select {
+	case err := <-done:
+		return request, err
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for Send")
+		return clientRequestProbe{}, nil
+	}
+}
+
+func sendTestState(s *appServerSession) (string, []string) {
+	s.stateMu.Lock()
+	defer s.stateMu.Unlock()
+	return s.currentTurn, append([]string(nil), s.pendingMsgs...)
+}
+
+func waitForEvent(t *testing.T, events <-chan core.Event) core.Event {
+	t.Helper()
+	select {
+	case event := <-events:
+		return event
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for app-server event")
+		return core.Event{}
+	}
+}
+
+func waitForClientRequest(t *testing.T, w *lockedWriteCloser) clientRequestProbe {
+	t.Helper()
+	line := waitForWrittenJSONLine(t, w)
+	var request clientRequestProbe
+	if err := json.Unmarshal([]byte(line), &request); err != nil {
+		t.Fatalf("decode JSON-RPC request %q: %v", line, err)
+	}
+	return request
+}
+
 func waitForWrittenJSONLine(t *testing.T, w *lockedWriteCloser) string {
 	t.Helper()
 	deadline := time.After(time.Second)
@@ -448,6 +1394,27 @@ func waitForWrittenJSONLine(t *testing.T, w *lockedWriteCloser) string {
 					return line
 				}
 			}
+		}
+	}
+}
+
+func TestAppServerListenURL(t *testing.T) {
+	cases := map[string]string{
+		"":                     "",
+		"  ":                   "",
+		"stdio://":             "",
+		"stdio":                "",
+		"ws://127.0.0.1:3845":  "ws://127.0.0.1:3845",
+		"ws://localhost:9000":  "ws://localhost:9000",
+		"ws://127.0.0.1:3845 ": "ws://127.0.0.1:3845",
+		" stdio ":              "",
+		" stdio:// ":           "",
+		"STDIO":                "",
+		"STDIO://":             "",
+	}
+	for in, want := range cases {
+		if got := appServerListenURL(in); got != want {
+			t.Errorf("appServerListenURL(%q) = %q, want %q", in, got, want)
 		}
 	}
 }

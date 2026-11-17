@@ -5,6 +5,8 @@ import (
 	"os"
 	"strings"
 	"testing"
+
+	"github.com/chenhg5/cc-connect/core"
 )
 
 // ── buildJSONArgs (Issue #1723) ────────────────────────────────
@@ -342,5 +344,276 @@ func TestComposeRPCPrompt_AcceptsNULInOriginalPrompt(t *testing.T) {
 	got := composeRPCPrompt(prompt, []string{"/tmp/x.png"})
 	if !strings.Contains(got, "hi\x00there") {
 		t.Errorf("NUL stripped from prompt: %q", got)
+	}
+}
+
+// ── promptWithFileRefs (Issue #1767) ───────────────────────────
+//
+// Issue #1767 regression coverage: the old code passed non-image files
+// through the same @<path> mechanism as images. pi's processFileArguments
+// reads every @<path> file's full UTF-8 contents and inlines them into
+// the prompt the model sees; for a >~1MB attachment this triggered a 400
+// from the model provider. The fix splits images (still @<path>) from
+// non-image files (now referenced by plain path trailer). These tests
+// pin the new contract so a future refactor cannot quietly re-introduce
+// the bug.
+
+func TestPromptWithFileRefs_NoFilesKeepsPrompt(t *testing.T) {
+	// When there are no non-image attachments, the prompt must be
+	// returned unchanged — we do NOT want to inject an empty "Files
+	// saved locally" trailer that would confuse the model.
+	got := promptWithFileRefs("just a plain question", nil)
+	if got != "just a plain question" {
+		t.Errorf("prompt mutated: got %q", got)
+	}
+	got = promptWithFileRefs("another", []string{})
+	if got != "another" {
+		t.Errorf("empty slice still mutated prompt: got %q", got)
+	}
+}
+
+func TestPromptWithFileRefs_AppendsPlainPathRefs(t *testing.T) {
+	// File paths must appear as plain text references, NOT prefixed
+	// with '@' (which is the pi mechanism that would re-trigger the
+	// #1767 inlining). Mirrors the wording claudecode uses so users
+	// see consistent phrasing across runtimes.
+	paths := []string{"/tmp/a.pdf", "/tmp/b.docx"}
+	got := promptWithFileRefs("please review", paths)
+
+	if !strings.HasPrefix(got, "please review") {
+		t.Errorf("original prompt text lost: %q", got)
+	}
+	for _, p := range paths {
+		if !strings.Contains(got, p) {
+			t.Errorf("path %q missing from prompt: %q", p, got)
+		}
+		if strings.Contains(got, "@"+p) {
+			t.Errorf("path %q must NOT be @-prefixed (would re-trigger Issue #1767): %q", p, got)
+		}
+	}
+}
+
+func TestPromptWithFileRefs_PreservesOrder(t *testing.T) {
+	// Order matters: multi-file reviews rely on the agent seeing
+	// attachments in the same order as the sender uploaded them.
+	paths := []string{"/tmp/first.pdf", "/tmp/second.pdf", "/tmp/third.pdf"}
+	got := promptWithFileRefs("p", paths)
+
+	prev := -1
+	for _, p := range paths {
+		idx := strings.Index(got, p)
+		if idx == -1 {
+			t.Fatalf("missing %s in prompt %q", p, got)
+		}
+		if idx <= prev {
+			t.Errorf("paths not in order: %s came after previous", p)
+		}
+		prev = idx
+	}
+}
+
+func TestPromptWithFileRefs_DoesNotInlineFileBytes(t *testing.T) {
+	// Core regression guard for #1767: a recognizable byte sequence
+	// saved to disk must never be inlined into the prompt.
+	marker := []byte("SECRET-INLINE-MARKER-1767")
+	tmp := t.TempDir()
+	docPath := tmp + "/report.pdf"
+	if err := os.WriteFile(docPath, marker, 0o644); err != nil {
+		t.Fatalf("seed attachment: %v", err)
+	}
+
+	got := promptWithFileRefs("review this", []string{docPath})
+	if strings.Contains(got, string(marker)) {
+		t.Errorf("file bytes inlined into prompt — #1767 regression: %q", got)
+	}
+	// The path itself may legitimately appear (as a plain reference);
+	// the marker check above is the real assertion.
+	if !strings.Contains(got, docPath) {
+		t.Errorf("path reference missing from prompt: %q", got)
+	}
+}
+
+func TestPromptWithFileRefs_LargeNonImageFileDoesNotInline(t *testing.T) {
+	// Spec-grade regression: a >1MB non-image attachment must NOT
+	// have its contents inlined into the prompt. The 1MB threshold
+	// matches the size mentioned in the upstream #1767 bug report
+	// that triggered model 400s. We seed a 1.5MB file with a
+	// recognizable marker scattered through it and assert the marker
+	// never appears in the prompt the model receives.
+	const size = 1_500_000
+	marker := []byte("ISSUE-1767-MUST-NOT-APPEAR-IN-PROMPT-ABCDEF")
+
+	tmp := t.TempDir()
+	docPath := tmp + "/big-log.txt"
+	f, err := os.Create(docPath)
+	if err != nil {
+		t.Fatalf("create big file: %v", err)
+	}
+	defer func() { _ = f.Close() }()
+
+	// Fill with repeating marker so the byte sequence is dense and
+	// any inlining (even partial) is caught.
+	buf := make([]byte, 0, size+len(marker)*4)
+	for len(buf) < size {
+		buf = append(buf, marker...)
+		buf = append(buf, bytes.Repeat([]byte{'x'}, 4096)...)
+	}
+	buf = buf[:size]
+	if _, err := f.Write(buf); err != nil {
+		t.Fatalf("write big file: %v", err)
+	}
+
+	// Confirm we wrote >1MB and that the marker is actually present
+	// on disk (so a false-negative test can't pass trivially).
+	info, err := os.Stat(docPath)
+	if err != nil {
+		t.Fatalf("stat: %v", err)
+	}
+	if info.Size() <= 1_000_000 {
+		t.Fatalf("seed file too small: %d", info.Size())
+	}
+	written, err := os.ReadFile(docPath)
+	if err != nil {
+		t.Fatalf("read back: %v", err)
+	}
+	if !bytes.Contains(written, marker) {
+		t.Fatalf("marker missing from seed file — test is meaningless")
+	}
+
+	// The fix: promptWithFileRefs must contain the path as plain text
+	// reference, but the marker bytes from inside the file must NOT
+	// appear anywhere in the returned prompt.
+	got := promptWithFileRefs("see attached", []string{docPath})
+
+	if strings.Contains(got, string(marker)) {
+		t.Fatalf("file bytes (marker) leaked into prompt for >1MB attachment — #1767 regression: %q (len=%d)", got, len(got))
+	}
+	if !strings.Contains(got, docPath) {
+		t.Errorf("path reference missing from prompt trailer: %q", got)
+	}
+}
+
+// ── Image vs file separation (Issue #1767) ───────────────────
+//
+// These tests pin the contract that Send() splits image attachments
+// from non-image attachments and hands only the image paths to
+// buildJSONArgs / composeRPCPrompt as @<path> argv entries. They use
+// the helpers directly (buildJSONArgs + composeRPCPrompt + a fake
+// caller's separation logic) because Send() itself spawns a pi
+// subprocess and is tested via the helpers.
+
+func TestBuildJSONArgs_OnlyImageAtFilesBecomeAtPath(t *testing.T) {
+	// Doc-level invariant: after the #1767 split, the @-args emitted
+	// by buildJSONArgs must contain ONLY image paths. Non-image file
+	// paths must travel through promptWithFileRefs instead, never as
+	// argv entries. The test mirrors what Send() now passes to
+	// buildJSONArgs.
+	imagePaths := []string{
+		"/tmp/cc-connect/attach/img1.png",
+		"/tmp/cc-connect/attach/img2.jpg",
+	}
+	promptWithTrailer := promptWithFileRefs("describe", []string{
+		"/tmp/cc-connect/attach/log.txt",
+		"/tmp/cc-connect/attach/report.pdf",
+	})
+	args := buildJSONArgs(nil, promptWithTrailer, "", "", "", imagePaths)
+
+	// Every image path must appear as @<path>; no non-image path may.
+	var got []string
+	for _, a := range args {
+		if strings.HasPrefix(a, "@") {
+			got = append(got, a)
+		}
+	}
+	want := []string{"@" + imagePaths[0], "@" + imagePaths[1]}
+	if len(got) != len(want) {
+		t.Fatalf("expected %d @-args (images only), got %d: %v", len(want), len(got), args)
+	}
+	for i, w := range want {
+		if got[i] != w {
+			t.Errorf("@-arg[%d]: got %q, want %q", i, got[i], w)
+		}
+	}
+	for _, f := range []string{"/tmp/cc-connect/attach/log.txt", "/tmp/cc-connect/attach/report.pdf"} {
+		// The non-image path may appear once in the prompt trailer
+		// (plain text reference), but never as a @<path> argv entry.
+		count := 0
+		for _, a := range args {
+			if a == "@"+f {
+				count++
+			}
+		}
+		if count != 0 {
+			t.Errorf("non-image path %q leaked into @-argv %d times", f, count)
+		}
+	}
+}
+
+func TestComposeRPCPrompt_OnlyImagesBecomeAtPathRefs(t *testing.T) {
+	// RPC-mode twin of TestBuildJSONArgs_OnlyImageAtFilesBecomeAtPath.
+	imagePaths := []string{"/tmp/img1.png"}
+	nonImagePaths := []string{"/tmp/notes.txt"}
+	got := composeRPCPrompt(promptWithFileRefs("look", nonImagePaths), imagePaths)
+
+	if !strings.Contains(got, "@"+imagePaths[0]) {
+		t.Errorf("image @<path> ref missing: %q", got)
+	}
+	if strings.Contains(got, "@"+nonImagePaths[0]) {
+		t.Errorf("non-image path must NOT be @-prefixed in RPC prompt: %q", got)
+	}
+	// Non-image path appears as plain text reference.
+	if !strings.Contains(got, nonImagePaths[0]) {
+		t.Errorf("non-image path reference missing from prompt: %q", got)
+	}
+}
+
+// ── saveFilesToDisk + ImageAtFiles invariants (Issue #1767) ────
+
+func TestSaveFilesToDisk_LargeFileRoundTrip(t *testing.T) {
+	// Doc-level invariant: saveFilesToDisk must handle >1MB non-image
+	// attachments without truncation (the file path is what we hand to
+	// the model, so the file on disk must be the FULL payload the
+	// platform sent us).
+	const size = 1_200_000
+	marker := []byte("LARGE-FILE-MARKER-XYZZY")
+	payload := make([]byte, size)
+	for i := 0; i < size; i++ {
+		payload[i] = byte('a' + (i % 26))
+	}
+	copy(payload[size-len(marker):], marker)
+
+	tmp := t.TempDir()
+	paths := saveFilesToDisk(tmp, []core.FileAttachment{
+		{MimeType: "text/plain", FileName: "big.txt", Data: payload},
+	})
+	if len(paths) != 1 {
+		t.Fatalf("expected 1 saved path, got %d", len(paths))
+	}
+	written, err := os.ReadFile(paths[0])
+	if err != nil {
+		t.Fatalf("read back: %v", err)
+	}
+	if len(written) != size {
+		t.Errorf("saved file truncated: wrote %d, read %d", size, len(written))
+	}
+	if !bytes.Contains(written, marker) {
+		t.Errorf("marker missing from saved file — round-trip failed")
+	}
+}
+
+func TestSaveImagesToDisk_DoesNotConsumeFileSlots(t *testing.T) {
+	// Defensive guard: after the #1767 split, saveImagesToDisk is the
+	// only producer of @<path> argv entries. A future refactor that
+	// accidentally feeds FileAttachment bytes through saveImagesToDisk
+	// (or vice versa) must be caught: image paths must end in image
+	// extensions and not look like arbitrary docs.
+	paths := saveImagesToDisk(t.TempDir(), []core.ImageAttachment{
+		{MimeType: "image/png", FileName: "shot.png", Data: []byte("\x89PNG\r\n\x1a\nfakepng")},
+	})
+	if len(paths) != 1 {
+		t.Fatalf("expected 1 image path, got %d", len(paths))
+	}
+	if !strings.HasSuffix(paths[0], ".png") {
+		t.Errorf("image path missing .png suffix: %q", paths[0])
 	}
 }

@@ -48,10 +48,62 @@ type claudeSession struct {
 	// carried a model field yet; callers should fall back to the Agent's
 	// configured model.
 	activeModel atomic.Value // stores string
+	// lastModelSwitch remembers the last model_refusal_fallback that was
+	// reported, so a fallback the CLI announces twice (provisional, then final)
+	// reaches the user once.
+	lastModelSwitch atomic.Value // stores string
+
+	// configuredEffort is the --effort value cc-connect passed at spawn time
+	// ("" when it passed none). appliedEffort stores the effort the CLI
+	// reports as actually in force via the get_settings control request, so
+	// the reply footer shows the real level even when it comes from the
+	// user's ~/.claude/settings.json rather than from cc-connect's config.
+	configuredEffort  string
+	effortMu          sync.Mutex
+	appliedEffort     string
+	settingsSequence  uint64
+	settingsRequestID string
 
 	// usageMu guards lastUsage. Populated from the most recent result event.
 	usageMu   sync.Mutex
 	lastUsage *core.ContextUsage
+	// usageSource records where lastUsage came from, so an auto-compress
+	// decision is never confused with a different data source:
+	//   "event"                — a live stream-json assistant event (per-sub-call
+	//                            prompt size; the most faithful snapshot)
+	//   "transcript"           — the last per-call record read from the Claude
+	//                            Code JSONL transcript. Used when the provider
+	//                            sends an empty assistant usage block
+	//                            (measured: MiniMax-M3)
+	//   "transcript-recovered" — the same tail read, done once at attach time
+	//                            after a --resume, before the first live number
+	//   ""                     — lastUsage is nil
+	//
+	// The result event's own aggregate is deliberately NOT a source: its
+	// cache_read sums every sub-call in the turn, so it overstates the final
+	// prompt by a factor that grows with the sub-call count.
+	usageSource string
+	// recoverUsageOnce guards the one-shot transcript recovery performed when
+	// the init event arrives (see handleSystem).
+	recoverUsageOnce sync.Once
+	// transcriptOverride, when non-empty, replaces the derived transcript path.
+	// Test-only seam: transcriptPath() resolves through the real
+	// ~/.claude/projects/<key>/ layout, which a unit test cannot fabricate.
+	transcriptOverride string
+
+	// ctxWindowOverride is the user-configured context window size used by
+	// the "ctx N%" indicator. When > 0 it wins over reportedCtxWindow; when
+	// <= 0, contextWindow uses reportedCtxWindow and then the model-name
+	// heuristic (200K, 1M for [1m] variants). The Agent sets
+	// this from `[projects.agent.options].context_window_tokens` at session
+	// construction time and never mutates it afterwards.
+	ctxWindowOverride int
+
+	// reportedCtxWindow is the context window Claude Code reported for this
+	// session's model in the most recent result event's modelUsage map.
+	// Zero until a result event carries one; until then (and on CLIs that
+	// omit the map) contextWindow falls back to the model-name heuristic.
+	reportedCtxWindow atomic.Int64
 
 	// gracefulStopTimeout is how long Close() waits for a clean exit
 	// (stdin close → Stop hooks → process exit) before escalating to
@@ -59,7 +111,32 @@ type claudeSession struct {
 	// Stop hook timeout. The wait ends as soon as the process exits,
 	// so typical shutdowns take seconds, not the full timeout.
 	gracefulStopTimeout time.Duration
-	ccHooks             *ccPermissionHookRunner // Claude Code PermissionRequest hook runner
+
+	// turnActive is true between a successful Send and the result event that
+	// terminates the turn. CancelTurn uses it to tell "there is a turn to
+	// interrupt" from "the session is already idle" — an idle session must not
+	// pay the cancel-confirmation timeout, because no result event is coming
+	// and there is nothing to interrupt.
+	turnActive atomic.Bool
+
+	// cancelMu guards cancelWaiters. CancelTurn registers a waiter BEFORE
+	// writing the interrupt request, because the CLI can emit the terminating
+	// result event in the same millisecond as the control_response ack; a
+	// waiter installed after the write would miss it and time out on a turn
+	// that actually stopped. The terminating result belongs to the turn, not
+	// to one caller, so concurrent cancels all register here and handleResult
+	// wakes every one of them.
+	cancelMu      sync.Mutex
+	cancelWaiters map[chan struct{}]struct{}
+
+	// cancelConfirmTimeout bounds how long CancelTurn waits for the CLI to
+	// confirm the interrupted turn actually terminated. On expiry CancelTurn
+	// returns an error and the engine falls back to Close() (stdin close →
+	// SIGTERM → SIGKILL), so an interrupt the CLI silently ignored still
+	// results in a stopped agent.
+	cancelConfirmTimeout time.Duration
+
+	ccHooks *ccPermissionHookRunner // Claude Code PermissionRequest hook runner
 
 	// startupWarning holds a one-time message to surface to the IM user at
 	// session start (e.g. when a permission mode was silently downgraded).
@@ -216,7 +293,7 @@ func buildAppendSystemPrompt(agentPrompt, platformPrompt, userAppend string) str
 	return strings.Join(parts, "\n")
 }
 
-func newClaudeSession(ctx context.Context, workDir, cliBin string, cliExtraArgs []string, cmdArgsFlag string, model, effort, sessionID, mode, systemPrompt, appendSystemPrompt string, allowedTools, disallowedTools []string, pluginDirs []string, extraEnv []string, platformPrompt string, disableVerbose bool, spawnOpts core.SpawnOptions, maxContextTokens int, ccDataDir string, lang core.Language) (*claudeSession, error) {
+func newClaudeSession(ctx context.Context, workDir, cliBin string, cliExtraArgs []string, cmdArgsFlag string, model, effort, sessionID, mode, systemPrompt, appendSystemPrompt string, allowedTools, disallowedTools []string, pluginDirs []string, extraEnv []string, platformPrompt string, disableVerbose bool, spawnOpts core.SpawnOptions, maxContextTokens int, ctxWindowTokens int, ccDataDir string, lang core.Language) (*claudeSession, error) {
 	sessionCtx, cancel := context.WithCancel(ctx)
 
 	// Claude Code rejects bypassPermissions when running as root.
@@ -436,6 +513,31 @@ func newClaudeSession(ctx context.Context, workDir, cliBin string, cliExtraArgs 
 	var stderrBuf bytes.Buffer
 	cmd.Stderr = &stderrBuf
 
+	// 🔴 /stop「杀不死」的根因修复（2026-07-29）。
+	//
+	// 症状：taskkill /T /F 报成功，Close() 却在 10 秒后返回
+	// "process tree (pid N) still alive 10s after SIGKILL reported success"，
+	// engine 于是认定 teardown 失败 —— 用户按了 /stop，却像在跟另一个 session 说话。
+	//
+	// 机制：上面这行把 stderr 接到 *bytes.Buffer（不是 *os.File），os/exec 因此会
+	// 自建一条管道 + 一个 io.Copy goroutine。**cmd.Wait() 不只等进程退出，还要等
+	// 那个 goroutine 结束**，而它要等管道 EOF —— 只要**任何一个孙进程**
+	// （Claude Code 拉起的 MCP server）继承了 stderr 写端还活着，管道就永不 EOF。
+	// 于是：直接子进程早被杀死，Wait() 却永不返回 → cs.done 永不关闭 → Close() 只能超时。
+	// **"还活着"的其实不是进程，是那根没人关的管道。**
+	// （下面 startReadLoopWait 对 stdout 已经做了 50ms 后强关来躲这个坑，
+	//   注释里还写着 "no descendants holding it" —— 唯独 stderr 漏了同样的处理。）
+	//
+	// 证据：同一个仓库的 gemini / kimi / antigravity / hooks **四个适配器全都设了
+	// WaitDelay**（gemini 那行注释：「确保 I/O goroutine 在 context 结束后不会长时间阻塞」）
+	// —— 唯独 claudecode 漏了。这不是新发明，是补上一致性。
+	//
+	// 取 3s 而非兄弟们的 1s：Claude Code 退出时可能还在吐最后一段 stderr（报错栈），
+	// 太短会截掉有用的诊断；而 Close() 的兜底等待是 10s，3s 留足余量。
+	// 超时后 Wait() 返回 ErrWaitDelay 并强制关管道 —— stderr 可能不全，
+	// 但**进程状态是准的**。这正是要的取舍：宁可少一段日志，不要一个杀不死的会话。
+	cmd.WaitDelay = 3 * time.Second
+
 	if err := cmd.Start(); err != nil {
 		if promptFilePath != "" && !promptFileIsShared {
 			_ = os.Remove(promptFilePath)
@@ -454,23 +556,27 @@ func newClaudeSession(ctx context.Context, workDir, cliBin string, cliExtraArgs 
 	}
 
 	cs := &claudeSession{
-		cmd:                 cmd,
-		stdin:               stdin,
-		events:              make(chan core.Event, 64),
-		workDir:             workDir,
-		ctx:                 sessionCtx,
-		cancel:              cancel,
-		done:                make(chan struct{}),
-		gracefulStopTimeout: 120 * time.Second,
-		ccHooks:             newCCPermissionHookRunner(workDir),
-		startupWarning:      rootDowngradeWarning,
-		promptFilePath:      cleanupPromptPath,
+		cmd:                  cmd,
+		stdin:                stdin,
+		events:               make(chan core.Event, 64),
+		workDir:              workDir,
+		ctx:                  sessionCtx,
+		cancel:               cancel,
+		done:                 make(chan struct{}),
+		gracefulStopTimeout:  defaultGracefulStopTimeout,
+		cancelConfirmTimeout: defaultCancelConfirmTimeout,
+		ccHooks:              newCCPermissionHookRunner(workDir),
+		startupWarning:       rootDowngradeWarning,
+		promptFilePath:       cleanupPromptPath,
+		ctxWindowOverride:    ctxWindowTokens,
+		configuredEffort:     effort,
 	}
 	cs.setPermissionMode(mode)
 	cs.sessionID.Store(sessionID)
 	cs.alive.Store(true)
 
 	go cs.readLoop(stdout, &stderrBuf)
+	cs.requestAppliedSettings()
 
 	return cs, nil
 }
@@ -524,6 +630,9 @@ func (cs *claudeSession) finishReadLoop(waitErrCh <-chan error, stderrBuf *bytes
 	err := <-waitErrCh
 
 	cs.alive.Store(false)
+	// A dead process has no active turn; clear the flag so a later /stop
+	// cannot take the idle fast path against a stale true.
+	cs.turnActive.Store(false)
 	if err != nil {
 		stderrMsg := ""
 		if stderrBuf != nil {
@@ -574,7 +683,7 @@ func (cs *claudeSession) handleReadLoopLine(line string) {
 
 	var raw map[string]any
 	if err := json.Unmarshal([]byte(line), &raw); err != nil {
-		slog.Debug("claudeSession: non-JSON line", "line", line)
+		slog.Debug("claudeSession: non-JSON line", "bytes", len(line))
 		return
 	}
 
@@ -592,17 +701,17 @@ func (cs *claudeSession) handleReadLoopLine(line string) {
 		cs.handleResult(raw)
 	case "control_request":
 		cs.handleControlRequest(raw)
+	case "control_response":
+		// Never log raw here: the get_settings response carries the effective
+		// env block, which includes provider credentials.
+		cs.handleControlResponse(raw)
 	case "control_cancel_request":
 		requestID, _ := raw["request_id"].(string)
 		slog.Debug("claudeSession: permission cancelled", "request_id", requestID)
 	default:
-		// Unknown event types are not silently dropped — they are logged
-		// at debug level with the full payload so future diagnosis of
-		// new Claude Code event shapes (e.g. compaction, hook events)
-		// is possible from the log stream. Compaction events are
-		// recognized in handleResult via their `result` subtype rather
-		// than the top-level event type.
-		slog.Debug("claudeSession: unrecognized event type", "type", eventType, "raw", raw)
+		// Settings responses can contain credentials. Unknown or malformed
+		// envelopes must not make the response body reach debug logs.
+		slog.Debug("claudeSession: unrecognized event type", "bytes", len(line))
 	}
 }
 
@@ -612,6 +721,22 @@ func (cs *claudeSession) handleReadLoopLine(line string) {
 // accept both to be safe across CLI rollouts (issue #481).
 func isCompactionResult(raw map[string]any) bool {
 	return resultSubtype(raw) == "compact" || resultSubtype(raw) == "compaction"
+}
+
+// isEmptyTaskNotificationResult reports whether a `type:"result"` event
+// closes a CLI-internal task-notification turn that produced no output and
+// made no model call. Such results are never a reply to a prompt sent by
+// cc-connect (see handleResult).
+func isEmptyTaskNotificationResult(raw map[string]any, content string) bool {
+	if content != "" {
+		return false
+	}
+	origin, _ := raw["origin"].(map[string]any)
+	if kind, _ := origin["kind"].(string); kind != "task-notification" {
+		return false
+	}
+	turns, ok := raw["num_turns"].(float64)
+	return ok && turns == 0
 }
 
 // resultSubtype extracts the optional `subtype` field from a result
@@ -625,7 +750,10 @@ func resultSubtype(raw map[string]any) string {
 
 func (cs *claudeSession) handleSystem(raw map[string]any) {
 	if model, ok := raw["model"].(string); ok && model != "" {
-		cs.activeModel.Store(model)
+		cs.updateActiveModel(model)
+	}
+	if subtype, _ := raw["subtype"].(string); subtype == "model_refusal_fallback" {
+		cs.handleRefusalFallback(raw)
 	}
 	if sid, ok := raw["session_id"].(string); ok && sid != "" {
 		cs.sessionID.Store(sid)
@@ -636,24 +764,324 @@ func (cs *claudeSession) handleSystem(raw map[string]any) {
 			return
 		}
 	}
+	// Attach-time recovery: after a --resume this fresh process has no usage
+	// yet, but the resumed transcript already records the exact prompt size the
+	// previous process ended on. Without this the first auto-compress decision
+	// of every resumed session had only the text-length heuristic available.
+	cs.recoverUsageOnce.Do(func() {
+		if cs.GetContextUsage() != nil {
+			return // already have live usage; nothing to recover
+		}
+		if u := cs.recoverUsageFromTranscript(); u != nil {
+			cs.usageMu.Lock()
+			if cs.lastUsage == nil {
+				cs.lastUsage = u
+				cs.usageSource = "transcript-recovered"
+			}
+			cs.usageMu.Unlock()
+		}
+	})
+}
+
+// handleRefusalFallback handles Claude Code's model_refusal_fallback event:
+// the primary model's safeguards declined a request and the CLI re-ran it on a
+// fallback model (claude-opus-5-5 falls back to claude-opus-4-8 for the "cyber"
+// category, for example). With scope "session", or no scope from older CLIs,
+// the CLI keeps the rest of the session on the fallback model until a model is
+// picked again, so the active model follows it; the reply footer would
+// otherwise keep naming a model that no longer answers. Scope "local" means
+// only a subagent's or side question's response came from the fallback model.
+//
+// The CLI may announce one fallback twice (a provisional notice mid-turn and
+// the final one at the end of the turn), so it is reported once per refused
+// request and fallback target.
+func (cs *claudeSession) handleRefusalFallback(raw map[string]any) {
+	// "revert" and "sticky" are still in the CLI's enum for SDK compatibility
+	// but are no longer emitted; only a retry moves the turn to another model.
+	if direction, _ := raw["direction"].(string); direction != "" && direction != "retry" {
+		slog.Debug("claudeSession: ignoring model_refusal_fallback", "direction", direction)
+		return
+	}
+	from, _ := raw["original_model"].(string)
+	to, _ := raw["fallback_model"].(string)
+	if from == "" || to == "" {
+		return
+	}
+	scope, _ := raw["scope"].(string)
+	sessionWide := scope != "local"
+	category, _ := raw["api_refusal_category"].(string)
+	requestID, _ := raw["request_id"].(string)
+
+	key := requestID + "\x00" + from + "\x00" + to
+	if prev, _ := cs.lastModelSwitch.Load().(string); prev == key {
+		return
+	}
+	cs.lastModelSwitch.Store(key)
+
+	if sessionWide {
+		cs.updateActiveModel(to)
+		// The cached window was reported for the previous model; the next
+		// result event reports the fallback model's own.
+		cs.reportedCtxWindow.Store(0)
+	}
+	slog.Warn("claudeSession: safeguards fallback switched model",
+		"from", from, "to", to, "category", category, "scope", scope, "request_id", requestID)
+
+	evt := core.Event{Type: core.EventModelSwitch, ModelSwitch: &core.ModelSwitch{
+		From:        from,
+		To:          to,
+		Reason:      "refusal",
+		Category:    category,
+		SessionWide: sessionWide,
+	}}
+	select {
+	case cs.events <- evt:
+	case <-cs.ctx.Done():
+	}
+}
+
+// claudeUsageFromTranscriptLine parses one JSONL transcript line and returns
+// the exact prompt size it records, or nil when the line is not an assistant
+// event carrying a usable usage block.
+//
+// input + cache_creation + cache_read is the true prompt size of THAT call:
+// on a transcript the cache_read of the next entry equals the previous entry's
+// in+cc+cr (verified against live data: cr 38802 → in+cr 38948 → next cr 38948),
+// so the value does NOT accumulate the way the result event's aggregate does.
+func claudeUsageFromTranscriptLine(line []byte, override int) *core.ContextUsage {
+	if len(line) == 0 || !bytes.Contains(line, []byte(`"usage"`)) {
+		return nil
+	}
+	var raw map[string]any
+	if err := json.Unmarshal(line, &raw); err != nil {
+		return nil
+	}
+	if t, _ := raw["type"].(string); t != "assistant" {
+		return nil
+	}
+	msg, ok := raw["message"].(map[string]any)
+	if !ok {
+		return nil
+	}
+	usageRaw, ok := msg["usage"].(map[string]any)
+	if !ok {
+		return nil
+	}
+	input, _, cc, cr := parseClaudeUsage(usageRaw)
+	used := input + cc + cr
+	if used <= 0 {
+		return nil
+	}
+	model, _ := msg["model"].(string)
+	return &core.ContextUsage{
+		UsedTokens:               used,
+		TotalTokens:              used,
+		InputTokens:              input,
+		CachedInputTokens:        cr,
+		CacheCreationInputTokens: cc,
+		ContextWindow:            claudeContextWindow(model, override),
+	}
+}
+
+// transcriptInitialWindow is the first tail window we read. Each per-call usage
+// line is a self-contained JSON object appended at the end of the transcript, so
+// one record is all we need: measured across 11k real transcripts the last line
+// is 478 bytes at the median and under 1.5 KiB at the 99th percentile. The window
+// doubles when the last line is still being written, or when it is one of the
+// rare multi-KiB ones.
+const transcriptInitialWindow = 4 << 10 // 4KiB
+
+// transcriptLineCap is the hard ceiling on the tail look-back, so a pathological
+// transcript can never make this allocate without bound.
+const transcriptLineCap = 64 << 20 // 64MiB
+
+// tailUsageFromTranscript reads the tail of a Claude Code JSONL transcript and
+// returns the LAST recorded per-call prompt size.
+//
+// This is deliberately a TAIL read, not a full scan: a long-lived session's
+// transcript runs to hundreds of MiB (one measured at 136MiB), and auto-compress
+// consults this every turn — a full rescan would be O(n²).
+//
+// windowBytes caps how far back we look before giving up and reporting "no
+// data"; it is clamped by transcriptLineCap. found distinguishes "read the file
+// and there was nothing usable" from "could not read it at all" — production
+// callers only need usage != nil, but the distinction is what lets a test assert
+// the reader actually opened and scanned the file rather than silently bailing.
+func tailUsageFromTranscript(path string, windowBytes int64, override int) (usage *core.ContextUsage, found bool) {
+	if path == "" {
+		return nil, false
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, false
+	}
+	// Read-only handle: a Close error carries nothing actionable, and the
+	// descriptor is released either way. errcheck wants that said explicitly.
+	defer func() { _ = f.Close() }()
+
+	st, err := f.Stat()
+	if err != nil {
+		return nil, false
+	}
+	size := st.Size()
+	if size == 0 {
+		return nil, false
+	}
+
+	// Start small and grow only when a single line (a tool result embedding a
+	// whole file, say) keeps the record out of reach. The common case is a
+	// transcript whose newest record sits in the last few KiB, so the first read
+	// usually settles it.
+	//
+	// windowBytes and transcriptLineCap are both ceilings: a caller that asks for
+	// a narrow look-back gets exactly that, and never a silent wider search.
+	limit := int64(transcriptLineCap)
+	if windowBytes > 0 && windowBytes < limit {
+		limit = windowBytes
+	}
+	window := int64(transcriptInitialWindow)
+	if window > limit {
+		window = limit
+	}
+	for window > 0 && window <= limit {
+		start := size - window
+		if start < 0 {
+			start = 0
+		}
+		buf := make([]byte, window)
+		n, err := f.ReadAt(buf, start)
+		if err != nil && err != io.EOF {
+			return nil, false
+		}
+		buf = buf[:n]
+
+		// Walk lines from the newest backwards and take the first one that parses.
+		//
+		// No boundary bookkeeping is needed: a record only ever spans lines
+		// Claude Code finished writing, so a truncated line either fails to parse
+		// or fails the "type":"assistant" check, and the walk simply moves on.
+		// That is what makes the multi-MiB tool-result case fall out for free
+		// instead of needing a carry buffer.
+		end := len(buf)
+		if end > 0 && buf[end-1] == '\n' {
+			end--
+		}
+		for end > 0 {
+			nl := bytes.LastIndexByte(buf[:end], '\n')
+			begin := 0
+			if nl >= 0 {
+				begin = nl + 1
+			}
+			if line := buf[begin:end]; len(line) > 0 {
+				if u := claudeUsageFromTranscriptLine(line, override); u != nil {
+					return u, true
+				}
+			}
+			if nl < 0 {
+				break
+			}
+			end = nl
+		}
+
+		if start == 0 || window == limit {
+			// The whole file (or the caller's look-back limit) was searched and
+			// held no record.
+			return nil, true
+		}
+		window *= 2
+		if window > limit {
+			window = limit
+		}
+	}
+	// The look-back limit was reached without a usable record.
+	return nil, true
+}
+
+// recoverUsageFromTranscript restores the exact context-usage numbers from the
+// Claude Code JSONL transcript at process attach time.
+//
+// Why this exists: every `--resume` spawns a NEW claudeSession whose lastUsage
+// starts nil, so the first auto-compress decision of every resumed process had
+// no exact number and silently fell back to the text-length heuristic. The
+// heuristic counts cc-connect's own history text (which excludes tool results
+// and the fixed system-prompt + tools overhead) and is routinely several times
+// off — measured at 574,797 while the same session's real API-reported prompt
+// never exceeded 229,783. Reading the transcript gives the exact number the
+// previous process ended on, so the decision stays exact across restarts.
+//
+// Returns nil when the transcript is missing, unreadable, or carries no
+// assistant event with a non-zero prompt. Callers must treat nil as "no exact
+// data" and NOT substitute an estimate.
+func (cs *claudeSession) recoverUsageFromTranscript() *core.ContextUsage {
+	u, _ := tailUsageFromTranscript(cs.transcriptPath(), transcriptRecoveryWindow, cs.ctxWindowOverride)
+	if u != nil {
+		slog.Info("claudeSession: recovered context usage from transcript",
+			"used", u.UsedTokens, "input", u.InputTokens,
+			"cache_read", u.CachedInputTokens, "cache_creation", u.CacheCreationInputTokens,
+			"context_window", u.ContextWindow)
+	}
+	return u
+}
+
+// transcriptRecoveryWindow is how far back the attach-time recovery looks. The
+// last usable line is normally in the final chunk; this bound only matters for
+// a transcript whose tail is one enormous tool result.
+const transcriptRecoveryWindow = 64 << 20 // 64MiB
+
+// GetUsageSource reports where GetContextUsage()'s value came from.
+// Empty when there is no usage yet.
+func (cs *claudeSession) GetUsageSource() string {
+	cs.usageMu.Lock()
+	defer cs.usageMu.Unlock()
+	return cs.usageSource
 }
 
 // parseClaudeUsage extracts the four token counts Claude reports per API call.
 // Missing fields default to zero.
 func parseClaudeUsage(usage map[string]any) (input, output, cacheCreation, cacheRead int) {
-	if v, ok := usage["input_tokens"].(float64); ok {
-		input = int(v)
-	}
-	if v, ok := usage["output_tokens"].(float64); ok {
-		output = int(v)
-	}
-	if v, ok := usage["cache_creation_input_tokens"].(float64); ok {
-		cacheCreation = int(v)
-	}
-	if v, ok := usage["cache_read_input_tokens"].(float64); ok {
-		cacheRead = int(v)
-	}
+	input = asInt(usage["input_tokens"])
+	output = asInt(usage["output_tokens"])
+	cacheCreation = asInt(usage["cache_creation_input_tokens"])
+	cacheRead = asInt(usage["cache_read_input_tokens"])
 	return
+}
+
+// asInt coerces a JSON-decoded value to int. json.Unmarshal defaults numeric
+// fields to float64, but some CLI builds encode large token counts as strings
+// (to avoid float64 precision loss past 2^53) or as json.Number. Without this
+// shim, parseClaudeUsage would silently zero out non-float64 fields and the
+// auto-compress trigger would fall back to the text-history heuristic.
+func asInt(v any) int {
+	switch x := v.(type) {
+	case nil:
+		return 0
+	case int:
+		return x
+	case int64:
+		return int(x)
+	case float64:
+		return int(x)
+	case float32:
+		return int(x)
+	case json.Number:
+		if n, err := x.Int64(); err == nil {
+			return int(n)
+		}
+		if f, err := x.Float64(); err == nil {
+			return int(f)
+		}
+		return 0
+	case string:
+		if n, err := strconv.ParseInt(x, 10, 64); err == nil {
+			return int(n)
+		}
+		if f, err := strconv.ParseFloat(x, 64); err == nil {
+			return int(f)
+		}
+		return 0
+	default:
+		return 0
+	}
 }
 
 func (cs *claudeSession) handleAssistant(raw map[string]any) {
@@ -681,8 +1109,7 @@ func (cs *claudeSession) handleAssistant(raw map[string]any) {
 		input, _, cc, cr := parseClaudeUsage(usageRaw)
 		used := input + cc + cr
 		if used > 0 {
-			model := cs.GetModel()
-			window := claudeContextWindow(model)
+			window := cs.contextWindow(cs.GetModel())
 			cs.usageMu.Lock()
 			prevOutput := 0
 			if cs.lastUsage != nil {
@@ -697,8 +1124,13 @@ func (cs *claudeSession) handleAssistant(raw map[string]any) {
 				OutputTokens:             prevOutput,
 				ContextWindow:            window,
 			}
+			cs.usageSource = "event"
 			cs.usageMu.Unlock()
 		}
+		// used == 0 means the usage block is present but empty — measured on
+		// MiniMax-M3, which sends {"input_tokens":0,...} on every assistant
+		// event. Deliberately leave lastUsage's previous value in place rather
+		// than clearing it; handleResult consults the transcript tail instead.
 	}
 
 	contentArr, ok := msg["content"].([]any)
@@ -761,6 +1193,18 @@ func (cs *claudeSession) handleUser(raw map[string]any) {
 			continue
 		}
 		contentType, _ := item["type"].(string)
+		if contentType == "text" {
+			text, _ := item["text"].(string)
+			if strings.HasPrefix(text, "Stop hook feedback:") {
+				evt := core.Event{Type: core.EventHookRejected}
+				select {
+				case cs.events <- evt:
+				case <-cs.ctx.Done():
+					return
+				}
+			}
+			continue
+		}
 		if contentType == "tool_result" {
 			isError, _ := item["is_error"].(bool)
 			var result string
@@ -810,6 +1254,22 @@ func (cs *claudeSession) handleResult(raw map[string]any) {
 		cs.sessionID.Store(sid)
 	}
 
+	// On --resume, Claude Code first replays task notifications for
+	// background shell tasks that did not finish before the previous process
+	// exited ("Background shell command didn't finish before the previous
+	// session ended"). Each one is closed with a synthetic result that has
+	// origin.kind == "task-notification", no model call (num_turns == 0) and
+	// an empty result. It is emitted right after the process starts — i.e.
+	// after cc-connect has already written the user's prompt to stdin — so
+	// forwarding it as EventResult{Done:true} makes the engine finish the
+	// user's turn with "(empty response)" and push the real reply into the
+	// unsolicited relay. It carries nothing to deliver, so drop it.
+	if isEmptyTaskNotificationResult(raw, content) {
+		slog.Info("claudeSession: dropping empty task-notification result (no model call)",
+			"session_id", cs.CurrentSessionID())
+		return
+	}
+
 	// Compaction events arrive as `type:"result"` with `subtype:"compact"`
 	// or `subtype:"compaction"`. They are NOT turn completion — the CLI
 	// is mid-task and will continue streaming subsequent tool calls and
@@ -819,33 +1279,89 @@ func (cs *claudeSession) handleResult(raw map[string]any) {
 	isCompaction := isCompactionResult(raw)
 	if isCompaction {
 		slog.Info("claudeSession: mid-turn compaction event; continuing turn", "subtype", resultSubtype(raw))
+	} else {
+		// A non-compaction result terminates the turn, whatever its subtype.
+		// `error_during_execution` is what the CLI emits for a turn ended by
+		// our own interrupt; `success` is a turn that completed on its own.
+		// Either way the turn is over, so release anything waiting on that fact.
+		// Signalled before the cs.events send below, which can block on a slow
+		// consumer — a blocked consumer must not delay the interrupt ack.
+		cs.turnActive.Store(false)
+		cs.signalTurnTerminated()
 	}
 
-	// Aggregated usage across all sub-calls in this turn — used for billing-
-	// style reporting in the EventResult event (slog turn-complete log etc.).
-	// We do NOT pull input/cache values into cs.lastUsage from here:
-	// cache_read_input_tokens is summed across every sub-call that hit the
-	// cached prefix, so on long agentic turns it vastly exceeds the model
-	// context window. The per-sub-call usage captured in handleAssistant
-	// gives a faithful "context used right now" snapshot.
+	// Exact context size, in order of preference:
 	//
-	// We DO use the result's output_tokens to update lastUsage.OutputTokens
-	// because output is additive (each sub-call's tokens are real new
-	// tokens, never recycled) and the per-assistant-event output_tokens in
+	//   1. the in-process stream-json assistant event (handleAssistant) — a
+	//      per-sub-call prompt size, and the freshest thing available;
+	//   2. the Claude Code JSONL transcript tail — the same per-sub-call
+	//      figure, recovered from disk. This is the path that matters for
+	//      providers whose assistant events carry an EMPTY usage block
+	//      (measured: MiniMax-M3 sends {"input_tokens":0,"output_tokens":0}
+	//      on every assistant event), where path 1 writes nothing at all.
+	//
+	// We deliberately do NOT use this event's own `usage` as the fallback.
+	// That object is the result aggregate: its cache_read_input_tokens sums
+	// every sub-call in the turn (measured: in+cc+cr walked 38377 → 38538 →
+	// 38671 within one turn), so it overstates the final prompt by a factor
+	// that grows with the number of sub-calls — roughly 2x on a short turn,
+	// and the user's own estimate is 5-7x on a session of a dozen iterations.
+	// The transcript carries the true per-call figure instead. The aggregate
+	// stays in use ONLY for the EventResult billing fields below.
+	//
+	// output_tokens is taken from this event because output is additive (never
+	// recycled across sub-calls) and the per-assistant-event output_tokens in
 	// stream-json is a placeholder (typically 1). The result is the only
 	// authoritative source of total tokens generated for this turn.
 	var inputTokens, outputTokens, cacheCreationTokens, cacheReadTokens int
 	if usage, ok := raw["usage"].(map[string]any); ok {
 		inputTokens, outputTokens, cacheCreationTokens, cacheReadTokens = parseClaudeUsage(usage)
 	}
-	if outputTokens > 0 {
-		cs.usageMu.Lock()
-		if cs.lastUsage != nil {
+
+	// The result event's modelUsage map is where Claude Code reports each
+	// model's real context window. Remember the session model's entry so this
+	// snapshot and every later one use it instead of the model-name guess,
+	// which knows nothing about models with a native 1M window and no "[1m]"
+	// suffix (claude-opus-5-5 reports contextWindow 1000000).
+	if w := claudeModelUsageContextWindow(raw, cs.GetModel()); w > 0 {
+		cs.reportedCtxWindow.Store(int64(w))
+	}
+
+	// Path 2: consult the transcript when the in-process snapshot is absent.
+	cs.usageMu.Lock()
+	haveExact := cs.lastUsage != nil && cs.usageSource == "event"
+	cs.usageMu.Unlock()
+
+	if !haveExact {
+		if u, _ := tailUsageFromTranscript(cs.transcriptPath(), transcriptRecoveryWindow, cs.ctxWindowOverride); u != nil {
+			cs.usageMu.Lock()
+			// A recovered snapshot is a placeholder and a result snapshot is an
+			// aggregate — the transcript's per-call figure supersedes both.
+			cs.lastUsage = u
+			cs.usageSource = "transcript"
+			cs.usageMu.Unlock()
+		}
+		// A nil u means the transcript is absent, unreadable, or carries no
+		// usable assistant record yet (the first turn of a fresh session).
+		// Leave lastUsage alone rather than substituting this event's
+		// aggregate — that substitution is what produced the overestimate.
+	}
+
+	cs.usageMu.Lock()
+	if cs.lastUsage != nil {
+		// The snapshot was taken before this event (by handleAssistant, or
+		// read from the transcript tail by the model id recorded there), so
+		// on the first turn it still carries the guess. Correct it now, before
+		// EventResult makes the engine render the footer.
+		if w := cs.knownContextWindow(); w > 0 {
+			cs.lastUsage.ContextWindow = w
+		}
+		if outputTokens > 0 {
 			cs.lastUsage.OutputTokens = outputTokens
 			cs.lastUsage.TotalTokens = cs.lastUsage.UsedTokens + outputTokens
 		}
-		cs.usageMu.Unlock()
 	}
+	cs.usageMu.Unlock()
 
 	evt := core.Event{
 		Type:                     core.EventResult,
@@ -878,8 +1394,9 @@ func (cs *claudeSession) handleControlRequest(raw map[string]any) {
 
 	toolName, _ := request["tool_name"].(string)
 	input, _ := request["input"].(map[string]any)
+	isAskUserQuestion := toolName == "AskUserQuestion"
 
-	if cs.autoApprove.Load() {
+	if cs.autoApprove.Load() && !isAskUserQuestion {
 		slog.Debug("claudeSession: auto-approving", "request_id", requestID, "tool", toolName)
 		_ = cs.RespondPermission(requestID, core.PermissionResult{
 			Behavior:     "allow",
@@ -887,7 +1404,7 @@ func (cs *claudeSession) handleControlRequest(raw map[string]any) {
 		})
 		return
 	}
-	if cs.dontAsk.Load() {
+	if cs.dontAsk.Load() && !isAskUserQuestion {
 		slog.Debug("claudeSession: auto-denying", "request_id", requestID, "tool", toolName)
 		_ = cs.RespondPermission(requestID, core.PermissionResult{
 			Behavior: "deny",
@@ -936,7 +1453,7 @@ func (cs *claudeSession) handleControlRequest(raw map[string]any) {
 		ToolInputRaw: input,
 	}
 
-	if toolName == "AskUserQuestion" {
+	if isAskUserQuestion {
 		evt.Questions = parseUserQuestions(input)
 	}
 
@@ -955,6 +1472,10 @@ func (cs *claudeSession) Send(prompt string, messageID string, images []core.Ima
 	if !cs.alive.Load() {
 		return fmt.Errorf("session process is not running")
 	}
+
+	// Refresh before each turn to pick up settings reloaded by the CLI.
+	// This is best effort: sending the prompt never waits for a response.
+	cs.requestAppliedSettings()
 
 	if len(images) == 0 && len(files) == 0 {
 		return cs.writeJSON(map[string]any{
@@ -1072,6 +1593,13 @@ func (cs *claudeSession) writeJSON(v any) error {
 	if _, err := cs.stdin.Write(append(data, '\n')); err != nil {
 		return fmt.Errorf("write stdin: %w", err)
 	}
+	// A successfully delivered user message opens a turn. Recorded here rather
+	// than in Send so both Send paths (plain text and attachment) are covered,
+	// and so a failed write never marks a turn that the CLI will never see.
+	// handleResult clears it when the turn terminates.
+	if m, ok := v.(map[string]any); ok && m["type"] == "user" {
+		cs.turnActive.Store(true)
+	}
 	return nil
 }
 
@@ -1084,6 +1612,8 @@ func isClaudeEditTool(toolName string) bool {
 	}
 }
 
+// setPermissionMode configures automatic permission handling. AskUserQuestion
+// remains interactive even in bypassPermissions and dontAsk modes.
 func (cs *claudeSession) setPermissionMode(mode string) {
 	cs.permissionMode.Store(mode)
 	cs.autoApprove.Store(mode == "bypassPermissions")
@@ -1117,23 +1647,109 @@ func (cs *claudeSession) permissionModeValue() string {
 // transcriptPath returns the path to the Claude Code JSONL transcript
 // for the current session, or "" if it cannot be determined.
 func (cs *claudeSession) transcriptPath() string {
+	if cs.transcriptOverride != "" {
+		return cs.transcriptOverride
+	}
 	sessionID := cs.CurrentSessionID()
 	if sessionID == "" || cs.workDir == "" {
 		return ""
 	}
-	homeDir, err := os.UserHomeDir()
-	if err != nil {
+	// Resolve the config home from the session process env so a per-project
+	// CLAUDE_CONFIG_DIR lands on the right projects tree; cmd may be nil for
+	// externally-attached sessions, in which case we fall back to ~/.claude.
+	configHome := configHomeFromEnv(cs.cmdEnv())
+	if configHome == "" {
 		return ""
 	}
 	absWorkDir, err := filepath.Abs(cs.workDir)
 	if err != nil {
 		return ""
 	}
-	projectDir := findProjectDir(homeDir, absWorkDir)
+	projectDir := findProjectDir(configHome, absWorkDir)
 	if projectDir == "" {
 		return ""
 	}
 	return filepath.Join(projectDir, sessionID+".jsonl")
+}
+
+// cmdEnv returns the environment of the underlying claude process (empty
+// when the process is not available).
+func (cs *claudeSession) cmdEnv() []string {
+	if cs.cmd == nil || cs.cmd.Env == nil {
+		return nil
+	}
+	return cs.cmd.Env
+}
+
+// getSettingsRequestID prefixes cc-connect's own settings request IDs.
+const getSettingsRequestID = "cc-connect-get-settings"
+
+// requestAppliedSettings invalidates the previous snapshot and asks the CLI
+// for its current applied effort. Unsupported requests need no response and
+// never block waiting for one; the footer falls back to the spawn-time flag.
+func (cs *claudeSession) requestAppliedSettings() {
+	cs.effortMu.Lock()
+	cs.settingsSequence++
+	requestID := fmt.Sprintf("%s-%d", getSettingsRequestID, cs.settingsSequence)
+	cs.settingsRequestID = requestID
+	cs.appliedEffort = ""
+	cs.effortMu.Unlock()
+	if cs.stdin == nil {
+		return
+	}
+	if err := cs.writeJSON(map[string]any{
+		"type":       "control_request",
+		"request_id": requestID,
+		"request":    map[string]any{"subtype": "get_settings"},
+	}); err != nil {
+		slog.Debug("claudeSession: get_settings request failed")
+	}
+}
+
+// updateActiveModel discards settings read for a previous model. Settings
+// requests are sequenced so a late response cannot restore that stale value.
+func (cs *claudeSession) updateActiveModel(model string) {
+	previous, _ := cs.activeModel.Load().(string)
+	cs.activeModel.Store(model)
+	if previous != "" && previous != model {
+		cs.requestAppliedSettings()
+	}
+}
+
+// handleControlResponse reads only the applied effort. The full response,
+// error text and other untrusted fields may contain credentials; never log
+// them, including for unsupported requests or changed protocol envelopes.
+func (cs *claudeSession) handleControlResponse(raw map[string]any) {
+	resp, _ := raw["response"].(map[string]any)
+	cs.effortMu.Lock()
+	defer cs.effortMu.Unlock()
+	if id, _ := resp["request_id"].(string); id == "" || id != cs.settingsRequestID {
+		return
+	}
+	if subtype, _ := resp["subtype"].(string); subtype != "success" {
+		slog.Debug("claudeSession: get_settings unavailable")
+		return
+	}
+	payload, _ := resp["response"].(map[string]any)
+	applied, _ := payload["applied"].(map[string]any)
+	effort, _ := applied["effort"].(string)
+	// These are display values, deliberately independent of normalizeEffort:
+	// the CLI may support levels not yet offered by cc-connect's menu.
+	switch effort = strings.TrimSpace(effort); effort {
+	case "low", "medium", "high", "xhigh", "max":
+		cs.appliedEffort = effort
+	}
+}
+
+// GetReasoningEffort returns the latest effort reported by the CLI, falling
+// back to the spawn-time --effort flag until a current response is available.
+func (cs *claudeSession) GetReasoningEffort() string {
+	cs.effortMu.Lock()
+	defer cs.effortMu.Unlock()
+	if cs.appliedEffort != "" {
+		return cs.appliedEffort
+	}
+	return cs.configuredEffort
 }
 
 // GetModel returns the model id reported by the CLI's init event (e.g.
@@ -1165,6 +1781,191 @@ func (cs *claudeSession) GetContextUsage() *core.ContextUsage {
 func (cs *claudeSession) Alive() bool {
 	return cs.alive.Load()
 }
+
+// CancelTurn implements core.AgentSessionCanceller. Asks Claude Code
+// to interrupt the current generation over the existing stream-json
+// stdin channel — `{"type":"control_request","request":{"subtype":
+// "interrupt"}, "request_id": "..."}`. The CLI replies with a
+// `control_response`, emits a `result` event that terminates the turn
+// (subtype="error_during_execution"), and returns to its idle-waiting
+// state with the same Claude session ID. The subprocess stays alive
+// and stdin stays open so the next user message can be delivered
+// without a re-spawn — matching TUI Esc/Ctrl+C semantics through the
+// stream-json wire protocol instead of an in-process AbortController
+// (TUI-only) or an OS signal (which closes stdin in stream-json mode
+// and is unreliable on Windows).
+//
+// Verified empirically against Claude Code v2.x in --input-format
+// stream-json mode; see /tmp/cc-cancel-verify/v7 in the local fork.
+//
+// 🔴 2026-10-01 加了确认步骤（原实现是 fire-and-forget，PR #1765 评审时
+// 被标为 P3 "no protocol handshake to detect this"）。
+//
+// 症状：写完 interrupt 就返回 nil，飞书秒回「执行已停止」，但 bot 还在继续
+// 干活。生产日志（2026-10-01，9 次 interrupt）显示**只有约一半真的停了**：
+// 停的那几次 interrupt 之后 5~20s 无事件；没停的那几次在 0.00~1.42s 后
+// 事件流原样继续（system → assistant → user …），全程没有 result 事件。
+//
+// 为什么不能只看 control_response：它只表示「请求收到了、队列是空的」
+// （`still_queued: []`），**不表示这一轮结束了**。没停的那些次里
+// control_response 照样是 subtype=success。
+//
+// 真正的终止信号是随后的 result 事件。对照实验（CLI 2.1.245，stream-json）：
+// interrupt 打在正在生成的 turn 上，同一毫秒内就收到
+// `result / error_during_execution`，进程保持存活 —— 正是这里想要的语义。
+// 所以协议本身没问题，缺的是「等它，并兜底」。
+//
+// 现在：装 waiter → 写 interrupt → 等 result。
+//   - 收到 result          → 真的停了，返回 nil，session 留着复用
+//   - 超时 / 进程退出       → 返回 error，engine 走 normalCleanup → Close()
+//     （stdin close → SIGTERM → SIGKILL）
+//
+// 空闲 session（turnActive=false）直接返回 nil：没有 turn 可中断，也不会有
+// result 事件，不该白白等满超时。
+func (cs *claudeSession) CancelTurn() error {
+	cs.stdinMu.Lock()
+	stdinClosed := cs.stdin == nil
+	cs.stdinMu.Unlock()
+	if stdinClosed {
+		return fmt.Errorf("claudecode: stdin closed, session torn down")
+	}
+	if !cs.alive.Load() {
+		return fmt.Errorf("claudecode: process not alive")
+	}
+	// Nothing is running: no result event is coming, so waiting would just add
+	// the timeout to every idle /stop. The session is already in the state the
+	// caller asked for.
+	if !cs.turnActive.Load() {
+		return nil
+	}
+
+	timeout := cs.cancelConfirmTimeout
+	if timeout <= 0 {
+		timeout = defaultCancelConfirmTimeout
+	}
+
+	// Install the waiter BEFORE the write. The CLI can emit the terminating
+	// result in the same millisecond as the control_response ack, so a waiter
+	// installed after writeJSON returns could miss it and time out on a turn
+	// that actually stopped.
+	wait, waiting := cs.beginCancelWait()
+	if !waiting {
+		// The turn ended between the check above and the registration; no
+		// result is coming, so there is nothing left to wait for.
+		return nil
+	}
+	defer cs.endCancelWait(wait)
+
+	requestID := fmt.Sprintf("interrupt-%d", time.Now().UnixNano())
+	if err := cs.writeJSON(map[string]any{
+		"type":       "control_request",
+		"request_id": requestID,
+		"request":    map[string]any{"subtype": "interrupt"},
+	}); err != nil {
+		return fmt.Errorf("claudecode: write interrupt: %w", err)
+	}
+
+	select {
+	case <-wait:
+		slog.Info("claudeSession: interrupt confirmed, turn terminated",
+			"request_id", requestID)
+		return nil
+	case <-cs.done:
+		return fmt.Errorf("claudecode: process exited while cancelling turn")
+	case <-time.After(timeout):
+		return fmt.Errorf("claudecode: no result event within %s of interrupt "+
+			"(request_id=%s) — the turn is probably still running; "+
+			"falling back to Close()", timeout, requestID)
+	}
+}
+
+// beginCancelWait registers a waiter for the current turn's terminating result
+// and returns it. The confirmation is a property of the turn, not of the
+// caller, so concurrent cancels all share it: every registered waiter is woken
+// when the result arrives. A caller that stops waiting early removes its own
+// waiter with endCancelWait.
+//
+// The turnActive check and the registration happen under cancelMu, which
+// signalTurnTerminated also takes. Either the waiter is registered before the
+// terminating result clears the set and is woken, or the turn already ended and
+// the caller is told there is nothing to wait for. A separate check outside the
+// lock would leave a window where the result arrives between the check and the
+// registration, and the caller would wait out the full timeout for an event
+// that has already happened.
+func (cs *claudeSession) beginCancelWait() (chan struct{}, bool) {
+	cs.cancelMu.Lock()
+	defer cs.cancelMu.Unlock()
+	if !cs.turnActive.Load() {
+		return nil, false
+	}
+	ch := make(chan struct{})
+	if cs.cancelWaiters == nil {
+		cs.cancelWaiters = make(map[chan struct{}]struct{})
+	}
+	cs.cancelWaiters[ch] = struct{}{}
+	return ch, true
+}
+
+// endCancelWait removes this caller's waiter, and only this caller's: with
+// concurrent cancels the set holds every caller's waiter.
+func (cs *claudeSession) endCancelWait(ch chan struct{}) {
+	cs.cancelMu.Lock()
+	delete(cs.cancelWaiters, ch)
+	cs.cancelMu.Unlock()
+}
+
+// signalTurnTerminated wakes every caller waiting on the turn. Safe to call
+// with no waiters registered.
+func (cs *claudeSession) signalTurnTerminated() {
+	cs.cancelMu.Lock()
+	waiters := cs.cancelWaiters
+	cs.cancelWaiters = nil
+	cs.cancelMu.Unlock()
+	for ch := range waiters {
+		close(ch)
+	}
+}
+
+// defaultCancelConfirmTimeout bounds how long CancelTurn waits for the CLI to
+// confirm the interrupted turn actually ended, before handing off to Close().
+//
+// The CLI emits the terminating result in the same millisecond as the
+// control_response ack when it is able to interrupt at all (measured on
+// 2.1.245), so the wait is only ever paid in the failure case. 5s matches
+// defaultGracefulStopTimeout so the worst-case /stop cost — confirm timeout
+// plus the Close() escalation ladder — stays in the same ballpark as the
+// pre-#1765 behaviour, instead of stacking two long waits.
+const defaultCancelConfirmTimeout = 5 * time.Second
+
+// defaultGracefulStopTimeout 是 Close() Phase 1「关掉 stdin、等它自己干净退出」
+// 的等待上限。
+//
+// 🔴 2026-07-31 从 120s 降到 5s（Cheney 实测逼出来的）。
+//
+// 症状：按 /stop，飞书**立刻**回「执行已停止」，但 bot **还在继续干活、继续说话**，
+// 连按好几次都一样。实测时间线：
+//
+//	17:45:20 /stop → 17:47:20 graceful 超时才发 SIGTERM → 17:47:29 真死，**用时 2 分 09 秒**。
+//
+// 那 2 分钟里它照常写库、照常推消息 —— 而用户按 /stop 的原因恰恰是**它正在做错的事**。
+//
+// 为什么原来是 120s：注释写着「to match claude-mem's Stop hook timeout」——
+// 留时间给 Stop 钩子（如 claude-mem 的会话摘要）跑完。
+// 🔴 但这台机器上**根本没有任何 Stop hook**（全局 settings 只有 PreToolUse + SessionStart，
+// 五个 bot 项目也都没有，claude-mem 未安装）。**那 120 秒在等一个不存在的东西。**
+//
+// 为什么 graceful 对"正在干活"根本不管用：Claude Code 只有在**当前这一轮跑完**之后
+// 才会理会 stdin EOF。它要是正卡在一个长工具调用里，等多久都没用 —— 等的不是"它快好了"，
+// 是"这一轮什么时候结束"。所以对 /stop 这个语义（**现在就停**），graceful 窗口只该覆盖
+// 「它本来就闲着」这一种情况，剩下的一律交给 SIGTERM/SIGKILL。
+//
+// 5s 的取舍：闲置会话关 stdin 后 1s 内就退，5s 是宽裕的余量；真在跑的会话则
+// 5s + 5s(SIGTERM) ≈ **10 秒内**被强杀，用户体感是"按了就停"。
+//
+// ⚠️ **哪天真装了 Stop hook（claude-mem 之类），必须回来重新评估这个值** ——
+// 5s 会把钩子切掉，而且是无声的。届时正确做法是按"用户主动 /stop"和"系统内部回收"
+// 分成两个窗口，而不是把这个数字调回 120s。
+const defaultGracefulStopTimeout = 5 * time.Second
 
 func (cs *claudeSession) Close() error {
 	// Best-effort cleanup of the --append-system-prompt-file temp file on
@@ -1217,12 +2018,44 @@ func (cs *claudeSession) Close() error {
 	// group-wide kill ensures grandchildren (Claude Code's MCP servers
 	// such as the Telegram bridge) are reaped along with the direct child;
 	// otherwise they can survive as orphans and spin at 100% CPU.
+	//
+	// A single taskkill /T /F attempt can lose a race against a
+	// still-forking descendant tree (e.g. an MCP server process spawned
+	// moments earlier) and report a PID as "could not be terminated" even
+	// though a repeat attempt kills it cleanly. Retry a few times before
+	// giving up, and bound the final wait so a kill that silently failed
+	// to take effect cannot hang this goroutine — and by extension the
+	// caller's abandon-timeout — forever.
 	cs.cancel()
-	if err := forceKillCmd(cs.cmd); err != nil {
-		slog.Warn("claudeSession: force kill", "error", err)
+	const killAttempts = 3
+	var killErr error
+	for attempt := 1; attempt <= killAttempts; attempt++ {
+		if killErr = forceKillCmd(cs.cmd); killErr == nil {
+			break
+		}
+		slog.Warn("claudeSession: force kill attempt failed",
+			"attempt", attempt, "max_attempts", killAttempts, "error", killErr)
+		select {
+		case <-cs.done:
+			slog.Info("claudeSession: exited during force-kill retries")
+			return nil
+		case <-time.After(2 * time.Second):
+		}
 	}
-	<-cs.done
-	return nil
+
+	select {
+	case <-cs.done:
+		return nil
+	case <-time.After(10 * time.Second):
+		pid := -1
+		if cs.cmd != nil && cs.cmd.Process != nil {
+			pid = cs.cmd.Process.Pid
+		}
+		if killErr != nil {
+			return fmt.Errorf("process tree (pid %d) still alive after SIGKILL retries: %w", pid, killErr)
+		}
+		return fmt.Errorf("process tree (pid %d) still alive 10s after SIGKILL reported success", pid)
+	}
 }
 
 // shellJoinArgs joins args into a single string, quoting any arg that
@@ -1256,12 +2089,81 @@ func shellJoinArgs(args []string) string {
 	return b.String()
 }
 
+// contextWindow returns the window the "ctx N%" indicator divides by: the
+// configured override, then the size Claude Code reported for this session's
+// model, then the model-name heuristic applied to model.
+func (cs *claudeSession) contextWindow(model string) int {
+	if w := cs.knownContextWindow(); w > 0 {
+		return w
+	}
+	return claudeContextWindow(model, 0)
+}
+
+// knownContextWindow returns the window that needs no guessing — the
+// configured context_window_tokens override, else the size Claude Code
+// reported in a result event's modelUsage — or 0 when neither is available.
+// The override wins because it is an explicit operator choice.
+func (cs *claudeSession) knownContextWindow() int {
+	if cs.ctxWindowOverride > 0 {
+		return cs.ctxWindowOverride
+	}
+	return int(cs.reportedCtxWindow.Load())
+}
+
+// claudeModelUsageContextWindow returns the contextWindow that a result
+// event's modelUsage map reports for model, or 0 when it reports none.
+//
+// The map has one entry per model the turn used, keyed by the id the init
+// event reports ("claude-opus-5-5", "claude-sonnet-5-5[1m]"). A turn that ran
+// a subagent on another model therefore carries that model's entry too, and
+// its window can differ from the session's. Only the session model's entry
+// counts: when model is known but absent from the map the answer is 0, never
+// whichever other entry happens to be there. A sole entry is taken only while
+// the session model is still unknown.
+func claudeModelUsageContextWindow(raw map[string]any, model string) int {
+	byModel, _ := raw["modelUsage"].(map[string]any)
+	if len(byModel) == 0 {
+		return 0
+	}
+	windowOf := func(v any) int {
+		entry, _ := v.(map[string]any)
+		if w := asInt(entry["contextWindow"]); w > 0 {
+			return w
+		}
+		return 0
+	}
+	if model == "" {
+		if len(byModel) == 1 {
+			for _, v := range byModel {
+				return windowOf(v)
+			}
+		}
+		return 0
+	}
+	if v, ok := byModel[model]; ok {
+		return windowOf(v)
+	}
+	for k, v := range byModel {
+		if strings.EqualFold(k, model) {
+			return windowOf(v)
+		}
+	}
+	return 0
+}
+
 // claudeContextWindow returns the context window size (tokens) that best
 // matches the given Claude model id. Used as a fallback when the stream-json
 // result event does not carry a modelUsage map. The "[1m]" suffix
 // (case-insensitive) signals the 1M-context variants; everything else
 // defaults to the standard 200k window.
-func claudeContextWindow(model string) int {
+// override (set from `[projects.agent.options].context_window_tokens`)
+// wins over the model-name heuristic when > 0. This lets operators pin a
+// specific window size for custom routers, fine-tuned models, or non-Claude
+// endpoints whose model id does not match Claude Code's naming scheme.
+func claudeContextWindow(model string, override int) int {
+	if override > 0 {
+		return override
+	}
 	lower := strings.ToLower(strings.TrimSpace(model))
 	if lower == "" {
 		return 200_000

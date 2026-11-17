@@ -31,6 +31,28 @@ func NewSkillRegistry() *SkillRegistry {
 	return &SkillRegistry{}
 }
 
+// SetSkills installs an authoritative snapshot, including an empty catalog.
+func (r *SkillRegistry) SetSkills(skills []*Skill) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.dirs = nil
+	r.cache = append([]*Skill{}, skills...)
+}
+
+// LoadSkillFile reads one explicitly selected skill without scanning siblings.
+func LoadSkillFile(path string) (*Skill, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("skill: read %s: %w", path, err)
+	}
+	dir := filepath.Dir(path)
+	skill := parseSkillMD(filepath.Base(dir), string(data), dir)
+	if skill == nil {
+		return nil, fmt.Errorf("skill: empty instructions in %s", path)
+	}
+	return skill, nil
+}
+
 // SetDirs configures which directories to scan for skills.
 func (r *SkillRegistry) SetDirs(dirs []string) {
 	r.mu.Lock()

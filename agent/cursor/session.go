@@ -10,6 +10,7 @@ import (
 	"log/slog"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -22,18 +23,19 @@ import (
 // cursorSession manages multi-turn conversations with the Cursor Agent CLI.
 // Each Send() launches a new `agent --print` process with --resume for continuity.
 type cursorSession struct {
-	cmd       string   // CLI binary name
-	extraArgs []string // extra args from cmd, prepended before agent args
-	workDir   string
-	model     string
-	mode      string
-	extraEnv  []string
-	events    chan core.Event
-	chatID    atomic.Value // stores string — Cursor chat/session ID
-	ctx       context.Context
-	cancel    context.CancelFunc
-	wg        sync.WaitGroup
-	alive     atomic.Bool
+	instructionsFile string
+	cmd              string   // CLI binary name
+	extraArgs        []string // extra args from cmd, prepended before agent args
+	workDir          string
+	model            string
+	mode             string
+	extraEnv         []string
+	events           chan core.Event
+	chatID           atomic.Value // stores string — Cursor chat/session ID
+	ctx              context.Context
+	cancel           context.CancelFunc
+	wg               sync.WaitGroup
+	alive            atomic.Bool
 
 	thinkingBuf strings.Builder // accumulate thinking deltas
 
@@ -52,19 +54,20 @@ type pendingInteractionQuery struct {
 	queryType string // e.g. "webFetchRequestQuery", "shellRequestQuery"
 }
 
-func newCursorSession(ctx context.Context, cmd string, extraArgs []string, workDir, model, mode, resumeID string, extraEnv []string) (*cursorSession, error) {
+func newCursorSession(ctx context.Context, cmd string, extraArgs []string, workDir, model, mode, resumeID string, extraEnv []string, instructionsFile string) (*cursorSession, error) {
 	sessionCtx, cancel := context.WithCancel(ctx)
 
 	cs := &cursorSession{
-		cmd:       cmd,
-		extraArgs: extraArgs,
-		workDir:   workDir,
-		model:     model,
-		mode:      mode,
-		extraEnv:  extraEnv,
-		events:    make(chan core.Event, 64),
-		ctx:       sessionCtx,
-		cancel:    cancel,
+		instructionsFile: instructionsFile,
+		cmd:              cmd,
+		extraArgs:        extraArgs,
+		workDir:          workDir,
+		model:            model,
+		mode:             mode,
+		extraEnv:         extraEnv,
+		events:           make(chan core.Event, 64),
+		ctx:              sessionCtx,
+		cancel:           cancel,
 	}
 	cs.alive.Store(true)
 
@@ -76,6 +79,14 @@ func newCursorSession(ctx context.Context, cmd string, extraArgs []string, workD
 }
 
 func (cs *cursorSession) Send(prompt string, messageID string, images []core.ImageAttachment, files []core.FileAttachment) error {
+	if cs.instructionsFile != "" {
+		instructions, err := os.ReadFile(cs.instructionsFile)
+		if err != nil {
+			return fmt.Errorf("cursor: read instructions file: %w", err)
+		}
+		prompt = string(instructions) + "\n\n" + prompt
+	}
+
 	if len(images) > 0 {
 		// The Cursor Agent CLI has no image flag, but it can open image files
 		// from disk and see their content. So route images through the same
@@ -547,8 +558,8 @@ func extractToolInput(toolName string, call map[string]any) string {
 			return p
 		}
 	case "Glob":
-		if p, ok := args["pattern"].(string); ok {
-			return p
+		if input := cursorGlobInput(args); input != "" {
+			return input
 		}
 	}
 
@@ -560,6 +571,28 @@ func extractToolInput(toolName string, call map[string]any) string {
 	return string(b)
 }
 
+// cursorGlobInput accepts Cursor's protobuf JSON fields as well as the older
+// aliases. Keep the search directory visible instead of falling back to raw JSON.
+func cursorGlobInput(args map[string]any) string {
+	firstString := func(keys ...string) string {
+		for _, key := range keys {
+			if value, ok := args[key].(string); ok && value != "" {
+				return value
+			}
+		}
+		return ""
+	}
+	pattern := firstString("globPattern", "glob_pattern", "pattern")
+	directory := firstString("targetDirectory", "target_directory", "path")
+	if pattern == "" {
+		return directory
+	}
+	if directory != "" && !filepath.IsAbs(pattern) {
+		return filepath.Join(directory, pattern)
+	}
+	return pattern
+}
+
 func (cs *cursorSession) handleResult(raw map[string]any) {
 	var content string
 	if result, ok := raw["result"].(string); ok {
@@ -568,12 +601,53 @@ func (cs *cursorSession) handleResult(raw map[string]any) {
 	if sid, ok := raw["session_id"].(string); ok && sid != "" {
 		cs.chatID.Store(sid)
 	}
-	evt := core.Event{Type: core.EventResult, Content: content, SessionID: cs.CurrentSessionID(), Done: true}
+	// Cursor emits a `usage` block on the result event with camelCase keys
+	// (inputTokens / outputTokens / cacheReadTokens / cacheWriteTokens).
+	// Without this, the engine's turn-complete log always reports 0 tokens
+	// and the reply footer is suppressed by #701's workdir-only guard. See
+	// issue #1810.
+	var inputTokens, outputTokens, cacheReadTokens, cacheWriteTokens int
+	if usage, ok := raw["usage"].(map[string]any); ok {
+		inputTokens, outputTokens, cacheReadTokens, cacheWriteTokens = parseCursorUsage(usage)
+	}
+	evt := core.Event{
+		Type:                     core.EventResult,
+		Content:                  content,
+		SessionID:                cs.CurrentSessionID(),
+		Done:                     true,
+		InputTokens:              inputTokens,
+		OutputTokens:             outputTokens,
+		CacheReadInputTokens:     cacheReadTokens,
+		CacheCreationInputTokens: cacheWriteTokens,
+	}
 	select {
 	case cs.events <- evt:
 	case <-cs.ctx.Done():
 		return
 	}
+}
+
+// parseCursorUsage extracts token counts from a Cursor result event's `usage`
+// object. The Cursor Agent CLI emits camelCase keys (inputTokens,
+// outputTokens, cacheReadTokens, cacheWriteTokens) — different from
+// Claude Code's snake_case — so this helper mirrors agent/claudecode's
+// parseClaudeUsage but uses the right field names. Returns 0 for any
+// field that is missing or not numeric, so callers can safely emit an
+// Event with partial usage (e.g. when the CLI downgrades the schema).
+func parseCursorUsage(usage map[string]any) (input, output, cacheRead, cacheWrite int) {
+	if v, ok := usage["inputTokens"].(float64); ok {
+		input = int(v)
+	}
+	if v, ok := usage["outputTokens"].(float64); ok {
+		output = int(v)
+	}
+	if v, ok := usage["cacheReadTokens"].(float64); ok {
+		cacheRead = int(v)
+	}
+	if v, ok := usage["cacheWriteTokens"].(float64); ok {
+		cacheWrite = int(v)
+	}
+	return
 }
 
 // RespondPermission writes the user's approval/denial decision back to the Cursor Agent

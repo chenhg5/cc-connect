@@ -583,6 +583,51 @@ func TestHandleComponentInteraction_DispatchesPermissionResponse(t *testing.T) {
 	}
 }
 
+func TestHandleComponentInteraction_DispatchesAskQuestionOption(t *testing.T) {
+	var ackBody string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		ackBody += string(body)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = fmt.Fprint(w, `{}`)
+	}))
+	defer server.Close()
+
+	var got *core.Message
+	p := &Platform{
+		session: newTestDiscordSession(t, server),
+		handler: func(_ core.Platform, msg *core.Message) {
+			got = msg
+		},
+	}
+	// Components as discordgo unmarshals them from the gateway: pointers.
+	interaction := &discordgo.InteractionCreate{Interaction: &discordgo.Interaction{
+		ID:        "interaction-1",
+		Token:     "token-1",
+		Type:      discordgo.InteractionMessageComponent,
+		ChannelID: "channel-1",
+		Message: &discordgo.Message{ID: "message-1", Content: "which one?", Components: []discordgo.MessageComponent{
+			&discordgo.ActionsRow{Components: []discordgo.MessageComponent{
+				&discordgo.Button{Label: "Red", CustomID: "askq:req-1:0:1"},
+				&discordgo.Button{Label: "Blue", CustomID: "askq:req-1:0:2"},
+			}},
+		}},
+		Data: discordgo.MessageComponentInteractionData{CustomID: "askq:req-1:0:2"},
+	}}
+
+	p.handleComponentInteraction(p.session, interaction, "user-1", "user")
+
+	if got == nil {
+		t.Fatal("askq button did not dispatch a message")
+	}
+	if got.Content != "askq:req-1:0:2" || got.IsPermissionResponse {
+		t.Fatalf("message = %#v, want raw askq value, not a permission response", got)
+	}
+	if !strings.Contains(ackBody, "✅ Blue") || strings.Contains(ackBody, "askq") {
+		t.Fatalf("ack body = %s, want chosen label instead of raw value", ackBody)
+	}
+}
+
 func TestDiscordComponentCommandRejectsUnknownPermissionAction(t *testing.T) {
 	if command, isPermission, ok := discordComponentCommand("perm:allow_all"); !ok || !isPermission || command != "allow all" {
 		t.Fatalf("allow-all component = (%q, %v, %v), want (allow all, true, true)", command, isPermission, ok)

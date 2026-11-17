@@ -419,6 +419,51 @@ func TestSessionConfig_MatchesCopilotCreateResumeShape(t *testing.T) {
 	}
 }
 
+// TestSessionConfig_SendsEnableConfigDiscoveryForSkills is a regression test
+// for skills under ~/.agents/skills (and every other discovered source) never
+// loading in cc-connect sessions.
+//
+// Copilot CLI's session.create/session.resume config builder defaults
+// enableConfigDiscovery to false and derives enableSkills from it
+// (`enableSkills: t.enableSkills ?? t.enableConfigDiscovery`). Note the
+// asymmetry that made this easy to miss: the lower-level skill discovery
+// helpers default the same flag to true, so interactive `copilot` and
+// `copilot -p` load skills fine — only the programmatic session.create path
+// defaults it off. Omitting the field therefore left cc-connect sessions with
+// builtin skills only, while `copilot skill list` in the same directory
+// listed all of them.
+func TestSessionConfig_SendsEnableConfigDiscoveryForSkills(t *testing.T) {
+	cs := &copilotSession{model: "gpt-5.2", workDir: "/work/project"}
+	cfg := cs.sessionConfig("sess-1")
+
+	if cfg.EnableConfigDiscovery == nil {
+		t.Fatal("EnableConfigDiscovery = nil (field omitted from session.create); " +
+			"Copilot CLI then defaults it to false and disables all skill discovery")
+	}
+	if !*cfg.EnableConfigDiscovery {
+		t.Fatalf("EnableConfigDiscovery = %v, want true", *cfg.EnableConfigDiscovery)
+	}
+
+	// The wire payload must actually carry the flag — `omitempty` on a *bool
+	// only elides a nil pointer, but assert it to pin the serialized shape
+	// Copilot CLI reads.
+	raw, err := json.Marshal(cfg)
+	if err != nil {
+		t.Fatalf("marshal session config: %v", err)
+	}
+	var wire map[string]any
+	if err := json.Unmarshal(raw, &wire); err != nil {
+		t.Fatalf("unmarshal session config: %v", err)
+	}
+	got, ok := wire["enableConfigDiscovery"]
+	if !ok {
+		t.Fatalf("session.create payload has no enableConfigDiscovery key: %s", raw)
+	}
+	if got != true {
+		t.Fatalf("enableConfigDiscovery = %v, want true, payload: %s", got, raw)
+	}
+}
+
 func TestRespondPermission_RPCUsesCopilotResultShape(t *testing.T) {
 	var buf bytes.Buffer
 	cs := &copilotSession{
@@ -604,5 +649,195 @@ func TestSaveImagesToTempDir(t *testing.T) {
 		if _, err := os.Stat(p); err != nil {
 			t.Errorf("file %s not found: %v", p, err)
 		}
+	}
+}
+
+func TestHandleSessionEvent_ToolExecutionStartAndComplete(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	cs := &copilotSession{
+		events: make(chan core.Event, 10),
+		ctx:    ctx,
+		cancel: cancel,
+	}
+	cs.alive.Store(true)
+
+	startData, _ := json.Marshal(map[string]any{
+		"toolCallId": "call-1",
+		"toolName":   "shell",
+		"arguments":  map[string]any{"command": "ls -la"},
+	})
+	cs.handleSessionEvent(json.RawMessage(mustMarshal(t, sessionEvent{
+		Event: sessionEventInner{Type: "tool.execution_start", Data: startData},
+	})))
+
+	select {
+	case evt := <-cs.events:
+		if evt.Type != core.EventToolUse {
+			t.Fatalf("event type = %v, want EventToolUse", evt.Type)
+		}
+		if evt.ToolName != "shell" {
+			t.Fatalf("tool name = %q, want shell", evt.ToolName)
+		}
+		if evt.ToolInput == "" {
+			t.Fatal("tool input summary is empty")
+		}
+	default:
+		t.Fatal("no EventToolUse emitted")
+	}
+
+	completeData, _ := json.Marshal(map[string]any{
+		"toolCallId": "call-1",
+		"success":    true,
+	})
+	cs.handleSessionEvent(json.RawMessage(mustMarshal(t, sessionEvent{
+		Event: sessionEventInner{Type: "tool.execution_complete", Data: completeData},
+	})))
+
+	select {
+	case evt := <-cs.events:
+		if evt.Type != core.EventToolResult {
+			t.Fatalf("event type = %v, want EventToolResult", evt.Type)
+		}
+		if evt.ToolName != "shell" {
+			t.Fatalf("tool name = %q, want shell (resolved from start event)", evt.ToolName)
+		}
+		if evt.ToolStatus != "completed" {
+			t.Fatalf("tool status = %q, want completed", evt.ToolStatus)
+		}
+		if evt.ToolSuccess == nil || !*evt.ToolSuccess {
+			t.Fatal("tool success = nil/false, want true")
+		}
+	default:
+		t.Fatal("no EventToolResult emitted")
+	}
+}
+
+func TestHandleSessionEvent_ToolExecutionFailed(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	cs := &copilotSession{
+		events: make(chan core.Event, 10),
+		ctx:    ctx,
+		cancel: cancel,
+	}
+	cs.alive.Store(true)
+
+	startData, _ := json.Marshal(map[string]any{
+		"toolCallId": "call-err",
+		"toolName":   "read",
+	})
+	cs.handleSessionEvent(json.RawMessage(mustMarshal(t, sessionEvent{
+		Event: sessionEventInner{Type: "tool.execution_start", Data: startData},
+	})))
+	<-cs.events
+
+	completeData, _ := json.Marshal(map[string]any{
+		"toolCallId": "call-err",
+		"success":    false,
+		"error":      map[string]any{"message": "file not found"},
+	})
+	cs.handleSessionEvent(json.RawMessage(mustMarshal(t, sessionEvent{
+		Event: sessionEventInner{Type: "tool.execution_complete", Data: completeData},
+	})))
+
+	select {
+	case evt := <-cs.events:
+		if evt.Type != core.EventToolResult {
+			t.Fatalf("event type = %v, want EventToolResult", evt.Type)
+		}
+		if evt.ToolStatus != "failed" {
+			t.Fatalf("tool status = %q, want failed", evt.ToolStatus)
+		}
+		if evt.ToolResult != "file not found" {
+			t.Fatalf("tool result = %q, want error message", evt.ToolResult)
+		}
+		if evt.ToolSuccess == nil || *evt.ToolSuccess {
+			t.Fatal("tool success = nil/true, want false")
+		}
+	default:
+		t.Fatal("no EventToolResult emitted")
+	}
+}
+
+func TestHandleSessionEvent_ToolExecutionSubAgentSkipped(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	cs := &copilotSession{
+		events: make(chan core.Event, 10),
+		ctx:    ctx,
+		cancel: cancel,
+	}
+	cs.alive.Store(true)
+
+	startData, _ := json.Marshal(map[string]any{
+		"toolCallId": "call-sub",
+		"toolName":   "shell",
+	})
+	cs.handleSessionEvent(json.RawMessage(mustMarshal(t, sessionEvent{
+		Event: sessionEventInner{Type: "tool.execution_start", AgentID: "sub-1", Data: startData},
+	})))
+	completeData, _ := json.Marshal(map[string]any{
+		"toolCallId": "call-sub",
+		"success":    true,
+	})
+	cs.handleSessionEvent(json.RawMessage(mustMarshal(t, sessionEvent{
+		Event: sessionEventInner{Type: "tool.execution_complete", AgentID: "sub-1", Data: completeData},
+	})))
+
+	select {
+	case evt := <-cs.events:
+		t.Fatalf("unexpected event emitted for sub-agent tool: %v", evt.Type)
+	default:
+	}
+	cs.toolCallMu.Lock()
+	defer cs.toolCallMu.Unlock()
+	if len(cs.toolCallNames) != 0 {
+		t.Fatalf("sub-agent start must not populate toolCallNames, got %v", cs.toolCallNames)
+	}
+}
+
+func TestHandleSessionEvent_Reasoning(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	cs := &copilotSession{
+		events: make(chan core.Event, 10),
+		ctx:    ctx,
+		cancel: cancel,
+	}
+	cs.alive.Store(true)
+
+	data, _ := json.Marshal(map[string]any{
+		"reasoningId": "r-1",
+		"content":     "thinking hard",
+	})
+	cs.handleSessionEvent(json.RawMessage(mustMarshal(t, sessionEvent{
+		Event: sessionEventInner{Type: "assistant.reasoning", Data: data},
+	})))
+
+	select {
+	case evt := <-cs.events:
+		if evt.Type != core.EventThinking {
+			t.Fatalf("event type = %v, want EventThinking", evt.Type)
+		}
+		if evt.Content != "thinking hard" {
+			t.Fatalf("content = %q, want 'thinking hard'", evt.Content)
+		}
+	default:
+		t.Fatal("no EventThinking emitted")
+	}
+
+	// Sub-agent reasoning must be skipped.
+	subData, _ := json.Marshal(map[string]any{
+		"reasoningId": "r-2",
+		"content":     "sub thinking",
+	})
+	cs.handleSessionEvent(json.RawMessage(mustMarshal(t, sessionEvent{
+		Event: sessionEventInner{Type: "assistant.reasoning", AgentID: "sub-1", Data: subData},
+	})))
+	select {
+	case evt := <-cs.events:
+		t.Fatalf("unexpected event emitted for sub-agent reasoning: %v", evt.Type)
+	default:
 	}
 }

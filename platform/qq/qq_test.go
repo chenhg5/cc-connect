@@ -149,3 +149,55 @@ func TestStart_FetchesSelfIDWithoutTimeout(t *testing.T) {
 		t.Errorf("selfID = %d, want %d (self-message filter would be disabled)", p.selfID, botUserID)
 	}
 }
+
+func TestNew_RequireMentionDefaultsTrue(t *testing.T) {
+	p, err := New(map[string]any{})
+	if err != nil {
+		t.Errorf("unexpected error: %v", err)
+	}
+	if !p.(*Platform).requireMention {
+		t.Error("requireMention should default to true")
+	}
+}
+
+func TestNew_RequireMentionFalse(t *testing.T) {
+	p, err := New(map[string]any{"require_mention": false})
+	if err != nil {
+		t.Errorf("unexpected error: %v", err)
+	}
+	if p.(*Platform).requireMention {
+		t.Error("requireMention should be false when explicitly configured")
+	}
+}
+
+func TestMessageMentionsSelf(t *testing.T) {
+	p := &Platform{selfID: 12345}
+	cases := []struct {
+		name    string
+		message any
+		want    bool
+	}{
+		{"array at self", []any{map[string]any{"type": "at", "data": map[string]any{"qq": "12345"}}}, true},
+		{"array at all", []any{map[string]any{"type": "at", "data": map[string]any{"qq": "all"}}}, true},
+		{"array at other", []any{map[string]any{"type": "at", "data": map[string]any{"qq": "99999"}}}, false},
+		{"array no at", []any{map[string]any{"type": "text", "data": map[string]any{"text": "hello"}}}, false},
+		{"cq string at self", "[CQ:at,qq=12345] hello", true},
+		{"cq string at all", "[CQ:at,qq=all] hello", true},
+		{"cq string no at", "hello", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			payload := map[string]any{"message": tc.message}
+			if got := p.messageMentionsSelf(payload); got != tc.want {
+				t.Errorf("messageMentionsSelf() = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestMessageMentionsSelf_FailsOpenWithoutSelfID(t *testing.T) {
+	p := &Platform{} // selfID unknown
+	if !p.messageMentionsSelf(map[string]any{"message": []any{}}) {
+		t.Error("should fail open (return true) when selfID is unknown")
+	}
+}

@@ -331,40 +331,54 @@ func (s *piSession) Send(msg string, messageID string, images []core.ImageAttach
 	if safeMessageID := sanitizePiAttachmentName(messageID); safeMessageID != "" {
 		attachDir = filepath.Join(attachDir, safeMessageID)
 	}
-	cleanAttachments(attachDir)
+	// Text-only supplements (such as /ps) must preserve attachments that
+	// the running task may still be reading, especially with no message ID.
+	if len(images) > 0 || len(files) > 0 {
+		cleanAttachments(attachDir)
+	}
 
-	var atFiles []string
+	// Issue #1723: images are passed via pi's @<path> argv / message-text
+	// mechanism. pi's processImage loads them as visual inputs and the
+	// bytes never enter our prompt text.
+	//
+	// Issue #1767: non-image files are NOT passed via @<path>. pi's
+	// processFileArguments reads every @<path> file's full UTF-8 contents
+	// and inlines them into the prompt the model sees. For a >~1MB text
+	// attachment this can blow the model's context and trigger a 400 from
+	// the provider. Mirror the claudecode behaviour: save non-image files
+	// to disk and tell the model where they live via a plain path
+	// reference; pi's own file-reading tools will load only the bytes the
+	// model actually needs.
+	var imageAtFiles []string
 	if len(images) > 0 {
-		atFiles = append(atFiles, saveImagesToDisk(attachDir, images)...)
+		imageAtFiles = append(imageAtFiles, saveImagesToDisk(attachDir, images)...)
 	}
+	var filePaths []string
 	if len(files) > 0 {
-		atFiles = append(atFiles, saveFilesToDisk(attachDir, files)...)
+		filePaths = append(filePaths, saveFilesToDisk(attachDir, files)...)
 	}
 
-	// Issue #1723: do NOT inline attachment bytes back into the prompt.
-	// json mode passes the prompt via -p <argv>, so embedding raw image
-	// bytes triggers execve EINVAL on NUL bytes and the pi process never
-	// starts (model never sees the image). rpc mode goes through stdin
-	// so it doesn't crash, but the model still gets image bytes as text
-	// rather than a real visual input. Both paths must hand pi the saved
-	// paths via pi's @<path> mechanism — sendJSON appends them as argv
-	// entries; sendRPC embeds them in the message text, which pi parses
-	// the same way.
 	if s.rpc {
-		return s.sendRPC(msg, atFiles)
+		return s.sendRPC(msg, imageAtFiles, filePaths)
 	}
-	return s.sendJSON(msg, atFiles)
+	return s.sendJSON(msg, imageAtFiles, filePaths)
 }
 
 // sendJSON spawns `pi --mode json -p <prompt>` as a one-shot process,
 // reads all output events, and sends them to the events channel.
 //
-// Issue #1723: attachment paths are passed as @<path> argv entries (Pi's
-// standard mechanism). Embedding the file bytes into -p would crash
+// Issue #1723: image paths are passed as @<path> argv entries (Pi's
+// standard mechanism). Embedding the image bytes into -p would crash
 // execve on NUL bytes, and would also break pi's vision pipeline which
 // needs to know the file is on disk rather than be handed raw bytes.
-func (s *piSession) sendJSON(prompt string, atFiles []string) error {
-	args := buildJSONArgs(s.extraArgs, prompt, s.CurrentSessionID(), s.model, s.thinking, atFiles)
+//
+// Issue #1767: filePaths (non-image attachments) are NOT passed as
+// @<path>. We append a plain "Files saved locally, please read them: …"
+// trailer to the prompt instead — pi's processFileArguments would
+// otherwise inline the entire UTF-8 contents into the prompt the model
+// sees, which triggers a 400 for files larger than the model's context.
+func (s *piSession) sendJSON(prompt string, imageAtFiles []string, filePaths []string) error {
+	args := buildJSONArgs(s.extraArgs, promptWithFileRefs(prompt, filePaths), s.CurrentSessionID(), s.model, s.thinking, imageAtFiles)
 
 	slog.Debug("piSession: spawning json mode", "cmd", s.cmd, "sessionID", s.CurrentSessionID())
 
@@ -457,20 +471,49 @@ func (s *piSession) writeRPCCommand(cmd map[string]any) error {
 // sendRPC writes a JSON "prompt" command to the persistent RPC process stdin.
 // Events are read asynchronously by readLoopRPC, including agent_end which
 // triggers EventResult.
+// streamingBehavior lets Pi steer an active run or start a prompt if it has
+// already finished, even while the engine is still delivering the last reply.
 //
-// Issue #1723: attachment paths are embedded into the message text as
+// Issue #1723: image paths are embedded into the message text as
 // @<path> references (pi's standard mechanism, parsed the same way as in
 // json mode). The rpc stdin pipe doesn't crash on NUL bytes, but the
-// model still needs to load the files from disk — embedding raw bytes
+// model still needs to load the images from disk — embedding raw bytes
 // in the message field would give the model text-shaped garbage instead
-// of a real visual/file input.
-func (s *piSession) sendRPC(prompt string, atFiles []string) error {
+// of a real visual input.
+//
+// Issue #1767: filePaths (non-image attachments) are NOT @<path>'d.
+// pi's processFileArguments would inline their full UTF-8 contents into
+// the message text the model sees; we append a plain "Files saved
+// locally, please read them: …" trailer instead so pi's own file
+// tools load only what the model actually needs.
+func (s *piSession) sendRPC(prompt string, imageAtFiles []string, filePaths []string) error {
 	cmd := map[string]any{
-		"type":    "prompt",
-		"message": composeRPCPrompt(prompt, atFiles),
+		"type":              "prompt",
+		"message":           composeRPCPrompt(promptWithFileRefs(prompt, filePaths), imageAtFiles),
+		"streamingBehavior": "steer",
 	}
 	slog.Debug("piSession: sending RPC prompt", "bytes", len(prompt))
 	return s.writeRPCCommand(cmd)
+}
+
+// promptWithFileRefs appends a plain-text trailer that tells the model
+// where non-image attachments were saved on disk. Pulled out of Send()
+// so the Issue #1767 regression test can assert that the path strings
+// appear in the prompt without inlining file bytes.
+//
+// The trailer mirrors the wording cc-connect uses for the claudecode
+// agent so users see consistent phrasing across runtimes. Paths are
+// joined with ", " and wrapped in parentheses to make the boundary with
+// the original prompt text unambiguous.
+//
+// Returns prompt unchanged when filePaths is empty — we do NOT emit an
+// empty "Files saved locally" trailer because an assistant model could
+// interpret that as a request to attach something that isn't there.
+func promptWithFileRefs(prompt string, filePaths []string) string {
+	if len(filePaths) == 0 {
+		return prompt
+	}
+	return prompt + "\n\n(Files saved locally, please read them: " + strings.Join(filePaths, ", ") + ")"
 }
 
 // composeRPCPrompt builds the rpc-mode message text, appending

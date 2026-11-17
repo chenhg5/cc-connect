@@ -3,7 +3,7 @@ MODULE     := github.com/chenhg5/cc-connect
 CMD        := ./cmd/cc-connect
 DIST       := dist
 
-VERSION := v1.3.3
+VERSION := v1.5.1-beta.1
 COMMIT     := $(shell git rev-parse --short HEAD 2>/dev/null || echo "none")
 BUILD_TIME := $(shell date -u '+%Y-%m-%dT%H:%M:%SZ')
 
@@ -44,20 +44,28 @@ COMMA := ,
 # Compute exclusion tags from AGENTS / PLATFORMS_INCLUDE / EXCLUDE variables
 _EXCLUDE_TAGS :=
 
+# Normalize comma-separated user input into the form used by ALL_AGENTS /
+# ALL_PLATFORMS (space-separated, dashes folded to underscores). Without
+# the dash→underscore fold, an agent registered under a hyphenated name
+# (e.g. AGENTS=foo-bar with build tag `no_foo_bar`) would fail to match
+# `foo_bar` in the ALL list and silently emit `no_foo_bar` via filter-out
+# — excluding the very plugin the user asked to include.
+_normalize = $(subst -,_,$(subst $(COMMA), ,$(1)))
+
 ifdef AGENTS
-  _WANTED_AGENTS := $(subst $(COMMA), ,$(AGENTS))
+  _WANTED_AGENTS := $(call _normalize,$(AGENTS))
   _EXCLUDE_AGENTS := $(filter-out $(_WANTED_AGENTS),$(ALL_AGENTS))
   _EXCLUDE_TAGS += $(addprefix no_,$(_EXCLUDE_AGENTS))
 endif
 
 ifdef PLATFORMS_INCLUDE
-  _WANTED_PLATFORMS := $(subst $(COMMA), ,$(PLATFORMS_INCLUDE))
+  _WANTED_PLATFORMS := $(call _normalize,$(PLATFORMS_INCLUDE))
   _EXCLUDE_PLATFORMS := $(filter-out $(_WANTED_PLATFORMS),$(ALL_PLATFORMS))
   _EXCLUDE_TAGS += $(addprefix no_,$(_EXCLUDE_PLATFORMS))
 endif
 
 ifdef EXCLUDE
-  _EXCLUDE_TAGS += $(addprefix no_,$(subst $(COMMA), ,$(EXCLUDE)))
+  _EXCLUDE_TAGS += $(addprefix no_,$(call _normalize,$(EXCLUDE)))
 endif
 
 ifdef NO_WEB
@@ -67,7 +75,7 @@ endif
 _BUILD_TAGS := $(strip $(_EXCLUDE_TAGS) goolm)
 _TAGS_FLAG  := $(if $(_BUILD_TAGS),-tags '$(_BUILD_TAGS)',)
 
-.PHONY: build run clean test test-fast test-full test-smoke test-e2e test-release test-release-local test-performance pre-test lint release release-all web
+.PHONY: build run clean test test-fast test-full test-smoke test-e2e test-release test-release-local test-blackbox-smoke test-release-smoke test-performance pre-test lint release release-all web
 
 web:
 	@if [ ! -d web/node_modules ]; then cd web && npm install; fi
@@ -138,6 +146,24 @@ test-release-local:
 	go test ./config
 	go test ./core -run 'TestEngineSendToSessionWithAttachments|TestProcessInteractiveEvents_SuppressesDuplicateSideChannelText|TestCmdList_AllSessionsVisibleAfterRepeatedNew|TestCmdList_SessionVisibleDuringAgentProcessing|TestEngine_Alias|TestEngine_BannedWords|TestEngine_DisabledCommands'
 	go test ./platform/feishu -run 'TestUserIDFromEventFallsBackToUserID|TestResolveUserNameSkipsInvalidLookupID|TestNew_CanDisableInteractiveCards'
+
+# Blackbox smoke: in-process engine and the real binary (driven through its
+# bridge WebSocket) across platform capability profiles. Needs one agent CLI
+# on PATH; agent turns use the scripted fake model (tests/blackbox/fakemodel),
+# so no model key is needed. TestSmoke_AgentTurn uses a real model and skips
+# without credentials. Point CC_BLACKBOX_BINARY at a built artifact to test
+# it instead of the current tree.
+test-blackbox-smoke:
+	go test -tags blackbox -count=1 -race ./tests/blackbox/smoke/
+
+# Release smoke: the pre-release gate. Same suite, but fail-closed: the agents
+# in CC_BLACKBOX_REQUIRE_AGENTS (default claudecode,codex) must be installed,
+# otherwise the run fails instead of skipping their scenarios. Set
+# CC_BLACKBOX_BINARY=dist/cc-connect-<ver>-<os>-<arch> to test the release
+# artifact itself instead of building the current tree.
+RELEASE_SMOKE_AGENTS ?= claudecode,codex
+test-release-smoke:
+	CC_BLACKBOX_REQUIRE_AGENTS=$(RELEASE_SMOKE_AGENTS) go test -tags blackbox,no_web -count=1 -race -timeout=30m ./tests/blackbox/fakemodel/ ./tests/blackbox/smoke/
 
 # Legacy: runs unit tests only
 test:

@@ -295,6 +295,14 @@ func TestQueuedMessagePreservesFiles(t *testing.T) {
 	if len(records[1].files) != 1 || records[1].files[0].FileName != "queued.txt" || string(records[1].files[0].Data) != "queued-file" {
 		t.Fatalf("queued file not preserved: %#v", records[1].files)
 	}
+
+	// waitRecords only proves the queued prompt reached the agent (the start of
+	// the turn). The engine persists the session store under t.TempDir() when
+	// the turn completes, so returning here lets the still-running turn goroutine
+	// race t.TempDir()'s RemoveAll cleanup ("directory not empty"). The queued
+	// turn's reply is emitted after that save, so waiting for it deterministically
+	// drains the write before cleanup runs.
+	platform.waitTextContaining(t, "media ok")
 }
 
 func TestSendToSessionWithAttachmentsDeliversTextImagesAndFiles(t *testing.T) {

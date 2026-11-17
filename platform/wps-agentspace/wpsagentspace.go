@@ -43,6 +43,17 @@ type Platform struct {
 	deviceUuid string
 	deviceName string
 	baseURL    string
+	// allowFrom restricts which chat/session IDs may drive the agent. Unlike
+	// every sibling platform in this codebase (wps-xiezuo, telegram, slack,
+	// feishu, ...), this connector had no access-control option at all: any
+	// WPS user who can message the "digital employee" app this connection
+	// authenticates as gets full, unconfirmed access to the configured
+	// agent (config.example.toml's own wps-agentspace example even sets
+	// mode = "bypassPermissions"). WPS's own app-level permission grant
+	// (USER_NO_APP_PERMISSION in handleFrame) is an org-wide gate, not a
+	// per-user one; wps-xiezuo's docs explicitly say not to rely on that
+	// alone ("Always set allow_from for production deployments").
+	allowFrom  string
 	handler    core.MessageHandler
 	cancel     context.CancelFunc
 	conn       *websocket.Conn
@@ -154,12 +165,16 @@ func New(opts map[string]any) (core.Platform, error) {
 		baseURL = v
 	}
 
+	allowFrom, _ := opts["allow_from"].(string)
+	core.CheckAllowFrom("wps-agentspace", allowFrom)
+
 	return &Platform{
 		appID:      appID,
 		wpsSid:     wpsSid,
 		deviceUuid: deviceUuid,
 		deviceName: deviceName,
 		baseURL:    baseURL,
+		allowFrom:  allowFrom,
 	}, nil
 }
 
@@ -543,6 +558,11 @@ func (p *Platform) handleUserMessage(data messageData) error {
 	}
 	if chatID == "" {
 		chatID = "default"
+	}
+
+	if !core.AllowList(p.allowFrom, chatID) {
+		slog.Debug("wps-agentspace: message from unauthorized chat/session", "chat_id", chatID)
+		return nil
 	}
 
 	// Dedup

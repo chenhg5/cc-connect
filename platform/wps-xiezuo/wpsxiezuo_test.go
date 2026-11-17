@@ -111,6 +111,35 @@ func TestNew_Valid(t *testing.T) {
 	if p.Name() != "wps-xiezuo" {
 		t.Fatalf("expected name wps-xiezuo, got %s", p.Name())
 	}
+	if got := p.(*Platform).maxAttachmentBytes; got != defaultMaxAttachmentBytes {
+		t.Fatalf("default max attachment bytes = %d, want %d", got, defaultMaxAttachmentBytes)
+	}
+}
+
+func TestNew_CustomAttachmentLimit(t *testing.T) {
+	configured := int64(3 * 1024 * 1024 * 1024)
+	p, err := New(map[string]any{
+		"app_id":               "id",
+		"app_secret":           "secret",
+		"max_attachment_bytes": configured,
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got := p.(*Platform).maxAttachmentBytes; got != configured {
+		t.Fatalf("max attachment bytes = %d, want %d", got, configured)
+	}
+}
+
+func TestNew_RejectsAttachmentLimitAboveWPSBound(t *testing.T) {
+	_, err := New(map[string]any{
+		"app_id":               "id",
+		"app_secret":           "secret",
+		"max_attachment_bytes": maxAttachmentBytes + 1,
+	})
+	if err == nil || !strings.Contains(err.Error(), "must not exceed") {
+		t.Fatalf("error = %v, want maximum-limit error", err)
+	}
 }
 
 func TestNew_CustomBaseURL(t *testing.T) {
@@ -152,6 +181,8 @@ func TestPlatformImplementsInterfaces(t *testing.T) {
 	var _ core.ReplyContextReconstructor = (*Platform)(nil)
 	var _ core.TypingIndicator = (*Platform)(nil)
 	var _ core.TypingIndicatorDone = (*Platform)(nil)
+	var _ core.ImageSender = (*Platform)(nil)
+	var _ core.FileSender = (*Platform)(nil)
 }
 
 // ============================================================================
@@ -246,6 +277,26 @@ func TestExtractText_RichText(t *testing.T) {
 	got := extractText(raw)
 	if got != "hello world" {
 		t.Fatalf("expected 'hello world', got %q", got)
+	}
+}
+
+func TestExtractText_WPSRichTextRecursive(t *testing.T) {
+	raw := json.RawMessage(`{"rich_text":{"elements":[{"type":"nl","elements":[{"type":"text","text_content":{"content":"第一行"}}]},{"type":"nl","elements":[{"type":"link","link_content":{"text":"说明","url":"https://example.com/doc"}}]},{"type":"nl","elements":[{"type":"mention","mention_content":{"text":"@张三"}},{"type":"text","style_text_content":{"text":" 请查看"}}]}]}}`)
+	got := extractText(raw)
+	want := "第一行\n说明 (https://example.com/doc)\n@张三 请查看"
+	if got != want {
+		t.Fatalf("rich text = %q, want %q", got, want)
+	}
+}
+
+func TestParseWPSRichText_CustomEmojiImage(t *testing.T) {
+	raw := json.RawMessage(`{"rich_text":{"elements":[{"type":"nl","elements":[{"type":"custom_emoji","image_content":{"name":"emoji.webp","size":12,"storage_key":"emoji-key","type":"image/webp"}}]}]}}`)
+	text, images, _, err := parseWPSRichText(raw)
+	if err != nil {
+		t.Fatalf("parse rich text: %v", err)
+	}
+	if text != "" || len(images) != 1 || images[0].StorageKey != "emoji-key" {
+		t.Fatalf("parsed = text:%q images:%+v, want one custom emoji image", text, images)
 	}
 }
 
@@ -665,6 +716,361 @@ func TestHandleChatMessage_EmptyContent(t *testing.T) {
 	}
 }
 
+func TestHandleChatMessage_ImageAttachment(t *testing.T) {
+	imageData := []byte{0xff, 0xd8, 0xff, 0xe0, 'j', 'p', 'e', 'g'}
+	var srv *httptest.Server
+	srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/oauth2/token":
+			_ = json.NewEncoder(w).Encode(tokenResponse{AccessToken: "media-token", ExpiresIn: 7200})
+		case "/v7/chats/chat-image/messages/msg-image/resources/image-key/download":
+			assertWPSResourceAuth(t, r, "media-app", "media-secret", "media-token")
+			if got := r.URL.Query().Get("file_name"); got != "photo.jpg" {
+				t.Errorf("file_name = %q, want photo.jpg", got)
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"code": 0,
+				"data": map[string]string{"url": srv.URL + "/cdn/photo.jpg"},
+			})
+		case "/cdn/photo.jpg":
+			w.Header().Set("Content-Type", "image/jpeg")
+			_, _ = w.Write(imageData)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+
+	received := make(chan *core.Message, 1)
+	p := &Platform{
+		appID:              "media-app",
+		appSecret:          "media-secret",
+		baseURL:            srv.URL,
+		httpClient:         srv.Client(),
+		maxAttachmentBytes: defaultMaxAttachmentBytes,
+		handler: func(_ core.Platform, msg *core.Message) {
+			received <- msg
+		},
+	}
+	payload := wpsMessageData{
+		Chat:      wpsChatInfo{ID: "chat-image", Type: "p2p"},
+		CompanyID: "company",
+		Message: wpsMessageInfo{
+			ID:      "msg-image",
+			Type:    "image",
+			Content: json.RawMessage(`{"image":{"height":1536,"name":"photo.jpg","size":8,"storage_key":"image-key","type":"image/jpeg","width":2048}}`),
+		},
+		Sender: wpsSenderInfo{ID: "user", Type: "user"},
+	}
+	plain, _ := json.Marshal(payload)
+	p.handleChatMessage(plain)
+
+	select {
+	case msg := <-received:
+		if len(msg.Images) != 1 || len(msg.Files) != 0 {
+			t.Fatalf("attachments = images:%d files:%d, want images:1 files:0", len(msg.Images), len(msg.Files))
+		}
+		if got := msg.Images[0]; got.FileName != "photo.jpg" || got.MimeType != "image/jpeg" || !bytes.Equal(got.Data, imageData) {
+			t.Fatalf("image = %+v, want downloaded JPEG attachment", got)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for image attachment")
+	}
+}
+
+func TestHandleChatMessage_LocalFileAttachment(t *testing.T) {
+	fileData := []byte("local file contents")
+	var srv *httptest.Server
+	srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/oauth2/token":
+			_ = json.NewEncoder(w).Encode(tokenResponse{AccessToken: "file-token", ExpiresIn: 7200})
+		case "/v7/chats/chat-file/messages/msg-file/resources/file-key/download":
+			assertWPSResourceAuth(t, r, "file-app", "file-secret", "file-token")
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"code": 0,
+				"data": map[string]string{"url": srv.URL + "/cdn/report.txt"},
+			})
+		case "/cdn/report.txt":
+			w.Header().Set("Content-Type", "application/octet-stream")
+			_, _ = w.Write(fileData)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+
+	received := make(chan *core.Message, 1)
+	p := &Platform{
+		appID:              "file-app",
+		appSecret:          "file-secret",
+		baseURL:            srv.URL,
+		httpClient:         srv.Client(),
+		maxAttachmentBytes: defaultMaxAttachmentBytes,
+		handler: func(_ core.Platform, msg *core.Message) {
+			received <- msg
+		},
+	}
+	payload := wpsMessageData{
+		Chat:      wpsChatInfo{ID: "chat-file", Type: "group"},
+		CompanyID: "company",
+		Message: wpsMessageInfo{
+			ID:      "msg-file",
+			Type:    "file",
+			Content: json.RawMessage(`{"file":{"local":{"name":"folder/report.txt","size":19,"storage_key":"file-key"},"type":"local"}}`),
+		},
+		Sender: wpsSenderInfo{ID: "user", Type: "user"},
+	}
+	plain, _ := json.Marshal(payload)
+	p.handleChatMessage(plain)
+
+	select {
+	case msg := <-received:
+		if len(msg.Files) != 1 || len(msg.Images) != 0 {
+			t.Fatalf("attachments = files:%d images:%d, want files:1 images:0", len(msg.Files), len(msg.Images))
+		}
+		if got := msg.Files[0]; got.FileName != "report.txt" || got.MimeType != "text/plain" || !bytes.Equal(got.Data, fileData) {
+			t.Fatalf("file = %+v, want downloaded text attachment", got)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for file attachment")
+	}
+}
+
+func TestHandleChatMessage_CloudDocumentForwardsLink(t *testing.T) {
+	received := make(chan *core.Message, 1)
+	p := &Platform{
+		handler: func(_ core.Platform, msg *core.Message) {
+			received <- msg
+		},
+	}
+	payload := wpsMessageData{
+		Chat:      wpsChatInfo{ID: "chat-cloud", Type: "p2p"},
+		CompanyID: "company",
+		Message: wpsMessageInfo{
+			ID:      "msg-cloud",
+			Type:    "file",
+			Content: json.RawMessage(`{"file":{"cloud":{"id":"file-id","link_id":"link-id","link_url":"https://365.kdocs.cn/l/link-id"},"type":"cloud"}}`),
+		},
+		Sender: wpsSenderInfo{ID: "user", Type: "user"},
+	}
+	plain, _ := json.Marshal(payload)
+	p.handleChatMessage(plain)
+
+	select {
+	case msg := <-received:
+		if msg.Content != "https://365.kdocs.cn/l/link-id" {
+			t.Fatalf("content = %q, want cloud document link", msg.Content)
+		}
+		if len(msg.Files) != 0 || len(msg.Images) != 0 {
+			t.Fatalf("cloud document must not be presented as a downloaded attachment")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for cloud document message")
+	}
+}
+
+func TestHandleChatMessage_RichTextEmbeddedCloudDocument(t *testing.T) {
+	received := make(chan *core.Message, 1)
+	p := &Platform{
+		handler: func(_ core.Platform, msg *core.Message) {
+			received <- msg
+		},
+	}
+	payload := wpsMessageData{
+		Chat:      wpsChatInfo{ID: "chat-rich-doc", Type: "p2p"},
+		CompanyID: "company",
+		Message: wpsMessageInfo{
+			ID:      "msg-rich-doc",
+			Type:    "rich_text",
+			Content: json.RawMessage(`{"rich_text":{"elements":[{"alt_text":"","elements":[{"text_content":{"content":"但是我这个和你聊天的用户就具有访问权限啊"},"type":"text"}],"type":"nl"},{"alt_text":"","elements":[{"text_content":{"content":"下面这个能访问吗："},"type":"text"}],"type":"nl"},{"alt_text":"","elements":[{"doc_content":{"file":{"id":"file-id","link_id":"ctNKwQRGzbXC","link_url":"https://365.kdocs.cn/l/ctNKwQRGzbXC"},"text":"WPS协作OpenClaw插件多机器人_多Agent配置说明（官方）"},"type":"doc"}],"type":"nl"}]},"text":null}`),
+		},
+		Sender: wpsSenderInfo{ID: "user", Type: "user"},
+	}
+	plain, _ := json.Marshal(payload)
+	p.handleChatMessage(plain)
+
+	select {
+	case msg := <-received:
+		want := "但是我这个和你聊天的用户就具有访问权限啊\n下面这个能访问吗：\nWPS协作OpenClaw插件多机器人_多Agent配置说明（官方） (https://365.kdocs.cn/l/ctNKwQRGzbXC)"
+		if msg.Content != want {
+			t.Fatalf("content = %q, want %q", msg.Content, want)
+		}
+		if len(msg.Files) != 0 || len(msg.Images) != 0 {
+			t.Fatalf("embedded cloud document must be forwarded as text and link")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for embedded cloud document")
+	}
+}
+
+func TestHandleChatMessage_RichTextEmbeddedCloudDocumentReadsContent(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/oauth2/token":
+			_ = json.NewEncoder(w).Encode(tokenResponse{AccessToken: "doc-token", ExpiresIn: 7200})
+		case "/v7/links/doc-link/meta":
+			assertWPSResourceAuth(t, r, "doc-app", "doc-secret", "doc-token")
+			_ = json.NewEncoder(w).Encode(map[string]any{"code": 0, "data": map[string]string{
+				"file_id": "doc-file", "drive_id": "doc-drive",
+			}})
+		case "/v7/drives/doc-drive/files/doc-file/content":
+			assertWPSResourceAuth(t, r, "doc-app", "doc-secret", "doc-token")
+			if got := r.URL.Query().Get("format"); got != "markdown" {
+				t.Errorf("format = %q, want markdown", got)
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{"code": 0, "data": map[string]string{
+				"markdown": "# 文档正文\n\n这是应用身份读取到的内容。",
+			}})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+
+	received := make(chan *core.Message, 1)
+	p := &Platform{
+		appID:      "doc-app",
+		appSecret:  "doc-secret",
+		baseURL:    srv.URL,
+		httpClient: srv.Client(),
+		handler: func(_ core.Platform, msg *core.Message) {
+			received <- msg
+		},
+	}
+	payload := wpsMessageData{
+		Chat:      wpsChatInfo{ID: "chat-doc-read", Type: "p2p"},
+		CompanyID: "company",
+		Message: wpsMessageInfo{
+			ID:      "msg-doc-read",
+			Type:    "rich_text",
+			Content: json.RawMessage(`{"rich_text":{"elements":[{"type":"nl","elements":[{"type":"doc","doc_content":{"text":"可读取文档","file":{"id":"doc-file","link_id":"doc-link","link_url":"https://365.kdocs.cn/l/doc-link"}}}]}]}}`),
+		},
+		Sender: wpsSenderInfo{ID: "user", Type: "user"},
+	}
+	plain, _ := json.Marshal(payload)
+	p.handleChatMessage(plain)
+
+	select {
+	case msg := <-received:
+		want := "可读取文档 (https://365.kdocs.cn/l/doc-link)\n\n[WPS云文档正文（已由应用授权读取，请优先基于以下正文回答，不要通过网页链接再次访问）]\n# 文档正文\n\n这是应用身份读取到的内容。"
+		if msg.Content != want {
+			t.Fatalf("content = %q, want %q", msg.Content, want)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for extracted cloud document")
+	}
+}
+
+func TestHandleChatMessage_RichTextImageAttachment(t *testing.T) {
+	imageData := []byte{0x89, 'P', 'N', 'G', '\r', '\n', 0x1a, '\n'}
+	var srv *httptest.Server
+	srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/oauth2/token":
+			_ = json.NewEncoder(w).Encode(tokenResponse{AccessToken: "rich-token", ExpiresIn: 7200})
+		case "/v7/chats/chat-rich-image/messages/msg-rich-image/resources/rich-image-key/download":
+			assertWPSResourceAuth(t, r, "rich-app", "rich-secret", "rich-token")
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"code": 0,
+				"data": map[string]string{"url": srv.URL + "/cdn/rich.png"},
+			})
+		case "/cdn/rich.png":
+			w.Header().Set("Content-Type", "image/png")
+			_, _ = w.Write(imageData)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+
+	received := make(chan *core.Message, 1)
+	p := &Platform{
+		appID:              "rich-app",
+		appSecret:          "rich-secret",
+		baseURL:            srv.URL,
+		httpClient:         srv.Client(),
+		maxAttachmentBytes: defaultMaxAttachmentBytes,
+		handler: func(_ core.Platform, msg *core.Message) {
+			received <- msg
+		},
+	}
+	payload := wpsMessageData{
+		Chat:      wpsChatInfo{ID: "chat-rich-image", Type: "p2p"},
+		CompanyID: "company",
+		Message: wpsMessageInfo{
+			ID:      "msg-rich-image",
+			Type:    "rich_text",
+			Content: json.RawMessage(`{"rich_text":{"elements":[{"type":"nl","elements":[{"type":"text","text_content":{"content":"看看这张图"}},{"type":"image","image_content":{"name":"rich.png","size":8,"storage_key":"rich-image-key","type":"image/png"}}]}]}}`),
+		},
+		Sender: wpsSenderInfo{ID: "user", Type: "user"},
+	}
+	plain, _ := json.Marshal(payload)
+	p.handleChatMessage(plain)
+
+	select {
+	case msg := <-received:
+		if msg.Content != "看看这张图" || len(msg.Images) != 1 {
+			t.Fatalf("message = content:%q images:%d, want rich text and one image", msg.Content, len(msg.Images))
+		}
+		if got := msg.Images[0]; got.FileName != "rich.png" || got.MimeType != "image/png" || !bytes.Equal(got.Data, imageData) {
+			t.Fatalf("image = %+v, want downloaded PNG attachment", got)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for rich text image")
+	}
+}
+
+func TestDownloadMessageResource_RejectsOversizeBody(t *testing.T) {
+	var srv *httptest.Server
+	srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case strings.HasPrefix(r.URL.Path, "/v7/chats/"):
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"code": 0,
+				"data": map[string]string{"url": srv.URL + "/cdn/too-large"},
+			})
+		case r.URL.Path == "/cdn/too-large":
+			_, _ = w.Write([]byte("12345"))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+
+	p := &Platform{
+		appID:              "app",
+		appSecret:          "secret",
+		baseURL:            srv.URL,
+		httpClient:         srv.Client(),
+		maxAttachmentBytes: 4,
+		token:              "cached-token",
+		tokenExpire:        time.Now().Add(time.Hour),
+	}
+	_, _, err := p.downloadMessageResource("chat", "message", "key", "large.bin")
+	if err == nil || !strings.Contains(err.Error(), "exceeds limit") {
+		t.Fatalf("error = %v, want attachment size limit error", err)
+	}
+}
+
+func assertWPSResourceAuth(t *testing.T, r *http.Request, appID, appSecret, token string) {
+	t.Helper()
+	if got := r.Header.Get("Authorization"); got != "Bearer "+token {
+		t.Errorf("Authorization = %q, want Bearer token", got)
+	}
+	date := r.Header.Get("X-Kso-Date")
+	if date == "" {
+		t.Fatal("X-Kso-Date is missing")
+	}
+	stringToSign := "KSO-1" + http.MethodGet + r.URL.RequestURI() + "" + date + ""
+	mac := hmac.New(sha256.New, []byte(appSecret))
+	_, _ = mac.Write([]byte(stringToSign))
+	want := "KSO-1 " + appID + ":" + hex.EncodeToString(mac.Sum(nil))
+	if got := r.Header.Get("X-Kso-Authorization"); got != want {
+		t.Errorf("X-Kso-Authorization = %q, want %q", got, want)
+	}
+}
+
 // ============================================================================
 // Handle chat message recall
 // ============================================================================
@@ -918,6 +1324,262 @@ func TestHandleChatMessage_AllowFrom(t *testing.T) {
 // ============================================================================
 // sendWPSMessage via httptest server
 // ============================================================================
+
+func TestSendFile_UploadsResourceAndCreatesMessage(t *testing.T) {
+	fileData := []byte("generated report")
+	wantChecksum := sha256.Sum256(fileData)
+	var credentialCalls, uploadCalls, messageCalls int
+	var srv *httptest.Server
+	srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/oauth2/token":
+			_ = json.NewEncoder(w).Encode(tokenResponse{AccessToken: "file-token", ExpiresIn: 7200})
+		case "/v7/chats/resources/upload":
+			credentialCalls++
+			body, err := io.ReadAll(r.Body)
+			if err != nil {
+				t.Errorf("read credential request: %v", err)
+			}
+			assertWPSSignedRequest(t, r, body, "file-app", "file-secret", "file-token")
+			var request resourceUploadRequest
+			if err := json.Unmarshal(body, &request); err != nil {
+				t.Errorf("decode credential request: %v", err)
+			}
+			if request.FileName != "report.pdf" || request.FileSize != int64(len(fileData)) {
+				t.Errorf("upload request = %+v", request)
+			}
+			if request.Checksum != hex.EncodeToString(wantChecksum[:]) {
+				t.Errorf("checksum = %q, want %q", request.Checksum, hex.EncodeToString(wantChecksum[:]))
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"code": 0,
+				"data": map[string]any{
+					"storage_key": "file-storage-key",
+					"upload_entry": map[string]any{
+						"method":  http.MethodPut,
+						"url":     srv.URL + "/object/report.pdf",
+						"headers": map[string]string{"X-Upload-Token": "upload-token"},
+						"params":  map[string]string{},
+					},
+				},
+			})
+		case "/object/report.pdf":
+			uploadCalls++
+			if r.Method != http.MethodPut {
+				t.Errorf("upload method = %s, want PUT", r.Method)
+			}
+			if got := r.Header.Get("X-Upload-Token"); got != "upload-token" {
+				t.Errorf("X-Upload-Token = %q", got)
+			}
+			body, _ := io.ReadAll(r.Body)
+			if !bytes.Equal(body, fileData) {
+				t.Errorf("uploaded body = %q, want %q", body, fileData)
+			}
+			w.WriteHeader(http.StatusNoContent)
+		case "/v7/messages/create":
+			messageCalls++
+			body, err := io.ReadAll(r.Body)
+			if err != nil {
+				t.Errorf("read message request: %v", err)
+			}
+			assertWPSSignedRequest(t, r, body, "file-app", "file-secret", "file-token")
+			var request sendMessageRequest
+			if err := json.Unmarshal(body, &request); err != nil {
+				t.Errorf("decode message request: %v", err)
+			}
+			if request.Type != "file" || request.Receiver.ReceiverID != "chat-file" {
+				t.Errorf("message envelope = %+v", request)
+			}
+			if request.Content.File == nil || request.Content.File.Local == nil {
+				t.Errorf("file message content = %+v", request.Content)
+				return
+			}
+			local := request.Content.File.Local
+			if request.Content.File.Type != "local" || local.Name != "report.pdf" || local.Size != int64(len(fileData)) || local.StorageKey != "file-storage-key" {
+				t.Errorf("file message = %+v", request.Content.File)
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{"code": 0})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+
+	p := &Platform{
+		appID:      "file-app",
+		appSecret:  "file-secret",
+		baseURL:    srv.URL,
+		httpClient: srv.Client(),
+	}
+	err := p.SendFile(context.Background(), replyContext{ChatID: "chat-file"}, core.FileAttachment{
+		FileName: "report.pdf",
+		MimeType: "application/pdf",
+		Data:     fileData,
+	})
+	if err != nil {
+		t.Fatalf("SendFile: %v", err)
+	}
+	if credentialCalls != 1 || uploadCalls != 1 || messageCalls != 1 {
+		t.Fatalf("calls = credentials:%d upload:%d message:%d, want 1 each", credentialCalls, uploadCalls, messageCalls)
+	}
+}
+
+func TestSendFile_RejectsConfiguredSizeLimit(t *testing.T) {
+	p := &Platform{maxAttachmentBytes: 4}
+	err := p.SendFile(context.Background(), replyContext{ChatID: "chat-file"}, core.FileAttachment{
+		FileName: "report.pdf",
+		Data:     []byte("five!"),
+	})
+	if err == nil || !strings.Contains(err.Error(), "exceeds limit") {
+		t.Fatalf("error = %v, want configured attachment limit error", err)
+	}
+}
+
+func TestSendImage_UploadsResourceAndCreatesImageMessage(t *testing.T) {
+	imageData := []byte{0x89, 'P', 'N', 'G', '\r', '\n', 0x1a, '\n'}
+	var gotMessage sendMessageRequest
+	var srv *httptest.Server
+	srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/oauth2/token":
+			_ = json.NewEncoder(w).Encode(tokenResponse{AccessToken: "image-token", ExpiresIn: 7200})
+		case "/v7/chats/resources/upload":
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"code": 0,
+				"data": map[string]any{
+					"storage_key": "image-storage-key",
+					"upload_entry": map[string]any{
+						"method":  http.MethodPut,
+						"url":     srv.URL + "/object/chart.png",
+						"headers": map[string]string{},
+						"params":  map[string]string{},
+					},
+				},
+			})
+		case "/object/chart.png":
+			body, _ := io.ReadAll(r.Body)
+			if !bytes.Equal(body, imageData) {
+				t.Errorf("uploaded image = %v, want %v", body, imageData)
+			}
+		case "/v7/messages/create":
+			body, _ := io.ReadAll(r.Body)
+			if err := json.Unmarshal(body, &gotMessage); err != nil {
+				t.Errorf("decode image message: %v", err)
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{"code": 0})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+
+	p := &Platform{appID: "image-app", appSecret: "image-secret", baseURL: srv.URL, httpClient: srv.Client()}
+	err := p.SendImage(context.Background(), replyContext{ChatID: "chat-image"}, core.ImageAttachment{
+		FileName: "chart.png",
+		MimeType: "image/png",
+		Data:     imageData,
+	})
+	if err != nil {
+		t.Fatalf("SendImage: %v", err)
+	}
+	if gotMessage.Type != "image" || gotMessage.Content.Image == nil {
+		t.Fatalf("image message = %+v", gotMessage)
+	}
+	image := gotMessage.Content.Image
+	if image.StorageKey != "image-storage-key" || image.Name != "chart.png" || image.Type != "image/png" || image.Size != int64(len(imageData)) {
+		t.Errorf("image content = %+v", image)
+	}
+}
+
+func TestUploadMessageResource_ReportsCredentialAPIErrors(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"code": 403000001,
+			"msg":  "permission denied",
+		})
+	}))
+	defer srv.Close()
+
+	p := &Platform{
+		appID:       "app",
+		appSecret:   "secret",
+		baseURL:     srv.URL,
+		httpClient:  srv.Client(),
+		token:       "cached-token",
+		tokenExpire: time.Now().Add(time.Hour),
+	}
+	_, err := p.uploadMessageResource(context.Background(), "report.pdf", []byte("report"))
+	if err == nil || !strings.Contains(err.Error(), "code=403000001") {
+		t.Fatalf("error = %v, want WPS permission error code", err)
+	}
+}
+
+func TestUploadResourceData_POSTUsesMultipartParams(t *testing.T) {
+	data := []byte("post upload")
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			t.Errorf("method = %s, want POST", r.Method)
+		}
+		if err := r.ParseMultipartForm(1024); err != nil {
+			t.Errorf("ParseMultipartForm: %v", err)
+			return
+		}
+		if got := r.FormValue("policy"); got != "signed-policy" {
+			t.Errorf("policy = %q", got)
+		}
+		file, header, err := r.FormFile("file")
+		if err != nil {
+			t.Errorf("FormFile: %v", err)
+			return
+		}
+		defer func() {
+			if err := file.Close(); err != nil {
+				t.Errorf("close multipart file: %v", err)
+			}
+		}()
+		if header.Filename != "bundle.zip" {
+			t.Errorf("filename = %q", header.Filename)
+		}
+		body, _ := io.ReadAll(file)
+		if !bytes.Equal(body, data) {
+			t.Errorf("file body = %q, want %q", body, data)
+		}
+	}))
+	defer srv.Close()
+
+	p := &Platform{httpClient: srv.Client()}
+	err := p.uploadResourceData(context.Background(), resourceUploadEntry{
+		Method: http.MethodPost,
+		URL:    srv.URL,
+		Params: map[string]any{"policy": "signed-policy"},
+	}, "bundle.zip", data)
+	if err != nil {
+		t.Fatalf("uploadResourceData: %v", err)
+	}
+}
+
+func assertWPSSignedRequest(t *testing.T, r *http.Request, body []byte, appID, appSecret, token string) {
+	t.Helper()
+	if got := r.Header.Get("Authorization"); got != "Bearer "+token {
+		t.Errorf("Authorization = %q, want Bearer token", got)
+	}
+	date := r.Header.Get("X-Kso-Date")
+	if date == "" {
+		t.Fatal("X-Kso-Date is missing")
+	}
+	bodyHash := ""
+	if len(body) > 0 {
+		hash := sha256.Sum256(body)
+		bodyHash = hex.EncodeToString(hash[:])
+	}
+	stringToSign := "KSO-1" + r.Method + r.URL.RequestURI() + r.Header.Get("Content-Type") + date + bodyHash
+	mac := hmac.New(sha256.New, []byte(appSecret))
+	_, _ = mac.Write([]byte(stringToSign))
+	want := "KSO-1 " + appID + ":" + hex.EncodeToString(mac.Sum(nil))
+	if got := r.Header.Get("X-Kso-Authorization"); got != want {
+		t.Errorf("X-Kso-Authorization = %q, want %q", got, want)
+	}
+}
 
 func TestSendWPSMessage_Success(t *testing.T) {
 	var gotBody []byte

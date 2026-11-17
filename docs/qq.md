@@ -2,7 +2,7 @@
 
 cc-connect 通过 [OneBot v11](https://github.com/botuniverse/onebot-11) 协议连接 QQ，需要搭配一个 OneBot 实现（如 NapCat）使用。
 
-cc-connect connects to QQ via the [OneBot v11](https://github.com/botuniverse/onebot-11) protocol. You need a OneBot implementation (e.g., NapCat) running alongside.
+cc-connect connects to QQ via the [OneBot v11](https://github.com/botuniverse/onebot-11) protocol. You need an OneBot implementation (e.g., NapCat) running alongside.
 
 ## 架构 / Architecture
 
@@ -70,6 +70,10 @@ allow_from = "*"                 # 允许交互的 QQ 号，"*" 表示所有人
 - `"*"` — 允许所有人 / Allow everyone
 - `"12345"` — 仅允许 QQ 号 12345 / Only allow QQ user 12345
 - `"12345,67890"` — 允许多个 QQ 号 / Allow multiple QQ users
+
+**`require_mention` 配置说明 / `require_mention` options:**
+- 默认 `true`：群聊中只有 **@ 机器人**的消息才会被处理，其他群消息忽略（@全体成员同样视为提及；与 feishu / tuitui 平台一致）/ Default `true`: only messages that **@ the bot** are processed in group chats; other group messages are ignored (@all counts too; consistent with the feishu and tuitui platforms).
+- `false`：群聊中的每条消息都会交给 agent（旧版行为；多机器人同群时慎用，容易互相触发）/ `false`: every group message is passed to the agent (legacy behavior; beware when multiple bots share one group - they will trigger each other).
 
 ### 4. 启动 / Start
 

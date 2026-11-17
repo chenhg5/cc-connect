@@ -1,11 +1,38 @@
 # Changelog
 
+## v1.5.1-beta.1 (2026-08-28)
+
+Beta since v1.5.0 stable — 16 merged PRs focused on Feishu/Weixin reliability, Claude Code /compact, Codex reasoning, and Cursor image attachments. See `changelogs/v1.5.1-beta.1.md` for the full contributor list.
+
+### New Features
+- **i18n**: Localize agent system prompts (cron/timer/send/relay) based on language config (#1721, #1655)
+- **Cursor**: Deliver image attachments via on-disk paths (#1709)
+
+### Fixed
+- **Feishu**: Chunked HTTP Range download for large resources (#1746); fail-closed on bot open_id discovery (#1725)
+- **Weixin**: Split send budget by reply vs push path (#1743); configurable inbound dedup (#1733)
+- **Claude Code**: Restore /compact and slash commands (#1737); bounded session teardown (#1714)
+- **Codex**: Propagate failed turns (#1730); max reasoning effort (#1727); /list session names (#1639)
+- **Pi**: Attachment @path refs (#1724); Windows build fix (#1738)
+- **Session**: /switch target idle reset exemption (#1734)
+- **Daemon/Skills**: Non-Linux build (#1710); plugin skill roots (#1713)
+
 ## Unreleased
 
+### Fixed
+- **Feishu**: With `inbound_coalesce_window_ms` enabled, card callbacks (AskUserQuestion option clicks, permission and command buttons) are no longer merged with text sent inside the window, so an option click is answered as that option instead of as free text or being dropped. Text already buffered for the session is delivered before the callback.
+- **Feishu**: Replies to bot menu clicks now send `receive_id_type=open_id` instead of `chat_id`, so menu items no longer fail every reply with `invalid receive_id` (code 230001); the reply context rebuilt after a restart infers the same type from the session key (#2259).
+- **Feishu**: Report WebSocket disconnect and reconnect state to the engine, including shared connections, so health checks and recovery reflect the connection (#693).
+- **Pi**: Merge custom providers with the built-in model catalog, resolve ambiguous aliases using the default provider, and filter duplicate or empty model entries. Reasoning levels follow the selected model, and switching models clears unsupported thinking overrides. Context windows now use catalog values for catalog-only models, with custom definitions taking precedence (#1872).
+
 ### Added
+- **Feishu/Lark**: configurable Card 2.0 typewriter interval, step and strategy; omitted options retain Feishu defaults (#1956).
 - **`agent_session_idle_timeout_mins`**: new per-project config option that closes an idle live agent process after a clean turn while preserving the cc-connect session and saved agent session ID. The next message starts a new agent process and resumes the same conversation. Set to `0` or leave unset to disable (#1338).
 - **Reasonix agent**: new agent adapter for Reasonix multi-model coding agent, bridging via HTTP serve API (POST /submit, SSE /events, POST /approve). Supports default/yolo/plan permission modes, SSE auto-reconnect with backoff, and thinking accumulator. (#1281)
 - **cloud_web platform**: 新增 self-hosted IM Gateway 作为 first-class platform 接入 (CWIP v1 协议,支持 websocket / long_poll / gateway 3 种 transport,完整 inbound/outbound + capability negotiation + graceful degradation)。 详见 docs/cloud-web.md + #1282。
+
+### Fixed
+- **Feishu**: a hung display-name lookup no longer holds an inbound message (in one case for 16 minutes, after which a stale `/new` ran): user/chat name lookups time out after 5s and fall back to the ID, the no-name answer for p2p chats is cached, card actions (`perm:`/`askq:`/`cmd:`) resolve names outside the callback, and failed lookup requests log at Warn (#2017, #2018).
 
 ## Unreleased
 
@@ -13,6 +40,7 @@
 - **Feishu: outbound bot-to-bot @mention resolution** via new `mention_map` config option. Maps agent-friendly names (e.g. `BOT-A`) to Feishu open_ids so that when an agent writes `@BOT-A` in its reply, cc-connect converts it to a native Feishu `<at>` tag that triggers a real notification. Layered on top of `resolve_mentions` (group-member matching) with higher priority, so explicit config always wins (#1322).
 
 ### Fixed
+- **codex**: expose the `max` reasoning effort in `/reasoning` and Codex project configuration. The Codex adapter now accepts and forwards `max` instead of rejecting it and showing usage limited to `low|medium|high|xhigh` (#1726).
 - **codex**: `/model` chooser now surfaces `gpt-5.x` (and any future frontier chat model) when the model list is populated by fetching `GET /v1/models` from the provider. The previous hard-coded 11-entry allowlist (`o1/o3/o4/gpt-4o/gpt-4.1/codex-mini-latest`) had not been updated since 2026-03 and silently filtered out every `gpt-5*` variant (including `gpt-5.6-sol/terra/luna`) returned by the API, so users on `codex-cli >= 0.143` could not pick GPT-5.6 in cc-connect even after upgrading the CLI. The allowlist is replaced with pattern rules: accept the `gpt-*` / `chatgpt-*` / `codex-*` / `o1-*` / `o3-*` / `o4-*` / `o5-*` families plus the bare `o1/o3/o4/o5` IDs, and reject non-chat modalities (`embedding`, `whisper`, `tts`, `dall-e`, `audio-preview`, `realtime`, `transcribe`, `moderation`, `image`, `search-preview`). New frontier chat models are picked up automatically without a code change. Note: this only affects the API-fetch fallback path; users with an explicit `model_catalog_json` in `~/.codex/config.toml` or a `models = [...]` list in cc-connect's provider config were unaffected.
 - **Feishu recall fallback probes**: throttle repeated active-message recall checks so long-running turns do not continuously call platform message APIs.
 - **Skill discovery depth-1 only**: skill scanning no longer recurses into subdirectories. Only `<skill_dir>/<name>/SKILL.md` is registered; nested SKILL.md files (e.g. inside `<name>/references/...`) are treated as skill assets and ignored, matching the Claude Code CLI convention. Previously, nested SKILL.md files leaked into platform command menus as phantom slash commands (101 leaked commands from `frontend-design` skill alone) (#1304).

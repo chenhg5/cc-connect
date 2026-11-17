@@ -56,8 +56,26 @@
       "overview": "總覽",
       "providers": "供應商",
       "heartbeat": "心跳",
-      "settings": "設定"
-    }
+      "settings": "設定",
+      "workspaces": "工作區"
+    },
+    "workspaceMode": "多工作區模式",
+    "workspaceModeHint": "在共享的基礎目錄下，將不同的聊天頻道路由到不同的工作目錄。",
+    "workspaceModeEnable": "啟用多工作區模式",
+    "workspaceModeWarning": "切換模式需要重新啟動服務。多工作區模式開啟後，單一的 work_dir 將不再使用。",
+    "workspaceBaseDir": "基礎目錄",
+    "workspaceBaseDirRequired": "啟用多工作區模式需要設定基礎目錄。",
+    "workspaceModeConfirm": "修改工作區模式需要重新啟動服務，確定繼續嗎？",
+    "workspaceBindings": "頻道綁定",
+    "workspaceNoBindings": "尚無頻道綁定到工作區。",
+    "workspaceActive": "運行中",
+    "workspaceIdle": "閒置",
+    "workspaceAddBinding": "綁定頻道",
+    "workspaceChannelKey": "頻道 Key",
+    "workspaceChannelName": "頻道名稱（可選）",
+    "workspacePath": "工作區路徑",
+    "workspaceSuggestions": "base_dir 中未綁定的目錄：",
+    "workspaceBind": "綁定"
   },
   "sessions": {
     "title": "工作階段",

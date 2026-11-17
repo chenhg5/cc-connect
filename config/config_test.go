@@ -1,6 +1,7 @@
 package config
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -580,6 +581,84 @@ func TestLoad_DefaultsDataDir(t *testing.T) {
 	want := filepath.Join(dir, ".cc-connect")
 	if cfg.DataDir != want {
 		t.Fatalf("Load() data_dir = %q, want %q", cfg.DataDir, want)
+	}
+}
+
+// TestLoad_DataDirAbsoluteWhenExplicitlyRelative regresses the
+// "Append system prompt file not found" bug: even when a user sets
+// data_dir to a relative path in config.toml, Load must anchor it to
+// an absolute path so that agent subprocesses (which cd into
+// project.work_dir before reading system prompt files) do not resolve
+// data_dir against the child's working directory instead of the
+// supervisor's.
+func TestLoad_DataDirAbsoluteWhenExplicitlyRelative(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("HOME", dir)
+
+	cfgPath := filepath.Join(dir, "config.toml")
+	body := "data_dir = \"./my-data\"\n" + baseConfigTOML
+	if err := os.WriteFile(cfgPath, []byte(body), 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	cfg, err := Load(cfgPath)
+	if err != nil {
+		t.Fatalf("Load() error: %v", err)
+	}
+	if !filepath.IsAbs(cfg.DataDir) {
+		t.Fatalf("Load() data_dir = %q, want absolute path", cfg.DataDir)
+	}
+	if !strings.HasSuffix(cfg.DataDir, "my-data") {
+		t.Fatalf("Load() data_dir = %q, want suffix my-data", cfg.DataDir)
+	}
+}
+
+func TestLoad_DataDirExpandsCurrentUserHome(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	cfgPath := filepath.Join(t.TempDir(), "config.toml")
+	body := "data_dir = \"~/.cc-connect\"\n" + baseConfigTOML
+	if err := os.WriteFile(cfgPath, []byte(body), 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	cfg, err := Load(cfgPath)
+	if err != nil {
+		t.Fatalf("Load() error: %v", err)
+	}
+
+	want := filepath.Join(home, ".cc-connect")
+	if cfg.DataDir != want {
+		t.Fatalf("Load() data_dir = %q, want %q", cfg.DataDir, want)
+	}
+}
+
+// TestLoad_DataDirAbsoluteWhenHOMEEmpty covers the fallback path when
+// os.UserHomeDir fails. This is exercised by service managers like
+// launchd (gui/... bootstrap) and systemd (system units) that do not
+// propagate HOME. Even in that degraded state, Load must still return
+// an absolute data_dir so subprocesses do not silently write to
+// <work_dir>/.cc-connect. Windows uses USERPROFILE, which we cannot
+// reliably clear from a test.
+func TestLoad_DataDirAbsoluteWhenHOMEEmpty(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("HOME does not gate os.UserHomeDir on windows")
+	}
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "config.toml")
+	if err := os.WriteFile(cfgPath, []byte(baseConfigTOML), 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	t.Setenv("HOME", "")
+
+	cfg, err := Load(cfgPath)
+	if err != nil {
+		t.Fatalf("Load() error: %v", err)
+	}
+	if !filepath.IsAbs(cfg.DataDir) {
+		t.Fatalf("Load() data_dir = %q, want absolute path even when HOME unset", cfg.DataDir)
 	}
 }
 
@@ -2010,6 +2089,84 @@ func TestLoadRejectsInvalidRelayVisibility(t *testing.T) {
 		t.Fatalf("error = %q, want relay.visibility validation error", err.Error())
 	}
 }
+
+const stopHookEventConfigFixture = `
+stop_hook_event = "%s"
+
+[[projects]]
+name = "alpha"
+
+[projects.agent]
+type = "codex"
+
+[projects.agent.options]
+work_dir = "/tmp/alpha"
+
+[[projects.platforms]]
+type = "telegram"
+
+[projects.platforms.options]
+bot_token = "token_xxx"
+`
+
+// TestLoadStopHookEvent verifies both accepted values are parsed through.
+func TestLoadStopHookEvent(t *testing.T) {
+	for _, want := range []string{"session.ended", "turn.cancelled"} {
+		configPath := writeConfigFixture(t, fmt.Sprintf(stopHookEventConfigFixture, want))
+
+		cfg, err := Load(configPath)
+		if err != nil {
+			t.Fatalf("Load(%q) returned error: %v", want, err)
+		}
+		if cfg.StopHookEvent != want {
+			t.Fatalf("cfg.StopHookEvent = %q, want %q", cfg.StopHookEvent, want)
+		}
+	}
+}
+
+// TestLoadStopHookEventDefaultsToEmpty verifies that omitting the key leaves
+// it empty, which the engine treats as "session.ended" (the historical
+// behavior).
+func TestLoadStopHookEventDefaultsToEmpty(t *testing.T) {
+	configPath := writeConfigFixture(t, `
+[[projects]]
+name = "alpha"
+
+[projects.agent]
+type = "codex"
+
+[projects.agent.options]
+work_dir = "/tmp/alpha"
+
+[[projects.platforms]]
+type = "telegram"
+
+[projects.platforms.options]
+bot_token = "token_xxx"
+`)
+
+	cfg, err := Load(configPath)
+	if err != nil {
+		t.Fatalf("Load returned error: %v", err)
+	}
+	if cfg.StopHookEvent != "" {
+		t.Fatalf("cfg.StopHookEvent = %q, want empty (engine default)", cfg.StopHookEvent)
+	}
+}
+
+// TestLoadRejectsInvalidStopHookEvent verifies that a typo is caught at
+// config load time instead of silently falling back to a default.
+func TestLoadRejectsInvalidStopHookEvent(t *testing.T) {
+	configPath := writeConfigFixture(t, fmt.Sprintf(stopHookEventConfigFixture, "turn.cancelledd"))
+
+	_, err := Load(configPath)
+	if err == nil {
+		t.Fatal("expected error for invalid stop_hook_event, got nil")
+	}
+	if !strings.Contains(err.Error(), `stop_hook_event must be "session.ended" or "turn.cancelled"`) {
+		t.Fatalf("error = %q, want stop_hook_event validation error", err.Error())
+	}
+}
 func writeConfigFixture(t *testing.T, content string) string {
 	t.Helper()
 	dir := t.TempDir()
@@ -2798,6 +2955,68 @@ func TestSaveProjectSettings_ExtraFields(t *testing.T) {
 	}
 	if stringMapValue(proj.Platforms[1].Options, "allow_from") != "u2" {
 		t.Fatalf("feishu allow_from = %q, want u2", stringMapValue(proj.Platforms[1].Options, "allow_from"))
+	}
+}
+
+func TestSaveProjectSettings_WorkspaceModeAndBaseDir(t *testing.T) {
+	configPath := writeConfigFixture(t, feishuConfigFixture)
+	patchConfigPath(t, configPath)
+
+	wsMode := "multi-workspace"
+	wsBaseDir := "/tmp/workspaces"
+	err := SaveProjectSettings("alpha", ProjectSettingsUpdate{
+		WorkspaceMode:    &wsMode,
+		WorkspaceBaseDir: &wsBaseDir,
+	})
+	if err != nil {
+		t.Fatalf("SaveProjectSettings: %v", err)
+	}
+
+	cfg := readConfigFixture(t, configPath)
+	proj := cfg.Projects[0]
+	if proj.Mode != wsMode {
+		t.Fatalf("Mode = %q, want %q", proj.Mode, wsMode)
+	}
+	if proj.BaseDir != wsBaseDir {
+		t.Fatalf("BaseDir = %q, want %q", proj.BaseDir, wsBaseDir)
+	}
+
+	// The saved file must still load: multi-workspace mode and an agent
+	// work_dir are mutually exclusive, so enabling the mode drops work_dir.
+	if _, ok := proj.Agent.Options["work_dir"]; ok {
+		t.Fatalf("work_dir still set after enabling multi-workspace mode: %v", proj.Agent.Options["work_dir"])
+	}
+	if _, err := Load(configPath); err != nil {
+		t.Fatalf("config saved by SaveProjectSettings no longer loads: %v", err)
+	}
+
+	details := GetProjectConfigDetails("alpha")
+	if details["workspace_mode"] != wsMode {
+		t.Fatalf("workspace_mode = %v, want %q", details["workspace_mode"], wsMode)
+	}
+	if details["workspace_base_dir"] != wsBaseDir {
+		t.Fatalf("workspace_base_dir = %v, want %q", details["workspace_base_dir"], wsBaseDir)
+	}
+
+	// Switching back to single mode clears Mode but leaves BaseDir untouched.
+	single := "single"
+	if err := SaveProjectSettings("alpha", ProjectSettingsUpdate{WorkspaceMode: &single}); err != nil {
+		t.Fatalf("SaveProjectSettings (single): %v", err)
+	}
+	cfg = readConfigFixture(t, configPath)
+	if cfg.Projects[0].Mode != "" {
+		t.Fatalf("Mode = %q, want empty after switching to single", cfg.Projects[0].Mode)
+	}
+}
+
+func TestSaveProjectSettings_WorkspaceModeRequiresBaseDir(t *testing.T) {
+	configPath := writeConfigFixture(t, feishuConfigFixture)
+	patchConfigPath(t, configPath)
+
+	wsMode := "multi-workspace"
+	err := SaveProjectSettings("alpha", ProjectSettingsUpdate{WorkspaceMode: &wsMode})
+	if err == nil {
+		t.Fatal("expected error enabling multi-workspace mode without base_dir, got nil")
 	}
 }
 
