@@ -722,6 +722,60 @@
           "models": ["claude-sonnet-4-6", "gpt-5.5"]
         }
       }
+    },
+    {
+      "name": "runcrate",
+      "display_name": "Runcrate",
+      "description": "Runcrate inference API for open models, with OpenAI-compatible and Anthropic Messages endpoints for coding agents.",
+      "description_zh": "Runcrate 开源模型推理 API，提供 OpenAI 兼容与 Anthropic Messages 接口，适用于编码智能体。",
+      "features": ["OpenAI Compatible", "Anthropic Compatible", "1M Context", "Open Models"],
+      "tier": 3,
+      "website": "https://www.runcrate.ai",
+      "agents": {
+        "claudecode": {
+          "base_url": "https://api.runcrate.ai",
+          "model": "deepseek-ai/DeepSeek-V4.1-Flash",
+          "models": ["deepseek-ai/DeepSeek-V4.1-Flash", "zai-org/GLM-5.3", "Qwen/Qwen3.8-Flash"]
+        },
+        "codex": {
+          "base_url": "https://api.runcrate.ai/v1",
+          "model": "deepseek-ai/DeepSeek-V4.1-Flash",
+          "models": ["deepseek-ai/DeepSeek-V4.1-Flash", "zai-org/GLM-5.3", "Qwen/Qwen3.8-Flash"],
+          "codex_config": { "wire_api": "responses" }
+        },
+        "opencode": {
+          "base_url": "https://api.runcrate.ai/v1",
+          "model": "deepseek-ai/DeepSeek-V4.1-Flash",
+          "models": ["deepseek-ai/DeepSeek-V4.1-Flash", "zai-org/GLM-5.3", "Qwen/Qwen3.8-Flash"]
+        }
+      }
+    },
+    {
+      "name": "requesty",
+      "display_name": "Requesty",
+      "description": "LLM gateway that routes to first-party providers (Anthropic, OpenAI, Google and more) through OpenAI and Anthropic compatible APIs.",
+      "description_zh": "LLM 网关，通过 OpenAI 和 Anthropic 兼容 API 将请求路由到一方模型供应商（Anthropic、OpenAI、Google 等）。",
+      "features": ["OpenAI Compatible", "Anthropic Compatible", "First-Party Providers"],
+      "tier": 3,
+      "website": "https://www.requesty.ai",
+      "agents": {
+        "claudecode": {
+          "base_url": "https://router.requesty.ai",
+          "model": "anthropic/claude-sonnet-5-5",
+          "models": ["anthropic/claude-sonnet-5-5", "anthropic/claude-opus-5-5", "anthropic/claude-haiku-5-5"]
+        },
+        "codex": {
+          "base_url": "https://router.requesty.ai/v1",
+          "model": "openai/gpt-5.4",
+          "models": ["openai/gpt-5.4", "openai/gpt-5.4-mini"],
+          "codex_config": { "wire_api": "responses" }
+        },
+        "opencode": {
+          "base_url": "https://router.requesty.ai/v1",
+          "model": "anthropic/claude-sonnet-5-5",
+          "models": ["anthropic/claude-sonnet-5-5", "openai/gpt-5.4", "google/gemini-3.6-flash"]
+        }
+      }
     }
   ]
 }

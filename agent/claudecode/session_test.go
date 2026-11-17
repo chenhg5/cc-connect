@@ -1012,13 +1012,44 @@ func TestHelperProcess(t *testing.T) {
 			// JSON quoting.
 			turnText := line
 			var envelope struct {
-				Type    string `json:"type"`
-				Message struct {
+				Type      string `json:"type"`
+				RequestID string `json:"request_id"`
+				Message   struct {
 					Role    string `json:"role"`
 					Content any    `json:"content"`
 				} `json:"message"`
 			}
-			if err := json.Unmarshal([]byte(line), &envelope); err == nil && envelope.Type == "user" {
+			_ = json.Unmarshal([]byte(line), &envelope)
+			if envelope.Type == "control_request" {
+				mode := os.Getenv("CC_CONNECT_TEST_SETTINGS_MODE")
+				if mode == "ignore" {
+					continue
+				}
+				subtype := "success"
+				if mode == "error" {
+					subtype = "error"
+				}
+				resp, _ := json.Marshal(map[string]any{
+					"type": "control_response",
+					"response": map[string]any{
+						"subtype":    subtype,
+						"request_id": envelope.RequestID,
+						"error":      "test-credential-must-not-leak",
+						"response": map[string]any{
+							"applied": map[string]any{"effort": "xhigh"},
+						},
+					},
+				})
+				if mode == "malformed" {
+					resp = []byte("incomplete settings response")
+				}
+				if mode == "renamed" {
+					resp = bytes.Replace(resp, []byte("control_response"), []byte("settings_response"), 1)
+				}
+				_, _ = os.Stdout.Write(append(resp, '\n'))
+				continue
+			}
+			if envelope.Type == "user" {
 				switch c := envelope.Message.Content.(type) {
 				case string:
 					turnText = c
@@ -1202,6 +1233,11 @@ func TestNewClaudeSession_NoReplayFlagKeepsProcessAlive(t *testing.T) {
 	// Close() will send stdin EOF and the helper will exit cleanly.
 	if !cs.Alive() {
 		t.Fatal("helper died before Close() — keep-alive contract violated")
+	}
+	// The helper answered the startup get_settings request before echoing
+	// any turn, so the applied effort is known by now.
+	if got := cs.GetReasoningEffort(); got != "xhigh" {
+		t.Fatalf("GetReasoningEffort() = %q, want applied effort %q", got, "xhigh")
 	}
 }
 
