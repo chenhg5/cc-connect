@@ -270,6 +270,103 @@ func TestSendDoesNotHoldStdinOpen(t *testing.T) {
 	}
 }
 
+func TestAntigravitySession_ReportsHeadlessExitFailures(t *testing.T) {
+	for _, tt := range []struct {
+		name, script, want string
+	}{
+		{"soft_denied_success", "printf 'headless mode cannot prompt; auto-denied' >&2; exit 0", "headless mode cannot prompt"},
+		{"empty_success", "exit 0", "without producing a response"},
+		{"failed_without_stderr", "exit 2", "exit status 2"},
+		{"failed_with_stderr", "printf 'tool execution failed' >&2; exit 2", "tool execution failed"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Setenv("HOME", t.TempDir())
+			cmdPath := filepath.Join(t.TempDir(), "fake-agy.sh")
+			if err := os.WriteFile(cmdPath, []byte("#!/bin/sh\n"+tt.script+"\n"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			s, err := newAntigravitySession(context.Background(), cmdPath, nil, t.TempDir(), "", "yolo", "existing-session", nil, 2*time.Second)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer func() { _ = s.Close() }()
+			if err := s.Send("test", "", nil, nil); err != nil {
+				t.Fatal(err)
+			}
+			select {
+			case event := <-s.Events():
+				if event.Type != core.EventError || event.Error == nil || !strings.Contains(event.Error.Error(), tt.want) {
+					t.Fatalf("event = %+v, want error containing %q", event, tt.want)
+				}
+			case <-time.After(3 * time.Second):
+				t.Fatal("timeout waiting for process error")
+			}
+		})
+	}
+}
+
+func TestRedactAgyStderr_RemovesEnvironmentSecrets(t *testing.T) {
+	got := redactAgyStderr("  denied token=secret-value-123 path=/tmp/project  ", []string{"API_TOKEN=secret-value-123", "PATH=/tmp/project"})
+	if strings.Contains(got, "secret-value-123") || !strings.Contains(got, "/tmp/project") || strings.TrimSpace(got) != got {
+		t.Fatalf("redacted stderr = %q", got)
+	}
+}
+
+func TestAntigravitySession_StreamResponseDiagnostics(t *testing.T) {
+	for _, tt := range []struct {
+		name, output, want string
+	}{
+		{"session_only", `{"event":"init","conversation_id":"session-1"}`, ""},
+		{"tool_only", `{"event":"step_update","step_update":{"step_index":1,"state":"DONE","step_type":"tool","tool_info":{"name":"run_command","output":"tool output"}}}`, ""},
+		{"whitespace", `{"event":"step_update","step_update":{"step_type":"agent_response","text_delta":"  "}}`, ""},
+		{"text_delta", `{"event":"step_update","step_update":{"step_type":"agent_response","text_delta":"answer"}}`, "answer"},
+		{"final_response", `{"event":"result","result":{"status":"SUCCESS","response":"answer"}}`, "answer"},
+		{"plain_text", "answer", "answer\n"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Setenv("HOME", t.TempDir())
+			cmdPath := filepath.Join(t.TempDir(), "fake-agy.sh")
+			script := "#!/bin/sh\ncat <<'AGY_OUTPUT'\n" + tt.output + "\nAGY_OUTPUT\n"
+			if err := os.WriteFile(cmdPath, []byte(script), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			s, err := newAntigravitySession(context.Background(), cmdPath, nil, t.TempDir(), "", "yolo", "existing-session", nil, 2*time.Second)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer func() { _ = s.Close() }()
+			if err := s.Send("test", "", nil, nil); err != nil {
+				t.Fatal(err)
+			}
+			var response strings.Builder
+			var responseErr error
+			deadline := time.After(3 * time.Second)
+			for {
+				select {
+				case event := <-s.Events():
+					switch event.Type {
+					case core.EventText:
+						response.WriteString(event.Content)
+					case core.EventError:
+						responseErr = event.Error
+					case core.EventResult:
+						if tt.want == "" {
+							if responseErr == nil || !strings.Contains(responseErr.Error(), "without producing a response") {
+								t.Fatalf("error = %v, want missing response diagnostic", responseErr)
+							}
+						} else if responseErr != nil || response.String() != tt.want {
+							t.Fatalf("response = %q, error = %v, want %q", response.String(), responseErr, tt.want)
+						}
+						return
+					}
+				case <-deadline:
+					t.Fatal("timeout waiting for response diagnostics")
+				}
+			}
+		})
+	}
+}
+
 func contains(xs []string, want string) bool {
 	for _, x := range xs {
 		if strings.TrimSpace(x) == want {
