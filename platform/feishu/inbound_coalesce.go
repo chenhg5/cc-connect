@@ -15,13 +15,33 @@ type inboundBatch struct {
 }
 
 // Only plain text and images participate. Commands, permission decisions,
-// quoted context and other attachment types preserve immediate dispatch.
+// AskUserQuestion answers, quoted context and other attachment types preserve
+// immediate dispatch.
 func canCoalesceInbound(msg *core.Message) bool {
+	content := strings.TrimSpace(msg.Content)
 	return msg.SessionKey != "" && msg.UserID != "" &&
 		!msg.IsPermissionResponse && !msg.FromVoice && msg.ModeOverride == "" &&
 		msg.ExtraContent == "" && len(msg.Files) == 0 && msg.Audio == nil && msg.Location == nil &&
-		!strings.HasPrefix(strings.TrimSpace(msg.Content), "/") &&
-		(strings.TrimSpace(msg.Content) != "" || len(msg.Images) > 0)
+		!strings.HasPrefix(content, "/") && !strings.HasPrefix(content, "askq:") &&
+		(content != "" || len(msg.Images) > 0)
+}
+
+// dispatchControlMessage delivers a card control callback (askq:, perm:,
+// cmd:) on its own, never merged into a coalesced burst. Core recognises these
+// callbacks by their exact content, so joining one with neighbouring text
+// would turn an option click into free text. A burst already buffered for the
+// session is flushed first so the callback cannot overtake messages the user
+// sent before clicking.
+func (p *Platform) dispatchControlMessage(msg *core.Message) {
+	if p.inboundCoalesceWindow <= 0 || msg == nil {
+		p.deliverCoreMessage(msg)
+		return
+	}
+	p.inboundDispatchMu.Lock()
+	defer p.inboundDispatchMu.Unlock()
+	p.populateWorkspaceChannelKeys(msg)
+	p.flushInboundSession(msg.SessionKey)
+	p.deliverCoreMessage(msg)
 }
 
 func (p *Platform) coalesceInboundMessage(msg *core.Message) {

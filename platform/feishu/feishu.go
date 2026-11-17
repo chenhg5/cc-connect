@@ -1423,11 +1423,14 @@ func isMessageWithdrawnError(err error) bool {
 // Like the message path (dispatchMessageWithHistory), the goroutine has no
 // recover. The callback has already been answered when it runs, so Feishu will
 // not redeliver the action.
+//
+// Card callbacks bypass inbound coalescing (see dispatchControlMessage): core
+// matches them by exact content, so they must reach it unmodified.
 func (p *Platform) dispatchCardActionMessage(chatID string, msg *core.Message) {
 	go func() {
 		msg.UserName = p.resolveUserName(msg.UserID)
 		msg.ChatName = p.resolveChatName(chatID)
-		p.dispatchCoreMessage(msg)
+		p.dispatchControlMessage(msg)
 	}()
 }
 
