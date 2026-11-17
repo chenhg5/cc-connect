@@ -20,7 +20,8 @@ import (
 )
 
 // qoderSession manages a multi-turn Qoder conversation.
-// Each Send() spawns `qodercli -p <prompt> -f stream-json -q`.
+// Each Send() spawns `qodercli -p -f stream-json --input-format stream-json -q`
+// and writes the prompt to stdin as a single stream-json user frame.
 // Subsequent turns use `-r <sessionID>` to resume the conversation.
 type qoderSession struct {
 	cmd            string
@@ -92,7 +93,12 @@ func (qs *qoderSession) Send(prompt string, messageID string, images []core.Imag
 		return fmt.Errorf("session is closed")
 	}
 
-	args := append(append([]string{}, qs.extraArgs...), "-p", prompt, "-f", "stream-json", "-q", "-w", qs.workDir)
+	// The prompt is delivered via stdin (stream-json input) rather than as a
+	// positional argument. qodercli's CLI parser treats a positional query
+	// starting with "-" as an unknown option, and cc-connect prepends
+	// "--- Reply chain ..." when a message is a reply, which previously broke
+	// parsing with `error: unknown option '--'`.
+	args := append(append([]string{}, qs.extraArgs...), "-p", "-f", "stream-json", "--input-format", "stream-json", "-q", "-w", qs.workDir)
 
 	sid := qs.CurrentSessionID()
 	if sid != "" {
@@ -118,6 +124,12 @@ func (qs *qoderSession) Send(prompt string, messageID string, images []core.Imag
 	if len(qs.extraEnv) > 0 {
 		cmd.Env = core.MergeEnv(os.Environ(), qs.extraEnv)
 	}
+	prepareCmdForKill(cmd)
+
+	stdin, err := cmd.StdinPipe()
+	if err != nil {
+		return fmt.Errorf("qoderSession: stdin pipe: %w", err)
+	}
 
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
@@ -129,6 +141,37 @@ func (qs *qoderSession) Send(prompt string, messageID string, images []core.Imag
 
 	if err := cmd.Start(); err != nil {
 		return fmt.Errorf("qoderSession: start: %w", err)
+	}
+
+	// From this point the readLoop goroutine is the sole owner of cmd.Wait().
+	// On any stdin error we kill the process (process-group) and let readLoop
+	// drain stdout and reap the zombie — Send() never calls Wait() itself.
+
+	// Deliver the prompt as a single stream-json user frame, then close stdin
+	// (EOF) so qodercli processes this turn and exits.
+	frame, err := json.Marshal(map[string]any{
+		"type":    "user",
+		"message": map[string]any{"role": "user", "content": prompt},
+	})
+	if err != nil {
+		_ = stdin.Close()
+		_ = forceKillCmd(cmd)
+		qs.wg.Add(1)
+		go qs.readLoop(cmd, stdout, &stderrBuf)
+		return fmt.Errorf("qoderSession: marshal prompt: %w", err)
+	}
+	if _, err := stdin.Write(append(frame, '\n')); err != nil {
+		_ = stdin.Close()
+		_ = forceKillCmd(cmd)
+		qs.wg.Add(1)
+		go qs.readLoop(cmd, stdout, &stderrBuf)
+		return fmt.Errorf("qoderSession: write stdin: %w", err)
+	}
+	if err := stdin.Close(); err != nil {
+		_ = forceKillCmd(cmd)
+		qs.wg.Add(1)
+		go qs.readLoop(cmd, stdout, &stderrBuf)
+		return fmt.Errorf("qoderSession: close stdin: %w", err)
 	}
 
 	qs.wg.Add(1)

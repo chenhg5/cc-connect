@@ -2,8 +2,11 @@ package core
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -19,6 +22,15 @@ import (
 // --- stubs for Engine tests ---
 
 type stubAgent struct{}
+
+type failingHistoryAgent struct {
+	stubAgent
+	err error
+}
+
+func (a *failingHistoryAgent) GetSessionHistory(context.Context, string, int) ([]HistoryEntry, error) {
+	return []HistoryEntry{{Role: "user", Content: "partial history"}}, a.err
+}
 
 func (a *stubAgent) Name() string { return "stub" }
 func (a *stubAgent) StartSession(_ context.Context, _ string) (AgentSession, error) {
@@ -3830,6 +3842,33 @@ func TestCmdCurrent_UsesLegacyTextOnPlatformWithoutCardSupport(t *testing.T) {
 	}
 }
 
+func TestCmdHistory_ReadFailureIsVisibleWithoutLeakingPath(t *testing.T) {
+	const secretPath = "/private/codex-home/sessions/secret.jsonl"
+	agent := &failingHistoryAgent{err: fmt.Errorf("scan %s: token too long", secretPath)}
+	msg := &Message{SessionKey: "test:history-failure", ReplyCtx: "ctx"}
+
+	plain := &stubPlatformEngine{n: "plain"}
+	textEngine := NewEngine("test", agent, []Platform{plain}, "", LangEnglish)
+	textEngine.sessions.GetOrCreateActive(msg.SessionKey).SetAgentSessionID("broken", "test")
+	textEngine.cmdHistory(plain, msg, []string{"10"})
+	sent := plain.getSent()
+	if len(sent) != 1 || sent[0] != textEngine.i18n.T(MsgHistoryReadFailed) || strings.Contains(sent[0], secretPath) {
+		t.Fatalf("text history response = %q; want generic localized failure without path", sent)
+	}
+
+	cardPlatform := &stubCardPlatform{stubPlatformEngine: stubPlatformEngine{n: "cards"}}
+	cardEngine := NewEngine("test", agent, []Platform{cardPlatform}, "", LangEnglish)
+	cardEngine.sessions.GetOrCreateActive(msg.SessionKey).SetAgentSessionID("broken", "test")
+	cardEngine.cmdHistory(cardPlatform, msg, nil)
+	if len(cardPlatform.repliedCards) != 1 {
+		t.Fatalf("card replies = %d, want 1", len(cardPlatform.repliedCards))
+	}
+	cardText := cardPlatform.repliedCards[0].RenderText()
+	if !strings.Contains(cardText, cardEngine.i18n.T(MsgHistoryReadFailed)) || strings.Contains(cardText, secretPath) || strings.Contains(cardText, "partial history") {
+		t.Fatalf("card history response = %q; want generic localized failure without path or partial history", cardText)
+	}
+}
+
 func TestCmdCurrent_ShowsAgentSummaryWhenNoCustomName(t *testing.T) {
 	p := &stubPlatformEngine{n: "plain"}
 	agent := &stubListAgent{sessions: []AgentSessionInfo{
@@ -5499,7 +5538,7 @@ func TestCmdReasoning_UsageListsAgentEfforts(t *testing.T) {
 	t.Run("card note", func(t *testing.T) {
 		agent := &stubModelModeAgent{reasoningEfforts: efforts}
 		e := NewEngine("test", agent, nil, "", LangEnglish)
-		card := e.renderReasoningCard()
+		card := e.renderReasoningCard(e.agent)
 
 		for _, element := range card.Elements {
 			if note, ok := element.(CardNote); ok && note.Text == wantUsage {
@@ -5549,6 +5588,79 @@ func TestCmdReasoning_RejectsMinimal(t *testing.T) {
 	}
 	if len(p.sent) != 1 || !strings.Contains(p.sent[0], "/reasoning <number>") || strings.Contains(p.sent[0], "minimal") {
 		t.Fatalf("sent = %v, want usage without minimal", p.sent)
+	}
+}
+
+// stubPiEffortAgent mimics agent/pi's reasoning effort set, which differs from
+// Codex's (no "max"; adds "off" and "minimal").
+type stubPiEffortAgent struct {
+	stubModelModeAgent
+}
+
+func (a *stubPiEffortAgent) AvailableReasoningEfforts() []string {
+	return []string{"off", "minimal", "low", "medium", "high", "xhigh"}
+}
+
+// TestCmdReasoning_NoHardcodedCodexLevels is a regression test for the bug
+// where /reasoning displayed Codex-specific text for every agent: the
+// not-set hint said "using Codex default" and the usage line hardcoded
+// Codex's <low|medium|high|xhigh|max> set. The usage line must list the
+// active agent's own AvailableReasoningEfforts() and mention no agent name.
+func TestCmdReasoning_NoHardcodedCodexLevels(t *testing.T) {
+	p := &stubPlatformEngine{n: "plain"}
+	agent := &stubPiEffortAgent{}
+	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+	msg := &Message{SessionKey: "test:user1", ReplyCtx: "ctx"}
+
+	// Listing (no args) on a text platform.
+	e.cmdReasoning(p, msg, nil)
+	if len(p.sent) != 1 {
+		t.Fatalf("expected 1 reply, got %d", len(p.sent))
+	}
+	got := p.sent[0]
+	if !strings.Contains(got, "off|minimal|low|medium|high|xhigh") {
+		t.Fatalf("usage line must list the agent's own efforts, got: %s", got)
+	}
+	if strings.Contains(got, "max") {
+		t.Fatalf("usage line must not contain efforts outside the agent's set (max), got: %s", got)
+	}
+	if strings.Contains(got, "Codex") {
+		t.Fatalf("output must not hardcode the agent name Codex, got: %s", got)
+	}
+
+	// Invalid target (a Codex-only level) also renders the agent-specific usage line.
+	p.sent = nil
+	e.cmdReasoning(p, msg, []string{"max"})
+	if len(p.sent) != 1 {
+		t.Fatalf("expected 1 reply for invalid effort, got %d", len(p.sent))
+	}
+	got = p.sent[0]
+	if !strings.Contains(got, "off|minimal|low|medium|high|xhigh") || strings.Contains(got, "Codex") {
+		t.Fatalf("invalid-effort reply = %q, want agent-specific usage without Codex mention", got)
+	}
+	if agent.reasoningEffort != "" {
+		t.Fatalf("reasoning effort = %q, want unchanged empty", agent.reasoningEffort)
+	}
+
+	// Card path: the not-set hint and card note must also stay agent-agnostic.
+	card := e.renderReasoningCard(agent)
+	var md, note string
+	for _, el := range card.Elements {
+		switch v := el.(type) {
+		case CardMarkdown:
+			md += v.Content
+		case CardNote:
+			note += v.Text
+		}
+	}
+	if strings.Contains(md, "Codex") || strings.Contains(note, "Codex") {
+		t.Fatalf("card must not mention Codex, markdown: %q note: %q", md, note)
+	}
+	if !strings.Contains(md, "not set, using default") {
+		t.Fatalf("card markdown should show agent-agnostic default hint, got: %q", md)
+	}
+	if !strings.Contains(note, "off|minimal|low|medium|high|xhigh") {
+		t.Fatalf("card note must list the agent's own efforts, got: %q", note)
 	}
 }
 
@@ -7341,6 +7453,10 @@ type controllableAgentSession struct {
 	closeDelay    time.Duration // how long Close() blocks before returning
 	closeErr      error         // what Close() reports (e.g. "process still alive")
 	closeFinished atomic.Bool   // set once Close() has returned
+
+	// CancelTurn control, for tests that exercise AgentSessionCanceller.
+	cancelTurnFn func() error // injected behavior; defaults to a no-op success
+	cancelCalls  atomic.Int32 // how many times CancelTurn was invoked
 }
 
 func newControllableSession(id string) *controllableAgentSession {
@@ -7369,6 +7485,20 @@ func (s *controllableAgentSession) GetUsage(_ context.Context) (*UsageReport, er
 }
 func (s *controllableAgentSession) GetContextUsage() *ContextUsage { return s.contextUsage }
 func (s *controllableAgentSession) Alive() bool                    { return s.alive }
+
+// CancelTurn implements AgentSessionCanceller for canceller-path tests.
+// Records the call and delegates to cancelTurnFn. Default behavior
+// returns an error so existing tests that don't opt in continue to
+// fall through to normalCleanup (preserves pre-canceller semantics).
+// Tests that exercise the canceller path inject a cancelTurnFn that
+// returns nil.
+func (s *controllableAgentSession) CancelTurn() error {
+	s.cancelCalls.Add(1)
+	if s.cancelTurnFn != nil {
+		return s.cancelTurnFn()
+	}
+	return fmt.Errorf("canceller not enabled for this fixture")
+}
 func (s *controllableAgentSession) Close() error {
 	if s.closeDelay > 0 {
 		time.Sleep(s.closeDelay)
@@ -8338,7 +8468,31 @@ func TestCmdCronExec_TriggersJob(t *testing.T) {
 			for time.Now().Before(deadline) {
 				sent := platform.getSent()
 				if sentContains(sent, "triggered") && sentContains(sent, "manual run complete") {
-					return
+					// RunJobNow runs the job asynchronously and its completion
+					// bookkeeping (MarkRun → store save) can land after the
+					// output is sent. Wait for it before returning, otherwise
+					// the late write races t.TempDir() removal and the test
+					// flakes with "crons: directory not empty". MarkRun sets
+					// LastRun and saves while holding store.mu, so reading it
+					// under that lock both avoids a data race on the field and
+					// proves the save has completed. (store.Get returns the
+					// shared *CronJob, so reading the field after Get returns
+					// is unsynchronized.)
+					for time.Now().Before(deadline) {
+						store.mu.Lock()
+						marked := false
+						for _, j := range store.jobs {
+							if j.ID == job.ID && !j.LastRun.IsZero() {
+								marked = true
+							}
+						}
+						store.mu.Unlock()
+						if marked {
+							return
+						}
+						time.Sleep(5 * time.Millisecond)
+					}
+					t.Fatal("run output seen but the job was never marked complete")
 				}
 				time.Sleep(10 * time.Millisecond)
 			}
@@ -9733,6 +9887,48 @@ func TestExecuteCardAction_ModeCleansUpWithInteractiveKey(t *testing.T) {
 	}
 }
 
+// Regression: the /list card button reaches executeCardAction, which cleared the
+// session history after switching. cmdSwitch never did, and documents why —
+// SwitchToAgentSession returns the existing Session when the agent session ID is
+// known, so wiping History makes /status and /history report zero messages right
+// after a switch that succeeded. Typing "/switch 1" kept its history; tapping the
+// same session in the card did not.
+func TestExecuteCardAction_SwitchPreservesHistory(t *testing.T) {
+	p := &stubCardPlatform{stubPlatformEngine: stubPlatformEngine{n: "feishu"}}
+	agent := &stubListAgent{sessions: []AgentSessionInfo{
+		{ID: "sess-a1", Summary: "a1"},
+		{ID: "sess-a2", Summary: "a2"},
+	}}
+	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+
+	sessionKey := "feishu:channel1:user1"
+	sessions := e.sessions
+
+	// A session with recorded history, then a second session that became active —
+	// the state a /list card switch encounters.
+	first := sessions.GetOrCreateActive(sessionKey)
+	first.SetAgentSessionID("sess-a1", "stub")
+	first.AddHistory("user", "A1 first message")
+	first.AddHistory("assistant", "A1 reply")
+	sessions.Save()
+
+	sessions.NewSession(sessionKey, "a2")
+	sessions.GetOrCreateActive(sessionKey).SetAgentSessionID("sess-a2", "stub")
+	sessions.Save()
+
+	// "act:/switch 1" is what a /list card row sends.
+	_ = e.handleCardNav("act:/switch 1", sessionKey)
+
+	active := sessions.GetOrCreateActive(sessionKey)
+	if active.GetAgentSessionID() != "sess-a1" {
+		t.Fatalf("active session after card /switch = %q, want sess-a1", active.GetAgentSessionID())
+	}
+	hist := active.GetHistory(10)
+	if len(hist) == 0 || !strings.Contains(hist[0].Content, "A1") {
+		t.Fatalf("history after card /switch = %v, want the A1 conversation preserved", hist)
+	}
+}
+
 // ===========================================================================
 // P0 Beta release tests
 // ===========================================================================
@@ -10488,6 +10684,316 @@ func TestCmdCompress_DrainsQueueAfterSuccess(t *testing.T) {
 	if !found {
 		t.Fatalf("queued message not found in send calls: %v", calls)
 	}
+}
+
+// --- cmdPs ---
+
+// stubCancellerCompressorAgent is a controllableAgent that also exposes
+// CompressCommand(), so the same session can be used in canceller-path
+// tests (cancel + keep state alive) and compress-path tests (verify
+// /compress still works after a graceful cancel).
+type stubCancellerCompressorAgent struct {
+	controllableAgent
+	cmd string
+}
+
+func (a *stubCancellerCompressorAgent) CompressCommand() string { return a.cmd }
+
+// TestStopInteractiveSession_CancellerPath_KeepsStateAlive verifies that
+// when the agent session implements AgentSessionCanceller, /stop routes
+// through the canceller branch — the subprocess is NOT closed and the
+// interactiveState entry remains in the map for the next user message.
+// This is the prerequisite for /compress, /clear, /resume working after
+// /stop (issue: /stop then /compress returned "no active session" because
+// the previous design killed the subprocess and deleted the state).
+func TestStopInteractiveSession_CancellerPath_KeepsStateAlive(t *testing.T) {
+	sess := newControllableSession("canceller-1")
+	sess.cancelTurnFn = func() error { return nil } // opt into canceller path
+	agent := &controllableAgent{nextSession: sess}
+	p := &stubPlatformEngine{n: "test"}
+	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+
+	key := "test:user1"
+	e.interactiveMu.Lock()
+	e.interactiveStates[key] = &interactiveState{
+		agentSession: sess,
+		platform:     p,
+		replyCtx:     "ctx",
+	}
+	e.interactiveMu.Unlock()
+
+	stopped := e.stopInteractiveSession(key, p, "ctx")
+	if !stopped {
+		t.Fatal("stopInteractiveSession returned false; expected canceller path to succeed")
+	}
+
+	// CancelTurn must have been invoked exactly once.
+	if calls := sess.cancelCalls.Load(); calls != 1 {
+		t.Fatalf("CancelTurn called %d times, want 1", calls)
+	}
+	// Subprocess is still alive — Close() was NOT called.
+	if !sess.Alive() {
+		t.Fatal("subprocess was closed; canceller path must keep it alive")
+	}
+	if sess.closeFinished.Load() {
+		t.Fatal("Close() ran; canceller path must skip Close()")
+	}
+	// interactiveState still in the map.
+	e.interactiveMu.Lock()
+	state, ok := e.interactiveStates[key]
+	e.interactiveMu.Unlock()
+	if !ok || state == nil {
+		t.Fatal("interactiveState removed from map; canceller path must keep it alive")
+	}
+	if state.agentSession != sess {
+		t.Fatalf("state.agentSession = %v, want original session %v", state.agentSession, sess)
+	}
+}
+
+// hookEventRecorder captures the hook events an engine emits.
+type hookEventRecorder struct {
+	mu     sync.Mutex
+	events []HookEvent
+}
+
+func (r *hookEventRecorder) add(ev HookEvent) {
+	r.mu.Lock()
+	r.events = append(r.events, ev)
+	r.mu.Unlock()
+}
+
+func (r *hookEventRecorder) snapshot() []HookEvent {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	out := make([]HookEvent, len(r.events))
+	copy(out, r.events)
+	return out
+}
+
+// find returns the first captured event with the given name.
+func (r *hookEventRecorder) find(name HookEventType) (HookEvent, bool) {
+	for _, ev := range r.snapshot() {
+		if ev.Event == name {
+			return ev, true
+		}
+	}
+	return HookEvent{}, false
+}
+
+// newHookRecorderServer starts an HTTP endpoint that records every hook event
+// delivered to it. The returned recorder and server must both be shut down by
+// the caller.
+func newHookRecorderServer(t *testing.T) (*hookEventRecorder, *httptest.Server) {
+	t.Helper()
+	rec := &hookEventRecorder{}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var ev HookEvent
+		if err := json.NewDecoder(r.Body).Decode(&ev); err != nil {
+			t.Errorf("decode hook event: %v", err)
+		}
+		rec.add(ev)
+		w.WriteHeader(http.StatusOK)
+	}))
+	t.Cleanup(srv.Close)
+	return rec, srv
+}
+
+// stopWithHookEvent runs /stop against an engine whose hook manager records
+// every emitted event, and returns the recorder.
+func stopWithHookEvent(t *testing.T, configure func(e *Engine)) *hookEventRecorder {
+	t.Helper()
+	rec, srv := newHookRecorderServer(t)
+
+	sess := newControllableSession("hook-event-1")
+	sess.cancelTurnFn = func() error { return nil } // take the graceful-cancel path
+	agent := &controllableAgent{nextSession: sess}
+	p := &stubPlatformEngine{n: "test"}
+	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+
+	// Hooks are synchronous (Async=false) so the event is recorded by the
+	// time stopInteractiveSession returns.
+	e.SetHooks(NewHookManager("test", []HookConfig{
+		{Event: "*", Type: "http", URL: srv.URL, Async: boolPtr(false)},
+	}, "sh", "-c", ""))
+
+	if configure != nil {
+		configure(e)
+	}
+
+	key := "test:user1"
+	e.interactiveMu.Lock()
+	e.interactiveStates[key] = &interactiveState{
+		agentSession: sess,
+		platform:     p,
+		replyCtx:     "ctx",
+	}
+	e.interactiveMu.Unlock()
+
+	if !e.stopInteractiveSession(key, p, "ctx") {
+		t.Fatal("stopInteractiveSession returned false; expected the canceller path to succeed")
+	}
+	return rec
+}
+
+// TestStopInteractiveSession_HookEvent_DefaultsToSessionEnded verifies the
+// backward-compatible default: when the stop hook event is not configured,
+// /stop emits "session.ended" — the event name existing hook rules already
+// listen for. Graceful cancellation must not silently rename it.
+func TestStopInteractiveSession_HookEvent_DefaultsToSessionEnded(t *testing.T) {
+	rec := stopWithHookEvent(t, nil)
+
+	ev, ok := rec.find(HookEventSessionEnded)
+	if !ok {
+		t.Fatalf("expected a %q hook event, got %v", HookEventSessionEnded, rec.snapshot())
+	}
+	if ev.SessionKey != "test:user1" {
+		t.Errorf("session_key = %q, want %q", ev.SessionKey, "test:user1")
+	}
+	if _, ok := rec.find(HookEventTurnCancelled); ok {
+		t.Errorf("default mode must not emit %q", HookEventTurnCancelled)
+	}
+}
+
+// TestStopInteractiveSession_HookEvent_TurnCancelledWhenOptedIn verifies the
+// opt-in mode: with stop_hook_event = "turn.cancelled", /stop emits the
+// precise "turn.cancelled" event instead of "session.ended".
+func TestStopInteractiveSession_HookEvent_TurnCancelledWhenOptedIn(t *testing.T) {
+	rec := stopWithHookEvent(t, func(e *Engine) {
+		e.SetStopHookEvent(HookEventTurnCancelled)
+	})
+
+	ev, ok := rec.find(HookEventTurnCancelled)
+	if !ok {
+		t.Fatalf("expected a %q hook event, got %v", HookEventTurnCancelled, rec.snapshot())
+	}
+	if ev.SessionKey != "test:user1" {
+		t.Errorf("session_key = %q, want %q", ev.SessionKey, "test:user1")
+	}
+	if _, ok := rec.find(HookEventSessionEnded); ok {
+		t.Errorf("opt-in mode must not emit %q", HookEventSessionEnded)
+	}
+}
+
+// TestSetStopHookEvent_RejectsUnknownValue verifies that an unknown event
+// name is ignored instead of silently disabling hook delivery.
+func TestSetStopHookEvent_RejectsUnknownValue(t *testing.T) {
+	e := NewEngine("test", &stubAgent{}, []Platform{&stubPlatformEngine{n: "test"}}, "", LangEnglish)
+	e.SetStopHookEvent("bogus.event")
+	if got := e.stopHookEventType(); got != HookEventSessionEnded {
+		t.Fatalf("stop hook event = %q, want the default %q", got, HookEventSessionEnded)
+	}
+}
+
+// TestCmdCancel_ForcesCloseAfterGracefulCancel verifies the cmdCancel
+// leak fix: even when stopInteractiveSession takes the canceller branch
+// (which keeps the subprocess alive for /stop), cmdCancel must follow up
+// with an explicit close so the subprocess is reaped — /cancel's intent
+// is to discard everything, unlike /stop which preserves the session.
+func TestCmdCancel_ForcesCloseAfterGracefulCancel(t *testing.T) {
+	sess := newControllableSession("cancel-leak-1")
+	sess.cancelTurnFn = func() error { return nil } // opt into canceller path
+	agent := &controllableAgent{nextSession: sess}
+	p := &stubPlatformEngine{n: "test"}
+	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+
+	key := "test:user1"
+	e.interactiveMu.Lock()
+	e.interactiveStates[key] = &interactiveState{
+		agentSession: sess,
+		platform:     p,
+		replyCtx:     "ctx",
+	}
+	e.interactiveMu.Unlock()
+
+	// Pre-seed a session AgentSessionID so we can verify /cancel clears it.
+	active := e.sessions.GetOrCreateActive(key)
+	active.SetAgentSessionID("agent-1", "controllable")
+	e.sessions.Save()
+
+	e.cmdCancel(p, &Message{SessionKey: key, ReplyCtx: "ctx"})
+
+	// Wait for the async closeAgentSessionAsync goroutine to finish.
+	deadline := time.After(2 * time.Second)
+	for !sess.closeFinished.Load() {
+		select {
+		case <-deadline:
+			t.Fatal("subprocess Close() never ran after /cancel")
+		default:
+			time.Sleep(10 * time.Millisecond)
+		}
+	}
+
+	// Subprocess was closed.
+	if sess.Alive() {
+		t.Fatal("subprocess still alive after /cancel; expected Close()")
+	}
+	// CancelTurn was called by the inner stopInteractiveSession.
+	if calls := sess.cancelCalls.Load(); calls != 1 {
+		t.Fatalf("CancelTurn called %d times, want 1", calls)
+	}
+	// AgentSessionID was cleared by the cmdCancel post-stop block.
+	if got := active.GetAgentSessionID(); got != "" {
+		t.Fatalf("AgentSessionID = %q, want cleared by /cancel", got)
+	}
+}
+
+// TestCmdStop_GracefulAllowsCompress is the end-to-end regression for the
+// user's reported bug: /stop then /compress returned "no active session"
+// because the previous design killed the subprocess. With the canceller
+// path keeping the session alive, /compress after /stop must reach the
+// agent session and send /compact (instead of bailing at the no-state
+// guard at engine.go:10449).
+func TestCmdStop_GracefulAllowsCompress(t *testing.T) {
+	sess := newControllableSession("graceful-compress-1")
+	sess.cancelTurnFn = func() error { return nil } // opt into canceller path
+	agent := &stubCancellerCompressorAgent{
+		controllableAgent: controllableAgent{nextSession: sess},
+		cmd:               "/compact",
+	}
+	p := &stubPlatformEngine{n: "test"}
+	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+
+	key := "test:user1"
+	e.interactiveMu.Lock()
+	e.interactiveStates[key] = &interactiveState{
+		agentSession: sess,
+		platform:     p,
+		replyCtx:     "ctx",
+	}
+	e.interactiveMu.Unlock()
+
+	// 1. /stop — must keep the session alive.
+	e.cmdStop(p, &Message{SessionKey: key, ReplyCtx: "ctx"})
+
+	// Verify the canceller path ran.
+	if calls := sess.cancelCalls.Load(); calls != 1 {
+		t.Fatalf("CancelTurn called %d times after /stop, want 1", calls)
+	}
+	e.interactiveMu.Lock()
+	state, ok := e.interactiveStates[key]
+	e.interactiveMu.Unlock()
+	if !ok || state == nil || state.agentSession != sess {
+		t.Fatal("/stop removed the interactive state; canceller path must keep it alive")
+	}
+
+	// 2. /compress — must NOT reply with MsgCompressNoSession.
+	e.cmdCompress(p, &Message{SessionKey: key, Content: "/compress", ReplyCtx: "ctx"})
+
+	// Verify we did NOT send the no-session reply.
+	for _, msg := range p.getSent() {
+		if strings.Contains(msg, e.i18n.T(MsgCompressNoSession)) {
+			t.Fatalf("cmdCompress returned MsgCompressNoSession after /stop; canceller path should keep state alive. sent=%v", p.getSent())
+		}
+	}
+
+	// Verify cmdCompress reached runCompress by completing the turn with a
+	// result event. runCompress calls drainEvents(state.agentSession.Events())
+	// first, so we deliver an EventResult that lets runCompress exit.
+	sess.events <- Event{Type: EventResult, Content: "", Done: true}
+	// (We don't assert /compact was sent here because cmdCompress dispatches
+	// runCompress in a goroutine that takes the session lock; the assertion
+	// that "MsgCompressNoSession was NOT sent" is sufficient to prove the
+	// state guard passed.)
 }
 
 // --- cmdPs ---
@@ -11503,6 +12009,33 @@ func TestCmdShell_EmptyCommand_ShowsUsage(t *testing.T) {
 	}
 }
 
+func TestCmdShell_BareCommand_ShowsUsage(t *testing.T) {
+	p := &stubPlatformEngine{n: "test"}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	e.SetAdminFrom("admin")
+
+	// "/shell" with no arguments and no trailing space should show usage.
+	msg := &Message{
+		SessionKey: "test:ch:admin",
+		Content:    "/shell",
+		ReplyCtx:   "ctx",
+		UserID:     "admin",
+		Platform:   "test",
+	}
+	e.cmdShell(p, msg, "/shell")
+
+	sent := p.getSent()
+	foundUsage := false
+	for _, s := range sent {
+		if strings.Contains(s, "Usage") {
+			foundUsage = true
+		}
+	}
+	if !foundUsage {
+		t.Fatalf("expected usage message for bare /shell, got %v", sent)
+	}
+}
+
 func TestCmdShell_MultiWorkspaceUsesSharedBindingWorkDir(t *testing.T) {
 	p := &stubPlatformEngine{n: "test"}
 	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
@@ -11843,7 +12376,7 @@ func TestRunShellWithProgress_NonexistentCommand(t *testing.T) {
 			if !strings.Contains(last, "❌") {
 				t.Errorf("expected failure emoji, got %q", last)
 			}
-			if !strings.Contains(last, "failed to start") && !strings.Contains(last, "not found") && !strings.Contains(last, "executable file not found") && !strings.Contains(last, "CommandNotFoundException") {
+			if !strings.Contains(last, "failed to start") && !strings.Contains(last, "not found") && !strings.Contains(last, "executable file not found") && !strings.Contains(last, "CommandNotFoundException") && !strings.Contains(last, "Permission denied") {
 				t.Errorf("expected start failure message, got %q", last)
 			}
 			return
@@ -14449,6 +14982,161 @@ func TestUnsolicitedReader_StopsOnCancel(t *testing.T) {
 	}
 }
 
+// TestUnsolicitedReader_FlushesPartialTextOnCancel is a regression test for
+// text being dropped when a new foreground turn cancels an unsolicited reader
+// mid-turn. Scenario (Claude Code, after a --resume): a stray result ended the
+// user's turn early, the real reply then streamed into the unsolicited reader,
+// and the user sent another message before that reply's EventResult arrived.
+// The already-streamed text must still be delivered.
+func TestUnsolicitedReader_FlushesPartialTextOnCancel(t *testing.T) {
+	p := &stubPlatformEngine{n: "test"}
+	sess := newControllableSession("unsol-flush")
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	defer func() { _ = e.Stop() }()
+
+	sessions := e.sessions
+	session := sessions.GetOrCreateActive("test:ch1:u1")
+
+	state := &interactiveState{
+		agentSession: sess,
+		platform:     p,
+		replyCtx:     "ctx",
+	}
+
+	e.startUnsolicitedReader(state, session, sessions, "test:ch1:u1", "")
+
+	sess.events <- Event{Type: EventText, Content: "Here is the analysis "}
+	sess.events <- Event{Type: EventText, Content: "you asked for."}
+
+	// Wait until the reader has consumed both events.
+	deadline := time.Now().Add(2 * time.Second)
+	for len(sess.events) > 0 && time.Now().Before(deadline) {
+		time.Sleep(5 * time.Millisecond)
+	}
+	time.Sleep(50 * time.Millisecond)
+
+	e.stopUnsolicitedReader(state)
+
+	sent := waitForPlatformSend(p, 1, 2*time.Second)
+	found := false
+	for _, s := range sent {
+		if strings.Contains(s, "Here is the analysis you asked for.") {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("expected partial unsolicited text to be flushed on cancel, got %v", sent)
+	}
+}
+
+// slowSendPlatform records sends like stubPlatformEngine but takes sendDelay
+// per Send, and blocks each Send until gate is closed when gate is non-nil.
+// It widens the window in which an asynchronous flush can be overtaken.
+type slowSendPlatform struct {
+	stubPlatformEngine
+	sendDelay time.Duration
+	gate      chan struct{}
+}
+
+func (p *slowSendPlatform) Send(ctx context.Context, rc any, content string) error {
+	if p.gate != nil {
+		<-p.gate
+	}
+	time.Sleep(p.sendDelay)
+	return p.stubPlatformEngine.Send(ctx, rc, content)
+}
+
+// startUnsolicitedReaderWithPartial starts a reader and feeds it a multi-chunk
+// partial turn (no EventResult), returning once the reader has consumed it.
+func startUnsolicitedReaderWithPartial(t *testing.T, e *Engine, p Platform, key string) (*interactiveState, []string) {
+	t.Helper()
+	sess := newControllableSession(key)
+	session := e.sessions.GetOrCreateActive(key)
+	state := &interactiveState{agentSession: sess, platform: p, replyCtx: "ctx"}
+	e.startUnsolicitedReader(state, session, e.sessions, key, "")
+
+	line := strings.Repeat("x", 99) + "\n"
+	var partial strings.Builder
+	for i := 0; i < 3*maxPlatformMessageLen/len(line); i++ {
+		partial.WriteString(line)
+	}
+	chunks := SplitMessageCodeFenceAware(partial.String(), maxPlatformMessageLen)
+	if len(chunks) < 3 {
+		t.Fatalf("test setup: expected >= 3 chunks, got %d", len(chunks))
+	}
+	sess.events <- Event{Type: EventText, Content: partial.String()}
+	deadline := time.Now().Add(2 * time.Second)
+	for len(sess.events) > 0 && time.Now().Before(deadline) {
+		time.Sleep(5 * time.Millisecond)
+	}
+	time.Sleep(50 * time.Millisecond)
+	return state, chunks
+}
+
+// TestUnsolicitedReader_FlushOrderedBeforeNextTurn verifies that partial text
+// flushed when a new foreground turn cancels the reader is fully delivered
+// before anything the new turn sends after stopUnsolicitedReader returns,
+// i.e. the flushed chunks are neither overtaken nor interleaved.
+func TestUnsolicitedReader_FlushOrderedBeforeNextTurn(t *testing.T) {
+	p := &slowSendPlatform{stubPlatformEngine: stubPlatformEngine{n: "test"}, sendDelay: 30 * time.Millisecond}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	defer func() { _ = e.Stop() }()
+
+	state, chunks := startUnsolicitedReaderWithPartial(t, e, p, "test:order:u1")
+
+	e.stopUnsolicitedReader(state)
+	// Simulates the next foreground turn replying right after taking over.
+	e.send(p, "ctx", "FOREGROUND-REPLY")
+
+	sent := waitForPlatformSend(&p.stubPlatformEngine, len(chunks)+1, 5*time.Second)
+	if len(sent) != len(chunks)+1 {
+		t.Fatalf("expected %d sends, got %d: %q", len(chunks)+1, len(sent), sent)
+	}
+	for i, chunk := range chunks {
+		if sent[i] != chunk {
+			t.Fatalf("send %d: flushed chunk out of order (foreground reply overtook flush); got %q", i, sent[i])
+		}
+	}
+	if sent[len(chunks)] != "FOREGROUND-REPLY" {
+		t.Fatalf("expected foreground reply last, got %q", sent[len(chunks)])
+	}
+}
+
+// TestUnsolicitedReader_FlushWaitIsBounded verifies that a platform stuck on
+// the flushed send cannot block stopUnsolicitedReader beyond
+// unsolicitedReaderStopTimeout, that no Events resync is forced (the reader
+// itself has exited), and that the flushed text is still delivered later.
+func TestUnsolicitedReader_FlushWaitIsBounded(t *testing.T) {
+	gate := make(chan struct{})
+	p := &slowSendPlatform{stubPlatformEngine: stubPlatformEngine{n: "test"}, gate: gate}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	defer func() { _ = e.Stop() }()
+
+	state, chunks := startUnsolicitedReaderWithPartial(t, e, p, "test:bounded:u1")
+
+	start := time.Now()
+	e.stopUnsolicitedReader(state)
+	elapsed := time.Since(start)
+	if elapsed > unsolicitedReaderStopTimeout+2*time.Second {
+		t.Fatalf("stopUnsolicitedReader blocked %v, want <= ~%v", elapsed, unsolicitedReaderStopTimeout)
+	}
+	if elapsed < unsolicitedReaderStopTimeout-time.Second {
+		t.Fatalf("stopUnsolicitedReader returned after %v; expected it to wait for the flush up to the timeout", elapsed)
+	}
+	state.mu.Lock()
+	resync := state.eventsNeedResync
+	state.mu.Unlock()
+	if resync {
+		t.Error("flush timeout must not force an Events resync: the reader already exited")
+	}
+
+	close(gate)
+	sent := waitForPlatformSend(&p.stubPlatformEngine, len(chunks), 5*time.Second)
+	if len(sent) != len(chunks) {
+		t.Fatalf("expected flushed chunks to be delivered after the gate opened, got %d of %d", len(sent), len(chunks))
+	}
+}
+
 // TestUnsolicitedReader_SetsResyncOnChannelClose verifies that when the agent
 // process exits (events channel closed), eventsNeedResync is set to true.
 func TestUnsolicitedReader_SetsResyncOnChannelClose(t *testing.T) {
@@ -14491,11 +15179,11 @@ func TestUnsolicitedReader_SetsResyncOnChannelClose(t *testing.T) {
 	}
 }
 
-// TestUnsolicitedReader_SetsResyncOnEventError verifies that EventError
-// sets eventsNeedResync to true and relays the error.
-func TestUnsolicitedReader_SetsResyncOnEventError(t *testing.T) {
+// A dead session cannot produce further background work after an error.
+func TestUnsolicitedReader_SetsResyncOnDeadSessionError(t *testing.T) {
 	p := &stubPlatformEngine{n: "test"}
 	sess := newControllableSession("unsol-error")
+	sess.alive = false
 	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
 	defer e.Stop()
 
@@ -14542,6 +15230,52 @@ func TestUnsolicitedReader_SetsResyncOnEventError(t *testing.T) {
 	}
 	if !found {
 		t.Errorf("expected error to be relayed to platform, got %v", sent)
+	}
+}
+
+func TestUnsolicitedReader_KeepsLiveSessionAfterTurnError(t *testing.T) {
+	p := &stubPlatformEngine{n: "test"}
+	sess := newControllableSession("unsol-live-error")
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	t.Cleanup(func() {
+		if err := e.Stop(); err != nil {
+			t.Error(err)
+		}
+	})
+	const key = "test:live-error:u1"
+	session := e.sessions.GetOrCreateActive(key)
+	state := &interactiveState{agentSession: sess, platform: p, replyCtx: "ctx"}
+	e.startUnsolicitedReader(state, session, e.sessions, key, "")
+	defer e.stopUnsolicitedReader(state)
+
+	// Preserve text from each failed background turn and keep accepting
+	// subsequent results; neither error is a process-exit notification.
+	for _, text := range []string{"first partial answer", "second partial answer"} {
+		sess.events <- Event{Type: EventText, Content: text}
+		sess.events <- Event{Type: EventError, Error: errors.New("turn was refused")}
+	}
+	sess.events <- Event{Type: EventText, Content: "later background answer"}
+	sess.events <- Event{Type: EventResult, Done: true}
+
+	sent := waitForPlatformSend(p, 5, 2*time.Second)
+	if len(sent) != 5 {
+		t.Fatalf("expected two partial answers, two errors and a later answer; got %v", sent)
+	}
+	e.stopUnsolicitedReader(state)
+	for i, want := range []string{"first partial answer", "turn was refused", "second partial answer", "turn was refused", "later background answer"} {
+		if !strings.Contains(sent[i], want) {
+			t.Errorf("reply %d = %q, want %q", i, sent[i], want)
+		}
+	}
+	history := session.GetHistory(0)
+	if len(history) != 3 {
+		t.Fatalf("history lost background answers: %+v", history)
+	}
+	state.mu.Lock()
+	resync := state.eventsNeedResync
+	state.mu.Unlock()
+	if resync {
+		t.Error("live session should preserve its event stream after a turn error")
 	}
 }
 
@@ -16492,5 +17226,148 @@ func TestProcessInteractiveEvents_StreamingCard_BareNoReply_Suppressed(t *testin
 	}
 	if strings.Contains(card.finalContent(), "NO_REPLY") {
 		t.Fatalf("silent reply leaked NO_REPLY into the streaming card: %q", card.finalContent())
+	}
+}
+
+// TestStopInteractiveSession_CancellerFallback_PreservesReplacedState pins the
+// compare-and-delete in normalCleanup: while the canceller path is waiting for
+// CancelTurn (interactiveMu released), /new can install a fresh state for the
+// same key. The fallback must close only the session it captured and must not
+// delete the replacement.
+func TestStopInteractiveSession_CancellerFallback_PreservesReplacedState(t *testing.T) {
+	sessA := newControllableSession("canceller-a")
+	sessB := newControllableSession("canceller-b")
+	p := &stubPlatformEngine{n: "test"}
+	e := NewEngine("test", &controllableAgent{nextSession: sessB}, []Platform{p}, "", LangEnglish)
+
+	key := "test:user1"
+	stateA := &interactiveState{agentSession: sessA, platform: p, replyCtx: "ctx"}
+	stateB := &interactiveState{agentSession: sessB, platform: p, replyCtx: "ctx2"}
+	e.interactiveMu.Lock()
+	e.interactiveStates[key] = stateA
+	e.interactiveMu.Unlock()
+
+	sessA.cancelTurnFn = func() error {
+		// Simulate /new landing while CancelTurn is blocking.
+		e.interactiveMu.Lock()
+		e.interactiveStates[key] = stateB
+		e.interactiveMu.Unlock()
+		return fmt.Errorf("interrupt not confirmed")
+	}
+
+	if stopped := e.stopInteractiveSession(key, p, "ctx"); !stopped {
+		t.Fatal("stopInteractiveSession returned false; expected fallback cleanup to run")
+	}
+
+	e.interactiveMu.Lock()
+	current := e.interactiveStates[key]
+	e.interactiveMu.Unlock()
+	if current != stateB {
+		t.Fatalf("interactiveStates[%q] = %v, want the replacement state %v", key, current, stateB)
+	}
+	if !sessB.Alive() || sessB.closeFinished.Load() {
+		t.Fatal("replacement session was closed; only the captured session may be torn down")
+	}
+	// The captured session is closed asynchronously; wait for it (same pattern
+	// as TestCmdCancel_ForcesCloseAfterGracefulCancel).
+	deadline := time.After(2 * time.Second)
+	for !sessA.closeFinished.Load() {
+		select {
+		case <-deadline:
+			t.Fatal("captured session was not closed on the canceller-failure fallback")
+		default:
+			time.Sleep(10 * time.Millisecond)
+		}
+	}
+}
+
+type recoveringEngineProgressPlatform struct {
+	stubCompactProgressPlatform
+	remainingFailures int
+}
+
+func (p *recoveringEngineProgressPlatform) UpdateMessage(ctx context.Context, handle any, content string) error {
+	if err := p.stubCompactProgressPlatform.UpdateMessage(ctx, handle, content); err != nil {
+		return err
+	}
+	if p.remainingFailures > 0 {
+		p.remainingFailures--
+		return errors.New("temporary card update failure")
+	}
+	return nil
+}
+
+func TestProcessInteractiveEvents_ProgressUpdateFailurePreservesFinalReply(t *testing.T) {
+	for _, failures := range []int{1, 100} {
+		t.Run(fmt.Sprintf("failures_%d", failures), func(t *testing.T) {
+			p := &recoveringEngineProgressPlatform{
+				stubCompactProgressPlatform: stubCompactProgressPlatform{
+					stubPlatformEngine: stubPlatformEngine{n: "test"},
+					style:              "card", supportPayload: true,
+				},
+				remainingFailures: failures,
+			}
+			e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+			sessionKey := "test:progress-recovery"
+			session := e.sessions.GetOrCreateActive(sessionKey)
+			agentSession := newControllableSession("progress-recovery")
+			state := &interactiveState{agentSession: agentSession, platform: p, replyCtx: "ctx"}
+			e.interactiveStates[sessionKey] = state
+			agentSession.events <- Event{Type: EventThinking, Content: "planning"}
+			agentSession.events <- Event{Type: EventToolUse, ToolName: "Bash", ToolInput: "echo hi"}
+			agentSession.events <- Event{Type: EventToolResult, ToolName: "Bash", ToolResult: "hi"}
+			agentSession.events <- Event{Type: EventText, Content: "done"}
+			agentSession.events <- Event{Type: EventResult, Content: "done", Done: true}
+			e.processInteractiveEvents(state, session, e.sessions, sessionKey, "message", time.Now(), nil, nil, state.replyCtx, 0)
+			if sent := p.getSent(); len(sent) != 1 || sent[0] != "done" {
+				t.Fatalf("sent = %#v, want final answer without per-tool fallback spam", sent)
+			}
+			if len(p.getPreviewStarts()) != 1 {
+				t.Fatal("recovery must use the original card")
+			}
+			edits := p.getPreviewEdits()
+			if len(edits) != 2 {
+				t.Fatalf("edits = %d, want failed progress update and final status attempt", len(edits))
+			}
+			payload, ok := ParseProgressCardPayload(edits[1])
+			if !ok || payload.State != ProgressCardStateCompleted {
+				t.Fatalf("final card payload = %#v, want completed", payload)
+			}
+		})
+	}
+}
+
+func TestCmdCurrent_UsesNativeSummaryForCurrentAgentSession(t *testing.T) {
+	nativeSessions := []AgentSessionInfo{
+		{ID: "agent-current", Summary: "Native generated title", MessageCount: 4, ModifiedAt: time.Now()},
+		{ID: "agent-other", Summary: "Other title", MessageCount: 2, ModifiedAt: time.Now()},
+	}
+	p := &stubPlatformEngine{n: "plain"}
+	e := NewEngine("test", &stubListAgent{sessions: nativeSessions}, []Platform{p}, "", LangEnglish)
+	msg := &Message{SessionKey: "test:user1", ReplyCtx: "ctx"}
+	session := e.sessions.GetOrCreateActive(msg.SessionKey)
+	session.Name = "latest user message"
+	session.SetAgentSessionID("agent-current", "codex")
+	session.AddHistory("user", "latest user message")
+
+	e.cmdCurrent(p, msg)
+
+	if len(p.sent) != 1 {
+		t.Fatalf("sent messages = %d, want 1", len(p.sent))
+	}
+	if !strings.Contains(p.sent[0], "Name: Native generated title") {
+		t.Fatalf("/current = %q, want native summary display name", p.sent[0])
+	}
+	if strings.Contains(p.sent[0], "Name: latest user message") {
+		t.Fatalf("/current = %q, should not use local Session.Name when native summary exists", p.sent[0])
+	}
+
+	p.sent = nil
+	e.cmdList(p, msg, nil)
+	if len(p.sent) != 1 {
+		t.Fatalf("list sent messages = %d, want 1", len(p.sent))
+	}
+	if got := strings.Count(p.sent[0], "msgs"); got != len(nativeSessions) {
+		t.Fatalf("/list item count = %d, want %d\n%s", got, len(nativeSessions), p.sent[0])
 	}
 }

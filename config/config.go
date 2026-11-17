@@ -114,6 +114,18 @@ type Config struct {
 	IdleTimeoutMins    *int                    `toml:"idle_timeout_mins,omitempty"`  // max minutes between consecutive agent events; 0 = no timeout; default 120
 	BusyTimeoutMins    *int                    `toml:"busy_timeout_mins,omitempty"`  // minutes a dead agent's session busy lock may be held before the next message breaks it; 0 = disable; default 2
 	MaxTurnTimeMins    *int                    `toml:"max_turn_time_mins,omitempty"` // absolute wall-clock cap per turn in minutes; 0 = disabled (default)
+	// StopHookEvent selects the hook event emitted when /stop ends an agent
+	// turn. Accepted values:
+	//
+	//	"session.ended"  (default) — the historical event name. /stop used to
+	//	                    tear the agent session down, so it always fired
+	//	                    "session.ended"; keeping the default means existing
+	//	                    hook rules keep working unchanged.
+	//	"turn.cancelled"  — the precise event for a gracefully cancelled turn
+	//	                    (the session stays alive for the next message).
+	//
+	// Empty means the default.
+	StopHookEvent string `toml:"stop_hook_event,omitempty"`
 	// WorkspaceIdleTimeoutMins controls the workspace idle reaper timeout
 	// (multi-workspace mode) for every engine in the process. 0 disables
 	// reaping. Default: 15 minutes. Defined as a top-level (process-global)
@@ -1087,6 +1099,11 @@ func (c *Config) validateInternal(permissive bool) error {
 	case "", "full", "summary", "none":
 	default:
 		return fmt.Errorf("config: relay.visibility must be \"full\", \"summary\", or \"none\"")
+	}
+	switch strings.ToLower(strings.TrimSpace(c.StopHookEvent)) {
+	case "", "session.ended", "turn.cancelled":
+	default:
+		return fmt.Errorf("config: stop_hook_event must be \"session.ended\" or \"turn.cancelled\"")
 	}
 	if len(c.Projects) == 0 {
 		return fmt.Errorf("config: at least one [[projects]] entry is required")
@@ -3443,6 +3460,11 @@ type ProjectSettingsUpdate struct {
 	ReplyFooter          *bool
 	InjectSender         *bool
 	PlatformAllowFrom    map[string]string
+	// WorkspaceMode and WorkspaceBaseDir control the project-level
+	// multi-workspace feature (ProjectConfig.Mode/BaseDir), distinct from
+	// Mode above (which is the agent permission mode, e.g. yolo/plan).
+	WorkspaceMode    *string
+	WorkspaceBaseDir *string
 }
 
 // SaveProjectSettings persists project-level settings and the global language to config.toml.
@@ -3552,6 +3574,30 @@ func SaveProjectSettings(projectName string, update ProjectSettingsUpdate) error
 				proj.Agent.Options["mode"] = mode
 			}
 		}
+		if update.WorkspaceBaseDir != nil {
+			proj.BaseDir = strings.TrimSpace(*update.WorkspaceBaseDir)
+		}
+		if update.WorkspaceMode != nil {
+			mode := strings.TrimSpace(*update.WorkspaceMode)
+			if mode == "single" {
+				mode = ""
+			}
+			if mode != "" && mode != "multi-workspace" {
+				return fmt.Errorf("invalid workspace_mode %q", mode)
+			}
+			if mode == "multi-workspace" && proj.BaseDir == "" {
+				return fmt.Errorf("workspace_base_dir is required to enable multi-workspace mode")
+			}
+			proj.Mode = mode
+			// Multi-workspace mode routes each channel to a directory under
+			// base_dir, and validation rejects an agent work_dir alongside it.
+			// Leaving work_dir in place wrote a config the next start refused
+			// ("conflicts with agent work_dir"), so the restart the dashboard
+			// asks for took the whole service down.
+			if mode == "multi-workspace" && proj.Agent.Options != nil {
+				delete(proj.Agent.Options, "work_dir")
+			}
+		}
 		if update.PlatformAllowFrom != nil {
 			for j := range proj.Platforms {
 				typ := strings.TrimSpace(proj.Platforms[j].Type)
@@ -3617,6 +3663,12 @@ func GetProjectConfigDetails(projectName string) map[string]any {
 		}
 		if p.InjectSender != nil {
 			result["inject_sender"] = *p.InjectSender
+		}
+		if strings.TrimSpace(p.Mode) != "" {
+			result["workspace_mode"] = p.Mode
+		}
+		if strings.TrimSpace(p.BaseDir) != "" {
+			result["workspace_base_dir"] = p.BaseDir
 		}
 		platConfigs := make([]map[string]any, len(p.Platforms))
 		for j, plat := range p.Platforms {

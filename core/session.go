@@ -645,6 +645,39 @@ func (sm *SessionManager) KnownAgentSessionIDs() map[string]struct{} {
 	return ids
 }
 
+// AgentSessionOwners maps each known agent session ID to the user key
+// (session_key) that last used it. Agent sessions created directly through the
+// CLI have no owner and are absent from the map, so callers can tell "belongs to
+// another conversation" apart from "belongs to nobody".
+//
+// Returns nil while the store predates ID tracking, matching
+// KnownAgentSessionIDs.
+func (sm *SessionManager) AgentSessionOwners() map[string]string {
+	sm.mu.RLock()
+	defer sm.mu.RUnlock()
+	if sm.legacyData {
+		return nil
+	}
+	owners := make(map[string]string)
+	for userKey, ids := range sm.userSessions {
+		for _, sid := range ids {
+			s, ok := sm.sessions[sid]
+			if !ok {
+				continue
+			}
+			s.mu.Lock()
+			if s.AgentSessionID != "" {
+				owners[s.AgentSessionID] = userKey
+			}
+			for _, past := range s.PastAgentSessionIDs {
+				owners[past] = userKey
+			}
+			s.mu.Unlock()
+		}
+	}
+	return owners
+}
+
 // SessionKeyMap returns a mapping from session ID to the user key (session_key) it belongs to,
 // plus active session IDs for each user key.
 func (sm *SessionManager) SessionKeyMap() (idToKey map[string]string, activeIDs map[string]bool) {

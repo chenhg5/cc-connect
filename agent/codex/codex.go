@@ -7,7 +7,6 @@ import (
 	"log/slog"
 	"net/http"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -23,7 +22,7 @@ func init() {
 	core.RegisterAgent("codex", New)
 }
 
-// Agent drives OpenAI Codex CLI using `codex exec --json`.
+// Agent drives OpenAI Codex CLI through exec or app-server.
 //
 // `codex exec` has no approval IPC, so approvals are not interactive on the
 // exec backend. To get interactive approvals, switch to backend="app_server".
@@ -34,24 +33,26 @@ func init() {
 //   - "full-auto": --sandbox workspace-write + approval_policy=never
 //   - "yolo":      --dangerously-bypass-approvals-and-sandbox
 type Agent struct {
-	workDir         string
-	model           string
-	reasoningEffort string
-	mode            string // "suggest" | "auto-edit" | "full-auto" | "yolo"
-	backend         string // "exec" | "app_server"
-	appServerURL    string
-	codexHome       string
-	systemPrompt    string
-	appendPrompt    string
-	cmd             string   // CLI binary name, default "codex"
-	cliExtraArgs    []string // extra args parsed from cmd after the binary
-	providers       []core.ProviderConfig
-	activeIdx       int      // -1 = no provider set
-	configEnv       []string // env vars from [projects.agent.options.env] — persists across SetSessionEnv calls
-	sessionEnv      []string
-	mu              sync.RWMutex
+	workDir           string
+	model             string
+	reasoningEffort   string
+	mode              string // "suggest" | "auto-edit" | "full-auto" | "yolo"
+	backend           string // "exec" | "app_server"
+	appServerURL      string
+	permissionProfile string
+	codexHome         string
+	systemPrompt      string
+	appendPrompt      string
+	cmd               string   // explicit CLI command; empty enables discovery
+	cliExtraArgs      []string // extra args parsed from cmd after the binary
+	providers         []core.ProviderConfig
+	activeIdx         int      // -1 = no provider set
+	configEnv         []string // env vars from [projects.agent.options.env] — persists across SetSessionEnv calls
+	sessionEnv        []string
+	mu                sync.RWMutex
 }
 
+// New validates the Codex adapter options and resolves its CLI.
 func New(opts map[string]any) (core.Agent, error) {
 	workDir, _ := opts["work_dir"].(string)
 	if workDir == "" {
@@ -69,10 +70,26 @@ func New(opts map[string]any) (core.Agent, error) {
 	backend = normalizeBackend(backend)
 	appServerURL = normalizeAppServerURL(appServerURL)
 
-	cmd, cliExtraArgs := core.ParseCmdOpts(opts, "codex")
+	var permissionProfile string
+	if raw, exists := opts["permission_profile"]; exists {
+		var ok bool
+		permissionProfile, ok = raw.(string)
+		if !ok || strings.TrimSpace(permissionProfile) == "" {
+			return nil, fmt.Errorf("codex: permission_profile must be a non-empty string")
+		}
+		permissionProfile = strings.TrimSpace(permissionProfile)
+		if backend != "app_server" {
+			return nil, fmt.Errorf("codex: permission_profile requires backend=app_server")
+		}
+	}
 
-	if _, err := exec.LookPath(cmd); err != nil {
-		return nil, fmt.Errorf("codex: %q CLI not found in PATH, install with: npm install -g @openai/codex", cmd)
+	cmd, cliExtraArgs := core.ParseCmdOpts(opts, "")
+
+	if cmd == "" {
+		cmd = strings.TrimSpace(os.Getenv("CODEX_CLI_PATH"))
+	}
+	if _, err := resolveCodexExecutable(cmd); err != nil {
+		return nil, fmt.Errorf("codex: CLI lookup failed (set cmd or install with npm install -g @openai/codex): %w", err)
 	}
 
 	// Parse project-level env from opts["env"] (set via [projects.agent.options.env] in config.toml).
@@ -93,19 +110,20 @@ func New(opts map[string]any) (core.Agent, error) {
 	}
 
 	return &Agent{
-		workDir:         workDir,
-		model:           model,
-		reasoningEffort: normalizeReasoningEffort(reasoningEffort),
-		mode:            mode,
-		backend:         backend,
-		appServerURL:    appServerURL,
-		codexHome:       strings.TrimSpace(codexHome),
-		systemPrompt:    strings.TrimSpace(systemPrompt),
-		appendPrompt:    strings.TrimSpace(appendPrompt),
-		cmd:             cmd,
-		cliExtraArgs:    cliExtraArgs,
-		configEnv:       configEnv,
-		activeIdx:       -1,
+		workDir:           workDir,
+		model:             model,
+		reasoningEffort:   normalizeReasoningEffort(reasoningEffort),
+		mode:              mode,
+		backend:           backend,
+		appServerURL:      appServerURL,
+		permissionProfile: permissionProfile,
+		codexHome:         strings.TrimSpace(codexHome),
+		systemPrompt:      strings.TrimSpace(systemPrompt),
+		appendPrompt:      strings.TrimSpace(appendPrompt),
+		cmd:               cmd,
+		cliExtraArgs:      cliExtraArgs,
+		configEnv:         configEnv,
+		activeIdx:         -1,
 	}, nil
 }
 
@@ -223,6 +241,12 @@ func (a *Agent) configuredModels() []core.ModelOption {
 }
 
 func (a *Agent) AvailableModels(ctx context.Context) []core.ModelOption {
+	a.mu.RLock()
+	minimaxModels := core.GetMiniMaxProviderModels(a.providers, a.activeIdx)
+	a.mu.RUnlock()
+	if len(minimaxModels) > 0 {
+		return minimaxModels
+	}
 	if models := readCodexModelCatalog(); len(models) > 0 {
 		return models
 	}
@@ -240,10 +264,14 @@ func (a *Agent) AvailableModels(ctx context.Context) []core.ModelOption {
 
 func defaultCodexModels() []core.ModelOption {
 	return []core.ModelOption{
-		{Name: "gpt-5.6-sol", Desc: "GPT-5.6 Sol (strongest for complex Codex work)"},
+		{Name: "gpt-6.1-sol", Desc: "GPT-6.1 Sol (latest Sol model)"},
+		{Name: "gpt-6-astra", Desc: "GPT-6 Astra"},
+		{Name: "gpt-6-sol", Desc: "GPT-6 Sol"},
+		{Name: "gpt-6-luna", Desc: "GPT-6 Luna"},
+		{Name: "gpt-5.6-sol", Desc: "GPT-5.6 Sol (previous generation)"},
 		{Name: "gpt-5.6-terra", Desc: "GPT-5.6 Terra (balanced everyday Codex work)"},
 		{Name: "gpt-5.6-luna", Desc: "GPT-5.6 Luna (fast, efficient GPT-5.6 model)"},
-		{Name: "gpt-5.6", Desc: "GPT-5.6 (recommended Codex model family default)"},
+		{Name: "gpt-5.6", Desc: "GPT-5.6 (previous model family)"},
 		{Name: "gpt-5.5", Desc: "GPT-5.5 (previous frontier Codex model)"},
 		{Name: "gpt-5.4", Desc: "GPT-5.4 (frontier Codex model)"},
 		{Name: "gpt-5.4-mini", Desc: "GPT-5.4 Mini (fast Codex model)"},
@@ -484,6 +512,7 @@ func (a *Agent) SetSessionEnv(env []string) {
 	a.sessionEnv = env
 }
 
+// StartSession starts or resumes a session using the configured backend and permissions.
 func (a *Agent) StartSession(ctx context.Context, sessionID string) (core.AgentSession, error) {
 	a.mu.Lock()
 	mode := a.mode
@@ -491,6 +520,7 @@ func (a *Agent) StartSession(ctx context.Context, sessionID string) (core.AgentS
 	reasoningEffort := a.reasoningEffort
 	backend := a.backend
 	appServerURL := a.appServerURL
+	permissionProfile := a.permissionProfile
 	codexHome := a.codexHome
 	systemPrompt := a.systemPrompt
 	appendPrompt := a.appendPrompt
@@ -524,7 +554,7 @@ func (a *Agent) StartSession(ctx context.Context, sessionID string) (core.AgentS
 	}
 
 	if backend == "app_server" {
-		return newAppServerSession(ctx, appServerURL, workDir, model, reasoningEffort, mode, sessionID, baseURL, provName, extraEnv, codexHome, systemPrompt, appendPrompt)
+		return newAppServerSession(ctx, cliBin, cliExtraArgs, appServerURL, workDir, model, reasoningEffort, mode, sessionID, baseURL, provName, extraEnv, codexHome, systemPrompt, appendPrompt, permissionProfile)
 	}
 	if codexHome != "" {
 		extraEnv = append(extraEnv, "CODEX_HOME="+codexHome)
@@ -575,6 +605,7 @@ func (a *Agent) GetMode() string {
 	return a.mode
 }
 
+// WorkspaceAgentOptions preserves backend and permission settings for derived workspaces.
 func (a *Agent) WorkspaceAgentOptions() map[string]any {
 	a.mu.RLock()
 	defer a.mu.RUnlock()
@@ -582,6 +613,9 @@ func (a *Agent) WorkspaceAgentOptions() map[string]any {
 	opts := map[string]any{
 		"mode":    a.mode,
 		"backend": a.backend,
+	}
+	if a.cmd != "" {
+		opts["cmd"] = append([]string{a.cmd}, a.cliExtraArgs...)
 	}
 	if a.model != "" {
 		opts["model"] = a.model
@@ -591,6 +625,9 @@ func (a *Agent) WorkspaceAgentOptions() map[string]any {
 	}
 	if a.appServerURL != "" {
 		opts["app_server_url"] = a.appServerURL
+	}
+	if a.permissionProfile != "" {
+		opts["permission_profile"] = a.permissionProfile
 	}
 	if a.codexHome != "" {
 		opts["codex_home"] = a.codexHome

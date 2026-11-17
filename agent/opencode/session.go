@@ -90,6 +90,13 @@ func (s *opencodeSession) Send(prompt string, messageID string, images []core.Im
 
 	cmd := exec.CommandContext(s.ctx, s.cmd, args...)
 	cmd.Dir = s.workDir
+	// Bound how long cmd.Wait() may wait for the I/O goroutines. os/exec
+	// copies the child's stderr into a buffer from its own goroutine, and
+	// that goroutine only ends when the stderr pipe reaches EOF — a
+	// descendant holding the pipe open would block the turn forever now
+	// that readLoop waits for the process before delivering the result.
+	// Same setting as the gemini/kimi/antigravity adapters.
+	cmd.WaitDelay = 1 * time.Second
 	env := os.Environ()
 	if len(s.extraEnv) > 0 {
 		env = core.MergeEnv(env, s.extraEnv)
@@ -168,9 +175,9 @@ func (s *opencodeSession) buildRunArgs(prompt string, imagePaths []string, chatI
 	if s.model != "" {
 		args = append(args, "--model", s.model)
 	}
-	if s.workDir != "" {
-		args = append(args, "--dir", s.workDir)
-	}
+	// The working directory is set as the process cwd in Send (cmd.Dir), like
+	// the other opencode invocations. `opencode run` has no --dir flag in
+	// opencode v2 and rejects it ("Unrecognized flag: --dir").
 
 	// Enable thinking blocks.
 	args = append(args, "--thinking")
@@ -193,7 +200,12 @@ func (s *opencodeSession) buildRunArgs(prompt string, imagePaths []string, chatI
 
 func (s *opencodeSession) readLoop(cmd *exec.Cmd, stdout io.ReadCloser, stderrBuf *bytes.Buffer) {
 	defer s.wg.Done()
-	defer func() { _ = cmd.Wait() }()
+	waited := false
+	defer func() {
+		if !waited {
+			_ = cmd.Wait()
+		}
+	}()
 
 	scanner := bufio.NewScanner(stdout)
 	scanner.Buffer(make([]byte, 0, 64*1024), 10*1024*1024)
@@ -223,6 +235,11 @@ func (s *opencodeSession) readLoop(cmd *exec.Cmd, stdout io.ReadCloser, stderrBu
 		}
 		return
 	}
+
+	// exec copies stderr into stderrBuf from its own goroutine until Wait
+	// returns, so the buffer is only safe to read after that.
+	_ = cmd.Wait()
+	waited = true
 
 	stderrMsg := stderrBuf.String()
 	if stderrMsg != "" {
@@ -376,23 +393,21 @@ func extractToolInput(state map[string]any) string {
 	if state == nil {
 		return ""
 	}
-	// Prefer title as a concise description (e.g. "List files in current directory")
-	if title, ok := state["title"].(string); ok && title != "" {
-		return title
-	}
 	switch input := state["input"].(type) {
 	case string:
 		return input
 	case map[string]any:
-		// Use "description" or "command" fields if available
-		if desc, ok := input["description"].(string); ok && desc != "" {
-			return desc
-		}
-		if cmd, ok := input["command"].(string); ok && cmd != "" {
-			return cmd
-		}
+		// Preserve structured input for downstream card renderers. They apply
+		// their own allowlist and redaction; reducing this to title/command here
+		// loses useful fields such as grep include/path and read offset/limit.
+		// The size cap prevents an unusually large tool payload from flooding cards.
 		b, _ := json.Marshal(input)
-		return truncate(string(b), 200)
+		return truncate(string(b), 2000)
+	}
+	// Fall back to the human-readable title only when the event has no structured
+	// input to preserve.
+	if title, ok := state["title"].(string); ok && title != "" {
+		return title
 	}
 	return ""
 }

@@ -27,6 +27,8 @@ export interface ProjectDetail {
   platforms: { type: string; connected: boolean }[];
   sessions_count: number;
   active_session_keys: string[];
+  workspace_mode?: string;
+  workspace_base_dir?: string;
   heartbeat: {
     enabled: boolean;
     paused: boolean;
@@ -52,6 +54,17 @@ export interface ProjectSettingsUpdate {
   reply_footer?: boolean;
   inject_sender?: boolean;
   platform_allow_from?: Record<string, string>;
+  workspace_mode?: string;
+  workspace_base_dir?: string;
+}
+
+export interface WorkspaceBinding {
+  channel_key: string;
+  channel_name: string;
+  workspace: string;
+  bound_at: string;
+  active?: boolean;
+  last_activity?: string;
 }
 
 export const listAgentTypes = () => api.get<{ agents: string[]; platforms: string[] }>('/agents');
@@ -66,3 +79,12 @@ export const addPlatformToProject = (projectName: string, body: {
 
 export const deleteProject = (name: string) =>
   api.delete<{ message: string; restart_required: boolean }>(`/projects/${name}`);
+
+export const listWorkspaces = (name: string) =>
+  api.get<{ base_dir: string; bindings: WorkspaceBinding[]; suggestions?: string[] }>(`/projects/${name}/workspaces`);
+
+export const bindWorkspace = (name: string, body: { channel_key: string; channel_name?: string; workspace: string }) =>
+  api.post<{ message: string; workspace: string }>(`/projects/${name}/workspaces`, body);
+
+export const unbindWorkspace = (name: string, channelKey: string) =>
+  api.delete(`/projects/${name}/workspaces/${encodeURIComponent(channelKey)}`);

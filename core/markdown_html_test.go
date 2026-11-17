@@ -2,6 +2,7 @@ package core
 
 import (
 	"fmt"
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -513,6 +514,77 @@ func TestSplitMessageCodeFenceAware_ChunkDoesNotExceedMaxLen(t *testing.T) {
 	}
 }
 
+func TestSplitMessageCodeFenceAware_OpeningFenceBudget(t *testing.T) {
+	chunks := SplitMessageCodeFenceAware("aaaaa\n```\nx", 10)
+	want := []string{"aaaaa", "```\nx\n```"}
+	if !reflect.DeepEqual(chunks, want) {
+		t.Fatalf("chunks = %q, want %q", chunks, want)
+	}
+}
+
+func TestSplitMessageCodeFenceAware_FenceBoundaryBudgets(t *testing.T) {
+	for _, tt := range []struct {
+		name  string
+		text  string
+		limit int
+	}{
+		{"closed block", "aaaaa\n```\nx\n```", 10},
+		{"language", "123456789\n```go\nx\n```", 16},
+		{"unicode", "一二三四五\n```\n六\n```", 10},
+		{"long code line", "123456789\n```go\n" + strings.Repeat("界", 80) + "\n```", 16},
+		{"adjacent blocks", "123456789\n```go\nx\n```\n```js\ny\n```", 16},
+		{"empty blocks", "aaaaa\n```\n```\n```\nx\n```", 10},
+		{"platform boundary", strings.Repeat("a", 4090) + "\n```\nx\n```", 4096},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			chunks := SplitMessageCodeFenceAware(tt.text, tt.limit)
+			payload := func(text string) string {
+				var lines []string
+				for _, line := range strings.Split(text, "\n") {
+					if !strings.HasPrefix(strings.TrimSpace(line), "```") {
+						lines = append(lines, line)
+					}
+				}
+				return strings.Join(lines, "")
+			}
+			var got strings.Builder
+			for i, chunk := range chunks {
+				if n := len([]rune(chunk)); n > tt.limit {
+					t.Fatalf("chunk %d has %d runes, limit %d: %q", i, n, tt.limit, chunk)
+				}
+				fences := 0
+				for _, line := range strings.Split(chunk, "\n") {
+					if strings.HasPrefix(strings.TrimSpace(line), "```") {
+						fences++
+					}
+				}
+				if fences%2 != 0 {
+					t.Fatalf("chunk %d has an unbalanced code fence: %q", i, chunk)
+				}
+				got.WriteString(payload(chunk))
+			}
+			if got.String() != payload(tt.text) {
+				t.Fatalf("payload was lost, duplicated or reordered: %q", chunks)
+			}
+		})
+	}
+}
+
+func TestSplitMessageCodeFenceAware_FenceOverheadExceedsBudget(t *testing.T) {
+	text := "before\n```long-language-name\n世界\n```\nafter"
+	for _, limit := range []int{1, 7, 10} {
+		chunks := SplitMessageCodeFenceAware(text, limit)
+		for _, chunk := range chunks {
+			if n := len([]rune(chunk)); n == 0 || n > limit {
+				t.Fatalf("limit %d: invalid chunk of %d runes: %q", limit, n, chunk)
+			}
+		}
+		if strings.Join(chunks, "") != text {
+			t.Fatalf("limit %d: plain fallback changed content: %q", limit, chunks)
+		}
+	}
+}
+
 func TestSplitMessageCodeFenceAware_LongSingleLine(t *testing.T) {
 	// A single line that exceeds maxLen must be split within the line.
 	line := strings.Repeat("x", 250)
@@ -659,5 +731,86 @@ func TestMarkdownToSimpleHTML_ManyInlineCodePlaceholders(t *testing.T) {
 		if !strings.Contains(out, want) {
 			t.Errorf("missing %s, got %q", want, out)
 		}
+	}
+}
+
+func TestMarkdownToSimpleHTML_StripANSI(t *testing.T) {
+	in := "\x1b[1m⚡ dscan\x1b[0m \x1b[38;2;56;189;248m.../debian/parch-man\x1b[0m │ 16 th"
+	out := MarkdownToSimpleHTML(in)
+	if strings.Contains(out, "\x1b") || strings.Contains(out, "[1m") {
+		t.Fatalf("output leaked ANSI escapes: %q", out)
+	}
+	if !strings.Contains(out, "⚡ dscan .../debian/parch-man │ 16 th") {
+		t.Fatalf("unexpected content after ANSI strip: %q", out)
+	}
+}
+
+func TestMarkdownToSimpleHTML_Spoiler(t *testing.T) {
+	in := "The secret code is ||supersecret123||."
+	out := MarkdownToSimpleHTML(in)
+	want := "The secret code is <tg-spoiler>supersecret123</tg-spoiler>."
+	if out != want {
+		t.Fatalf("expected %q, got %q", want, out)
+	}
+}
+
+func TestMarkdownToSimpleHTML_ExpandableCallout(t *testing.T) {
+	in := "> [!collapse] Command Output\n> line 1\n> line 2"
+	out := MarkdownToSimpleHTML(in)
+	if !strings.Contains(out, "<blockquote expandable>") {
+		t.Fatalf("expected expandable blockquote, got %q", out)
+	}
+	if !strings.Contains(out, "<b>Command Output</b>") {
+		t.Fatalf("expected callout title, got %q", out)
+	}
+}
+
+func TestMarkdownToSimpleHTML_ExpandableQuoteDoubleStar(t *testing.T) {
+	in := "**> line 1\n**> line 2"
+	out := MarkdownToSimpleHTML(in)
+	if !strings.Contains(out, "<blockquote expandable>") {
+		t.Fatalf("expected expandable blockquote for **>, got %q", out)
+	}
+	if !strings.Contains(out, "line 1\nline 2") {
+		t.Fatalf("expected lines joined, got %q", out)
+	}
+}
+
+func TestMarkdownToSimpleHTML_ExistingTelegramTagsPreserved(t *testing.T) {
+	in := "Check <code>git status</code> & <b>result</b> <tg-spoiler>secret</tg-spoiler> with x < y"
+	out := MarkdownToSimpleHTML(in)
+	if !strings.Contains(out, "<code>git status</code>") {
+		t.Fatalf("expected preserved code tag, got %q", out)
+	}
+	if !strings.Contains(out, "<b>result</b>") {
+		t.Fatalf("expected preserved bold tag, got %q", out)
+	}
+	if !strings.Contains(out, "<tg-spoiler>secret</tg-spoiler>") {
+		t.Fatalf("expected preserved spoiler tag, got %q", out)
+	}
+	if !strings.Contains(out, "x &lt; y") {
+		t.Fatalf("expected escaped < in normal text, got %q", out)
+	}
+}
+
+func TestMarkdownToSimpleHTML_TableWithoutBoundaryPipes(t *testing.T) {
+	in := "Name | Age | Role\n---|---|---\nAlice | 30 | Admin\nBob | 25 | Member"
+	out := MarkdownToSimpleHTML(in)
+	if !strings.Contains(out, "<pre>") || !strings.Contains(out, "</pre>") {
+		t.Fatalf("expected <pre> table wrapping, got %q", out)
+	}
+	if !strings.Contains(out, "Name") || !strings.Contains(out, "Alice") {
+		t.Fatalf("expected table cells, got %q", out)
+	}
+}
+
+func TestMarkdownToSimpleHTML_TableColonAlignment(t *testing.T) {
+	in := "Directory | Size | Usage\n:--- | :--- | :---\n~/.local/bin | 1.49 GiB | Binaries\n~/.bun | 1010 MiB | Packages"
+	out := MarkdownToSimpleHTML(in)
+	if !strings.Contains(out, "<pre>") || !strings.Contains(out, "</pre>") {
+		t.Fatalf("expected <pre> table wrapping, got %q", out)
+	}
+	if !strings.Contains(out, "Directory") || !strings.Contains(out, "Binaries") {
+		t.Fatalf("expected table cells, got %q", out)
 	}
 }
