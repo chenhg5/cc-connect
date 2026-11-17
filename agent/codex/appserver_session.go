@@ -89,6 +89,21 @@ type itemNotification struct {
 	Item     map[string]any `json:"item"`
 }
 
+type agentMessageDeltaNotification struct {
+	ThreadID string `json:"threadId"`
+	TurnID   string `json:"turnId"`
+	ItemID   string `json:"itemId"`
+	Delta    string `json:"delta"`
+}
+
+// Only explicitly final_answer items are streamed as user-facing text. Older
+// servers without a phase retain the existing buffered classification, so tool
+// preambles and async questions cannot accidentally become the final answer.
+type appServerStreamMessage struct {
+	text string
+	done bool
+}
+
 type errorNotification struct {
 	Message string `json:"message"`
 }
@@ -191,11 +206,13 @@ type appServerSession struct {
 	wg        sync.WaitGroup
 	readDone  chan struct{} // drain stdout before cmd.Wait closes its pipe
 
-	stateMu      sync.Mutex
-	pendingMsgs  []string
-	currentTurn  string
-	turnRevision uint64 // terminal notifications can precede the turn/start response
-	preambleSent bool
+	stateMu        sync.Mutex
+	pendingMsgs    []string
+	streamMessages map[string]*appServerStreamMessage
+	streamOrder    []string // preserve final-answer item order for authoritative completion
+	currentTurn    string
+	turnRevision   uint64 // terminal notifications can precede the turn/start response
+	preambleSent   bool
 
 	runtimeMu sync.RWMutex
 	usage     *core.UsageReport
@@ -349,7 +366,6 @@ func (s *appServerSession) initialize() error {
 			"experimentalApi": true,
 			"optOutNotificationMethods": []string{
 				"command/exec/outputDelta",
-				"item/agentMessage/delta",
 				"item/plan/delta",
 				"item/fileChange/outputDelta",
 				"item/reasoning/summaryTextDelta",
@@ -584,8 +600,14 @@ func (s *appServerSession) Send(prompt string, messageID string, images []core.I
 		s.stateMu.Unlock()
 		return fmt.Errorf("codex app-server connection closed during turn/start: %w", io.EOF)
 	}
+	// turn/started and text deltas can arrive before the turn/start response.
+	// Do not reset their state when the RPC reply is eventually consumed.
+	if s.currentTurn != resp.Turn.ID {
+		s.pendingMsgs = s.pendingMsgs[:0]
+		s.streamMessages = nil
+		s.streamOrder = nil
+	}
 	s.currentTurn = resp.Turn.ID
-	s.pendingMsgs = s.pendingMsgs[:0]
 	s.stateMu.Unlock()
 
 	return nil
@@ -1229,6 +1251,8 @@ func (s *appServerSession) handleNotification(method string, paramsRaw json.RawM
 			s.stateMu.Lock()
 			s.currentTurn = notif.Turn.ID
 			s.pendingMsgs = s.pendingMsgs[:0]
+			s.streamMessages = nil
+			s.streamOrder = nil
 			s.stateMu.Unlock()
 			s.storeContextUsage(nil)
 		}
@@ -1237,6 +1261,12 @@ func (s *appServerSession) handleNotification(method string, paramsRaw json.RawM
 		var notif itemNotification
 		if err := json.Unmarshal(paramsRaw, &notif); err == nil && s.acceptsTurnNotification(method, notif.ThreadID, notif.TurnID) {
 			s.handleItemStarted(notif.Item)
+		}
+
+	case "item/agentMessage/delta":
+		var notif agentMessageDeltaNotification
+		if err := json.Unmarshal(paramsRaw, &notif); err == nil && s.acceptsTurnNotification(method, notif.ThreadID, notif.TurnID) {
+			s.handleAgentMessageDelta(notif)
 		}
 
 	case "item/completed":
@@ -1328,7 +1358,22 @@ func (s *appServerSession) handleItemStarted(item map[string]any) {
 	}
 
 	switch itemType {
-	case "agentMessage", "reasoning", "userMessage", "plan", "hookPrompt", "contextCompaction":
+	case "agentMessage":
+		id, _ := item["id"].(string)
+		phase, _ := item["phase"].(string)
+		if id != "" && phase == "final_answer" && item["delivery"] != "async" {
+			s.stateMu.Lock()
+			if s.streamMessages == nil {
+				s.streamMessages = make(map[string]*appServerStreamMessage)
+			}
+			if s.streamMessages[id] == nil {
+				s.streamMessages[id] = &appServerStreamMessage{}
+				s.streamOrder = append(s.streamOrder, id)
+			}
+			s.stateMu.Unlock()
+		}
+		return
+	case "reasoning", "userMessage", "plan", "hookPrompt", "contextCompaction":
 		return
 	}
 
@@ -1376,6 +1421,9 @@ func (s *appServerSession) handleItemCompleted(item map[string]any) {
 			return
 		}
 		text, _ := item["text"].(string)
+		if s.completeStreamMessage(item, text) {
+			return
+		}
 		if strings.TrimSpace(text) != "" {
 			s.stateMu.Lock()
 			s.pendingMsgs = append(s.pendingMsgs, text)
@@ -1439,6 +1487,59 @@ func (s *appServerSession) handleItemCompleted(item map[string]any) {
 			ToolSuccess: &success,
 		})
 	}
+}
+
+func (s *appServerSession) handleAgentMessageDelta(notif agentMessageDeltaNotification) {
+	if notif.Delta == "" {
+		return
+	}
+	s.stateMu.Lock()
+	msg := s.streamMessages[notif.ItemID]
+	if msg == nil || msg.done {
+		s.stateMu.Unlock()
+		return
+	}
+	first := msg.text == ""
+	msg.text += notif.Delta
+	s.stateMu.Unlock()
+	if first {
+		slog.Debug("codex app-server: final answer streaming started", "item_id", notif.ItemID)
+	}
+	s.emit(core.Event{Type: core.EventText, Content: notif.Delta})
+}
+
+// Reconcile completion with the deltas already delivered. A repeated completed
+// notification is ignored and any unstreamed tail is emitted exactly once.
+func (s *appServerSession) completeStreamMessage(item map[string]any, text string) bool {
+	id, _ := item["id"].(string)
+	if id == "" {
+		return false
+	}
+	s.stateMu.Lock()
+	msg := s.streamMessages[id]
+	if msg == nil {
+		s.stateMu.Unlock()
+		return false
+	}
+	if msg.done {
+		s.stateMu.Unlock()
+		return true
+	}
+	msg.done = true
+	tail := ""
+	if strings.HasPrefix(text, msg.text) {
+		tail = strings.TrimPrefix(text, msg.text)
+	} else {
+		slog.Warn("codex app-server: completed text differs from streamed prefix", "item_id", id)
+	}
+	// EventResult carries the authoritative body, including literal ellipses
+	// that the engine's generic preview filtering may suppress as a tiny delta.
+	msg.text = text
+	s.stateMu.Unlock()
+	if tail != "" {
+		s.emit(core.Event{Type: core.EventText, Content: tail})
+	}
+	return true
 }
 
 func appServerReasoningText(item map[string]any) string {
@@ -1679,9 +1780,15 @@ func (s *appServerSession) completeTurn() {
 	}
 	s.currentTurn = ""
 	s.turnRevision++
+	var finalParts []string
+	for _, id := range s.streamOrder {
+		if msg := s.streamMessages[id]; msg != nil && msg.text != "" {
+			finalParts = append(finalParts, msg.text)
+		}
+	}
 	s.stateMu.Unlock()
 	s.flushPendingAsText()
-	s.emit(core.Event{Type: core.EventResult, SessionID: s.CurrentSessionID(), Done: true})
+	s.emit(core.Event{Type: core.EventResult, Content: strings.Join(finalParts, "\n\n"), SessionID: s.CurrentSessionID(), Done: true})
 }
 
 func (s *appServerSession) failTurn(err error) bool {
