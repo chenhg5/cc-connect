@@ -61,6 +61,12 @@ func ResolveProviderModel(p ProviderConfig, providerName, model string, scoped b
 		if resolved, ok := ProviderModelFor(p, strings.TrimPrefix(model, providerName+"/")); ok {
 			return scopeProviderModel(providerName, resolved, scoped), true
 		}
+		// Providers may already store the provider-qualified name ("aiapi/glm-5.3"),
+		// while the typed target and the picker payload carry the bare model. Try
+		// the qualified spelling too, otherwise such a model can never be picked.
+		if resolved, ok := ProviderModelFor(p, providerName+"/"+model); ok {
+			return scopeProviderModel(providerName, resolved, scoped), true
+		}
 	}
 	return "", false
 }

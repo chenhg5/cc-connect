@@ -147,6 +147,13 @@ func TestResolveProviderModel(t *testing.T) {
 		Name:   "aiapi",
 		Models: []ModelOption{{Name: "glm-5.3", Alias: "glm"}},
 	}
+	// The live config stores the provider-qualified name while both the typed
+	// target and the picker payload carry the bare model ("/goto aiapi/<model>").
+	prefixed := ProviderConfig{
+		Name:   "aiapi",
+		Model:  "aiapi/deepseek-v4.1-flash",
+		Models: []ModelOption{{Name: "aiapi/deepseek-v4.1-flash"}},
+	}
 	freeform := ProviderConfig{Name: "gateway"}
 
 	tests := []struct {
@@ -162,6 +169,8 @@ func TestResolveProviderModel(t *testing.T) {
 		{name: "bare name is provider-qualified for scoped agents", provider: aiapi, typed: "glm-5.3", scoped: true, want: "aiapi/glm-5.3", wantOK: true},
 		{name: "already qualified name stays single-prefixed", provider: aiapi, typed: "aiapi/glm-5.3", scoped: true, want: "aiapi/glm-5.3", wantOK: true},
 		{name: "bare agent stores the listed name", provider: aiapi, typed: "glm", scoped: false, want: "glm-5.3", wantOK: true},
+		{name: "bare name matches a provider-qualified stored name", provider: prefixed, typed: "deepseek-v4.1-flash", scoped: true, want: "aiapi/deepseek-v4.1-flash", wantOK: true},
+		{name: "qualified name matches a provider-qualified stored name", provider: prefixed, typed: "aiapi/deepseek-v4.1-flash", scoped: true, want: "aiapi/deepseek-v4.1-flash", wantOK: true},
 		{name: "unlisted model is rejected", provider: aiapi, typed: "gpt-5.6-sol", scoped: true, wantOK: false},
 		{name: "provider without a list only accepts its configured model", provider: freeform, typed: "anything", scoped: false, wantOK: false},
 	}
