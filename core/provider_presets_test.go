@@ -189,6 +189,65 @@ func TestProviderPresetsIncludesRuncrate(t *testing.T) {
 	}
 }
 
+func TestProviderPresetsIncludesRequesty(t *testing.T) {
+	body, err := os.ReadFile("../provider-presets.json")
+	if err != nil {
+		t.Fatalf("read provider-presets.json: %v", err)
+	}
+
+	var presets ProviderPresetsResponse
+	if err := json.Unmarshal(body, &presets); err != nil {
+		t.Fatalf("parse provider-presets.json: %v", err)
+	}
+
+	var requesty *ProviderPreset
+	for i := range presets.Providers {
+		if presets.Providers[i].Name == "requesty" {
+			requesty = &presets.Providers[i]
+			break
+		}
+	}
+	if requesty == nil {
+		t.Fatal("requesty preset not found")
+	}
+	if requesty.InviteURL != "" {
+		t.Fatalf("requesty invite_url = %q, want empty", requesty.InviteURL)
+	}
+
+	claude := requesty.AgentConfig("claudecode")
+	if claude == nil {
+		t.Fatal("requesty claudecode config missing")
+	}
+	if claude.BaseURL != "https://router.requesty.ai" {
+		t.Fatalf("claudecode base_url = %q", claude.BaseURL)
+	}
+	if claude.Model != "anthropic/claude-sonnet-5-5" {
+		t.Fatalf("claudecode model = %q", claude.Model)
+	}
+
+	codex := requesty.AgentConfig("codex")
+	if codex == nil {
+		t.Fatal("requesty codex config missing")
+	}
+	if codex.BaseURL != "https://router.requesty.ai/v1" {
+		t.Fatalf("codex base_url = %q", codex.BaseURL)
+	}
+	if codex.Model != "openai/gpt-5.4" {
+		t.Fatalf("codex model = %q", codex.Model)
+	}
+	if codex.CodexConfig == nil || codex.CodexConfig.WireAPI != "responses" {
+		t.Fatalf("codex_config = %#v", codex.CodexConfig)
+	}
+
+	opencode := requesty.AgentConfig("opencode")
+	if opencode == nil {
+		t.Fatal("requesty opencode config missing")
+	}
+	if opencode.BaseURL != "https://router.requesty.ai/v1" {
+		t.Fatalf("opencode base_url = %q", opencode.BaseURL)
+	}
+}
+
 func TestProviderPresetsIncludesTrustedRouter(t *testing.T) {
 	body, err := os.ReadFile("../provider-presets.json")
 	if err != nil {

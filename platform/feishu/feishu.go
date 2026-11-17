@@ -130,6 +130,9 @@ type replyContext struct {
 	bootstrapThread  bool
 	receiptEmoji     string // persistent reaction owned by the accepted-message callback
 	receiptMessageID string
+	// receiveIDType selects which Feishu ID space chatID belongs to:
+	// "" or "chat_id" (default), "open_id", "union_id".
+	receiveIDType string
 }
 
 type Platform struct {
@@ -1420,11 +1423,14 @@ func isMessageWithdrawnError(err error) bool {
 // Like the message path (dispatchMessageWithHistory), the goroutine has no
 // recover. The callback has already been answered when it runs, so Feishu will
 // not redeliver the action.
+//
+// Card callbacks bypass inbound coalescing (see dispatchControlMessage): core
+// matches them by exact content, so they must reach it unmodified.
 func (p *Platform) dispatchCardActionMessage(chatID string, msg *core.Message) {
 	go func() {
 		msg.UserName = p.resolveUserName(msg.UserID)
 		msg.ChatName = p.resolveChatName(chatID)
-		p.dispatchCoreMessage(msg)
+		p.dispatchControlMessage(msg)
 	}()
 }
 
@@ -3886,7 +3892,7 @@ func (p *Platform) sendMediaMessage(ctx context.Context, rc replyContext, msgTyp
 	if p.shouldUseThreadOrReplyAPI(rc) {
 		return p.replyMessage(ctx, rc, msgType, content)
 	}
-	return p.createMessage(ctx, rc.chatID, msgType, content, "send media message")
+	return p.createMessage(ctx, rc.chatID, rc.receiveIDType, msgType, content, "send media message")
 }
 
 func detectFeishuFileType(mimeType, fileName string) string {
@@ -4557,7 +4563,7 @@ func (p *Platform) sendNewMessageToChat(ctx context.Context, rc replyContext, ms
 	if rc.chatID == "" {
 		return fmt.Errorf("%s: chatID is empty, cannot send new message", p.tag())
 	}
-	return p.createMessage(ctx, rc.chatID, msgType, content, "send")
+	return p.createMessage(ctx, rc.chatID, rc.receiveIDType, msgType, content, "send")
 }
 
 func (p *Platform) buildReplyMessageReqBody(rc replyContext, msgType, content string) *larkim.ReplyMessageReqBody {
@@ -4589,9 +4595,23 @@ func (p *Platform) replyMessage(ctx context.Context, rc replyContext, msgType, c
 	})
 }
 
-func (p *Platform) createMessage(ctx context.Context, chatID, msgType, content, op string) error {
+// createMessageReceiveIDType maps the reply context's receive ID type onto the
+// Feishu CreateMessage ReceiveIdType enum. An empty or unknown value falls back
+// to chat_id, which is what every non-bot-menu path uses.
+func createMessageReceiveIDType(receiveIDType string) string {
+	switch receiveIDType {
+	case "open_id":
+		return larkim.CreateMessageV1ReceiveIDTypeOpenId
+	case "union_id":
+		return larkim.CreateMessageV1ReceiveIDTypeUnionId
+	default:
+		return larkim.CreateMessageV1ReceiveIDTypeChatId
+	}
+}
+
+func (p *Platform) createMessage(ctx context.Context, chatID, receiveIDType, msgType, content, op string) error {
 	req := larkim.NewCreateMessageReqBuilder().
-		ReceiveIdType(larkim.CreateMessageV1ReceiveIDTypeChatId).
+		ReceiveIdType(createMessageReceiveIDType(receiveIDType)).
 		Body(larkim.NewCreateMessageReqBodyBuilder().
 			ReceiveId(chatID).
 			MsgType(msgType).
@@ -4971,6 +4991,11 @@ func (p *Platform) ReconstructReplyCtx(sessionKey string) (any, error) {
 		return nil, fmt.Errorf("%s: invalid session key %q", p.tag(), sessionKey)
 	}
 	rc := replyContext{chatID: parts[1], sessionKey: sessionKey}
+	if strings.HasPrefix(parts[1], "ou_") {
+		rc.receiveIDType = "open_id"
+	} else if strings.HasPrefix(parts[1], "on_") {
+		rc.receiveIDType = "union_id"
+	}
 	if len(parts) == 3 {
 		if rootID, ok := parseThreadRootID(parts[2]); ok {
 			rc.messageID = rootID
@@ -5665,7 +5690,7 @@ func (p *Platform) SendPreviewStart(ctx context.Context, rctx any, content strin
 		}
 	} else {
 		req := larkim.NewCreateMessageReqBuilder().
-			ReceiveIdType(larkim.CreateMessageV1ReceiveIDTypeChatId).
+			ReceiveIdType(createMessageReceiveIDType(rc.receiveIDType)).
 			Body(larkim.NewCreateMessageReqBodyBuilder().
 				ReceiveId(chatID).
 				MsgType(larkim.MsgTypeInteractive).
@@ -6310,7 +6335,7 @@ func (p *Platform) onBotMenu(event *larkapplication.P2BotMenuV6) error {
 		Content:    content,
 		UserID:     userID,
 		UserName:   userName,
-		ReplyCtx:   replyContext{chatID: userID, sessionKey: sessionKey},
+		ReplyCtx:   replyContext{chatID: userID, sessionKey: sessionKey, receiveIDType: "open_id"},
 	})
 	return nil
 }

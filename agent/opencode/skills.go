@@ -516,9 +516,8 @@ func parseOpencodeConfig(raw json.RawMessage) (opencodeFileConfig, error) {
 				if err != nil {
 					return cfg, err
 				}
-				// Agent permission block may itself be {"skill": ...} or a
-				// bare skill rule set; parseOpencodeSkillPermission already
-				// handles both shapes.
+				// Agent permission blocks share the top-level shape; their
+				// rules are evaluated after the global ones.
 				cfg.agentRulesMap[name] = append(cfg.agentRulesMap[name], rules...)
 			}
 			if tv, ok := aroot["tools"]; ok {
@@ -534,9 +533,15 @@ func parseOpencodeConfig(raw json.RawMessage) (opencodeFileConfig, error) {
 
 // parseOpencodeSkillPermission extracts skill rules from a permission value.
 // Shapes (see https://opencode.ai/docs/permissions/):
-//   - "allow"|"ask"|"deny" (applies to skill)
-//   - {"skill": "allow"|{pattern: action}, "*": action, ...}
-//   - {"pattern": action, ...} (agent-level permission block)
+//   - "allow"|"ask"|"deny" (applies to every tool, including skill)
+//   - {"*": action, "skill": action|{pattern: action}, "bash": ..., ...}
+//
+// OpenCode turns every key of the permission object into rules in file order
+// (a string value becomes pattern "*") and evaluates a skill by taking the
+// last rule whose key matches "skill" and whose pattern matches the skill
+// name. A top-level "*" therefore keeps applying next to the skill rules, and
+// whichever of the two comes later in the file wins. Keys that do not match
+// "skill" (bash, edit, ...) never affect skills.
 func parseOpencodeSkillPermission(raw json.RawMessage) ([]opencodeSkillRule, error) {
 	var asString string
 	if err := json.Unmarshal(raw, &asString); err == nil {
@@ -546,42 +551,40 @@ func parseOpencodeSkillPermission(raw json.RawMessage) ([]opencodeSkillRule, err
 		}
 		return []opencodeSkillRule{{pattern: "*", action: act}}, nil
 	}
-	var asMap map[string]json.RawMessage
-	if err := json.Unmarshal(raw, &asMap); err != nil {
-		return nil, fmt.Errorf("opencode: invalid permission config: %w", err)
+	dec := json.NewDecoder(strings.NewReader(string(raw)))
+	if tok, err := dec.Token(); err != nil || tok != json.Delim('{') {
+		return nil, fmt.Errorf("opencode: invalid permission config")
 	}
-	// Prefer the skill-specific key when present.
-	if skillRaw, ok := asMap["skill"]; ok {
-		var skillStr string
-		if err := json.Unmarshal(skillRaw, &skillStr); err == nil {
-			act := normalizeOpencodeAction(skillStr)
+	var rules []opencodeSkillRule
+	for dec.More() {
+		ktok, err := dec.Token()
+		if err != nil {
+			return nil, fmt.Errorf("opencode: invalid permission config: %w", err)
+		}
+		key, _ := ktok.(string)
+		var value json.RawMessage
+		if err := dec.Decode(&value); err != nil {
+			return nil, fmt.Errorf("opencode: invalid permission config: %w", err)
+		}
+		if ok, err := path.Match(key, "skill"); err != nil || !ok {
+			continue
+		}
+		var valueStr string
+		if err := json.Unmarshal(value, &valueStr); err == nil {
+			act := normalizeOpencodeAction(valueStr)
 			if act == "" {
-				return nil, fmt.Errorf("opencode: invalid permission.skill action %q", skillStr)
+				return nil, fmt.Errorf("opencode: invalid permission.%s action %q", key, valueStr)
 			}
-			return []opencodeSkillRule{{pattern: "*", action: act}}, nil
+			rules = append(rules, opencodeSkillRule{pattern: "*", action: act})
+			continue
 		}
-		var skillMap map[string]string
-		if err := json.Unmarshal(skillRaw, &skillMap); err != nil {
-			return nil, fmt.Errorf("opencode: invalid permission.skill config")
+		keyRules, err := orderedOpencodeRules(value)
+		if err != nil {
+			return nil, err
 		}
-		return orderedOpencodeRules(skillRaw)
+		rules = append(rules, keyRules...)
 	}
-	// Agent-level block: {"skill": ..., ...} already handled above when the
-	// map itself contains skill patterns? No: agent permission blocks use
-	// tool names as keys, so a bare {"internal-*": "allow"} is ambiguous.
-	// Only honor "*" (global default for all tools) and "skill" here; other
-	// tool keys (bash/edit/...) must not affect skills.
-	if starRaw, ok := asMap["*"]; ok {
-		var starStr string
-		if err := json.Unmarshal(starRaw, &starStr); err == nil {
-			act := normalizeOpencodeAction(starStr)
-			if act == "" {
-				return nil, fmt.Errorf("opencode: invalid permission action %q", starStr)
-			}
-			return []opencodeSkillRule{{pattern: "*", action: act}}, nil
-		}
-	}
-	return nil, nil
+	return rules, nil
 }
 
 func orderedOpencodeRules(raw json.RawMessage) ([]opencodeSkillRule, error) {
