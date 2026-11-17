@@ -454,11 +454,16 @@ func TestBuildCardJSONWithStatusFooter_EmptyFooterFallsThrough(t *testing.T) {
 }
 
 func TestTrackedPermissionCard_UpdatesSentMessageWithoutClick(t *testing.T) {
-	for _, thread := range []bool{false, true} {
-		name := "chat"
-		if thread {
-			name = "thread"
-		}
+	for _, tc := range []struct {
+		name          string
+		thread        bool
+		receiveIDType string
+	}{
+		{name: "chat"},
+		{name: "thread", thread: true},
+		{name: "bot_menu_open_id", receiveIDType: "open_id"},
+	} {
+		name, thread := tc.name, tc.thread
 		t.Run(name, func(t *testing.T) {
 			var patchedPath string
 			var patchedContent string
@@ -471,6 +476,15 @@ func TestTrackedPermissionCard_UpdatesSentMessageWithoutClick(t *testing.T) {
 					wantPath := "/open-apis/im/v1/messages"
 					if thread {
 						wantPath += "/om_trigger/reply"
+					}
+					if !thread {
+						wantType := "chat_id"
+						if tc.receiveIDType != "" {
+							wantType = tc.receiveIDType
+						}
+						if got := r.URL.Query().Get("receive_id_type"); got != wantType {
+							t.Errorf("receive_id_type = %q, want %q", got, wantType)
+						}
 					}
 					if r.URL.Path != wantPath {
 						t.Errorf("send path = %q, want %q", r.URL.Path, wantPath)
@@ -502,7 +516,7 @@ func TestTrackedPermissionCard_UpdatesSentMessageWithoutClick(t *testing.T) {
 			if thread {
 				sessionKey = "feishu:chat:root:om_trigger"
 			}
-			handle, err := p.SendCardWithHandle(context.Background(), replyContext{messageID: "om_trigger", chatID: "oc_chat", sessionKey: sessionKey}, core.NewCard().Markdown("pending").Build())
+			handle, err := p.SendCardWithHandle(context.Background(), replyContext{messageID: "om_trigger", chatID: "oc_chat", receiveIDType: tc.receiveIDType, sessionKey: sessionKey}, core.NewCard().Markdown("pending").Build())
 			if err != nil {
 				t.Fatal(err)
 			}

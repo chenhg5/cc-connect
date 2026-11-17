@@ -14,6 +14,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"time"
 	"unicode/utf8"
 
 	"github.com/chenhg5/cc-connect/core"
@@ -224,6 +225,25 @@ func (a *Agent) DeleteSession(_ context.Context, sessionID string) error {
 	}
 	return os.RemoveAll(dir)
 }
+
+func (a *Agent) GetSessionHistory(_ context.Context, sessionID string, limit int) ([]core.HistoryEntry, error) {
+	homeDir, err := os.UserHomeDir()
+	if err != nil {
+		return nil, fmt.Errorf("cursor: cannot determine home dir: %w", err)
+	}
+	dir, err := findCursorSessionDir(homeDir, a.GetWorkDir(), sessionID)
+	if err != nil {
+		return nil, fmt.Errorf("cursor: %w", err)
+	}
+	dbPath := filepath.Join(dir, "store.db")
+	meta := readSessionMeta(dbPath)
+	if meta.RootBlobID == "" {
+		return nil, fmt.Errorf("cursor: session %s has no root blob", sessionID)
+	}
+	return readCursorSessionHistory(dbPath, meta.RootBlobID, limit)
+}
+
+var _ core.HistoryProvider = (*Agent)(nil)
 
 func (a *Agent) Stop() error { return nil }
 
@@ -695,4 +715,186 @@ func countSessionMessages(dbPath, rootBlobID string) (int, string) {
 	}
 
 	return msgCount, firstUserMsg
+}
+
+const cursorHistoryReadBatch = 40
+
+func readCursorSessionHistory(dbPath, rootBlobID string, limit int) ([]core.HistoryEntry, error) {
+	if _, err := exec.LookPath("sqlite3"); err != nil {
+		return nil, fmt.Errorf("cursor: sqlite3 not found: %w", err)
+	}
+	if !isCursorBlobID(rootBlobID) {
+		return nil, fmt.Errorf("cursor: invalid root blob id")
+	}
+	root, err := readCursorBlob(dbPath, rootBlobID)
+	if err != nil {
+		return nil, err
+	}
+	childIDs := cursorChildBlobIDs(root)
+	if len(childIDs) == 0 {
+		return nil, nil
+	}
+
+	target := len(childIDs)
+	if limit > 0 && limit < target {
+		target = limit
+	}
+	var newestFirst []core.HistoryEntry
+	for end := len(childIDs); end > 0 && len(newestFirst) < target; {
+		start := end - cursorHistoryReadBatch
+		if start < 0 {
+			start = 0
+		}
+		blobs, err := readCursorBlobs(dbPath, childIDs[start:end])
+		if err != nil {
+			return nil, err
+		}
+		for i := end - 1; i >= start; i-- {
+			entry, ok := cursorHistoryEntry(blobs[childIDs[i]])
+			if !ok {
+				continue
+			}
+			newestFirst = append(newestFirst, entry)
+			if len(newestFirst) == target {
+				break
+			}
+		}
+		end = start
+	}
+	for i, j := 0, len(newestFirst)-1; i < j; i, j = i+1, j-1 {
+		newestFirst[i], newestFirst[j] = newestFirst[j], newestFirst[i]
+	}
+	return newestFirst, nil
+}
+
+func cursorChildBlobIDs(root []byte) []string {
+	var ids []string
+	for i := 0; i+33 < len(root) && root[i] == 0x0a && root[i+1] == 0x20; i += 34 {
+		ids = append(ids, hex.EncodeToString(root[i+2:i+34]))
+	}
+	return ids
+}
+
+func cursorHistoryEntry(raw []byte) (core.HistoryEntry, bool) {
+	if len(raw) == 0 {
+		return core.HistoryEntry{}, false
+	}
+	var msg struct {
+		Role      string          `json:"role"`
+		Content   any             `json:"content"`
+		CreatedAt json.RawMessage `json:"createdAt"`
+		Timestamp json.RawMessage `json:"timestamp"`
+	}
+	if json.Unmarshal(raw, &msg) != nil {
+		return core.HistoryEntry{}, false
+	}
+	role := strings.ToLower(strings.TrimSpace(msg.Role))
+	var text string
+	switch role {
+	case "user":
+		text = extractCursorUserSummary(msg.Content)
+	case "assistant":
+		text = strings.TrimSpace(cursorMessageContentText(msg.Content))
+	default:
+		return core.HistoryEntry{}, false
+	}
+	if text == "" {
+		return core.HistoryEntry{}, false
+	}
+	return core.HistoryEntry{
+		Role:      role,
+		Content:   text,
+		Timestamp: cursorBlobTime(msg.CreatedAt, msg.Timestamp),
+	}, true
+}
+
+func cursorBlobTime(fields ...json.RawMessage) time.Time {
+	for _, raw := range fields {
+		raw = json.RawMessage(strings.TrimSpace(string(raw)))
+		if len(raw) == 0 || string(raw) == "null" {
+			continue
+		}
+		var text string
+		if json.Unmarshal(raw, &text) == nil {
+			if ts, err := time.Parse(time.RFC3339Nano, text); err == nil {
+				return ts.Local()
+			}
+			continue
+		}
+		var n float64
+		if json.Unmarshal(raw, &n) != nil || n <= 0 {
+			continue
+		}
+		sec := int64(n)
+		if sec > 1_000_000_000_000 {
+			return time.UnixMilli(sec).Local()
+		}
+		return time.Unix(sec, 0).Local()
+	}
+	return time.Time{}
+}
+
+func isCursorBlobID(id string) bool {
+	if id == "" || len(id)%2 != 0 {
+		return false
+	}
+	for _, c := range id {
+		switch {
+		case c >= '0' && c <= '9', c >= 'a' && c <= 'f', c >= 'A' && c <= 'F':
+		default:
+			return false
+		}
+	}
+	return true
+}
+
+func readCursorBlob(dbPath, id string) ([]byte, error) {
+	blobs, err := readCursorBlobs(dbPath, []string{id})
+	if err != nil {
+		return nil, err
+	}
+	raw, ok := blobs[strings.ToLower(id)]
+	if !ok {
+		raw, ok = blobs[id]
+	}
+	if !ok {
+		return nil, fmt.Errorf("cursor: blob %s not found", id)
+	}
+	return raw, nil
+}
+
+func readCursorBlobs(dbPath string, ids []string) (map[string][]byte, error) {
+	sqliteBin, err := exec.LookPath("sqlite3")
+	if err != nil {
+		return nil, fmt.Errorf("cursor: sqlite3 not found: %w", err)
+	}
+	quoted := make([]string, 0, len(ids))
+	for _, id := range ids {
+		if !isCursorBlobID(id) {
+			return nil, fmt.Errorf("cursor: invalid blob id")
+		}
+		quoted = append(quoted, "'"+id+"'")
+	}
+	query := fmt.Sprintf("SELECT id || '|' || hex(data) FROM blobs WHERE id IN (%s);", strings.Join(quoted, ","))
+	out, err := exec.Command(sqliteBin, dbPath, query).Output()
+	if err != nil {
+		return nil, fmt.Errorf("cursor: read blobs: %w", err)
+	}
+	blobs := make(map[string][]byte, len(ids))
+	for _, line := range strings.Split(string(out), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		id, hexData, ok := strings.Cut(line, "|")
+		if !ok {
+			continue
+		}
+		raw, err := hex.DecodeString(hexData)
+		if err != nil {
+			continue
+		}
+		blobs[strings.ToLower(id)] = raw
+	}
+	return blobs, nil
 }

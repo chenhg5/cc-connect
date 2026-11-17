@@ -62,7 +62,13 @@ func New(opts map[string]any) (core.Agent, error) {
 	// entry, and so pi's --model flag gets an unambiguous reference instead of
 	// relying on its own fuzzy fallback (which silently invents a custom model
 	// ID when the reference does not resolve).
-	model = resolveModelRef(model)
+	// A ":<thinking>" suffix on the reference (e.g. "provider/id:high") is
+	// carried into the thinking level instead of being dropped; an explicitly
+	// configured thinking option takes precedence over the suffix.
+	model, suffixThinking := resolveModelRef(model)
+	if strings.TrimSpace(thinking) == "" {
+		thinking = suffixThinking
+	}
 
 	return &Agent{
 		cmd:          cmd,
@@ -112,11 +118,16 @@ func (a *Agent) WorkspaceAgentOptions() map[string]any {
 }
 
 // SetModel affects future sessions; the engine recreates sessions after switching.
+// A ":<thinking>" suffix on the new reference is the most recent explicit
+// choice, so it replaces the current thinking level.
 func (a *Agent) SetModel(model string) {
-	model = resolveModelRef(model)
+	model, suffixThinking := resolveModelRef(model)
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	a.model = model
+	if suffixThinking != "" {
+		a.thinking = suffixThinking
+	}
 	if levels, known := supportedThinkingLevels(model); known && a.thinking != "" {
 		supported := false
 		for _, level := range levels {
@@ -956,21 +967,36 @@ func matchModelPattern(pattern string, catalog []piModel) []piModel {
 
 // resolveModelRef canonicalises a user-supplied model reference to the
 // catalog's "provider/id" spelling (e.g. "workbuddy/auto" →
-// "workbuddy/cn:auto"). An unresolvable reference is returned unchanged so that
-// pi's own custom-model-id fallback keeps working.
-func resolveModelRef(model string) string {
+// "workbuddy/cn:auto"). When the reference only resolves after splitting off a
+// ":<thinking>" suffix (e.g. "provider/id:high"), the lower-cased level is
+// returned as thinking so callers can keep it; the canonical ref never carries
+// the suffix. An unresolvable reference is returned unchanged (suffix included)
+// so that pi's own custom-model-id fallback and suffix parsing keep working.
+func resolveModelRef(model string) (ref, thinking string) {
 	model = strings.TrimSpace(model)
 	if model == "" || hasGlobMeta(model) {
-		return model
+		return model, ""
 	}
-	if provider, def, ok := lookupModelDef(model); ok {
-		return provider + "/" + def.ID
+	catalog := readModelCatalog()
+	// A colon can be part of a real model ID: an exact match on the whole
+	// reference wins and carries no suffix.
+	if provider, def, ok := lookupCatalogRef(catalog, model); ok {
+		return provider + "/" + def.ID, ""
 	}
-	matched := matchModelPattern(model, readModelCatalog())
+	base, level := splitThinkingSuffix(model)
+	level = strings.ToLower(level)
+	if level != "" {
+		if provider, def, ok := lookupCatalogRef(catalog, base); ok {
+			return provider + "/" + def.ID, level
+		}
+	}
+	// The whole reference has no exact catalog match, so any glob/fuzzy match
+	// below is made on the suffix-free base.
+	matched := matchModelPattern(model, catalog)
 	if len(matched) != 1 {
-		return model
+		return model, ""
 	}
-	return matched[0].Provider + "/" + matched[0].ID
+	return matched[0].Provider + "/" + matched[0].ID, level
 }
 
 // readDefaultModel returns the defaultModel from settings.json.

@@ -27,7 +27,7 @@ func (p *interactivePlatform) ReplyCard(ctx context.Context, rctx any, card *cor
 		if rc.chatID == "" {
 			return fmt.Errorf("%s: chatID is empty, cannot send card", p.tag())
 		}
-		return p.createMessage(ctx, rc.chatID, larkim.MsgTypeInteractive, cardJSON, "send card")
+		return p.createMessage(ctx, rc.chatID, rc.receiveIDType, larkim.MsgTypeInteractive, cardJSON, "send card")
 	}
 	return p.replyMessage(ctx, rc, larkim.MsgTypeInteractive, cardJSON)
 }
@@ -98,7 +98,7 @@ func (p *interactivePlatform) sendCard(ctx context.Context, rctx any, card *core
 	if p.shouldReplyInThread(rc) && p.shouldUseThreadOrReplyAPI(rc) {
 		messageID, err = p.replyMessageWithID(ctx, rc, larkim.MsgTypeInteractive, cardJSON)
 	} else {
-		messageID, err = p.createMessageWithID(ctx, rc.chatID, larkim.MsgTypeInteractive, cardJSON, "send card")
+		messageID, err = p.createMessageWithID(ctx, rc.chatID, rc.receiveIDType, larkim.MsgTypeInteractive, cardJSON, "send card")
 	}
 	return cardMessageHandle{messageID: messageID, sessionKey: rc.sessionKey}, err
 }

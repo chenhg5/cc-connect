@@ -18,6 +18,7 @@ Complete guide to using cc-connect features.
 - [Voice Messages (STT)](#voice-messages-speech-to-text)
 - [Voice Reply (TTS)](#voice-reply-text-to-speech)
 - [Image and File Send-Back](#image-and-file-send-back)
+- [Lifecycle Hooks](#lifecycle-hooks)
 - [Scheduled Tasks (Cron)](#scheduled-tasks-cron)
 - [Shell Configuration](#shell-configuration)
 - [Multi-Bot Relay](#multi-bot-relay)
@@ -56,6 +57,8 @@ During a session, the agent may request tool permissions. Reply **allow** / **de
 Use `/ps` (or `/btw`) to add instructions while a task is running. An idle session rejects the command. The delivery confirmation means the bridge sent the request, not that the agent has finished processing it.
 
 With Pi, enable `rpc = true` for native steering: the supplement is queued for the next model call, after the current assistant turn's tool calls. If Pi has already finished while the bridge is still delivering its reply, the supplement starts a follow-up turn. Pi's default JSON mode keeps its existing one-shot sending behavior; it cannot inject into an already running process.
+
+Codex `/ps` steering requires an app-server that implements `turn/steer` (codex-cli 0.166.0 or newer). Older CLIs return a method-not-supported error; upgrade the Codex CLI to use this feature.
 
 cc-connect rotates to a fresh session automatically after long inactivity:
 
@@ -153,6 +156,31 @@ cmd = ["/path with spaces/codex", "--profile", "work"]
 ```
 
 This runs the bundled CLI using the existing Codex adapter. Desktop-only tools and shared-thread locking have separate requirements; see [Desktop backend discussion #651](https://github.com/chenhg5/cc-connect/issues/651) and [thread writer conflict #1909](https://github.com/chenhg5/cc-connect/issues/1909).
+
+### Codex home directory (`codex_home`)
+
+By default the Codex adapter uses the same Codex home as your terminal and the Codex desktop app. The adapter resolves the home in this order: the project `codex_home` option, then `CODEX_HOME` from the environment that starts cc-connect, then `~/.codex`. A configured `codex_home` is exported as `CODEX_HOME` to the Codex CLI for both the `exec` and `app_server` backends, and `/list` reads sessions from the same resolved home.
+
+Sharing one home has a cost. When the Codex desktop app holds the thread writer lock for a conversation, a later `codex exec resume` fails with `thread-store conflict: ... already has an active writer (code -32600)`. Give a project its own home when it must not share threads:
+
+```toml
+[projects.agent.options]
+codex_home = "/Users/you/.codex-cc-connect"
+```
+
+- Put the option under `[projects.agent.options]`. Options under `[projects.platforms.options]` are per-platform and never reach the agent.
+- Use an absolute path that already exists. `codex_home` does not expand `~`, so `~/.codex-cc-connect` reaches the CLI literally, and the CLI does not create the directory. cc-connect creates it only when it writes provider configuration, which a subscription login never does.
+- Copy `auth.json` and `config.toml` from your default Codex home to reuse the login and settings. cc-connect writes `auth.json` only for provider API keys and never writes `config.toml` for a subscription login.
+- The trade-off: conversations in the isolated home no longer appear in the Codex desktop app, and the desktop app's conversations cannot be resumed by this project. The two clients stop sharing threads.
+
+Create the directory and copy the login files before the first message:
+
+```sh
+mkdir -p ~/.codex-cc-connect
+cp ~/.codex/auth.json ~/.codex/config.toml ~/.codex-cc-connect/
+```
+
+Then set the absolute path under `[projects.agent.options]`, for example `/Users/you/.codex-cc-connect`. To reuse one isolated home across projects, set `CODEX_HOME` in the environment that starts cc-connect instead; an explicit `codex_home` wins over the environment variable.
 
 ### Cursor Agent Modes
 
@@ -877,6 +905,27 @@ Notes:
 - The target platform also enforces its own file-size/type limit at delivery; the effective per-attachment ceiling is the smaller of that limit and `max_attachment_size_mb` (a file that passes cc-connect may still be rejected by the platform).
 
 ---
+
+## Lifecycle Hooks
+
+`[[hooks]]` rules run a shell command or POST to an HTTP endpoint when a lifecycle event fires. The event names are `message.received`, `message.sent`, `session.started`, `session.ended`, `turn.cancelled`, `cron.triggered`, `timer.triggered`, `permission.requested`, `error`, plus the wildcard `*`.
+
+### `/stop` and `turn.cancelled`
+
+For agents that support graceful cancellation (Claude Code and ACP-based agents), `/stop` interrupts the current turn but keeps the agent process and the conversation alive, so `/compress`, `/clear`, and `/resume` keep working afterwards. A stop is therefore no longer necessarily a session end.
+
+`stop_hook_event` selects which event `/stop` fires:
+
+```toml
+# Default: keeps the historical behaviour, existing rules keep firing.
+stop_hook_event = "session.ended"
+
+# Opt in: fire the precise event when the turn was cancelled and the
+# session was kept alive.
+stop_hook_event = "turn.cancelled"
+```
+
+In both modes `session.ended` is fired when the session really is torn down: the agent has no graceful cancel, or cancellation failed and the process was killed. A `/stop` fires exactly one of the two events, so rules matching `event = "*"` still receive one event per stop.
 
 ## Scheduled Tasks (Cron)
 

@@ -19,6 +19,7 @@ cc-connect 完整功能使用指南。
 - [语音消息（语音转文字）](#语音消息语音转文字)
 - [语音回复（文字转语音）](#语音回复文字转语音)
 - [图片与文件回传](#图片与文件回传)
+- [生命周期钩子](#生命周期钩子)
 - [定时任务 (Cron)](#定时任务-cron)
 - [Shell 配置](#shell-配置)
 - [多机器人中继](#多机器人中继)
@@ -58,6 +59,8 @@ cc-connect 完整功能使用指南。
 任务运行时，可用 `/ps`（或 `/btw`）补充指令；会话空闲时会拒绝该命令。送达确认表示桥接已发送请求，不表示 Agent 已完成处理。
 
 使用 Pi 时，设置 `rpc = true` 可启用原生中途引导：补充内容会在当前助手回合的工具调用结束后、下一次模型调用前送入。如果 Pi 已经结束、桥接仍在发送最终回复，补充内容会启动后续回合。Pi 默认的 JSON 模式保留原有的一次性发送行为，无法向已经运行的进程注入消息。
+
+Codex `/ps` 中途引导要求 app-server 支持 `turn/steer`（codex-cli 0.166.0 或更新版本）。旧版 CLI 会返回方法不支持错误；使用此功能前请升级 Codex CLI。
 
 也可以为项目开启“空闲后自动切换新会话”：
 
@@ -151,6 +154,31 @@ cmd = ["/path with spaces/codex", "--profile", "work"]
 ```
 
 此功能通过现有 Codex 适配器运行应用内置 CLI。桌面专有工具和共享会话写锁有独立的适配要求，参见 [桌面后端讨论 #651](https://github.com/chenhg5/cc-connect/issues/651) 和 [会话写锁冲突 #1909](https://github.com/chenhg5/cc-connect/issues/1909)。
+
+### Codex home 目录（`codex_home`）
+
+默认情况下，Codex 适配器与终端和 Codex 桌面应用使用同一个 Codex home。解析顺序是：项目的 `codex_home` 选项，启动 cc-connect 的进程环境中的 `CODEX_HOME`，最后是 `~/.codex`。配置 `codex_home` 后，适配器会把它导出为子进程的 `CODEX_HOME`，`exec` 和 `app_server` 两种后端都如此；`/list` 也从同一个解析出的 home 读取会话。
+
+共用同一个 home 有代价。当 Codex 桌面应用持有某个会话的 thread writer 锁时，之后的 `codex exec resume` 会以 `thread-store conflict: ... already has an active writer (code -32600)` 失败。项目不能与桌面应用共享线程时，可以为它配置独立的 home：
+
+```toml
+[projects.agent.options]
+codex_home = "/Users/you/.codex-cc-connect"
+```
+
+- 选项放在 `[projects.agent.options]` 下。`[projects.platforms.options]` 下的选项只属于具体平台，不会传给 agent。
+- 使用已存在的绝对路径。`codex_home` 不展开 `~`，`~/.codex-cc-connect` 会原样传给 CLI，CLI 也不会创建目录。cc-connect 只在写 provider 配置时创建目录，订阅登录不会走到这一步。
+- 从默认 Codex home 复制 `auth.json` 和 `config.toml`，以复用登录和配置。cc-connect 只为 provider API key 写 `auth.json`，订阅登录不会生成 `config.toml`。
+- 取舍：独立 home 中的会话不再出现在 Codex 桌面应用，桌面应用中的会话也无法被这个项目恢复；两个客户端不再共享线程。
+
+在第一条消息之前创建目录并复制登录文件：
+
+```sh
+mkdir -p ~/.codex-cc-connect
+cp ~/.codex/auth.json ~/.codex/config.toml ~/.codex-cc-connect/
+```
+
+然后在 `[projects.agent.options]` 中填写绝对路径，例如 `/Users/you/.codex-cc-connect`。如果多个项目要共用一个独立 home，也可以改用启动 cc-connect 的进程环境中的 `CODEX_HOME`；显式配置的 `codex_home` 优先于环境变量。
 
 ### Cursor Agent 模式
 
@@ -789,6 +817,26 @@ cc-connect send --tts "你好"
 - 目标平台在投递时还会校验自己的文件大小/类型上限；实际生效的是它与 `max_attachment_size_mb` 中**更小**的那个（通过了 cc-connect 的文件仍可能在投递时被平台拒绝）。
 
 ---
+
+## 生命周期钩子
+
+`[[hooks]]` 规则可以在生命周期事件发生时执行 shell 命令或向 HTTP 端点 POST 数据。事件名包括 `message.received`、`message.sent`、`session.started`、`session.ended`、`turn.cancelled`、`cron.triggered`、`timer.triggered`、`permission.requested`、`error`，以及通配符 `*`。
+
+### `/stop` 与 `turn.cancelled`
+
+对于支持优雅取消的 Agent（Claude Code 与 ACP 系 Agent），`/stop` 只中断当前这一轮，Agent 进程与会话保持存活，因此之后 `/compress`、`/clear`、`/resume` 仍然可用。也就是说，一次 stop 不再必然意味着会话结束。
+
+`stop_hook_event` 决定 `/stop` 触发哪个事件：
+
+```toml
+# 默认值：保持历史行为，已有规则照常触发。
+stop_hook_event = "session.ended"
+
+# 可选：仅当这一轮被优雅取消、会话被保留时，触发更精确的事件。
+stop_hook_event = "turn.cancelled"
+```
+
+两种模式下，当会话真正被销毁时（Agent 不支持优雅取消，或取消失败、进程被杀死）都会触发 `session.ended`。一次 `/stop` 只触发两者之一，因此 `event = "*"` 的规则每次 stop 仍然只收到一个事件。
 
 ## 定时任务 (Cron)
 
