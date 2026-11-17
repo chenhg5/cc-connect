@@ -72,6 +72,10 @@ type turnStartResponse struct {
 	} `json:"turn"`
 }
 
+type turnSteerResponse struct {
+	TurnID string `json:"turnId"`
+}
+
 type turnNotification struct {
 	ThreadID string `json:"threadId"`
 	Turn     struct {
@@ -528,7 +532,8 @@ func (s *appServerSession) Send(prompt string, messageID string, images []core.I
 
 	s.stateMu.Lock()
 	turnRevision := s.turnRevision
-	if !s.preambleSent {
+	activeTurn := s.currentTurn
+	if activeTurn == "" && !s.preambleSent {
 		prompt = prependCodexPromptPreamble(prompt, s.promptPreamble)
 		s.preambleSent = true
 	}
@@ -552,6 +557,13 @@ func (s *appServerSession) Send(prompt string, messageID string, images []core.I
 		})
 	}
 
+	if activeTurn != "" {
+		return s.steerTurn(threadID, activeTurn, input)
+	}
+	return s.startTurn(threadID, input, turnRevision)
+}
+
+func (s *appServerSession) startTurn(threadID string, input []map[string]any, turnRevision uint64) error {
 	params := map[string]any{
 		"threadId": threadID,
 		"input":    input,
@@ -588,6 +600,35 @@ func (s *appServerSession) Send(prompt string, messageID string, images []core.I
 	s.pendingMsgs = s.pendingMsgs[:0]
 	s.stateMu.Unlock()
 
+	return nil
+}
+
+func (s *appServerSession) steerTurn(threadID, expectedTurnID string, input []map[string]any) error {
+	params := map[string]any{
+		"threadId":       threadID,
+		"expectedTurnId": expectedTurnID,
+		"input":          input,
+	}
+
+	var resp turnSteerResponse
+	if err := s.request("turn/steer", params, &resp); err != nil {
+		s.stateMu.Lock()
+		if s.currentTurn == expectedTurnID {
+			// A turn can finish before its delayed turn/start response is
+			// installed. Do not strand every later message on a stale ID;
+			// the next user message gets a normal turn/start instead.
+			s.currentTurn = ""
+			s.turnRevision++
+		}
+		s.stateMu.Unlock()
+		return fmt.Errorf("codex app-server turn/steer: %w", err)
+	}
+	if resp.TurnID == "" {
+		return fmt.Errorf("codex app-server turn/steer returned empty turn id")
+	}
+	if resp.TurnID != expectedTurnID {
+		return fmt.Errorf("codex app-server turn/steer returned turn id %q, want %q", resp.TurnID, expectedTurnID)
+	}
 	return nil
 }
 
