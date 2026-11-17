@@ -70,19 +70,19 @@
       "agents": {
         "claudecode": {
           "base_url": "https://api.minimax.io/anthropic",
-          "model": "MiniMax-M3",
-          "models": ["MiniMax-M3", "MiniMax-M3-highspeed", "MiniMax-M2.7"]
+          "model": "MiniMax-M3.1-Flash",
+          "models": ["MiniMax-M3.1-Flash", "MiniMax-M3"]
         },
         "codex": {
           "base_url": "https://api.minimax.io/v1",
-          "model": "MiniMax-M3",
-          "models": ["MiniMax-M3", "MiniMax-M2.7"],
+          "model": "MiniMax-M3.1-Flash",
+          "models": ["MiniMax-M3.1-Flash", "MiniMax-M3"],
           "codex_config": { "wire_api": "responses" }
         },
         "opencode": {
           "base_url": "https://api.minimax.io/v1",
-          "model": "MiniMax-M3",
-          "models": ["MiniMax-M3", "MiniMax-M2.7"]
+          "model": "MiniMax-M3.1-Flash",
+          "models": ["MiniMax-M3.1-Flash", "MiniMax-M3"]
         }
       }
     },
@@ -98,19 +98,19 @@
       "agents": {
         "claudecode": {
           "base_url": "https://api.minimaxi.com/anthropic",
-          "model": "MiniMax-M3",
-          "models": ["MiniMax-M3", "MiniMax-M3-highspeed", "MiniMax-M2.7"]
+          "model": "MiniMax-M3.1-Flash",
+          "models": ["MiniMax-M3.1-Flash", "MiniMax-M3"]
         },
         "codex": {
           "base_url": "https://api.minimaxi.com/v1",
-          "model": "MiniMax-M3",
-          "models": ["MiniMax-M3", "MiniMax-M2.7"],
+          "model": "MiniMax-M3.1-Flash",
+          "models": ["MiniMax-M3.1-Flash", "MiniMax-M3"],
           "codex_config": { "wire_api": "responses" }
         },
         "opencode": {
           "base_url": "https://api.minimaxi.com/v1",
-          "model": "MiniMax-M3",
-          "models": ["MiniMax-M3", "MiniMax-M2.7"]
+          "model": "MiniMax-M3.1-Flash",
+          "models": ["MiniMax-M3.1-Flash", "MiniMax-M3"]
         }
       }
     },
@@ -699,6 +699,81 @@
           "base_url": "https://cloudgpu.app/v1",
           "model": "deepseek-v4-flash",
           "models": ["deepseek-v4-flash", "deepseek-v4-pro"]
+        }
+      }
+    },
+    {
+      "name": "opper",
+      "display_name": "Opper",
+      "description": "EU-hosted AI gateway with 700+ models from 50+ providers behind one key, through OpenAI and Anthropic compatible APIs.",
+      "description_zh": "欧盟托管的 AI 网关，一个密钥即可通过 OpenAI 和 Anthropic 兼容 API 使用 50+ 家供应商的 700+ 个模型。",
+      "features": ["EU Hosted", "700+ Models", "OpenAI + Anthropic API"],
+      "tier": 3,
+      "website": "https://opper.ai",
+      "agents": {
+        "claudecode": {
+          "base_url": "https://api.opper.ai/v3/compat",
+          "model": "claude-sonnet-4-6",
+          "models": ["claude-sonnet-4-6", "claude-opus-5"]
+        },
+        "opencode": {
+          "base_url": "https://api.opper.ai/v3/compat",
+          "model": "claude-sonnet-4-6",
+          "models": ["claude-sonnet-4-6", "gpt-5.5"]
+        }
+      }
+    },
+    {
+      "name": "runcrate",
+      "display_name": "Runcrate",
+      "description": "Runcrate inference API for open models, with OpenAI-compatible and Anthropic Messages endpoints for coding agents.",
+      "description_zh": "Runcrate 开源模型推理 API，提供 OpenAI 兼容与 Anthropic Messages 接口，适用于编码智能体。",
+      "features": ["OpenAI Compatible", "Anthropic Compatible", "1M Context", "Open Models"],
+      "tier": 3,
+      "website": "https://www.runcrate.ai",
+      "agents": {
+        "claudecode": {
+          "base_url": "https://api.runcrate.ai",
+          "model": "deepseek-ai/DeepSeek-V4.1-Flash",
+          "models": ["deepseek-ai/DeepSeek-V4.1-Flash", "zai-org/GLM-5.3", "Qwen/Qwen3.8-Flash"]
+        },
+        "codex": {
+          "base_url": "https://api.runcrate.ai/v1",
+          "model": "deepseek-ai/DeepSeek-V4.1-Flash",
+          "models": ["deepseek-ai/DeepSeek-V4.1-Flash", "zai-org/GLM-5.3", "Qwen/Qwen3.8-Flash"],
+          "codex_config": { "wire_api": "responses" }
+        },
+        "opencode": {
+          "base_url": "https://api.runcrate.ai/v1",
+          "model": "deepseek-ai/DeepSeek-V4.1-Flash",
+          "models": ["deepseek-ai/DeepSeek-V4.1-Flash", "zai-org/GLM-5.3", "Qwen/Qwen3.8-Flash"]
+        }
+      }
+    },
+    {
+      "name": "requesty",
+      "display_name": "Requesty",
+      "description": "LLM gateway that routes to first-party providers (Anthropic, OpenAI, Google and more) through OpenAI and Anthropic compatible APIs.",
+      "description_zh": "LLM 网关，通过 OpenAI 和 Anthropic 兼容 API 将请求路由到一方模型供应商（Anthropic、OpenAI、Google 等）。",
+      "features": ["OpenAI Compatible", "Anthropic Compatible", "First-Party Providers"],
+      "tier": 3,
+      "website": "https://www.requesty.ai",
+      "agents": {
+        "claudecode": {
+          "base_url": "https://router.requesty.ai",
+          "model": "anthropic/claude-sonnet-5-5",
+          "models": ["anthropic/claude-sonnet-5-5", "anthropic/claude-opus-5-5", "anthropic/claude-haiku-5-5"]
+        },
+        "codex": {
+          "base_url": "https://router.requesty.ai/v1",
+          "model": "openai/gpt-5.4",
+          "models": ["openai/gpt-5.4", "openai/gpt-5.4-mini"],
+          "codex_config": { "wire_api": "responses" }
+        },
+        "opencode": {
+          "base_url": "https://router.requesty.ai/v1",
+          "model": "anthropic/claude-sonnet-5-5",
+          "models": ["anthropic/claude-sonnet-5-5", "openai/gpt-5.4", "google/gemini-3.6-flash"]
         }
       }
     }
