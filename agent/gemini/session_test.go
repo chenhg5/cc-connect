@@ -250,9 +250,9 @@ func TestHandleMessage_MixedDeltaAndNonDelta(t *testing.T) {
 		"content": "Let me look at the files.",
 	})
 	gs.handleEvent(map[string]any{
-		"type":      "tool_use",
-		"tool_name": "shell",
-		"tool_id":   "t1",
+		"type":       "tool_use",
+		"tool_name":  "shell",
+		"tool_id":    "t1",
 		"parameters": map[string]any{"command": "ls"},
 	})
 	gs.handleEvent(map[string]any{
@@ -445,10 +445,10 @@ func TestSessionMessage_TextContent(t *testing.T) {
 
 func TestComputeLineDiff(t *testing.T) {
 	tests := []struct {
-		name     string
-		old      string
-		new_     string
-		want     string
+		name string
+		old  string
+		new_ string
+		want string
 	}{
 		{
 			"single line fully different",

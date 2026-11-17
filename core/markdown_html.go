@@ -428,7 +428,7 @@ func IsRTL(s string) bool {
 			(r >= 0x0750 && r <= 0x077F) || // Arabic Supplement
 			(r >= 0x08A0 && r <= 0x08FF) || // Arabic Extended-A
 			(r >= 0xFB50 && r <= 0xFDFF) || // Arabic Presentation Forms-A
-			(r >= 0xFE70 && r <= 0xFEFF) {  // Arabic Presentation Forms-B
+			(r >= 0xFE70 && r <= 0xFEFF) { // Arabic Presentation Forms-B
 			return true
 		}
 	}

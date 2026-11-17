@@ -305,11 +305,11 @@ type wsMessage struct {
 }
 
 type messagePayload struct {
-	MessageID  string              `json:"messageId"`
-	FromUserID string              `json:"fromUserId"`
-	Text       string              `json:"text"`
-	Timestamp  int64               `json:"timestamp"`
-	Input      []messageInputItem  `json:"input,omitempty"`
+	MessageID  string             `json:"messageId"`
+	FromUserID string             `json:"fromUserId"`
+	Text       string             `json:"text"`
+	Timestamp  int64              `json:"timestamp"`
+	Input      []messageInputItem `json:"input,omitempty"`
 }
 
 type messageInputItem struct {

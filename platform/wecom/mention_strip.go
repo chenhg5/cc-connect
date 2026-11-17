@@ -73,6 +73,7 @@ func removeAllEqualFold(s, sub string) string {
 //   - the user @-mentions multiple parties before the command
 //     (e.g. "@张三 @机器人 /list"),
 //   - or the mention token contains punctuation other than whitespace.
+//
 // The fix scans for the first '/' or '!' that appears at a token boundary
 // (i.e. preceded by whitespace) and treats everything before it as the
 // mention prefix. Matching at a token boundary avoids false positives on

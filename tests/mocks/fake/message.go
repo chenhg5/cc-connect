@@ -70,7 +70,7 @@ func TestLongMessage(length int) *core.Message {
 		SessionKey: "test:channel:user",
 		Platform:   "test",
 		MessageID:  "msg-test-long",
-		UserID:    "user-test",
+		UserID:     "user-test",
 		Content:    strings.Repeat("x", length),
 	}
 }
@@ -81,7 +81,7 @@ func TestSpecialCharsMessage() *core.Message {
 		SessionKey: "test:channel:user",
 		Platform:   "test",
 		MessageID:  "msg-test-special",
-		UserID:    "user-test",
+		UserID:     "user-test",
 		Content:    "Hello! 🎉 <script>alert('xss')</script> & \"quotes\"",
 	}
 }
