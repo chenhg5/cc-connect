@@ -18,6 +18,7 @@ Complete guide to using cc-connect features.
 - [Voice Messages (STT)](#voice-messages-speech-to-text)
 - [Voice Reply (TTS)](#voice-reply-text-to-speech)
 - [Image and File Send-Back](#image-and-file-send-back)
+- [Lifecycle Hooks](#lifecycle-hooks)
 - [Scheduled Tasks (Cron)](#scheduled-tasks-cron)
 - [Shell Configuration](#shell-configuration)
 - [Multi-Bot Relay](#multi-bot-relay)
@@ -56,6 +57,8 @@ During a session, the agent may request tool permissions. Reply **allow** / **de
 Use `/ps` (or `/btw`) to add instructions while a task is running. An idle session rejects the command. The delivery confirmation means the bridge sent the request, not that the agent has finished processing it.
 
 With Pi, enable `rpc = true` for native steering: the supplement is queued for the next model call, after the current assistant turn's tool calls. If Pi has already finished while the bridge is still delivering its reply, the supplement starts a follow-up turn. Pi's default JSON mode keeps its existing one-shot sending behavior; it cannot inject into an already running process.
+
+Codex `/ps` steering requires an app-server that implements `turn/steer` (codex-cli 0.166.0 or newer). Older CLIs return a method-not-supported error; upgrade the Codex CLI to use this feature.
 
 cc-connect rotates to a fresh session automatically after long inactivity:
 
@@ -150,6 +153,31 @@ cmd = ["/path with spaces/codex", "--profile", "work"]
 
 This runs the bundled CLI using the existing Codex adapter. Desktop-only tools and shared-thread locking have separate requirements; see [Desktop backend discussion #651](https://github.com/chenhg5/cc-connect/issues/651) and [thread writer conflict #1909](https://github.com/chenhg5/cc-connect/issues/1909).
 
+### Codex home directory (`codex_home`)
+
+By default the Codex adapter uses the same Codex home as your terminal and the Codex desktop app. The adapter resolves the home in this order: the project `codex_home` option, then `CODEX_HOME` from the environment that starts cc-connect, then `~/.codex`. A configured `codex_home` is exported as `CODEX_HOME` to the Codex CLI for both the `exec` and `app_server` backends, and `/list` reads sessions from the same resolved home.
+
+Sharing one home has a cost. When the Codex desktop app holds the thread writer lock for a conversation, a later `codex exec resume` fails with `thread-store conflict: ... already has an active writer (code -32600)`. Give a project its own home when it must not share threads:
+
+```toml
+[projects.agent.options]
+codex_home = "/Users/you/.codex-cc-connect"
+```
+
+- Put the option under `[projects.agent.options]`. Options under `[projects.platforms.options]` are per-platform and never reach the agent.
+- Use an absolute path that already exists. `codex_home` does not expand `~`, so `~/.codex-cc-connect` reaches the CLI literally, and the CLI does not create the directory. cc-connect creates it only when it writes provider configuration, which a subscription login never does.
+- Copy `auth.json` and `config.toml` from your default Codex home to reuse the login and settings. cc-connect writes `auth.json` only for provider API keys and never writes `config.toml` for a subscription login.
+- The trade-off: conversations in the isolated home no longer appear in the Codex desktop app, and the desktop app's conversations cannot be resumed by this project. The two clients stop sharing threads.
+
+Create the directory and copy the login files before the first message:
+
+```sh
+mkdir -p ~/.codex-cc-connect
+cp ~/.codex/auth.json ~/.codex/config.toml ~/.codex-cc-connect/
+```
+
+Then set the absolute path under `[projects.agent.options]`, for example `/Users/you/.codex-cc-connect`. To reuse one isolated home across projects, set `CODEX_HOME` in the environment that starts cc-connect instead; an explicit `codex_home` wins over the environment variable.
+
 ### Cursor Agent Modes
 
 | Mode | Config Value | Behavior |
@@ -163,6 +191,8 @@ For Cursor projects, the optional `instructions_file` setting under `[projects.a
 prepends a UTF-8 file to each prompt, including resumed turns. The file is read again on
 every turn so edits take effect without restarting the agent. An unreadable file rejects
 the turn explicitly. Leave it unset to keep the existing prompt behavior.
+
+`/memory` reads and appends `<work_dir>/AGENTS.md`, which the Cursor CLI loads on every session. `/cron setup` writes the same file. If you set `instructions_file`, point it at that same `AGENTS.md`; `/memory` still writes `<work_dir>/AGENTS.md` when the two paths differ. Cursor has no user-level memory file, so `/memory global` is unsupported.
 
 ### Gemini CLI Modes
 
@@ -236,7 +266,7 @@ name = "minimax"
 api_key = "your-minimax-api-key"
 # Use https://api.minimaxi.com/v1 for China-region accounts.
 base_url = "https://api.minimax.io/v1"
-model = "MiniMax-M2.7"
+model = "MiniMax-M3.1-Flash"
 
 # For Bedrock, Vertex, etc.
 [[projects.agent.providers]]
@@ -872,6 +902,27 @@ Notes:
 
 ---
 
+## Lifecycle Hooks
+
+`[[hooks]]` rules run a shell command or POST to an HTTP endpoint when a lifecycle event fires. The event names are `message.received`, `message.sent`, `session.started`, `session.ended`, `turn.cancelled`, `cron.triggered`, `timer.triggered`, `permission.requested`, `error`, plus the wildcard `*`.
+
+### `/stop` and `turn.cancelled`
+
+For agents that support graceful cancellation (Claude Code and ACP-based agents), `/stop` interrupts the current turn but keeps the agent process and the conversation alive, so `/compress`, `/clear`, and `/resume` keep working afterwards. A stop is therefore no longer necessarily a session end.
+
+`stop_hook_event` selects which event `/stop` fires:
+
+```toml
+# Default: keeps the historical behaviour, existing rules keep firing.
+stop_hook_event = "session.ended"
+
+# Opt in: fire the precise event when the turn was cancelled and the
+# session was kept alive.
+stop_hook_event = "turn.cancelled"
+```
+
+In both modes `session.ended` is fired when the session really is torn down: the agent has no graceful cancel, or cancellation failed and the process was killed. A `/stop` fires exactly one of the two events, so rules matching `event = "*"` still receive one event per stop.
+
 ## Scheduled Tasks (Cron)
 
 Create scheduled tasks that run automatically.
@@ -1261,51 +1312,21 @@ Empty responses from OpenClaw are almost always a missing pairing step
 (issue #432). Re-run `openclaw pair` and re-approve before debugging
 anything else. Reference: <https://zhuanlan.zhihu.com/p/2005687480976970296>
 
-### Personal WeChat group chat — finding the right `chat_id` (issue #805)
+### Personal WeChat group chat is not feasible (correction for issue #805 docs)
 
-Personal WeChat (the `weixin` platform) supports group chats. To bind the
-bot to a specific group, set `chat_id` in `[[projects.platforms.options]]`
-to the **group chat ID**, not an individual user ID. Group chat IDs always
-end with `@chatroom`, for example:
+Personal WeChat (`weixin` / ilink) bots are **not normal WeChat contacts**.
+You usually cannot find them via a group's "Add members" search, and there
+is no "invite bot to group" API. **Group chat is therefore not a workable
+path on this channel.** Do not expect `chat_id=…@chatroom` or
+"share the QR into a group like adding a friend" to make group chat work.
 
-```toml
-[[projects.platforms]]
-type = "weixin"
+**Recommended:**
 
-[projects.platforms.options]
-token = "ilink_bot_bearer_token"
-chat_id = "your_group_chat_id@chatroom"   # group chats end with @chatroom
-```
+- Have each person scan / open the bot link and use **private chat**.
+- If you need in-group `@bot` collaboration, use Feishu, DingTalk, or
+  WeCom (those can run alongside `weixin` on the same project).
 
-**How to find the group chat ID:**
-
-1. Start cc-connect and let the bot be in the target group.
-2. Send any message in the group from a known allowed account.
-3. Check the cc-connect logs — the incoming `chat_id` (ending in
-   `@chatroom`) is logged at the moment the message is received. Copy
-   that value into `chat_id`.
-
-Leave `chat_id` empty (or omit the key) to respond to every chat the bot
-is in. Set it to a specific value to restrict the bot to that group or
-user only.
-
-Common pitfalls:
-
-- **"How do I add the bot to a group?"** Personal WeChat bots are added
-  by scanning the QR code *inside* the group with the linked WeChat
-  account, or by sharing the QR via the personal chat and then opening
-  it inside the target group. There is no API-side "invite bot to group"
-  call; the bot becomes a group member the same way any other WeChat
-  contact does.
-- **Bot never receives group messages** — make sure the group is bound
-  to your cc-connect instance. If `allow_from` is set, the first user
-  to message in the group is recorded; if the binding is to a
-  different user, the bot stays silent.
-- **Bot replies in private but ignores the group (or vice versa)** —
-  duplicate the `[[projects.platforms]]` block, one with `chat_id` set
-  to the group and one without, to cover both surfaces.
-
-For more on the `weixin` platform, see [docs/weixin.md](./weixin.md).
+See [docs/weixin.md](./weixin.md) for the full limitation note.
 
 ### Telegram proxy / outbound restrictions (issue #245)
 
