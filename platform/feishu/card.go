@@ -497,7 +497,7 @@ func (p *interactivePlatform) SendAskQuestionCard(ctx context.Context, rctx any,
 	if !p.noReplyToTrigger && p.shouldReplyInThread(rc) {
 		return p.replyMessage(ctx, rc, larkim.MsgTypeInteractive, string(cardJSON))
 	}
-	return p.createMessage(ctx, rc.chatID, larkim.MsgTypeInteractive, string(cardJSON), "send ask-question card")
+	return p.createMessage(ctx, rc.chatID, rc.receiveIDType, larkim.MsgTypeInteractive, string(cardJSON), "send ask-question card")
 }
 
 // buildAskQuestionCard2 builds the Feishu card schema 2.0 map for an

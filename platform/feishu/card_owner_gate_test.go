@@ -27,6 +27,15 @@ func cardActionEventWithKey(openID, action, sessionKey string) *callback.CardAct
 	}
 }
 
+// askqClaimedAction mirrors cardActionEventWithKey but attaches a live claim
+// token, as the card 2.0 flow emits on every option button: a callback with
+// no claim for the session is rejected as stale.
+func askqClaimedAction(ip *interactivePlatform, openID, action, sessionKey string) *callback.CardActionTriggerEvent {
+	ev := cardActionEventWithKey(openID, action, sessionKey)
+	ev.Event.Action.Value["askq_token"] = mintAskq(ip, sessionKey, "oc_test_chat", 0)
+	return ev
+}
+
 func TestRequesterFromSessionKey(t *testing.T) {
 	cases := []struct {
 		sessionKey string
@@ -81,7 +90,7 @@ func TestOnCardAction_NonRequesterAskqClickRejected(t *testing.T) {
 func TestOnCardAction_RequesterAskqClickDispatchesWithButtonlessCard(t *testing.T) {
 	ip, msgCh := newAllowFromTestPlatform(t, "*")
 
-	resp, err := ip.onCardAction(cardActionEventWithKey("ou_owner", "askq:0:1", "feishu:oc_test_chat:ou_owner"))
+	resp, err := ip.onCardAction(askqClaimedAction(ip, "ou_owner", "askq:0:1", "feishu:oc_test_chat:ou_owner"))
 	if err != nil {
 		t.Fatalf("onCardAction() error = %v", err)
 	}
@@ -150,7 +159,7 @@ func TestOnCardAction_RequesterPermClickDispatches(t *testing.T) {
 func TestOnCardAction_ThreadSessionAskqNotGated(t *testing.T) {
 	ip, msgCh := newAllowFromTestPlatform(t, "*")
 
-	_, err := ip.onCardAction(cardActionEventWithKey("ou_teammate", "askq:0:1", "feishu:oc_test_chat:root:om_root"))
+	_, err := ip.onCardAction(askqClaimedAction(ip, "ou_teammate", "askq:0:1", "feishu:oc_test_chat:root:om_root"))
 	if err != nil {
 		t.Fatalf("onCardAction() error = %v", err)
 	}
@@ -187,7 +196,7 @@ func TestOnCardAction_StaleAskqClickLeavesCard(t *testing.T) {
 	i18n := core.NewI18n(core.LangEnglish)
 	ip.SetLocalizer(i18n.T)
 
-	resp, err := ip.onCardAction(cardActionEventWithKey("ou_owner", "askq:0:2", "feishu:oc_test_chat:ou_owner"))
+	resp, err := ip.onCardAction(askqClaimedAction(ip, "ou_owner", "askq:0:2", "feishu:oc_test_chat:ou_owner"))
 	if err != nil {
 		t.Fatalf("onCardAction() error = %v", err)
 	}
@@ -208,7 +217,7 @@ func TestOnCardAction_LiveAskqClickRendersAnswer(t *testing.T) {
 	ip, _ := newAllowFromTestPlatform(t, "*")
 	ip.SetAskQuestionLiveCheck(func(string, string) bool { return true })
 
-	resp, err := ip.onCardAction(cardActionEventWithKey("ou_owner", "askq:0:2", "feishu:oc_test_chat:ou_owner"))
+	resp, err := ip.onCardAction(askqClaimedAction(ip, "ou_owner", "askq:0:2", "feishu:oc_test_chat:ou_owner"))
 	if err != nil {
 		t.Fatalf("onCardAction() error = %v", err)
 	}
