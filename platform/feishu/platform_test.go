@@ -2415,7 +2415,7 @@ func TestCmdAction_WithAfterClick_DispatchesAndReturnsCard(t *testing.T) {
 func TestCmdAction_SharedInteractiveResultUpdatesClickedCard(t *testing.T) {
 	for _, command := range []string{"/decision token allow", "/async-answer token option 1"} {
 		t.Run(command, func(t *testing.T) {
-			platformAny, err := New(map[string]any{"app_id": "cli_xxx", "app_secret": "secret", "enable_feishu_card": true})
+			platformAny, err := New(map[string]any{"app_id": "cli_xxx", "app_secret": "secret", "enable_feishu_card": true, "domain": stubOpenAPIDomain(t)})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -2442,15 +2442,20 @@ func TestCmdAction_SharedInteractiveResultUpdatesClickedCard(t *testing.T) {
 			if header["template"] != "green" || header["title"].(map[string]any)["content"] != "✅ Accepted" {
 				t.Fatalf("callback card header = %#v", header)
 			}
-			if got := <-seen; got != command {
-				t.Fatalf("dispatched command = %q, want %q", got, command)
+			select {
+			case got := <-seen:
+				if got != command {
+					t.Fatalf("dispatched command = %q, want %q", got, command)
+				}
+			case <-time.After(2 * time.Second):
+				t.Fatalf("expected command %q to be dispatched", command)
 			}
 		})
 	}
 }
 
 func TestCmdAction_SharedInteractiveTimeoutClaimsCallback(t *testing.T) {
-	platformAny, err := New(map[string]any{"app_id": "cli_xxx", "app_secret": "secret", "enable_feishu_card": true})
+	platformAny, err := New(map[string]any{"app_id": "cli_xxx", "app_secret": "secret", "enable_feishu_card": true, "domain": stubOpenAPIDomain(t)})
 	if err != nil {
 		t.Fatal(err)
 	}
