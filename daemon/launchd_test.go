@@ -1142,3 +1142,56 @@ func TestInstallLaunchd_RemovesLegacyRetryPlist(t *testing.T) {
 		t.Fatalf("current plist missing after install: %v", err)
 	}
 }
+
+// Regression test for #2274: `daemon restart` must go through the launchd
+// restart transaction instead of the generic Stop → Start path, which boots out
+// the legacy label and then cannot bootstrap anything when only
+// com.cc-connect.retry.plist exists.
+func TestLaunchdManagerRestartsInPlace(t *testing.T) {
+	var m Manager = &launchdManager{}
+	if _, ok := m.(InPlaceRestarter); !ok {
+		t.Fatal("launchdManager must implement InPlaceRestarter so restart does not fall back to Stop → Start")
+	}
+
+	orig := runLaunchctl
+	t.Cleanup(func() { runLaunchctl = orig })
+
+	// Legacy-only install: only the legacy plist exists, and the legacy label is
+	// loaded and serving.
+	dir := t.TempDir()
+	t.Setenv("HOME", dir)
+	seedLaunchdPlist(t, legacyLaunchdPlistPath())
+
+	var calls []string
+	runLaunchctl = func(args ...string) (string, error) {
+		calls = append(calls, strings.Join(args, " "))
+		switch args[0] {
+		case "print":
+			if strings.Contains(args[len(args)-1], legacyLaunchdLabel) {
+				return "state = running\n\tpid = 4242", nil
+			}
+			return "Could not find service", fmt.Errorf("exit status 113")
+		case "kickstart":
+			return "", nil
+		}
+		return "", nil
+	}
+
+	if err := m.(InPlaceRestarter).RestartInPlace(); err != nil {
+		t.Fatalf("RestartInPlace: %v", err)
+	}
+	for _, c := range calls {
+		if strings.HasPrefix(c, "bootout") {
+			t.Fatalf("restart must not boot out anything, got calls %v", calls)
+		}
+	}
+	foundKickstart := false
+	for _, c := range calls {
+		if strings.HasPrefix(c, "kickstart") && strings.Contains(c, legacyLaunchdLabel) {
+			foundKickstart = true
+		}
+	}
+	if !foundKickstart {
+		t.Fatalf("expected the loaded legacy label to be kickstarted, got calls %v", calls)
+	}
+}
