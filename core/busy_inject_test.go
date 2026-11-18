@@ -365,3 +365,23 @@ func TestSetBusyAction_Normalizes(t *testing.T) {
 		}
 	}
 }
+
+func TestBusyActionConcurrentReload(t *testing.T) {
+	e := &Engine{busyAction: BusyActionQueue}
+	var wg sync.WaitGroup
+	for i := 0; i < 4; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for j := 0; j < 1000; j++ {
+				e.SetBusyAction(BusyActionInject)
+				value := e.getBusyAction()
+				if value != BusyActionQueue && value != BusyActionInject {
+					t.Errorf("invalid busy action %q", value)
+				}
+				e.SetBusyAction(BusyActionQueue)
+			}
+		}()
+	}
+	wg.Wait()
+}

@@ -2,8 +2,8 @@ package claudecode
 
 import (
 	"context"
+	"encoding/json"
 	"io"
-	"strings"
 	"testing"
 	"time"
 
@@ -129,25 +129,148 @@ func TestClaudeSession_FollowUpTurnMergesIntoRunningTurn(t *testing.T) {
 	}
 }
 
-// Anything else on the stream after a held result means no follow-up turn:
-// the result goes out first, in order.
-func TestClaudeSession_HeldResultReleasedBeforeNextStreamEvent(t *testing.T) {
+// Unexpected pre-init events are not proof that no follow-up is coming.
+func TestClaudeSession_UnexpectedEventsPreserveExpectedFollowUp(t *testing.T) {
+	for _, line := range []string{
+		`{"type":"rate_limit_event","rate_limit_info":{}}`,
+		`{"type":"system","subtype":"future_event"}`,
+		`{"type":"user","message":{"role":"user","content":"echo"}}`,
+		`{"type":"future_event"}`,
+		textB,
+	} {
+		for _, withInit := range []bool{false, true} {
+			cs := newMidTurnTestSession(t, time.Hour)
+			if err := cs.SendMidTurn("continue", "", nil, nil); err != nil {
+				t.Fatal(err)
+			}
+			cs.handleReadLoopLine(resultA)
+			cs.handleReadLoopLine(line)
+			if got := results(drain(cs, time.Millisecond)); len(got) != 0 {
+				t.Fatalf("intermediate event released held result: %#v", got)
+			}
+			if withInit {
+				cs.handleReadLoopLine(initLine)
+			}
+			cs.handleReadLoopLine(resultB)
+			got := results(drain(cs, time.Millisecond))
+			if len(got) != 1 || got[0].Content != "STORY\n\nBANANA." {
+				t.Fatalf("withInit=%v: got %#v, want one merged result", withInit, got)
+			}
+		}
+	}
+}
+
+type midTurnWriteFunc func([]byte) (int, error)
+
+func (f midTurnWriteFunc) Write(p []byte) (int, error) { return f(p) }
+func (midTurnWriteFunc) Close() error                  { return nil }
+
+// Send refreshes settings before writing the actual user input. Only a user
+// packet can trigger the simulated turn result; get_settings is not a turn.
+func midTurnUserWrite(t *testing.T, onUser midTurnWriteFunc) midTurnWriteFunc {
+	t.Helper()
+	return func(p []byte) (int, error) {
+		var packet struct {
+			Type    string `json:"type"`
+			Request struct {
+				Subtype string `json:"subtype"`
+			} `json:"request"`
+		}
+		if err := json.Unmarshal(p, &packet); err != nil {
+			t.Fatalf("invalid stdin packet: %v", err)
+		}
+		if packet.Type == "control_request" && packet.Request.Subtype == "get_settings" {
+			return len(p), nil
+		}
+		if packet.Type != "user" {
+			t.Fatalf("unexpected stdin packet type %q", packet.Type)
+		}
+		return onUser(p)
+	}
+}
+
+// Settings refresh is best effort. Its failed control write must not roll
+// back the independently accepted user input or generate a fake turn result.
+func TestClaudeSession_MidTurnSettingsFailureKeepsUserReservation(t *testing.T) {
 	cs := newMidTurnTestSession(t, time.Hour)
-	if err := cs.SendMidTurn("add BANANA", "", nil, nil); err != nil {
+	settings, users := 0, 0
+	cs.stdin = midTurnWriteFunc(func(p []byte) (int, error) {
+		var packet struct {
+			Type string `json:"type"`
+		}
+		if err := json.Unmarshal(p, &packet); err != nil {
+			t.Fatal(err)
+		}
+		switch packet.Type {
+		case "control_request":
+			settings++
+			return 0, io.ErrClosedPipe
+		case "user":
+			users++
+			cs.handleReadLoopLine(resultA)
+			return len(p), nil
+		default:
+			t.Fatalf("unexpected packet type %q", packet.Type)
+			return 0, io.ErrUnexpectedEOF
+		}
+	})
+	if err := cs.SendMidTurn("continue", "", nil, nil); err != nil {
 		t.Fatal(err)
 	}
-	cs.handleReadLoopLine(resultA)
-	cs.handleReadLoopLine(`{"type":"rate_limit_event","rate_limit_info":{}}`)
-	if held := results(drain(cs, 20*time.Millisecond)); len(held) != 0 {
-		t.Fatalf("rate_limit_event must not release the held result: %#v", held)
+	if settings != 1 || users != 1 {
+		t.Fatalf("writes: settings=%d user=%d, want one of each", settings, users)
 	}
-	cs.handleReadLoopLine(textB)
-	events := drain(cs, 50*time.Millisecond)
-	if len(events) < 2 || events[0].Type != core.EventResult || events[0].Content != "STORY" {
-		t.Fatalf("events = %#v, want the held STORY result first", events)
+	if got := results(drain(cs, time.Millisecond)); len(got) != 0 {
+		t.Fatalf("settings failure released pending user turn: %#v", got)
 	}
-	if !strings.Contains(events[1].Content, "BANANA") {
-		t.Fatalf("second event = %#v, want the assistant text after the result", events[1])
+	cs.handleReadLoopLine(resultB)
+	if got := results(drain(cs, time.Millisecond)); len(got) != 1 || got[0].Content != "STORY\n\nBANANA." {
+		t.Fatalf("accepted input was lost after settings failure: %#v", got)
+	}
+}
+
+func TestClaudeSession_MidTurnReservesBeforeWriteReturns(t *testing.T) {
+	cs := newMidTurnTestSession(t, time.Hour)
+	cs.stdin = midTurnUserWrite(t, func(p []byte) (int, error) {
+		cs.handleReadLoopLine(resultA)
+		return len(p), nil
+	})
+	if err := cs.SendMidTurn("continue", "", nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	if got := results(drain(cs, time.Millisecond)); len(got) != 0 {
+		t.Fatalf("result raced the pending reservation: %#v", got)
+	}
+	cs.handleReadLoopLine(resultB)
+	if got := results(drain(cs, time.Millisecond)); len(got) != 1 || got[0].Content != "STORY\n\nBANANA." {
+		t.Fatalf("got %#v, want one merged result", got)
+	}
+}
+
+func TestClaudeSession_FailedMidTurnWriteRollsBackReservation(t *testing.T) {
+	for _, resultDuringWrite := range []bool{false, true} {
+		cs := newMidTurnTestSession(t, time.Hour)
+		cs.stdin = midTurnUserWrite(t, func([]byte) (int, error) {
+			if resultDuringWrite {
+				cs.handleReadLoopLine(resultA)
+			}
+			return 0, io.ErrClosedPipe
+		})
+		if err := cs.SendMidTurn("continue", "", nil, nil); err == nil {
+			t.Fatal("expected write error")
+		}
+		if !resultDuringWrite {
+			cs.handleReadLoopLine(resultA)
+		}
+		if got := results(drain(cs, time.Millisecond)); len(got) != 1 || got[0].Content != "STORY" {
+			t.Fatalf("failed write left result held: %#v", got)
+		}
+		cs.midTurnMu.Lock()
+		pending := len(cs.midTurnPending)
+		cs.midTurnMu.Unlock()
+		if pending != 0 {
+			t.Fatalf("failed write left %d pending messages", pending)
+		}
 	}
 }
 
@@ -168,5 +291,37 @@ func TestClaudeSession_HeldResultFlushedOnExit(t *testing.T) {
 	}
 	if r := results(got); len(r) != 1 || r[0].Content != "STORY" {
 		t.Fatalf("results = %#v, want the held STORY result before the channel closes", r)
+	}
+}
+
+func TestClaudeSession_FailedWriteDoesNotRemoveAnotherReservation(t *testing.T) {
+	cs := newMidTurnTestSession(t, time.Hour)
+	cs.stdin = midTurnUserWrite(t, func([]byte) (int, error) {
+		cs.handleReadLoopLine(resultA)
+		cs.handleReadLoopLine(initLine)
+		// The reader consumed this write's reservation. Model a later
+		// independently accepted input before the original writer fails.
+		cs.midTurnMu.Lock()
+		cs.midTurnNextID++
+		cs.midTurnPending = append(cs.midTurnPending, cs.midTurnNextID)
+		cs.midTurnMu.Unlock()
+		return 0, io.ErrClosedPipe
+	})
+	if err := cs.SendMidTurn("continue", "", nil, nil); err == nil {
+		t.Fatal("expected write error")
+	}
+	cs.midTurnMu.Lock()
+	pending := append([]uint64(nil), cs.midTurnPending...)
+	cs.midTurnMu.Unlock()
+	if len(pending) != 1 || pending[0] != 2 {
+		t.Fatalf("rollback removed another input's reservation: %v", pending)
+	}
+	cs.handleReadLoopLine(resultB)
+	if got := results(drain(cs, time.Millisecond)); len(got) != 0 {
+		t.Fatalf("outstanding input must still hold the merged result: %#v", got)
+	}
+	cs.releaseHeldResult()
+	if got := results(drain(cs, time.Millisecond)); len(got) != 1 || got[0].Content != "STORY\n\nBANANA." {
+		t.Fatalf("got %#v, want one merged result", got)
 	}
 }
