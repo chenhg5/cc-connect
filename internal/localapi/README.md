@@ -27,6 +27,14 @@ files restrict access to the current Windows SID and SYSTEM. Remote pipe
 clients and filesystem reparse points are rejected. Startup preserves live or
 unverifiable previous endpoints; shutdown removes only its own descriptor.
 
+Readers validate both ownership and the DACL of the opened descriptor handle.
+Null DACLs, grants outside the current SID/SYSTEM, and unsupported ACE types
+are refused. Before returning a connected pipe to HTTP code, clients verify
+the kernel-reported server PID against the descriptor and the server process
+token SID against the current user. A failed identity check closes the pipe
+without sending an HTTP request. A real second-account takeover and remote
+client rejection still require native Windows validation.
+
 Clients must connect and receive a successful response from `GET /sessions`
 before reporting readiness. File existence alone does not prove the server has
 started its HTTP loop. `POST /shutdown` responds with HTTP 202 and

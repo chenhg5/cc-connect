@@ -2,8 +2,10 @@ package localapi
 
 import (
 	"fmt"
+	"net"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"unsafe"
 
@@ -79,8 +81,12 @@ func (s privateSecurity) checkOwner(handle windows.Handle) error {
 	if err != nil {
 		return err
 	}
-	if sd == nil {
-		return fmt.Errorf("local API state has no security descriptor")
+	return s.checkDescriptorOwner(sd)
+}
+
+func (s privateSecurity) checkDescriptorOwner(sd *windows.SECURITY_DESCRIPTOR) error {
+	if sd == nil || !sd.IsValid() {
+		return fmt.Errorf("local API state has no valid security descriptor")
 	}
 	owner, _, err := sd.Owner()
 	if err != nil {
@@ -88,6 +94,92 @@ func (s privateSecurity) checkOwner(handle windows.Handle) error {
 	}
 	if owner == nil || !owner.Equals(s.sid) {
 		return fmt.Errorf("local API state belongs to another Windows identity")
+	}
+	return nil
+}
+
+func (s privateSecurity) checkPrivateDescriptor(sd *windows.SECURITY_DESCRIPTOR) error {
+	defer runtime.KeepAlive(sd)
+	if err := s.checkDescriptorOwner(sd); err != nil {
+		return err
+	}
+	rejected := func() error {
+		return fmt.Errorf("local API state has a permissive or unsupported DACL")
+	}
+	dacl, _, err := sd.DACL()
+	if err != nil || dacl == nil {
+		return rejected()
+	}
+	for i := uint16(0); i < dacl.AceCount; i++ {
+		var ace *windows.ACCESS_ALLOWED_ACE
+		if err := windows.GetAce(dacl, uint32(i), &ace); err != nil {
+			return err
+		}
+		if ace == nil || uintptr(ace.Header.AceSize) < unsafe.Sizeof(windows.ACE_HEADER{}) {
+			return rejected()
+		}
+		if ace.Header.AceType == windows.ACCESS_DENIED_ACE_TYPE {
+			continue
+		}
+		if ace.Header.AceType != windows.ACCESS_ALLOWED_ACE_TYPE {
+			return rejected()
+		}
+		sidOffset := unsafe.Offsetof(ace.SidStart)
+		if uintptr(ace.Header.AceSize) < sidOffset+8 {
+			return rejected()
+		}
+		sidBytes := unsafe.Slice((*byte)(unsafe.Pointer(&ace.SidStart)), int(ace.Header.AceSize)-int(sidOffset))
+		if sidBytes[1] > 15 || 8+4*int(sidBytes[1]) > len(sidBytes) {
+			return rejected()
+		}
+		sid := (*windows.SID)(unsafe.Pointer(&ace.SidStart))
+		if !sid.IsValid() || (ace.Mask != 0 && !sid.Equals(s.sid) && !sid.IsWellKnown(windows.WinLocalSystemSid)) {
+			return rejected()
+		}
+	}
+	return nil
+}
+
+func (s privateSecurity) checkPrivateHandle(handle windows.Handle) error {
+	sd, err := windows.GetSecurityInfo(handle, windows.SE_FILE_OBJECT,
+		windows.OWNER_SECURITY_INFORMATION|windows.DACL_SECURITY_INFORMATION)
+	if err != nil {
+		return err
+	}
+	return s.checkPrivateDescriptor(sd)
+}
+
+// Authenticate the connected peer before exposing the connection to HTTP code.
+// go-winio's pipe embeds win32File, which exposes its live handle through Fd.
+func (s privateSecurity) checkPipeServer(conn net.Conn, expectedPID uint32) error {
+	defer runtime.KeepAlive(conn)
+	pipe, ok := conn.(interface{ Fd() uintptr })
+	if !ok {
+		return fmt.Errorf("local API pipe does not expose a verifiable handle")
+	}
+	var pid uint32
+	if err := windows.GetNamedPipeServerProcessId(windows.Handle(pipe.Fd()), &pid); err != nil {
+		return fmt.Errorf("read local API pipe server identity: %w", err)
+	}
+	if pid != expectedPID {
+		return fmt.Errorf("local API pipe server PID does not match its descriptor")
+	}
+	process, err := windows.OpenProcess(windows.PROCESS_QUERY_LIMITED_INFORMATION, false, pid)
+	if err != nil {
+		return fmt.Errorf("open local API pipe server identity: %w", err)
+	}
+	defer func() { _ = windows.CloseHandle(process) }()
+	var token windows.Token
+	if err := windows.OpenProcessToken(process, windows.TOKEN_QUERY, &token); err != nil {
+		return fmt.Errorf("read local API pipe server token: %w", err)
+	}
+	defer func() { _ = token.Close() }()
+	user, err := token.GetTokenUser()
+	if err != nil {
+		return fmt.Errorf("read local API pipe server user: %w", err)
+	}
+	if !user.User.Sid.Equals(s.sid) {
+		return fmt.Errorf("local API pipe server belongs to another Windows identity")
 	}
 	return nil
 }
@@ -158,7 +250,7 @@ func (s privateSecurity) openFile(path string, access, sharing, disposition uint
 		_ = windows.CloseHandle(handle)
 		return nil, fmt.Errorf("local API state must be a regular file")
 	}
-	if err := s.checkOwner(handle); err != nil {
+	if err := s.checkPrivateHandle(handle); err != nil {
 		_ = windows.CloseHandle(handle)
 		return nil, err
 	}

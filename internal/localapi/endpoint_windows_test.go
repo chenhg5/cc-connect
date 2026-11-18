@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sync"
 	"testing"
 	"time"
@@ -265,5 +266,140 @@ func TestWindowsPipeConcurrentOwners(t *testing.T) {
 	}
 	if count != 1 {
 		t.Fatalf("concurrent owners = %d, want 1", count)
+	}
+}
+
+func TestWindowsDescriptorRejectsBroadOrNullDACL(t *testing.T) {
+	for _, policy := range []string{"broad", "null"} {
+		t.Run(policy, func(t *testing.T) {
+			listener, err := Listen(t.TempDir())
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() {
+				setStateDACL(t, listener.path, listener.security.sddl)
+				_ = listener.Close()
+			})
+			sddl := ""
+			if policy == "broad" {
+				sddl = listener.security.sddl + "(A;;GRGW;;;BU)"
+			}
+			setStateDACL(t, listener.path, sddl)
+			if _, err := readDescriptor(listener.path, listener.security); err == nil {
+				t.Fatal("accepted an owned descriptor writable or readable by another identity")
+			}
+		})
+	}
+}
+
+func setStateDACL(t *testing.T, path, sddl string) {
+	t.Helper()
+	var sd *windows.SECURITY_DESCRIPTOR
+	var dacl *windows.ACL
+	var err error
+	if sddl != "" {
+		sd, err = windows.SecurityDescriptorFromString(sddl)
+		if err != nil {
+			t.Fatal(err)
+		}
+		dacl, _, err = sd.DACL()
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := windows.SetNamedSecurityInfo(path, windows.SE_FILE_OBJECT,
+		windows.DACL_SECURITY_INFORMATION|windows.PROTECTED_DACL_SECURITY_INFORMATION,
+		nil, nil, dacl, nil); err != nil {
+		t.Fatal(err)
+	}
+	runtime.KeepAlive(sd)
+}
+
+func TestWindowsPrivateDACLRejectsUnknownGrant(t *testing.T) {
+	security, err := currentSecurity()
+	if err != nil {
+		t.Fatal(err)
+	}
+	sd, err := windows.SecurityDescriptorFromString("O:" + security.sid.String() + "D:P(OA;;GA;;;" + security.sid.String() + ")")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := security.checkPrivateDescriptor(sd); err == nil {
+		t.Fatal("accepted an unsupported object-allow ACE")
+	}
+}
+
+func TestWindowsPipeRejectsForgedDescriptorPID(t *testing.T) {
+	listener, err := Listen(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = listener.Close() })
+	endpoint, err := readDescriptor(listener.path, listener.security)
+	if err != nil {
+		t.Fatal(err)
+	}
+	endpoint.PID ^= 1 // Guaranteed to differ from this process, without opening it.
+	if _, err := publishDescriptor(listener.path, endpoint, listener.security); err != nil {
+		t.Fatal(err)
+	}
+	read := make(chan int, 1)
+	go func() {
+		conn, err := listener.Accept()
+		if err != nil {
+			read <- -1
+			return
+		}
+		defer func() { _ = conn.Close() }()
+		_ = conn.SetReadDeadline(time.Now().Add(time.Second))
+		var first [1]byte
+		n, _ := conn.Read(first[:])
+		read <- n
+	}()
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	conn, err := DialContext(ctx, listener.path)
+	if conn != nil {
+		_ = conn.Close()
+	}
+	if err == nil || conn != nil {
+		t.Fatal("returned an unverified pipe connection to the caller")
+	}
+	select {
+	case n := <-read:
+		if n != 0 {
+			t.Fatalf("unverified server received %d bytes, want EOF before any request", n)
+		}
+	case <-ctx.Done():
+		t.Fatal("identity rejection did not close the pipe")
+	}
+}
+
+func TestWindowsPipeRejectsUnexpectedServerSID(t *testing.T) {
+	listener, err := Listen(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = listener.Close() })
+	go func() {
+		if conn, err := listener.Accept(); err == nil {
+			defer func() { _ = conn.Close() }()
+			_, _ = io.Copy(io.Discard, conn)
+		}
+	}()
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	conn, err := DialContext(ctx, listener.path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = conn.Close() }()
+	foreign := listener.security
+	foreign.sid, err = windows.CreateWellKnownSid(windows.WinBuiltinUsersSid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := foreign.checkPipeServer(conn, uint32(os.Getpid())); err == nil {
+		t.Fatal("accepted a server token SID different from the expected owner")
 	}
 }

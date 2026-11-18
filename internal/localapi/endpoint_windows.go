@@ -56,7 +56,15 @@ func DialContext(ctx context.Context, endpointPath string) (net.Conn, error) {
 	if err != nil {
 		return nil, err
 	}
-	return winio.DialPipeContext(ctx, endpoint.Address)
+	conn, err := winio.DialPipeContext(ctx, endpoint.Address)
+	if err != nil {
+		return nil, err
+	}
+	if err := security.checkPipeServer(conn, endpoint.PID); err != nil {
+		_ = conn.Close()
+		return nil, err
+	}
+	return conn, nil
 }
 
 // Listener owns one named-pipe listener, its descriptor and its state lock.
