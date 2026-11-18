@@ -16,12 +16,21 @@ func (as *antigravitySession) prepareUsageMeter(sessionID string) {
 	if as.usageMeter != nil && as.meterSession == sessionID {
 		return
 	}
+	// A fresh stream may announce children before its parent ID is known.
+	// Keep those pending sources when chat-file recovery supplies the ID.
+	var pendingSources map[string]string
+	if as.usageMeter != nil && as.meterSession == "" && sessionID != "" {
+		pendingSources = as.usageMeter.Sources()
+	}
 	state := ""
 	if home, err := os.UserHomeDir(); err == nil && sessionID != "" && sessionID != core.ContinueSession {
 		state = filepath.Join(home, ".gemini", "antigravity-cli", "cc-connect-usage", sessionID+".json")
 	}
 	var restored bool
 	as.usageMeter, restored = core.NewUsageMeter(state)
+	for id, path := range pendingSources {
+		as.usageMeter.TrackSource(id, path)
+	}
 	as.usageBaselineKnown = !as.resuming || restored
 	as.meterSession = sessionID
 }

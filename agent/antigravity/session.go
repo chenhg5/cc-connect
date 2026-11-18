@@ -269,6 +269,9 @@ func (u agyUsage) resultEvent(sessionID string) core.Event {
 func (as *antigravitySession) readLoop(ctx context.Context, cancel context.CancelFunc, cmd *exec.Cmd, stdout io.ReadCloser, stderrBuf *bytes.Buffer, tempFiles []string, preEntries map[string]bool, sendStartedAt time.Time) {
 	defer as.wg.Done()
 	var result *agyStreamResult
+	var pendingResultError *core.Event
+	hasResponse := false
+	reportedError := false
 
 	defer func() {
 		for _, f := range tempFiles {
@@ -277,12 +280,9 @@ func (as *antigravitySession) readLoop(ctx context.Context, cancel context.Cance
 
 		err := cmd.Wait()
 
-		// An agy that printed a result event named its conversation there.
-		// Otherwise detect the conversation ID if this was the first turn of a
-		// fresh session. agy may flush the chat file only while the process is
-		// exiting, so wait for process reaping before scanning the chat
-		// directory.
-		if as.CurrentSessionID() == "" && result == nil {
+		// A terminal result can omit its ID. Recover any still-missing ID
+		// after process reaping, when agy has flushed its chat file.
+		if as.CurrentSessionID() == "" {
 			var sid string
 			for attempt := 0; attempt < 15; attempt++ {
 				sid = as.detectNewSessionID(preEntries, sendStartedAt)
@@ -303,17 +303,51 @@ func (as *antigravitySession) readLoop(ctx context.Context, cancel context.Cance
 		}
 
 		sid := as.CurrentSessionID()
-		// After a result event the outcome is already reported, and a
-		// non-zero exit is either agy's own error code for it or the grace
-		// period running out.
-		if err != nil && result == nil {
-			stderrMsg := strings.TrimSpace(stderrBuf.String())
+		if pendingResultError != nil {
+			// A terminal error can precede the chat-file ID. Settle only after
+			// recovery so Error and Done share one persisted meter baseline.
+			usage := as.turnUsageEvent(sid, result.Usage)
+			errorEvent := *pendingResultError
+			errorEvent.SessionID = sid
+			errorEvent.InputTokens, errorEvent.OutputTokens = usage.InputTokens, usage.OutputTokens
+			errorEvent.CacheReadInputTokens, errorEvent.ReasoningOutputTokens = usage.CacheReadInputTokens, usage.ReasoningOutputTokens
+			errorEvent.Sidechain, errorEvent.UsageIncomplete = usage.Sidechain, usage.UsageIncomplete
+			select {
+			case as.events <- errorEvent:
+			case <-as.ctx.Done():
+			}
+		}
+		stderrMsg := redactAgyStderr(stderrBuf.String(), cmd.Env)
+		var processErr error
+		// Only a nonempty terminal response can supersede a late process
+		// error. An empty result must retain the upstream failure diagnostic.
+		if err != nil && !reportedError && (result == nil || strings.TrimSpace(result.Response) == "") {
 			if stderrMsg != "" {
-				slog.Error("antigravitySession: process failed", "error", err, "stderr", stderrMsg)
-				select {
-				case as.events <- core.Event{Type: core.EventError, Error: fmt.Errorf("%s", stderrMsg)}:
-				case <-as.ctx.Done():
-				}
+				processErr = fmt.Errorf("agy process failed (%w): %s", err, stderrMsg)
+			} else {
+				processErr = fmt.Errorf("agy process failed: %w", err)
+			}
+		} else if !hasResponse && !reportedError && as.ctx.Err() == nil && (result != nil || ctx.Err() == nil) {
+			if stderrMsg != "" {
+				processErr = fmt.Errorf("agy returned no response: %s", stderrMsg)
+			} else {
+				processErr = fmt.Errorf("agy exited successfully without producing a response")
+			}
+		}
+		if processErr != nil {
+			slog.Error("antigravitySession: process failed", "error", processErr)
+			// The engine ends this turn on EventError, so its usage belongs on
+			// that event. The final Done event must not bill it a second time.
+			usage := agyUsage{}
+			if result != nil {
+				usage = result.Usage
+			}
+			errorEvent := as.turnUsageEvent(sid, usage)
+			errorEvent.Type, errorEvent.Done, errorEvent.Error = core.EventError, false, processErr
+			errorEvent.UsageIncomplete = errorEvent.UsageIncomplete || result == nil
+			select {
+			case as.events <- errorEvent:
+			case <-as.ctx.Done():
 			}
 		}
 
@@ -383,12 +417,18 @@ func (as *antigravitySession) readLoop(ctx context.Context, cancel context.Cance
 				}
 				continue
 			}
+			if event.Type == core.EventText && strings.TrimSpace(event.Content) != "" {
+				hasResponse = true
+			}
+			if event.Type == core.EventError {
+				reportedError = true
+			}
 			if event.Type == core.EventError && result != nil {
-				usage := as.turnUsageEvent(as.CurrentSessionID(), result.Usage)
-				event.InputTokens, event.OutputTokens = usage.InputTokens, usage.OutputTokens
-				event.CacheReadInputTokens, event.ReasoningOutputTokens = usage.CacheReadInputTokens, usage.ReasoningOutputTokens
-				event.Sidechain = usage.Sidechain
-				event.UsageIncomplete = usage.UsageIncomplete
+				if pendingResultError == nil {
+					copy := event
+					pendingResultError = &copy
+				}
+				continue
 			}
 			select {
 			case as.events <- event:
@@ -399,6 +439,9 @@ func (as *antigravitySession) readLoop(ctx context.Context, cancel context.Cance
 	}
 	if ctx.Err() == nil {
 		for _, event := range parser.flushResponse(core.EventText) {
+			if strings.TrimSpace(event.Content) != "" {
+				hasResponse = true
+			}
 			select {
 			case as.events <- event:
 			case <-as.ctx.Done():
@@ -407,12 +450,27 @@ func (as *antigravitySession) readLoop(ctx context.Context, cancel context.Cance
 		}
 	}
 	if err := scanner.Err(); err != nil && !strings.Contains(err.Error(), "file already closed") && result == nil {
+		reportedError = true
 		slog.Error("antigravitySession: read error", "error", err)
 		select {
 		case as.events <- core.Event{Type: core.EventError, Error: fmt.Errorf("read stdout: %w", err)}:
 		case <-as.ctx.Done():
 		}
 	}
+}
+
+func redactAgyStderr(stderr string, env []string) string {
+	for _, entry := range env {
+		key, value, ok := strings.Cut(entry, "=")
+		if !ok || value == "" {
+			continue
+		}
+		key = strings.ToUpper(key)
+		if strings.Contains(key, "TOKEN") || strings.Contains(key, "KEY") || strings.Contains(key, "SECRET") || strings.Contains(key, "PASSWORD") {
+			stderr = core.RedactToken(stderr, value)
+		}
+	}
+	return strings.TrimSpace(stderr)
 }
 
 func (as *antigravitySession) detectNewSessionID(preEntries map[string]bool, sendStartedAt time.Time) string {
