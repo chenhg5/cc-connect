@@ -9994,23 +9994,29 @@ func (e *Engine) cmdHistory(p Platform, msg *Message, args []string) {
 	e.reply(p, msg.ReplyCtx, sb.String())
 }
 
+// loadSessionHistory prefers the agent transcript, which includes turns from
+// other clients. If the transcript is unavailable, it falls back to the local
+// cache. It returns an error only when the transcript read fails and the cache
+// is empty.
 func (e *Engine) loadSessionHistory(agent Agent, session *Session, limit int) ([]HistoryEntry, error) {
+	var transcriptErr error
 	if agentSID := session.GetAgentSessionID(); agentSID != "" {
 		if hp, ok := agent.(HistoryProvider); ok {
-			// The transcript includes turns from other clients that the local
-			// cache cannot know about, including after resuming a session.
 			entries, err := hp.GetSessionHistory(e.ctx, agentSID, limit)
-			if err != nil {
-				if !errors.Is(err, ErrHistoryUnsupported) {
-					slog.Warn("history: agent transcript read failed", "session_id", agentSID, "error", err)
-					return nil, err
-				}
-			} else if len(entries) > 0 {
+			switch {
+			case err == nil && len(entries) > 0:
 				return entries, nil
+			case err != nil && !errors.Is(err, ErrHistoryUnsupported):
+				slog.Warn("history: agent transcript read failed, falling back to local cache", "session_id", agentSID, "error", err)
+				transcriptErr = err
 			}
 		}
 	}
-	return session.GetHistory(limit), nil
+	cached := session.GetHistory(limit)
+	if len(cached) == 0 && transcriptErr != nil {
+		return nil, transcriptErr
+	}
+	return cached, nil
 }
 
 func (e *Engine) historyEntryMaxLen() int {

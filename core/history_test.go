@@ -115,11 +115,7 @@ func TestCmdHistory_AgentTranscriptFallbackAndFailureWithCache(t *testing.T) {
 			if len(sent) != 1 {
 				t.Fatalf("replies = %d, want 1", len(sent))
 			}
-			if tt.err != nil && !errors.Is(tt.err, ErrHistoryUnsupported) {
-				if sent[0] != e.i18n.T(MsgHistoryReadFailed) {
-					t.Fatalf("reply = %q, want localized read failure", sent[0])
-				}
-			} else if !strings.Contains(sent[0], "cached answer") || strings.Contains(sent[0], "cached question") {
+			if !strings.Contains(sent[0], "cached answer") || strings.Contains(sent[0], "cached question") {
 				t.Fatalf("reply = %q, want only the last cached entry", sent[0])
 			}
 			if tt.id == "" && len(agent.ids) != 0 {
@@ -129,14 +125,22 @@ func TestCmdHistory_AgentTranscriptFallbackAndFailureWithCache(t *testing.T) {
 	}
 }
 
-func TestCmdHistory_UnsupportedTranscriptFallsBackForTextAndCard(t *testing.T) {
-	for _, cards := range []bool{false, true} {
-		name := "text"
-		if cards {
-			name = "card"
-		}
-		t.Run(name, func(t *testing.T) {
-			agent := &historyProviderStub{err: ErrHistoryUnsupported}
+// Regression: a transcript read error (e.g. codex "session file not found"
+// under a different codex_home) must not hide history cc-connect still caches.
+func TestCmdHistory_TranscriptErrorFallsBackToCacheForTextAndCard(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		err   error
+		cards bool
+	}{
+		{name: "unsupported/text", err: ErrHistoryUnsupported},
+		{name: "unsupported/card", err: ErrHistoryUnsupported, cards: true},
+		{name: "read error/text", err: errors.New("session file not found")},
+		{name: "read error/card", err: errors.New("session file not found"), cards: true},
+	} {
+		cards := tc.cards
+		t.Run(tc.name, func(t *testing.T) {
+			agent := &historyProviderStub{err: tc.err}
 			plain := &stubPlatformEngine{n: "history"}
 			var platform Platform = plain
 			cardPlatform := &stubCardPlatform{stubPlatformEngine: stubPlatformEngine{n: "cards"}}
@@ -173,7 +177,7 @@ func TestCmdHistory_UnsupportedTranscriptFallsBackForTextAndCard(t *testing.T) {
 				t.Fatalf("history = %q, want cached conversation", got)
 			}
 			if strings.Contains(got, e.i18n.T(MsgHistoryReadFailed)) {
-				t.Fatalf("unsupported transcript surfaced as read failure: %q", got)
+				t.Fatalf("transcript error surfaced as read failure: %q", got)
 			}
 		})
 	}

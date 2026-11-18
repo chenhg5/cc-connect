@@ -1520,7 +1520,7 @@ func TestCUJ_B8_HistoryShowsConversation(t *testing.T) {
 		env := newCUJEnv(t)
 		transcript := &historyProviderStub{}
 		env.engine.agent = &cujHistoryAgent{cujAgent: env.agent, transcript: transcript}
-		t.Cleanup(func() { env.engine.Stop() })
+		t.Cleanup(func() { _ = env.engine.Stop() })
 
 		env.userSends("b8-external", "question from chat")
 		env.waitFor("chat reply", 2*time.Second, func() bool {
