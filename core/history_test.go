@@ -125,6 +125,21 @@ func TestCmdHistory_AgentTranscriptFallbackAndFailureWithCache(t *testing.T) {
 	}
 }
 
+func TestCmdHistory_TranscriptErrorWithEmptyCacheReportsReadFailure(t *testing.T) {
+	agent := &historyProviderStub{err: errors.New("session file not found")}
+	plain := &stubPlatformEngine{n: "history"}
+	e := NewEngine("test", agent, []Platform{plain}, "", LangEnglish)
+	msg := &Message{SessionKey: "test:history", ReplyCtx: "ctx"}
+	s := e.sessions.GetOrCreateActive(msg.SessionKey)
+	s.SetAgentSessionID("current-thread", "stub")
+
+	e.cmdHistory(plain, msg, []string{"10"})
+	sent := plain.getSent()
+	if len(sent) != 1 || sent[0] != e.i18n.T(MsgHistoryReadFailed) {
+		t.Fatalf("replies = %q, want localized read failure", sent)
+	}
+}
+
 // Regression: a transcript read error (e.g. codex "session file not found"
 // under a different codex_home) must not hide history cc-connect still caches.
 func TestCmdHistory_TranscriptErrorFallsBackToCacheForTextAndCard(t *testing.T) {
