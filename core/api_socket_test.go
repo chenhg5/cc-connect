@@ -1,3 +1,5 @@
+//go:build !windows
+
 package core
 
 import (
@@ -6,7 +8,6 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
-	"runtime"
 	"sync"
 	"syscall"
 	"testing"
@@ -15,9 +16,6 @@ import (
 
 func TestAPISocketRefusedErrorClassification(t *testing.T) {
 	refused := syscall.ECONNREFUSED
-	if runtime.GOOS == "windows" {
-		refused = syscall.Errno(10061) // WSAECONNREFUSED
-	}
 	for _, tc := range []struct {
 		name string
 		err  error

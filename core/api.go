@@ -8,8 +8,6 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
-	"os"
-	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -20,20 +18,21 @@ import (
 // is unset. Exported so cmd/cc-connect can resolve the same default.
 const DefaultMaxAttachmentSize int64 = 50 << 20
 
-// APIServer exposes a local Unix socket API for external tools (e.g. cron jobs)
+// APIServer exposes a local control API for external tools (e.g. cron jobs)
 // to send messages to active sessions.
 type APIServer struct {
-	socketPath string
-	socketInfo os.FileInfo
-	socketLock io.Closer
-	stopOnce   sync.Once
-	listener   net.Listener
-	server     *http.Server
-	mux        *http.ServeMux
-	engines    map[string]*Engine // project name → engine
-	cron       *CronScheduler
-	timer      *TimerScheduler
-	relay      *RelayManager
+	socketPath      string
+	endpointCleanup func() error
+	shutdownHandler func()
+	shutdownOnce    sync.Once
+	stopOnce        sync.Once
+	listener        net.Listener
+	server          *http.Server
+	mux             *http.ServeMux
+	engines         map[string]*Engine // project name → engine
+	cron            *CronScheduler
+	timer           *TimerScheduler
+	relay           *RelayManager
 	// maxAttachmentBytes caps the raw size of a single attachment accepted by
 	// /send; the request body limit in handleSend is derived from it (base64
 	// expansion + envelope). Defaults to DefaultMaxAttachmentSize.
@@ -65,72 +64,29 @@ type SendRequest struct {
 	AtAll      bool              `json:"at_all,omitempty"`
 }
 
-// NewAPIServer creates an API server on a Unix socket.
+type apiEndpoint struct {
+	path     string
+	listener net.Listener
+	cleanup  func() error
+}
+
+// NewAPIServer creates an API server on a private local transport.
 func NewAPIServer(dataDir string) (*APIServer, error) {
-	sockDir := filepath.Join(dataDir, "run")
-	if err := os.MkdirAll(sockDir, 0o755); err != nil {
-		return nil, fmt.Errorf("create run dir: %w", err)
-	}
-	sockPath := filepath.Join(sockDir, "api.sock")
-	// Different configs can still resolve to the same data directory. Keep
-	// this lock for the listener's lifetime, including stale-socket recovery.
-	lock, err := lockAPISocket(sockPath + ".lock")
+	endpoint, err := listenLocalAPI(dataDir)
 	if err != nil {
-		return nil, fmt.Errorf("lock API socket: %w", err)
-	}
-	owned := false
-	defer func() {
-		if !owned {
-			_ = lock.Close()
-		}
-	}()
-	if info, err := os.Lstat(sockPath); err == nil {
-		if info.Mode()&os.ModeSocket == 0 {
-			return nil, fmt.Errorf("API socket path is not a socket: %s", sockPath)
-		}
-		conn, dialErr := net.DialTimeout("unix", sockPath, time.Second)
-		if dialErr == nil {
-			_ = conn.Close()
-			return nil, fmt.Errorf("API socket is already listening: %s", sockPath)
-		}
-		// Only connection refusal proves a leftover socket. Timeouts and
-		// permission errors must never cause a live listener to be unlinked.
-		if !apiSocketConnectionRefused(dialErr) && !errors.Is(dialErr, os.ErrNotExist) {
-			return nil, fmt.Errorf("check existing API socket: %w", dialErr)
-		}
-		if err := removeAPISocket(sockPath, info); err != nil {
-			return nil, fmt.Errorf("remove stale API socket: %w", err)
-		}
-	} else if !os.IsNotExist(err) {
-		return nil, fmt.Errorf("stat API socket: %w", err)
-	}
-	listener, err := net.ListenUnix("unix", &net.UnixAddr{Name: sockPath, Net: "unix"})
-	if err != nil {
-		return nil, fmt.Errorf("listen unix socket: %w", err)
-	}
-	// Close must not unlink a socket that another instance has replaced.
-	listener.SetUnlinkOnClose(false)
-	info, err := os.Lstat(sockPath)
-	if err != nil {
-		_ = listener.Close()
-		return nil, fmt.Errorf("stat new API socket: %w", err)
-	}
-	if err := os.Chmod(sockPath, 0o600); err != nil {
-		_ = listener.Close()
-		_ = removeAPISocket(sockPath, info)
-		return nil, fmt.Errorf("chmod socket: %w", err)
+		return nil, err
 	}
 
 	s := &APIServer{
-		socketPath:         sockPath,
-		socketInfo:         info,
-		socketLock:         lock,
-		listener:           listener,
+		socketPath:         endpoint.path,
+		endpointCleanup:    endpoint.cleanup,
+		listener:           endpoint.listener,
 		mux:                http.NewServeMux(),
 		engines:            make(map[string]*Engine),
 		maxAttachmentBytes: DefaultMaxAttachmentSize,
 	}
 	s.mux.HandleFunc("/send", s.handleSend)
+	s.mux.HandleFunc("/shutdown", s.handleShutdown)
 	s.mux.HandleFunc("/sessions", s.handleSessions)
 	s.mux.HandleFunc("/cron/add", s.handleCronAdd)
 	s.mux.HandleFunc("/cron/list", s.handleCronList)
@@ -147,7 +103,6 @@ func NewAPIServer(dataDir string) (*APIServer, error) {
 	s.mux.HandleFunc("/relay/bind", s.handleRelayBind)
 	s.mux.HandleFunc("/relay/binding", s.handleRelayBinding)
 
-	owned = true
 	return s, nil
 }
 
@@ -231,32 +186,16 @@ func (s *APIServer) Stop() {
 			}
 		}
 		if s.listener != nil {
-			_ = s.listener.Close()
+			if err := s.listener.Close(); err != nil && !errors.Is(err, net.ErrClosed) {
+				slog.Debug("api server endpoint close failed", "error", err)
+			}
 		}
-		if err := removeAPISocket(s.socketPath, s.socketInfo); err != nil {
-			slog.Debug("api server remove socket failed", "error", err)
-		}
-		if s.socketLock != nil {
-			_ = s.socketLock.Close()
+		if s.endpointCleanup != nil {
+			if err := s.endpointCleanup(); err != nil {
+				slog.Debug("api server cleanup failed", "error", err)
+			}
 		}
 	})
-}
-
-func removeAPISocket(path string, owned os.FileInfo) error {
-	if owned == nil {
-		return nil
-	}
-	current, err := os.Lstat(path)
-	if os.IsNotExist(err) {
-		return nil
-	}
-	if err != nil {
-		return err
-	}
-	if !os.SameFile(owned, current) {
-		return nil
-	}
-	return os.Remove(path)
 }
 
 func apiJSON(w http.ResponseWriter, status int, v any) {
