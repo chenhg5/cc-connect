@@ -776,6 +776,27 @@
           "models": ["anthropic/claude-sonnet-5-5", "openai/gpt-5.4", "google/gemini-3.6-flash"]
         }
       }
+    },
+    {
+      "name": "trustedrouter",
+      "display_name": "TrustedRouter",
+      "description": "AI gateway with 600+ models from many providers behind one key, through OpenAI and Anthropic compatible APIs.",
+      "description_zh": "AI 网关，一个密钥即可通过 OpenAI 和 Anthropic 兼容 API 使用多家供应商的 600+ 个模型。",
+      "features": ["600+ Models", "OpenAI + Anthropic API"],
+      "tier": 3,
+      "website": "https://trustedrouter.com",
+      "agents": {
+        "claudecode": {
+          "base_url": "https://api.trustedrouter.com",
+          "model": "anthropic/claude-sonnet-4.6",
+          "models": ["anthropic/claude-sonnet-4.6", "anthropic/claude-opus-5"]
+        },
+        "opencode": {
+          "base_url": "https://api.trustedrouter.com/v1",
+          "model": "anthropic/claude-sonnet-4.6",
+          "models": ["anthropic/claude-sonnet-4.6", "openai/gpt-5.5"]
+        }
+      }
     }
   ]
 }
