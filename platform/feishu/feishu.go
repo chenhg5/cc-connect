@@ -1113,6 +1113,17 @@ func (p *Platform) onCardAction(event *callback.CardActionTriggerEvent) (*callba
 		return nil, nil
 	}
 
+	// askq:/perm: — answering a question or a permission prompt is the
+	// requester's own decision. Button values carry the requester's session
+	// key (renderCardMap), so without this gate any group member's click
+	// dispatches into the requester's session and is consumed as their
+	// answer/approval.
+	if strings.HasPrefix(actionVal, "askq:") || strings.HasPrefix(actionVal, "perm:") {
+		if rejected := rejectNonRequester(sessionKey, userID); rejected != nil {
+			return rejected, nil
+		}
+	}
+
 	// perm: — permission response with in-place card update
 	if strings.HasPrefix(actionVal, "perm:") {
 		var responseText string
@@ -1164,6 +1175,9 @@ func (p *Platform) onCardAction(event *callback.CardActionTriggerEvent) (*callba
 			UserID:     userID,
 			Content:    actionVal,
 			ReplyCtx:   rctx,
+			// The callback response below replaces this card with the
+			// rendered answer, so the engine must not echo it as text.
+			CardAnswerRendered: true,
 		})
 
 		answerLabel, _ := event.Event.Action.Value["askq_label"].(string)
@@ -4591,6 +4605,51 @@ func (p *Platform) sessionKeyFromCardAction(chatID, userID string, value map[str
 		return fmt.Sprintf("%s:%s", p.tag(), chatID)
 	}
 	return fmt.Sprintf("%s:%s:%s", p.tag(), chatID, userID)
+}
+
+// requesterFromSessionKey extracts the requester identity segment from a
+// per-user session key ({platform}:{chatID}:{openID}, makeSessionKey).
+// Button values carry the requester's session key, so a click by anyone else
+// must not dispatch into that session (a stranger's tap would otherwise answer
+// the requester's AskUserQuestion or approve their permission prompt).
+// Thread-root and shared-channel keys address a session with no single
+// requester, so they report ok=false and stay ungated.
+func requesterFromSessionKey(sessionKey string) (string, bool) {
+	parts := strings.SplitN(sessionKey, ":", 3)
+	if len(parts) != 3 {
+		return "", false
+	}
+	id := parts[2]
+	if i := strings.Index(id, ":"); i >= 0 {
+		switch id[:i] {
+		case "root", "thread":
+			return "", false
+		}
+	}
+	// Only open_id (ou_) and union_id (on_) segments are treated as an
+	// identifiable requester. Any other shape (e.g. a tenant user_id) is left
+	// ungated so a mixed ID space cannot reject the real requester.
+	if !strings.HasPrefix(id, "ou_") && !strings.HasPrefix(id, "on_") {
+		return "", false
+	}
+	return id, true
+}
+
+// rejectNonRequester returns a toast response when sessionKey belongs to a
+// single requester who is not the current clicker, and nil when the click is
+// allowed through (requester's own click, or a shared session).
+func rejectNonRequester(sessionKey, clickerOpenID string) *callback.CardActionTriggerResponse {
+	owner, ok := requesterFromSessionKey(sessionKey)
+	if !ok || owner == clickerOpenID {
+		return nil
+	}
+	slog.Debug("feishu: card action by non-requester ignored", "clicker", clickerOpenID, "owner", owner)
+	return &callback.CardActionTriggerResponse{
+		Toast: &callback.Toast{
+			Type:    "info",
+			Content: "此卡片仅提问者本人可操作 / Only the requester can operate this card",
+		},
+	}
 }
 
 func (p *Platform) shouldReplyInThread(rc replyContext) bool {
