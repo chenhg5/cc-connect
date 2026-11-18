@@ -219,6 +219,11 @@ func TestCUJ_C_GoalLifecycle(t *testing.T) {
 
 func TestGoalStopRPCFailureClosesSession(t *testing.T) {
 	env := newCUJEnv(t)
+	t.Cleanup(func() {
+		if err := env.engine.Stop(); err != nil {
+			t.Errorf("Stop: %v", err)
+		}
+	})
 	s := &goalTestSession{cujAgentSession: newCUJAgentSession(), cancelErr: errors.New("goal RPC unavailable")}
 	env.engine.agent = &goalTestAgent{session: s}
 	msg := &Message{SessionKey: "test:goal-user", ReplyCtx: "ctx"}
@@ -235,6 +240,13 @@ func TestGoalStopRPCFailureClosesSession(t *testing.T) {
 	env.engine.interactiveMu.Unlock()
 	if stillPresent {
 		t.Fatal("failed cancellation left live state registered")
+	}
+	env.waitFor("failed Goal cancellation closes the old session", time.Second, func() bool { return !s.Alive() })
+	// The conflict resolution must preserve the durable stop as well as the
+	// upstream lock/cleanup path. An in-memory-only change would resume later.
+	reloaded := NewSessionManager(filepath.Join(env.tempDir, "sessions.json"))
+	if reloaded.GetOrCreateActive(msg.SessionKey).GetResumeGoal() {
+		t.Fatal("failed Goal stop was not persisted")
 	}
 }
 
@@ -516,4 +528,46 @@ func TestGoalFollowingForegroundStillClosesWhenIdle(t *testing.T) {
 	env.waitFor("foreground task Send", time.Second, func() bool { return len(s.getSentPrompts()) == 1 })
 	env.waitFor("foreground task unlock", time.Second, func() bool { return !env.engine.sessions.GetOrCreateActive(key).Busy() })
 	env.waitFor("completed foreground session idle close", time.Second, func() bool { return !s.Alive() })
+}
+
+// A concurrent replacement must survive failed Goal cancellation, but the
+// captured process must close and its recovery intent must be durably revoked.
+func TestGoalCancelFailureClosesCapturedSessionAfterReplacement(t *testing.T) {
+	env := newCUJEnv(t)
+	t.Cleanup(func() { _ = env.engine.Stop() })
+	key := "test:goal-replacement"
+	stored := env.engine.sessions.GetOrCreateActive(key)
+	stored.SetResumeGoal(true)
+	env.engine.sessions.Save()
+	oldSession := newControllableSession("goal-old")
+	newSession := newControllableSession("goal-new")
+	oldState := &interactiveState{agentSession: oldSession, platform: env.plat,
+		replyCtx: "ctx", busySession: stored, goalSessionStore: env.engine.sessions}
+	newState := &interactiveState{agentSession: newSession, platform: env.plat, replyCtx: "next"}
+	env.engine.interactiveMu.Lock()
+	env.engine.interactiveStates[key] = oldState
+	env.engine.interactiveMu.Unlock()
+	oldSession.cancelTurnFn = func() error {
+		env.engine.interactiveMu.Lock()
+		env.engine.interactiveStates[key] = newState
+		env.engine.interactiveMu.Unlock()
+		return errors.New("goal interrupt failed")
+	}
+	if !env.engine.stopInteractiveSession(key, env.plat, "ctx") {
+		t.Fatal("failed Goal stop was not handled")
+	}
+	env.waitFor("captured Goal process closes", time.Second, func() bool { return oldSession.closeFinished.Load() })
+	env.engine.interactiveMu.Lock()
+	current := env.engine.interactiveStates[key]
+	env.engine.interactiveMu.Unlock()
+	if current != newState || !newSession.Alive() || newSession.closeFinished.Load() {
+		t.Fatal("replacement state was removed or closed")
+	}
+	if stored.GetResumeGoal() {
+		t.Fatal("captured Goal retained recovery intent")
+	}
+	reloaded := NewSessionManager(filepath.Join(env.tempDir, "sessions.json"))
+	if reloaded.GetOrCreateActive(key).GetResumeGoal() {
+		t.Fatal("captured Goal stop was not persisted")
+	}
 }

@@ -156,17 +156,3 @@ func (s *appServerSession) handleGoalNotification(method string, raw json.RawMes
 		s.emit(core.Event{Type: core.EventGoal, Goal: cloneGoal(n.Goal), SessionID: n.ThreadID})
 	}
 }
-
-func (s *appServerSession) steerGoalInput(input []map[string]any, turnID string) error {
-	var response struct {
-		TurnID string `json:"turnId"`
-	}
-	params := map[string]any{"threadId": s.CurrentSessionID(), "expectedTurnId": turnID, "input": input}
-	if err := s.request("turn/steer", params, &response); err != nil {
-		return err
-	}
-	if response.TurnID != turnID {
-		return fmt.Errorf("goal steering returned unexpected turn %q", response.TurnID)
-	}
-	return nil
-}

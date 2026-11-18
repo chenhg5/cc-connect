@@ -201,7 +201,7 @@ func TestAppServerGoalRealCLI(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 40*time.Second)
 	defer cancel()
 	start := func(id string) *appServerSession {
-		s, err := newAppServerSession(ctx, cli, nil, "stdio://", home, "", "", "suggest", id, "", "", nil, home, "", "")
+		s, err := newAppServerSession(ctx, cli, nil, "stdio://", home, "", "", "suggest", id, "", "", nil, home, "", "", "")
 		if err != nil {
 			t.Fatal(err)
 		}
