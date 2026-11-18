@@ -1147,6 +1147,9 @@ func (p *Platform) onCardAction(event *callback.CardActionTriggerEvent) (*callba
 			UserID:     userID,
 			Content:    actionVal,
 			ReplyCtx:   rctx,
+			// The callback response below replaces this card with the
+			// rendered answer, so the engine must not echo it as text.
+			CardAnswerRendered: true,
 		})
 
 		answerLabel, _ := event.Event.Action.Value["askq_label"].(string)
