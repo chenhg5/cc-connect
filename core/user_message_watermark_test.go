@@ -200,3 +200,24 @@ func TestQueueMessageForBusySession_RejectsStaleBeforeEnqueue(t *testing.T) {
 	}
 	state.mu.Unlock()
 }
+
+func TestLatestUserMessageWatermark_IncludesSteeredMessage(t *testing.T) {
+	state := &interactiveState{
+		lastCompletedUserMessageTimeMs: 1000,
+		currentTurnUserMessageTimeMs:   1500,
+		lastSteeredUserMessageTimeMs:   2000,
+	}
+	if got := latestUserMessageWatermarkLocked(state); got != 2000 {
+		t.Fatalf("watermark = %d, want 2000", got)
+	}
+	e := &Engine{}
+	// 1800 is newer than the in-flight turn (1500) but older than the steered
+	// message (2000): the redelivery check must see it stale, while the
+	// queue-drain check must not.
+	if !e.isStaleUserMessageLocked(state, 1800) {
+		t.Fatal("redelivery older than a steered message must be stale")
+	}
+	if e.isQueuedUserMessageStaleForDrainLocked(state, 1800) {
+		t.Fatal("queue-drain staleness must ignore the steered watermark")
+	}
+}

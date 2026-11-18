@@ -1791,6 +1791,39 @@ func TestLoad_ParsesResetOnIdleMins(t *testing.T) {
 	}
 }
 
+const projectWithSteerWhileBusyFixture = `
+[[projects]]
+name = "beta"
+steer_while_busy = true
+
+[projects.agent]
+type = "codex"
+
+[projects.agent.options]
+work_dir = "/tmp/beta"
+
+[[projects.platforms]]
+type = "telegram"
+
+[projects.platforms.options]
+bot_token = "token_xxx"
+`
+
+func TestLoad_ParsesSteerWhileBusy(t *testing.T) {
+	configPath := writeConfigFixture(t, projectWithSteerWhileBusyFixture)
+
+	cfg, err := Load(configPath)
+	if err != nil {
+		t.Fatalf("Load returned error: %v", err)
+	}
+	if cfg.Projects[0].SteerWhileBusy == nil {
+		t.Fatal("expected steer_while_busy to be parsed")
+	}
+	if !*cfg.Projects[0].SteerWhileBusy {
+		t.Fatal("steer_while_busy = true was not parsed")
+	}
+}
+
 func TestLoad_RejectsNegativeResetOnIdleMins(t *testing.T) {
 	configPath := writeConfigFixture(t, projectWithNegativeResetOnIdleFixture)
 

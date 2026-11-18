@@ -62,6 +62,16 @@ cc-connect 完整功能使用指南。
 
 Codex `/ps` 中途引导要求 app-server 支持 `turn/steer`（codex-cli 0.166.0 或更新版本）。旧版 CLI 会返回方法不支持错误；使用此功能前请升级 Codex CLI。
 
+若要免去打命令，可在项目上开启 `steer_while_busy = true`（默认关闭）：
+
+```toml
+[[projects]]
+name = "demo"
+steer_while_busy = true
+```
+
+开启后，任务运行期间新到的普通消息会直接并入当前一轮，模型在下一次调用即可看到，而不必等当前任务结束。不会再单独发一条回执，补充内容会直接体现在当前任务的回复里；图片与文件会一并送达，该消息也会写入会话历史。仅对支持中途并入的 agent 生效（Claude Code、支持 `turn/steer` 的 Codex app-server，即 codex-cli 0.166.0 或更新版本、以及 `rpc = true` 的 Pi），其它 agent 仍按队列处理。以下情况仍会排队：会话已有排队消息（保持先进先出）、正在等待你回答权限或问答提示、或写入失败。`/ps` 走同一实现，因此其补充内容现在也会记录到历史；但 `/ps` 仍只支持文本，因为带图片的消息会直接交给 agent 而不会进入命令分发。
+
 也可以为项目开启“空闲后自动切换新会话”：
 
 ```toml

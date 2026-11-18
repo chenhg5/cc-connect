@@ -518,6 +518,11 @@ type ProjectConfig struct {
 	// the current session has been inactive for the specified number of minutes.
 	// 0 or nil disables the behavior.
 	ResetOnIdleMins *int `toml:"reset_on_idle_mins,omitempty"`
+	// SteerWhileBusy: when true, a message arriving while the session is busy
+	// is folded into the running turn (next model call) instead of being
+	// queued. Only honored for agents implementing core.MidTurnSteerer.
+	// Default false.
+	SteerWhileBusy *bool `toml:"steer_while_busy,omitempty"`
 	// AgentSessionIdleTimeoutMins 在指定分钟数后关闭空闲的 live agent 进程，
 	// 同时保留已保存的 session ID，便于下一条消息继续恢复。0 或 nil 表示禁用。
 	AgentSessionIdleTimeoutMins *int `toml:"agent_session_idle_timeout_mins,omitempty"`

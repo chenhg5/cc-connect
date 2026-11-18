@@ -1132,6 +1132,13 @@ func lastAskQuestionAnswer(updatedInput map[string]any) string {
 
 // ── RespondPermission ───────────────────────────────────────
 
+// SupportsMidTurnSteering reports native steering support: only the persistent
+// RPC mode can send streamingBehavior=steer into a running prompt; one-shot
+// JSON mode spawns a new process per prompt.
+func (s *piSession) SupportsMidTurnSteering() bool { return s.rpc }
+
+var _ core.MidTurnSteerer = (*piSession)(nil)
+
 func (s *piSession) RespondPermission(requestID string, result core.PermissionResult) error {
 	if !s.rpc {
 		// JSON mode: no extension_ui support

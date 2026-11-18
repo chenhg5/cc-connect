@@ -1084,6 +1084,12 @@ func extractItemText(item map[string]any, arrayField, elementType string) string
 	return text
 }
 
+// SupportsMidTurnSteering reports false: the exec-subprocess model starts a new
+// `codex exec resume` per Send and cannot fold input into a running turn.
+func (s *codexSession) SupportsMidTurnSteering() bool { return false }
+
+var _ core.MidTurnSteerer = (*codexSession)(nil)
+
 func truncate(s string, maxRunes int) string {
 	if utf8.RuneCountInString(s) <= maxRunes {
 		return s

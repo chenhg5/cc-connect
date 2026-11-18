@@ -60,6 +60,16 @@ With Pi, enable `rpc = true` for native steering: the supplement is queued for t
 
 Codex `/ps` steering requires an app-server that implements `turn/steer` (codex-cli 0.166.0 or newer). Older CLIs return a method-not-supported error; upgrade the Codex CLI to use this feature.
 
+To make this automatic, set `steer_while_busy = true` on the project (default off):
+
+```toml
+[[projects]]
+name = "demo"
+steer_while_busy = true
+```
+
+With it on, a plain message arriving during a running turn is folded into that turn, so the model sees it on its next call instead of after the current task finishes. No separate acknowledgement is sent — the supplement shows up in the running task's reply. Images and files travel with it and the message is recorded in session history. It applies only to agents that support mid-turn steering (Claude Code, Codex app-server with `turn/steer` support, i.e. codex-cli 0.166.0 or newer, and Pi with `rpc = true`); other agents keep queueing. A message is still queued when the session already has queued messages (FIFO is preserved), when a permission or question prompt is waiting for your answer, or when the write fails. `/ps` uses the same path, so its supplements are now recorded in history too; `/ps` remains text-only because image-bearing messages are routed to the agent instead of to commands.
+
 cc-connect rotates to a fresh session automatically after long inactivity:
 
 ```toml

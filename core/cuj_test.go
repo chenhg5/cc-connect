@@ -146,6 +146,58 @@ func TestCUJ_A9_PsAndBtwSupplementRunningTask(t *testing.T) {
 	}
 }
 
+// CUJ: start a long task, send a plain supplement while it runs with
+// steer_while_busy on. The supplement is folded into the running turn: the user
+// sees one combined answer, the supplement is in history, and no extra
+// acknowledgement bubble is sent.
+func TestCUJ_A10_SteerWhileBusyFoldsSupplement(t *testing.T) {
+	p := &stubPlatformEngine{n: "test"}
+	as := newSteerableSession("steer-cuj")
+	agent := &controllableAgent{startSessionFn: func(context.Context, string) (AgentSession, error) { return as, nil }}
+	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+	e.SetSteerWhileBusy(true)
+
+	const key = "test:steer-user"
+	send := func(content string) {
+		e.ReceiveMessage(p, &Message{SessionKey: key, Platform: p.Name(), UserID: "steer-user", Content: content, ReplyCtx: "ctx"})
+	}
+
+	// User action 1: start a task that stays in progress.
+	send("start the long task")
+	waitForQueuedSends(t, as.queuingAgentSession, 1)
+
+	// User action 2: supplement it with a plain message, no command prefix.
+	send("keep the nav bar unchanged")
+	waitForQueuedSends(t, as.queuingAgentSession, 2)
+
+	// User action 3: the running turn finishes with one combined answer.
+	as.events <- Event{Type: EventResult, Content: "done: long task, nav bar unchanged", Done: true}
+	waitForSessionIdle(t, e.sessions.GetOrCreateActive(key))
+
+	replies := p.getSent()
+	combined := false
+	for _, line := range replies {
+		if strings.Contains(line, "done: long task, nav bar unchanged") {
+			combined = true
+		}
+		if strings.Contains(line, "Folded into") {
+			t.Fatalf("steering must not send an acknowledgement bubble; replies=%v", replies)
+		}
+	}
+	if !combined {
+		t.Fatalf("combined turn result missing; replies=%v", replies)
+	}
+	found := false
+	for _, h := range e.sessions.GetOrCreateActive(key).GetHistory(0) {
+		if h.Role == "user" && h.Content == "keep the nav bar unchanged" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("steered supplement missing from session history")
+	}
+}
+
 // ---------------------------------------------------------------------------
 // Helper types: cujAgent + cujAgentSession give per-CUJ control over what the
 // agent "replies" for each user prompt, without bringing up a real LLM.

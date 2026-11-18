@@ -225,6 +225,19 @@ level = "info" # debug, info, warn, error
 # [[projects]]
 # agent_session_idle_timeout_mins = 30
 
+# Fold a message that arrives while a turn is still running into that turn, so
+# the model sees it on its next call instead of after the current turn ends.
+# Only honored for agents that support mid-turn steering: Claude Code, Codex
+# app-server, and Pi in RPC mode. Messages are still queued (FIFO) while the
+# session has queued messages, is waiting on a permission/question prompt, or
+# when steering fails. Default false.
+# 会话正在执行任务时，新到的消息直接并入当前这一轮（模型下一次调用即可看到），
+# 而不是等当前任务结束后再处理。仅对支持中途并入的 agent 生效：Claude Code、
+# Codex app-server、Pi 的 RPC 模式。存在排队消息、正在等待权限/问答、或并入失败时，
+# 仍按原有队列（先进先出）处理。默认关闭。
+# [[projects]]
+# steer_while_busy = true
+
 # =============================================================================
 # OS-user isolation via run_as_user (Linux/macOS only)
 # 通过 run_as_user 实现 OS 用户隔离（仅限 Linux/macOS）

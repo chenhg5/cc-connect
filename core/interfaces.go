@@ -403,6 +403,14 @@ type UserInputSteerer interface {
 	SteerUserInput(prompt string) (bool, error)
 }
 
+// MidTurnSteerer is implemented by agents whose Send can fold a user message
+// into an in-flight turn instead of starting a new one. Implementations must
+// return from Send promptly: callers invoke it on the message-handling path
+// and use the returned error to decide between "folded" and "queued".
+type MidTurnSteerer interface {
+	SupportsMidTurnSteering() bool
+}
+
 // ToolAuthorizer is an optional interface for agents that support dynamic tool authorization.
 type ToolAuthorizer interface {
 	AddAllowedTools(tools ...string) error

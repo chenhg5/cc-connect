@@ -1542,6 +1542,13 @@ func (cs *claudeSession) Send(prompt string, messageID string, images []core.Ima
 	})
 }
 
+// SupportsMidTurnSteering reports that a message written to the CLI's stdin
+// while a turn is running is folded into that turn and reaches the model on its
+// next call, rather than starting a separate turn.
+func (cs *claudeSession) SupportsMidTurnSteering() bool { return true }
+
+var _ core.MidTurnSteerer = (*claudeSession)(nil)
+
 // RespondPermission writes a control_response to the Claude process stdin.
 func (cs *claudeSession) RespondPermission(requestID string, result core.PermissionResult) error {
 	if !cs.alive.Load() {

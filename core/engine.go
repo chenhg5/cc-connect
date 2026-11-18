@@ -426,6 +426,7 @@ type Engine struct {
 	agentSessionIdleTimeoutNanos atomic.Int64
 	agentSessionIdleSeq          atomic.Uint64
 	maxQueuedMessages            int
+	steerWhileBusy               bool
 	dirHistory                   *DirHistory
 	baseWorkDir                  string
 	projectState                 *ProjectStateStore
@@ -615,6 +616,11 @@ type interactiveState struct {
 	// currentTurnUserMessageTimeMs is the UserMessageTimeMs for the in-flight
 	// foreground turn (including a queued turn after EventResult).
 	currentTurnUserMessageTimeMs int64
+	// lastSteeredUserMessageTimeMs is the platform create time (ms) of the newest
+	// message folded into the in-flight turn. It advances the stale-redelivery
+	// watermark but is deliberately excluded from the queue-drain check, which
+	// must keep FIFO messages accepted before the injection.
+	lastSteeredUserMessageTimeMs int64
 }
 
 // latestUserMessageWatermarkLocked returns the highest UserMessageTimeMs among
@@ -627,6 +633,9 @@ func latestUserMessageWatermarkLocked(state *interactiveState) int64 {
 	wm := state.lastCompletedUserMessageTimeMs
 	if state.currentTurnUserMessageTimeMs > wm {
 		wm = state.currentTurnUserMessageTimeMs
+	}
+	if state.lastSteeredUserMessageTimeMs > wm {
+		wm = state.lastSteeredUserMessageTimeMs
 	}
 	for _, q := range state.pendingMessages {
 		if q.userMessageTimeMs > wm {
@@ -1471,6 +1480,10 @@ func (e *Engine) SetMaxQueuedMessages(n int) {
 		e.maxQueuedMessages = n
 	}
 }
+
+// SetSteerWhileBusy enables folding messages into an in-flight turn for this
+// engine. Callers resolve nil to false.
+func (e *Engine) SetSteerWhileBusy(v bool) { e.steerWhileBusy = v }
 
 func (e *Engine) SetRelayManager(rm *RelayManager) {
 	e.relayManager = rm
@@ -3289,6 +3302,11 @@ func (e *Engine) handleMessage(p Platform, msg *Message) {
 			}
 		}
 		// ── end self-heal; queueing path below is unchanged ────────────────
+		// Fold the message into the running turn when configured and the
+		// agent supports it; otherwise queue it as before.
+		if e.trySteerBusyMessage(p, msg, session, sessions, interactiveKey) {
+			return
+		}
 		// Session is busy — try to queue the message for the running turn
 		// so the agent processes it immediately after the current turn ends.
 		if e.queueMessageForBusySession(p, msg, interactiveKey) {
@@ -3513,6 +3531,82 @@ func (e *Engine) queueMessageForBusySession(p Platform, msg *Message, interactiv
 		"queue_depth", queueDepth,
 	)
 	e.reply(p, msg.ReplyCtx, e.i18n.T(MsgMessageQueued))
+	return true
+}
+
+// steerMessage writes msg into the in-flight turn of state's agent session and
+// records it in session history. Send must return promptly (MidTurnSteerer
+// contract); the caller decides the receipt from the returned error.
+func (e *Engine) steerMessage(state *interactiveState, p Platform, msg *Message, session *Session, sessions *SessionManager) error {
+	state.mu.Lock()
+	as := state.agentSession
+	busy := state.busySession
+	state.mu.Unlock()
+	if as == nil || !as.Alive() {
+		return fmt.Errorf("steer: agent session is not running")
+	}
+	prompt := e.buildSenderPrompt(msg.Content, msg.UserID, msg.UserName, msg.Platform, msg.SessionKey, msg.ChannelKey)
+	if err := as.Send(prompt, msg.MessageID, msg.Images, msg.Files); err != nil {
+		return fmt.Errorf("steer: send: %w", err)
+	}
+	session.AddHistory("user", msg.Content)
+	sessions.Save()
+	state.mu.Lock()
+	if msg.UserMessageTimeMs > state.lastSteeredUserMessageTimeMs {
+		state.lastSteeredUserMessageTimeMs = msg.UserMessageTimeMs
+	}
+	state.mu.Unlock()
+	if busy != nil {
+		busy.TouchUserActivity()
+	}
+	runMessageAccepted(msg)
+	return nil
+}
+
+// trySteerBusyMessage folds a busy-session message into the running turn.
+// Returns true when the message was steered; false means the caller must fall
+// back to the existing queue path.
+func (e *Engine) trySteerBusyMessage(p Platform, msg *Message, session *Session, sessions *SessionManager, interactiveKey string) bool {
+	if !e.steerWhileBusy {
+		return false
+	}
+	e.interactiveMu.Lock()
+	state := e.interactiveStates[interactiveKey]
+	e.interactiveMu.Unlock()
+	if state == nil {
+		return false
+	}
+	state.mu.Lock()
+	as := state.agentSession
+	queueEmpty := len(state.pendingMessages) == 0
+	interactionPending := state.pending != nil || state.pendingUserInput != nil
+	stale := e.isStaleUserMessageLocked(state, msg.UserMessageTimeMs)
+	state.mu.Unlock()
+	if as == nil || !as.Alive() {
+		return false
+	}
+	// Never overtake queued messages (FIFO), never write into a turn that is
+	// blocked on a permission/question prompt, and never re-inject a
+	// redelivery of a message already folded in.
+	if !queueEmpty || interactionPending || stale {
+		return false
+	}
+	steerer, ok := as.(MidTurnSteerer)
+	if !ok || !steerer.SupportsMidTurnSteering() {
+		return false
+	}
+	if msg.Content == "" && len(msg.Images) == 0 && len(msg.Files) == 0 {
+		return false
+	}
+	if err := e.steerMessage(state, p, msg, session, sessions); err != nil {
+		slog.Warn("steer: failed, falling back to queue",
+			"session", msg.SessionKey, "err", err)
+		return false
+	}
+	// No separate acknowledgement: the supplement joins the running turn's
+	// reply, and an extra bubble per message is noise in a chat.
+	slog.Info("steer: message folded into the running turn",
+		"session", msg.SessionKey, "msg_id", msg.MessageID)
 	return true
 }
 
@@ -7157,11 +7251,20 @@ func (e *Engine) cmdPs(p Platform, msg *Message, args []string) {
 	// session lock and races with concurrent normal messages on the CLI's
 	// stdin, so reject instead.
 	_, sessions := e.sessionContextForKey(msg.SessionKey)
-	if session := sessions.GetOrCreateActive(msg.SessionKey); !session.Busy() {
+	session := sessions.GetOrCreateActive(msg.SessionKey)
+	if !session.Busy() {
 		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgPsNoSession))
 		return
 	}
-	if err := state.agentSession.Send(text, "", nil, nil); err != nil {
+	// Share the automatic-steering path so /ps also records history and keeps
+	// one implementation of the write into the running turn.
+	synthetic := &Message{
+		SessionKey: msg.SessionKey, Platform: msg.Platform,
+		UserID: msg.UserID, UserName: msg.UserName,
+		MessageID: msg.MessageID, ChannelKey: msg.ChannelKey,
+		Content: text, Images: msg.Images, Files: msg.Files,
+	}
+	if err := e.steerMessage(state, p, synthetic, session, sessions); err != nil {
 		slog.Error("ps: send failed", "error", err)
 		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgPsSendFailed))
 		return

@@ -195,9 +195,14 @@ type appServerSession struct {
 	wg        sync.WaitGroup
 	readDone  chan struct{} // drain stdout before cmd.Wait closes its pipe
 
-	stateMu      sync.Mutex
-	pendingMsgs  []string
-	currentTurn  string
+	stateMu     sync.Mutex
+	pendingMsgs []string
+	currentTurn string
+	// turnActive tracks whether a turn is in flight independently of
+	// currentTurn. A failed turn/steer clears currentTurn so the next message
+	// starts a fresh turn, but the running turn must still deliver its
+	// EventResult when it completes.
+	turnActive   bool
 	turnRevision uint64 // terminal notifications can precede the turn/start response
 	preambleSent bool
 
@@ -597,6 +602,7 @@ func (s *appServerSession) startTurn(threadID string, input []map[string]any, tu
 		return fmt.Errorf("codex app-server connection closed during turn/start: %w", io.EOF)
 	}
 	s.currentTurn = resp.Turn.ID
+	s.turnActive = true
 	s.pendingMsgs = s.pendingMsgs[:0]
 	s.stateMu.Unlock()
 
@@ -612,15 +618,7 @@ func (s *appServerSession) steerTurn(threadID, expectedTurnID string, input []ma
 
 	var resp turnSteerResponse
 	if err := s.request("turn/steer", params, &resp); err != nil {
-		s.stateMu.Lock()
-		if s.currentTurn == expectedTurnID {
-			// A turn can finish before its delayed turn/start response is
-			// installed. Do not strand every later message on a stale ID;
-			// the next user message gets a normal turn/start instead.
-			s.currentTurn = ""
-			s.turnRevision++
-		}
-		s.stateMu.Unlock()
+		s.retireSteerTurn(expectedTurnID)
 		return fmt.Errorf("codex app-server turn/steer: %w", err)
 	}
 	if resp.TurnID == "" {
@@ -630,6 +628,18 @@ func (s *appServerSession) steerTurn(threadID, expectedTurnID string, input []ma
 		return fmt.Errorf("codex app-server turn/steer returned turn id %q, want %q", resp.TurnID, expectedTurnID)
 	}
 	return nil
+}
+
+// retireSteerTurn drops the turn id after a failed steer so the next message
+// starts a fresh turn. turnActive is intentionally left alone: the running
+// turn still completes and must deliver its EventResult.
+func (s *appServerSession) retireSteerTurn(expectedTurnID string) {
+	s.stateMu.Lock()
+	if s.currentTurn == expectedTurnID {
+		s.currentTurn = ""
+		s.turnRevision++
+	}
+	s.stateMu.Unlock()
 }
 
 func (s *appServerSession) stageImages(prompt string, images []core.ImageAttachment) (string, []string, error) {
@@ -659,6 +669,11 @@ func (s *appServerSession) stageImages(prompt string, images []core.ImageAttachm
 
 	return prompt, imagePaths, nil
 }
+
+// SupportsMidTurnSteering reports that an active turn accepts turn/steer input.
+func (s *appServerSession) SupportsMidTurnSteering() bool { return true }
+
+var _ core.MidTurnSteerer = (*appServerSession)(nil)
 
 func (s *appServerSession) RespondPermission(requestID string, result core.PermissionResult) error {
 	s.approvalsMu.Lock()
@@ -1227,9 +1242,10 @@ func (s *appServerSession) waitLoop() {
 func (s *appServerSession) finishTransport(err error) {
 	s.stateMu.Lock()
 	s.alive.Store(false)
-	active := s.currentTurn != ""
+	active := s.currentTurn != "" || s.turnActive
 	if active {
 		s.currentTurn = ""
+		s.turnActive = false
 		s.pendingMsgs = s.pendingMsgs[:0]
 		s.turnRevision++
 	}
@@ -1269,6 +1285,7 @@ func (s *appServerSession) handleNotification(method string, paramsRaw json.RawM
 		if err := json.Unmarshal(paramsRaw, &notif); err == nil && s.acceptsThreadNotification(method, notif.ThreadID) {
 			s.stateMu.Lock()
 			s.currentTurn = notif.Turn.ID
+			s.turnActive = true
 			s.pendingMsgs = s.pendingMsgs[:0]
 			s.stateMu.Unlock()
 			s.storeContextUsage(nil)
@@ -1714,11 +1731,15 @@ func rpcIDToInt64(v any) (int64, bool) {
 
 func (s *appServerSession) completeTurn() {
 	s.stateMu.Lock()
-	if s.currentTurn == "" {
+	// Gate on turnActive as well as currentTurn: a failed steer clears the id
+	// while the turn is still running, and that turn must still emit its
+	// result or the engine waits for a result that never arrives.
+	if s.currentTurn == "" && !s.turnActive {
 		s.stateMu.Unlock()
 		return
 	}
 	s.currentTurn = ""
+	s.turnActive = false
 	s.turnRevision++
 	s.stateMu.Unlock()
 	s.flushPendingAsText()
@@ -1727,11 +1748,12 @@ func (s *appServerSession) completeTurn() {
 
 func (s *appServerSession) failTurn(err error) bool {
 	s.stateMu.Lock()
-	if s.currentTurn == "" {
+	if s.currentTurn == "" && !s.turnActive {
 		s.stateMu.Unlock()
 		return false
 	}
 	s.currentTurn = ""
+	s.turnActive = false
 	s.turnRevision++
 	s.pendingMsgs = s.pendingMsgs[:0]
 	s.stateMu.Unlock()
