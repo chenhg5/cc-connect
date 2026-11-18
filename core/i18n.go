@@ -216,6 +216,7 @@ const (
 	MsgToolAllowFailed           MsgKey = "tool_allow_failed"
 	MsgToolAllowedNew            MsgKey = "tool_allowed_new"
 	MsgError                     MsgKey = "error"
+	MsgAttachmentUnavailable     MsgKey = "attachment_unavailable"
 	MsgSessionNotFound           MsgKey = "session_not_found"
 	MsgFailedToStartAgentSession MsgKey = "failed_to_start_agent_session"
 	MsgFailedToDeleteSession     MsgKey = "failed_to_delete_session"
@@ -552,6 +553,7 @@ const (
 	MsgBannedWordBlocked MsgKey = "banned_word_blocked"
 	MsgCommandDisabled   MsgKey = "command_disabled"
 	MsgAdminRequired     MsgKey = "admin_required"
+	MsgCardActorRequired MsgKey = "card_actor_required"
 	MsgRateLimited       MsgKey = "rate_limited"
 	MsgPsSent            MsgKey = "ps_sent"
 	MsgPsSendFailed      MsgKey = "ps_send_failed"
@@ -858,6 +860,13 @@ var messages = map[MsgKey]map[Language]string{
 		LangTraditionalChinese: "✅ 工具 `%s` 已預授權。將在下次會話生效。",
 		LangJapanese:           "✅ ツール `%s` を事前許可しました。次のセッションから有効になります。",
 		LangSpanish:            "✅ Herramienta `%s` pre-autorizada. Se aplicará en la próxima sesión.",
+	},
+	MsgAttachmentUnavailable: {
+		LangEnglish:            "Attachment unavailable: %s. The attachment was sent but could not be read.",
+		LangChinese:            "附件无法读取：%s。消息确实带有附件，但本次未能取得文件内容。",
+		LangTraditionalChinese: "附件無法讀取：%s。訊息確實帶有附件，但本次未能取得檔案內容。",
+		LangJapanese:           "添付ファイルを読み取れません：%s。添付ファイルは送信されましたが、内容を取得できませんでした。",
+		LangSpanish:            "Archivo adjunto no disponible: %s. Se envió el archivo, pero no se pudo leer su contenido.",
 	},
 	MsgError: {
 		LangEnglish:            "❌ Error: %v",
@@ -3431,6 +3440,13 @@ var messages = map[MsgKey]map[Language]string{
 		LangTraditionalChinese: "🚫 命令 `%s` 在當前專案中已被停用。",
 		LangJapanese:           "🚫 コマンド `%s` はこのプロジェクトで無効化されています。",
 		LangSpanish:            "🚫 El comando `%s` está deshabilitado para este proyecto.",
+	},
+	MsgCardActorRequired: {
+		LangEnglish:            "🔒 Cannot verify who clicked this card. Please use the text command instead.",
+		LangChinese:            "🔒 无法确认此卡片的点击者身份，请改用文本命令。",
+		LangTraditionalChinese: "🔒 無法確認此卡片的點擊者身分，請改用文字命令。",
+		LangJapanese:           "🔒 このカードをクリックしたユーザーを確認できません。テキストコマンドを使用してください。",
+		LangSpanish:            "🔒 No se puede verificar quién pulsó esta tarjeta. Usa el comando de texto.",
 	},
 	MsgAdminRequired: {
 		LangEnglish:            "🔒 Command `%s` requires admin privilege. Set `admin_from` in config to authorize users.",
