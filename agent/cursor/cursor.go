@@ -14,6 +14,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"time"
 	"unicode/utf8"
 
 	"github.com/chenhg5/cc-connect/core"
@@ -31,16 +32,17 @@ func init() {
 //   - "plan":     --mode plan (read-only analysis)
 //   - "ask":      --mode ask (Q&A style, read-only)
 type Agent struct {
-	workDir      string
-	model        string
-	mode         string
-	cmd          string   // CLI binary name, default "agent"
-	cliExtraArgs []string // extra args from cmd after the binary name
-	configEnv    []string // env vars from [projects.agent.options.env]
-	providers    []core.ProviderConfig
-	activeIdx    int
-	sessionEnv   []string
-	mu           sync.RWMutex
+	instructionsFile string
+	workDir          string
+	model            string
+	mode             string
+	cmd              string   // CLI binary name, default "agent"
+	cliExtraArgs     []string // extra args from cmd after the binary name
+	configEnv        []string // env vars from [projects.agent.options.env]
+	providers        []core.ProviderConfig
+	activeIdx        int
+	sessionEnv       []string
+	mu               sync.RWMutex
 }
 
 func New(opts map[string]any) (core.Agent, error) {
@@ -48,6 +50,7 @@ func New(opts map[string]any) (core.Agent, error) {
 	if workDir == "" {
 		workDir = "."
 	}
+	instructionsFile, _ := opts["instructions_file"].(string)
 	model, _ := opts["model"].(string)
 	mode, _ := opts["mode"].(string)
 	mode = normalizeMode(mode)
@@ -57,13 +60,14 @@ func New(opts map[string]any) (core.Agent, error) {
 	}
 
 	return &Agent{
-		workDir:      workDir,
-		model:        model,
-		mode:         mode,
-		cmd:          cmd,
-		cliExtraArgs: extraArgs,
-		configEnv:    core.ParseConfigEnv(opts),
-		activeIdx:    -1,
+		instructionsFile: instructionsFile,
+		workDir:          workDir,
+		model:            model,
+		mode:             mode,
+		cmd:              cmd,
+		cliExtraArgs:     extraArgs,
+		configEnv:        core.ParseConfigEnv(opts),
+		activeIdx:        -1,
 	}, nil
 }
 
@@ -129,7 +133,8 @@ func (a *Agent) AvailableModels(ctx context.Context) []core.ModelOption {
 	if models := fetchModelsFromAgentCLI(ctx, cmd, extraEnv); len(models) > 0 {
 		return models
 	}
-	return cursorFallbackModels()
+	slog.Warn("cursor: model discovery failed; no model list is available")
+	return nil
 }
 
 // fetchModelsFromAgentCLI runs `agent models` and parses the output.
@@ -173,16 +178,6 @@ func fetchModelsFromAgentCLI(ctx context.Context, cmd string, extraEnv []string)
 	return models
 }
 
-func cursorFallbackModels() []core.ModelOption {
-	return []core.ModelOption{
-		{Name: "claude-sonnet-4-20250514", Desc: "Claude Sonnet 4"},
-		{Name: "claude-opus-4-20250514", Desc: "Claude Opus 4"},
-		{Name: "gpt-4o", Desc: "GPT-4o"},
-		{Name: "gemini-2.5-pro", Desc: "Gemini 2.5 Pro"},
-		{Name: "cursor-small", Desc: "Cursor Small (fast)"},
-	}
-}
-
 func (a *Agent) SetSessionEnv(env []string) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
@@ -196,6 +191,7 @@ func (a *Agent) StartSession(ctx context.Context, sessionID string) (core.AgentS
 	cmd := a.cmd
 	extraArgs := append([]string{}, a.cliExtraArgs...)
 	workDir := a.workDir
+	instructionsFile := a.instructionsFile
 	extraEnv := append([]string(nil), a.configEnv...)
 	extraEnv = append(extraEnv, a.providerEnvLocked()...)
 	extraEnv = append(extraEnv, a.sessionEnv...)
@@ -206,7 +202,7 @@ func (a *Agent) StartSession(ctx context.Context, sessionID string) (core.AgentS
 	}
 	a.mu.RUnlock()
 
-	return newCursorSession(ctx, cmd, extraArgs, workDir, model, mode, sessionID, extraEnv)
+	return newCursorSession(ctx, cmd, extraArgs, workDir, model, mode, sessionID, extraEnv, instructionsFile)
 }
 
 // ListSessions reads sessions from Cursor Agent CLI chat storage.
@@ -230,6 +226,25 @@ func (a *Agent) DeleteSession(_ context.Context, sessionID string) error {
 	return os.RemoveAll(dir)
 }
 
+func (a *Agent) GetSessionHistory(_ context.Context, sessionID string, limit int) ([]core.HistoryEntry, error) {
+	homeDir, err := os.UserHomeDir()
+	if err != nil {
+		return nil, fmt.Errorf("cursor: cannot determine home dir: %w", err)
+	}
+	dir, err := findCursorSessionDir(homeDir, a.GetWorkDir(), sessionID)
+	if err != nil {
+		return nil, fmt.Errorf("cursor: %w", err)
+	}
+	dbPath := filepath.Join(dir, "store.db")
+	meta := readSessionMeta(dbPath)
+	if meta.RootBlobID == "" {
+		return nil, fmt.Errorf("cursor: session %s has no root blob", sessionID)
+	}
+	return readCursorSessionHistory(dbPath, meta.RootBlobID, limit)
+}
+
+var _ core.HistoryProvider = (*Agent)(nil)
+
 func (a *Agent) Stop() error { return nil }
 
 // ── SkillProvider implementation ──────────────────────────────
@@ -252,6 +267,21 @@ func (a *Agent) SkillDirs() []string {
 	}
 	return dirs
 }
+
+// ── MemoryFileProvider implementation ─────────────────────────
+
+func (a *Agent) ProjectMemoryFile() string {
+	workDir := a.GetWorkDir()
+	absDir, err := filepath.Abs(workDir)
+	if err != nil {
+		absDir = workDir
+	}
+	return filepath.Join(absDir, "AGENTS.md")
+}
+
+func (a *Agent) GlobalMemoryFile() string { return "" }
+
+var _ core.MemoryFileProvider = (*Agent)(nil)
 
 // ── ContextCompressor implementation ──────────────────────────
 
@@ -685,4 +715,186 @@ func countSessionMessages(dbPath, rootBlobID string) (int, string) {
 	}
 
 	return msgCount, firstUserMsg
+}
+
+const cursorHistoryReadBatch = 40
+
+func readCursorSessionHistory(dbPath, rootBlobID string, limit int) ([]core.HistoryEntry, error) {
+	if _, err := exec.LookPath("sqlite3"); err != nil {
+		return nil, fmt.Errorf("cursor: sqlite3 not found: %w", err)
+	}
+	if !isCursorBlobID(rootBlobID) {
+		return nil, fmt.Errorf("cursor: invalid root blob id")
+	}
+	root, err := readCursorBlob(dbPath, rootBlobID)
+	if err != nil {
+		return nil, err
+	}
+	childIDs := cursorChildBlobIDs(root)
+	if len(childIDs) == 0 {
+		return nil, nil
+	}
+
+	target := len(childIDs)
+	if limit > 0 && limit < target {
+		target = limit
+	}
+	var newestFirst []core.HistoryEntry
+	for end := len(childIDs); end > 0 && len(newestFirst) < target; {
+		start := end - cursorHistoryReadBatch
+		if start < 0 {
+			start = 0
+		}
+		blobs, err := readCursorBlobs(dbPath, childIDs[start:end])
+		if err != nil {
+			return nil, err
+		}
+		for i := end - 1; i >= start; i-- {
+			entry, ok := cursorHistoryEntry(blobs[childIDs[i]])
+			if !ok {
+				continue
+			}
+			newestFirst = append(newestFirst, entry)
+			if len(newestFirst) == target {
+				break
+			}
+		}
+		end = start
+	}
+	for i, j := 0, len(newestFirst)-1; i < j; i, j = i+1, j-1 {
+		newestFirst[i], newestFirst[j] = newestFirst[j], newestFirst[i]
+	}
+	return newestFirst, nil
+}
+
+func cursorChildBlobIDs(root []byte) []string {
+	var ids []string
+	for i := 0; i+33 < len(root) && root[i] == 0x0a && root[i+1] == 0x20; i += 34 {
+		ids = append(ids, hex.EncodeToString(root[i+2:i+34]))
+	}
+	return ids
+}
+
+func cursorHistoryEntry(raw []byte) (core.HistoryEntry, bool) {
+	if len(raw) == 0 {
+		return core.HistoryEntry{}, false
+	}
+	var msg struct {
+		Role      string          `json:"role"`
+		Content   any             `json:"content"`
+		CreatedAt json.RawMessage `json:"createdAt"`
+		Timestamp json.RawMessage `json:"timestamp"`
+	}
+	if json.Unmarshal(raw, &msg) != nil {
+		return core.HistoryEntry{}, false
+	}
+	role := strings.ToLower(strings.TrimSpace(msg.Role))
+	var text string
+	switch role {
+	case "user":
+		text = extractCursorUserSummary(msg.Content)
+	case "assistant":
+		text = strings.TrimSpace(cursorMessageContentText(msg.Content))
+	default:
+		return core.HistoryEntry{}, false
+	}
+	if text == "" {
+		return core.HistoryEntry{}, false
+	}
+	return core.HistoryEntry{
+		Role:      role,
+		Content:   text,
+		Timestamp: cursorBlobTime(msg.CreatedAt, msg.Timestamp),
+	}, true
+}
+
+func cursorBlobTime(fields ...json.RawMessage) time.Time {
+	for _, raw := range fields {
+		raw = json.RawMessage(strings.TrimSpace(string(raw)))
+		if len(raw) == 0 || string(raw) == "null" {
+			continue
+		}
+		var text string
+		if json.Unmarshal(raw, &text) == nil {
+			if ts, err := time.Parse(time.RFC3339Nano, text); err == nil {
+				return ts.Local()
+			}
+			continue
+		}
+		var n float64
+		if json.Unmarshal(raw, &n) != nil || n <= 0 {
+			continue
+		}
+		sec := int64(n)
+		if sec > 1_000_000_000_000 {
+			return time.UnixMilli(sec).Local()
+		}
+		return time.Unix(sec, 0).Local()
+	}
+	return time.Time{}
+}
+
+func isCursorBlobID(id string) bool {
+	if id == "" || len(id)%2 != 0 {
+		return false
+	}
+	for _, c := range id {
+		switch {
+		case c >= '0' && c <= '9', c >= 'a' && c <= 'f', c >= 'A' && c <= 'F':
+		default:
+			return false
+		}
+	}
+	return true
+}
+
+func readCursorBlob(dbPath, id string) ([]byte, error) {
+	blobs, err := readCursorBlobs(dbPath, []string{id})
+	if err != nil {
+		return nil, err
+	}
+	raw, ok := blobs[strings.ToLower(id)]
+	if !ok {
+		raw, ok = blobs[id]
+	}
+	if !ok {
+		return nil, fmt.Errorf("cursor: blob %s not found", id)
+	}
+	return raw, nil
+}
+
+func readCursorBlobs(dbPath string, ids []string) (map[string][]byte, error) {
+	sqliteBin, err := exec.LookPath("sqlite3")
+	if err != nil {
+		return nil, fmt.Errorf("cursor: sqlite3 not found: %w", err)
+	}
+	quoted := make([]string, 0, len(ids))
+	for _, id := range ids {
+		if !isCursorBlobID(id) {
+			return nil, fmt.Errorf("cursor: invalid blob id")
+		}
+		quoted = append(quoted, "'"+id+"'")
+	}
+	query := fmt.Sprintf("SELECT id || '|' || hex(data) FROM blobs WHERE id IN (%s);", strings.Join(quoted, ","))
+	out, err := exec.Command(sqliteBin, dbPath, query).Output()
+	if err != nil {
+		return nil, fmt.Errorf("cursor: read blobs: %w", err)
+	}
+	blobs := make(map[string][]byte, len(ids))
+	for _, line := range strings.Split(string(out), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		id, hexData, ok := strings.Cut(line, "|")
+		if !ok {
+			continue
+		}
+		raw, err := hex.DecodeString(hexData)
+		if err != nil {
+			continue
+		}
+		blobs[strings.ToLower(id)] = raw
+	}
+	return blobs, nil
 }
