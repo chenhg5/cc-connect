@@ -77,12 +77,10 @@ func (s *tmuxSession) Send(prompt string, messageID string, _ []core.ImageAttach
 		return fmt.Errorf("tmux: session closed")
 	}
 
-	// Save attached files and append their paths to the prompt
+	// Save attached files and append their paths to the prompt using the
+	// shared core helper so the wording stays in sync with other agents.
 	if len(files) > 0 {
-		paths := core.SaveFilesToDisk(s.workDir, messageID, files)
-		if len(paths) > 0 {
-			prompt = prompt + "\n# files: " + strings.Join(paths, ", ")
-		}
+		prompt = core.AppendFileRefs(prompt, core.SaveFilesToDisk(s.workDir, messageID, files))
 	}
 
 	// Cancel any running poll from a previous Send

@@ -116,16 +116,14 @@ func (as *antigravitySession) Send(prompt string, messageID string, images []cor
 		}
 	}
 
-	var fileRefs []string
-	for i, f := range files {
-		fname := filepath.Base(f.FileName)
-		if fname == "" || fname == "." || fname == ".." {
-			fname = fmt.Sprintf("file_%d_%d", time.Now().UnixMilli(), i)
-		}
-		fpath := filepath.Join(attachDir, fname)
-		if err := os.WriteFile(fpath, f.Data, 0o600); err == nil {
-			fileRefs = append(fileRefs, fpath)
-		}
+	// File attachments go through the shared core helper so we get
+	// messageID-scoped subdirectories, sanitized filenames, and a
+	// consistent "(Files saved locally, please read them: …)" reference
+	// wording shared with the other agents. See issue #1552 for the
+	// collision-protection guarantees this brings.
+	var filePaths []string
+	if len(files) > 0 {
+		filePaths = core.SaveFilesToDisk(as.workDir, messageID, files)
 	}
 
 	chatID := as.CurrentSessionID()
@@ -139,12 +137,7 @@ func (as *antigravitySession) Send(prompt string, messageID string, images []cor
 		}
 		fullPrompt += "\n\n[Attached images saved at: " + strings.Join(imageRefs, ", ") + "]"
 	}
-	if len(fileRefs) > 0 {
-		if fullPrompt == "" {
-			fullPrompt = "Please analyze the attached file(s)."
-		}
-		fullPrompt += "\n\n[Attached files saved at: " + strings.Join(fileRefs, ", ") + "]"
-	}
+	fullPrompt = core.AppendFileRefs(fullPrompt, filePaths)
 	agyConfigDir := ""
 	if as.permissionBridge != nil {
 		agyConfigDir = as.permissionBridge.AgyConfigDir()
@@ -200,7 +193,7 @@ func (as *antigravitySession) Send(prompt string, messageID string, images []cor
 	as.wg.Add(1)
 	go func() {
 		defer cancel()
-		as.readLoop(ctx, cmd, stdout, &stderrBuf, append(imageRefs, fileRefs...), preEntries, time.Now())
+		as.readLoop(ctx, cmd, stdout, &stderrBuf, append(imageRefs, filePaths...), preEntries, time.Now())
 	}()
 
 	return nil
@@ -230,6 +223,8 @@ func (as *antigravitySession) buildAntigravityArgs(chatID string, isResume bool,
 
 func (as *antigravitySession) readLoop(ctx context.Context, cmd *exec.Cmd, stdout io.ReadCloser, stderrBuf *bytes.Buffer, tempFiles []string, preEntries map[string]bool, sendStartedAt time.Time) {
 	defer as.wg.Done()
+	hasResponse := false
+	reportedError := false
 	parser := newAgyOutputParser()
 	defer func() {
 		for _, f := range tempFiles {
@@ -241,7 +236,7 @@ func (as *antigravitySession) readLoop(ctx context.Context, cmd *exec.Cmd, stdou
 		// Detect conversation ID if this was the first turn of a fresh session.
 		// agy may flush the chat file only while the process is exiting, so wait
 		// for process reaping before scanning the chat directory.
-		if as.CurrentSessionID() == "" && !parser.resultReceived {
+		if as.CurrentSessionID() == "" {
 			var sid string
 			for attempt := 0; attempt < 15; attempt++ {
 				sid = as.detectNewSessionID(preEntries, sendStartedAt)
@@ -262,14 +257,27 @@ func (as *antigravitySession) readLoop(ctx context.Context, cmd *exec.Cmd, stdou
 		}
 
 		sid := as.CurrentSessionID()
-		if err != nil && !parser.resultReceived {
-			stderrMsg := strings.TrimSpace(stderrBuf.String())
+		stderrMsg := redactAgyStderr(stderrBuf.String(), cmd.Env)
+		var processErr error
+		// Only a nonblank terminal response can override a late process error.
+		if err != nil && !reportedError && !parser.resultHasResponse {
 			if stderrMsg != "" {
-				slog.Error("antigravitySession: process failed", "error", err, "stderr", stderrMsg)
-				select {
-				case as.events <- core.Event{Type: core.EventError, Error: fmt.Errorf("%s", stderrMsg)}:
-				case <-as.ctx.Done():
-				}
+				processErr = fmt.Errorf("agy process failed (%w): %s", err, stderrMsg)
+			} else {
+				processErr = fmt.Errorf("agy process failed: %w", err)
+			}
+		} else if !hasResponse && !reportedError && as.ctx.Err() == nil && (parser.resultReceived || ctx.Err() == nil) {
+			if stderrMsg != "" {
+				processErr = fmt.Errorf("agy returned no response: %s", stderrMsg)
+			} else {
+				processErr = fmt.Errorf("agy exited successfully without producing a response")
+			}
+		}
+		if processErr != nil {
+			slog.Error("antigravitySession: process failed", "error", processErr)
+			select {
+			case as.events <- core.Event{Type: core.EventError, Error: processErr}:
+			case <-as.ctx.Done():
 			}
 		}
 
@@ -304,6 +312,12 @@ func (as *antigravitySession) readLoop(ctx context.Context, cmd *exec.Cmd, stdou
 			if event.SessionID != "" {
 				as.chatID.Store(event.SessionID)
 			}
+			if event.Type == core.EventError {
+				reportedError = true
+			}
+			if event.Type == core.EventText && strings.TrimSpace(event.Content) != "" {
+				hasResponse = true
+			}
 			select {
 			case as.events <- event:
 			case <-as.ctx.Done():
@@ -312,12 +326,27 @@ func (as *antigravitySession) readLoop(ctx context.Context, cmd *exec.Cmd, stdou
 		}
 	}
 	if err := scanner.Err(); err != nil && !strings.Contains(err.Error(), "file already closed") && !parser.resultReceived {
+		reportedError = true
 		slog.Error("antigravitySession: read error", "error", err)
 		select {
 		case as.events <- core.Event{Type: core.EventError, Error: fmt.Errorf("read stdout: %w", err)}:
 		case <-as.ctx.Done():
 		}
 	}
+}
+
+func redactAgyStderr(stderr string, env []string) string {
+	for _, entry := range env {
+		key, value, ok := strings.Cut(entry, "=")
+		if !ok || value == "" {
+			continue
+		}
+		key = strings.ToUpper(key)
+		if strings.Contains(key, "TOKEN") || strings.Contains(key, "KEY") || strings.Contains(key, "SECRET") || strings.Contains(key, "PASSWORD") {
+			stderr = core.RedactToken(stderr, value)
+		}
+	}
+	return strings.TrimSpace(stderr)
 }
 
 func (as *antigravitySession) detectNewSessionID(preEntries map[string]bool, sendStartedAt time.Time) string {

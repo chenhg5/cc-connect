@@ -10,10 +10,11 @@ import (
 )
 
 type agyOutputParser struct {
-	resultReceived bool
-	sessionID      string
-	hasText        bool
-	toolSteps      map[int]bool
+	resultReceived    bool
+	resultHasResponse bool
+	sessionID         string
+	hasText           bool
+	toolSteps         map[int]bool
 }
 
 type agyOutputEnvelope struct {
@@ -93,7 +94,7 @@ func (p *agyOutputParser) parseLine(line []byte) (recognized bool, events []core
 		step := envelope.StepUpdate
 		switch step.StepType {
 		case "agent_response":
-			if step.TextDelta != "" {
+			if strings.TrimSpace(step.TextDelta) != "" {
 				p.hasText = true
 				events = append(events, core.Event{Type: core.EventText, Content: step.TextDelta})
 			}
@@ -148,6 +149,7 @@ func (p *agyOutputParser) parseLine(line []byte) (recognized bool, events []core
 		}
 		p.resultReceived = true
 		if strings.TrimSpace(result.Response) != "" {
+			p.resultHasResponse = true
 			if !p.hasText {
 				p.hasText = true
 				events = append(events, core.Event{Type: core.EventText, Content: result.Response})

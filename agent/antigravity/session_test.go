@@ -103,6 +103,14 @@ func TestStreamJSONResult(t *testing.T) {
 		_ = os.WriteFile(os.Getenv("CC_ANTIGRAVITY_ARGS_FILE"), []byte(strings.Join(os.Args, "\x00")), 0o600)
 		_, _ = io.WriteString(os.Stdout, os.Getenv("CC_ANTIGRAVITY_STDOUT"))
 		_, _ = io.WriteString(os.Stderr, os.Getenv("CC_ANTIGRAVITY_STDERR"))
+		if path := os.Getenv("CC_ANTIGRAVITY_CHAT_FILE"); path != "" {
+			if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+				os.Exit(4)
+			}
+			if err := os.WriteFile(path, []byte(`{"sessionId":"conv-recovered"}`), 0o600); err != nil {
+				os.Exit(4)
+			}
+		}
 		if os.Getenv("CC_ANTIGRAVITY_FAIL") == "1" {
 			os.Exit(3)
 		}
@@ -117,6 +125,7 @@ func TestStreamJSONResult(t *testing.T) {
 		wantText    string
 		wantError   string
 		wantSession string
+		recoverID   bool
 	}{
 		{
 			name:        "success",
@@ -170,8 +179,80 @@ func TestStreamJSONResult(t *testing.T) {
 			wantError: "not available",
 		},
 		{
-			name:   "empty_success",
-			output: `{"event":"result","result":{"status":"SUCCESS","response":""}}`,
+			name:      "empty_success",
+			output:    `{"event":"result","result":{"status":"SUCCESS","response":""}}`,
+			wantError: "without producing a response",
+		},
+		{
+			name:      "whitespace_success_without_text_reports_empty_result",
+			output:    `{"event":"result","result":{"status":"SUCCESS","response":" \t\n"}}`,
+			wantError: "without producing a response",
+		},
+		{
+			name:        "empty_success_without_id_recovers_id_and_reports_error",
+			output:      `{"event":"result","result":{"status":"SUCCESS","response":""}}`,
+			wantError:   "without producing a response",
+			wantSession: "conv-recovered",
+			recoverID:   true,
+		},
+		{
+			name:        "response_with_old_error_without_id_recovers_id",
+			output:      `{"event":"result","result":{"status":"ERROR","response":"done","error":"historical error"}}`,
+			stderr:      "historical error",
+			fail:        true,
+			wantText:    "done",
+			wantSession: "conv-recovered",
+			recoverID:   true,
+		},
+		{
+			name:        "explicit_session_id_is_not_replaced_by_fallback",
+			output:      `{"event":"result","result":{"conversation_id":"conv-explicit","status":"SUCCESS","response":"done"}}`,
+			wantText:    "done",
+			wantSession: "conv-explicit",
+			recoverID:   true,
+		},
+		{
+			name:     "streamed_text_with_empty_success_is_valid_response",
+			output:   `{"event":"step_update","step_update":{"step_type":"agent_response","text_delta":"done"}}` + "\n" + `{"event":"result","result":{"status":"SUCCESS","response":""}}`,
+			wantText: "done",
+		},
+		{
+			name:        "terminal_without_id_recovers_chat_after_process_exit",
+			output:      `{"event":"result","result":{"status":"SUCCESS","response":"done"}}`,
+			wantText:    "done",
+			wantSession: "conv-recovered",
+			recoverID:   true,
+		},
+		{
+			name:      "empty_success_preserves_nonzero_exit",
+			output:    `{"event":"result","result":{"status":"SUCCESS","response":""}}`,
+			fail:      true,
+			wantError: "exit status 3",
+		},
+		{
+			name:      "empty_success_preserves_headless_diagnostic",
+			output:    `{"event":"result","result":{"status":"SUCCESS","response":""}}`,
+			stderr:    "headless mode cannot prompt",
+			wantError: "headless mode cannot prompt",
+		},
+		{
+			name:      "delta_only_empty_error_is_not_historical",
+			output:    `{"event":"step_update","step_update":{"step_type":"agent_response","text_delta":"done"}}` + "\n" + `{"event":"result","result":{"status":"ERROR","response":"","error":"current failure"}}`,
+			fail:      true,
+			wantText:  "done",
+			wantError: "current failure",
+		},
+		{
+			name:      "streamed_text_empty_success_does_not_mask_failed_exit",
+			output:    `{"event":"step_update","step_update":{"step_type":"agent_response","text_delta":"done"}}` + "\n" + `{"event":"result","result":{"status":"SUCCESS","response":""}}`,
+			fail:      true,
+			wantText:  "done",
+			wantError: "exit status 3",
+		},
+		{
+			name:     "whitespace_delta_does_not_hide_terminal_response",
+			output:   `{"event":"step_update","step_update":{"step_type":"agent_response","text_delta":" \t"}}` + "\n" + `{"event":"result","result":{"status":"ERROR","response":"done","error":"historical error"}}`,
+			wantText: "done",
 		},
 		{
 			name:        "streamed_response_survives_historical_result_error_without_duplication",
@@ -216,6 +297,8 @@ func TestStreamJSONResult(t *testing.T) {
 			argsPath := filepath.Join(t.TempDir(), "args")
 			extraEnv := []string{
 				"GO_WANT_ANTIGRAVITY_STREAM_HELPER=1",
+				"CC_ANTIGRAVITY_CHAT_FILE=",
+				"CC_ANTIGRAVITY_FAIL=",
 				"CC_ANTIGRAVITY_ARGS_FILE=" + argsPath,
 				"CC_ANTIGRAVITY_STDOUT=" + test.output,
 				"CC_ANTIGRAVITY_STDERR=" + test.stderr,
@@ -223,7 +306,12 @@ func TestStreamJSONResult(t *testing.T) {
 			if test.fail {
 				extraEnv = append(extraEnv, "CC_ANTIGRAVITY_FAIL=1")
 			}
-			session, err := newAntigravitySession(context.Background(), os.Args[0], []string{"-test.run=^TestStreamJSONResult$", "--"}, t.TempDir(), "", "yolo", "", extraEnv, 5*time.Second)
+			workDir := t.TempDir()
+			if test.recoverID {
+				chatFile := filepath.Join(os.Getenv("HOME"), ".gemini", "tmp", antigravityProjectSlug(workDir), "chats", "session-recovered.jsonl")
+				extraEnv = append(extraEnv, "CC_ANTIGRAVITY_CHAT_FILE="+chatFile)
+			}
+			session, err := newAntigravitySession(context.Background(), os.Args[0], []string{"-test.run=^TestStreamJSONResult$", "--"}, workDir, "", "yolo", "", extraEnv, 5*time.Second)
 			if err != nil {
 				t.Fatalf("newAntigravitySession: %v", err)
 			}
@@ -442,6 +530,103 @@ func TestSendDoesNotHoldStdinOpen(t *testing.T) {
 		case <-deadline:
 			t.Fatal("timeout waiting for agy process to receive stdin EOF")
 		}
+	}
+}
+
+func TestAntigravitySession_ReportsHeadlessExitFailures(t *testing.T) {
+	for _, tt := range []struct {
+		name, script, want string
+	}{
+		{"soft_denied_success", "printf 'headless mode cannot prompt; auto-denied' >&2; exit 0", "headless mode cannot prompt"},
+		{"empty_success", "exit 0", "without producing a response"},
+		{"failed_without_stderr", "exit 2", "exit status 2"},
+		{"failed_with_stderr", "printf 'tool execution failed' >&2; exit 2", "tool execution failed"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Setenv("HOME", t.TempDir())
+			cmdPath := filepath.Join(t.TempDir(), "fake-agy.sh")
+			if err := os.WriteFile(cmdPath, []byte("#!/bin/sh\n"+tt.script+"\n"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			s, err := newAntigravitySession(context.Background(), cmdPath, nil, t.TempDir(), "", "yolo", "existing-session", nil, 2*time.Second)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer func() { _ = s.Close() }()
+			if err := s.Send("test", "", nil, nil); err != nil {
+				t.Fatal(err)
+			}
+			select {
+			case event := <-s.Events():
+				if event.Type != core.EventError || event.Error == nil || !strings.Contains(event.Error.Error(), tt.want) {
+					t.Fatalf("event = %+v, want error containing %q", event, tt.want)
+				}
+			case <-time.After(3 * time.Second):
+				t.Fatal("timeout waiting for process error")
+			}
+		})
+	}
+}
+
+func TestRedactAgyStderr_RemovesEnvironmentSecrets(t *testing.T) {
+	got := redactAgyStderr("  denied token=secret-value-123 path=/tmp/project  ", []string{"API_TOKEN=secret-value-123", "PATH=/tmp/project"})
+	if strings.Contains(got, "secret-value-123") || !strings.Contains(got, "/tmp/project") || strings.TrimSpace(got) != got {
+		t.Fatalf("redacted stderr = %q", got)
+	}
+}
+
+func TestAntigravitySession_StreamResponseDiagnostics(t *testing.T) {
+	for _, tt := range []struct {
+		name, output, want string
+	}{
+		{"session_only", `{"event":"init","conversation_id":"session-1"}`, ""},
+		{"tool_only", `{"event":"step_update","step_update":{"step_index":1,"state":"DONE","step_type":"tool","tool_info":{"name":"run_command","output":"tool output"}}}`, ""},
+		{"whitespace", `{"event":"step_update","step_update":{"step_type":"agent_response","text_delta":"  "}}`, ""},
+		{"text_delta", `{"event":"step_update","step_update":{"step_type":"agent_response","text_delta":"answer"}}`, "answer"},
+		{"final_response", `{"event":"result","result":{"status":"SUCCESS","response":"answer"}}`, "answer"},
+		{"plain_text", "answer", "answer\n"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Setenv("HOME", t.TempDir())
+			cmdPath := filepath.Join(t.TempDir(), "fake-agy.sh")
+			script := "#!/bin/sh\ncat <<'AGY_OUTPUT'\n" + tt.output + "\nAGY_OUTPUT\n"
+			if err := os.WriteFile(cmdPath, []byte(script), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			s, err := newAntigravitySession(context.Background(), cmdPath, nil, t.TempDir(), "", "yolo", "existing-session", nil, 2*time.Second)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer func() { _ = s.Close() }()
+			if err := s.Send("test", "", nil, nil); err != nil {
+				t.Fatal(err)
+			}
+			var response strings.Builder
+			var responseErr error
+			deadline := time.After(3 * time.Second)
+			for {
+				select {
+				case event := <-s.Events():
+					switch event.Type {
+					case core.EventText:
+						response.WriteString(event.Content)
+					case core.EventError:
+						responseErr = event.Error
+					case core.EventResult:
+						if tt.want == "" {
+							if responseErr == nil || !strings.Contains(responseErr.Error(), "without producing a response") {
+								t.Fatalf("error = %v, want missing response diagnostic", responseErr)
+							}
+						} else if responseErr != nil || response.String() != tt.want {
+							t.Fatalf("response = %q, error = %v, want %q", response.String(), responseErr, tt.want)
+						}
+						return
+					}
+				case <-deadline:
+					t.Fatal("timeout waiting for response diagnostics")
+				}
+			}
+		})
 	}
 }
 
