@@ -46,7 +46,7 @@ func TestAvailableModels_NativeListOverridesStaleCacheAndGenericAPI(t *testing.T
 	}
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		t.Error("generic API must not override a successful native catalog")
-		fmt.Fprint(w, `{"data":[{"id":"gpt-generic"}]}`)
+		_, _ = fmt.Fprint(w, `{"data":[{"id":"gpt-generic"}]}`)
 	}))
 	defer srv.Close()
 	t.Setenv("OPENAI_API_KEY", "test-key")
