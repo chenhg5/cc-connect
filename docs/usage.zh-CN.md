@@ -19,6 +19,7 @@ cc-connect 完整功能使用指南。
 - [语音消息（语音转文字）](#语音消息语音转文字)
 - [语音回复（文字转语音）](#语音回复文字转语音)
 - [图片与文件回传](#图片与文件回传)
+- [生命周期钩子](#生命周期钩子)
 - [定时任务 (Cron)](#定时任务-cron)
 - [Shell 配置](#shell-配置)
 - [多机器人中继](#多机器人中继)
@@ -58,6 +59,8 @@ cc-connect 完整功能使用指南。
 任务运行时，可用 `/ps`（或 `/btw`）补充指令；会话空闲时会拒绝该命令。送达确认表示桥接已发送请求，不表示 Agent 已完成处理。
 
 使用 Pi 时，设置 `rpc = true` 可启用原生中途引导：补充内容会在当前助手回合的工具调用结束后、下一次模型调用前送入。如果 Pi 已经结束、桥接仍在发送最终回复，补充内容会启动后续回合。Pi 默认的 JSON 模式保留原有的一次性发送行为，无法向已经运行的进程注入消息。
+
+Codex `/ps` 中途引导要求 app-server 支持 `turn/steer`（codex-cli 0.166.0 或更新版本）。旧版 CLI 会返回方法不支持错误；使用此功能前请升级 Codex CLI。
 
 也可以为项目开启“空闲后自动切换新会话”：
 
@@ -810,6 +813,26 @@ cc-connect send --tts "你好"
 - 目标平台在投递时还会校验自己的文件大小/类型上限；实际生效的是它与 `max_attachment_size_mb` 中**更小**的那个（通过了 cc-connect 的文件仍可能在投递时被平台拒绝）。
 
 ---
+
+## 生命周期钩子
+
+`[[hooks]]` 规则可以在生命周期事件发生时执行 shell 命令或向 HTTP 端点 POST 数据。事件名包括 `message.received`、`message.sent`、`session.started`、`session.ended`、`turn.cancelled`、`cron.triggered`、`timer.triggered`、`permission.requested`、`error`，以及通配符 `*`。
+
+### `/stop` 与 `turn.cancelled`
+
+对于支持优雅取消的 Agent（Claude Code 与 ACP 系 Agent），`/stop` 只中断当前这一轮，Agent 进程与会话保持存活，因此之后 `/compress`、`/clear`、`/resume` 仍然可用。也就是说，一次 stop 不再必然意味着会话结束。
+
+`stop_hook_event` 决定 `/stop` 触发哪个事件：
+
+```toml
+# 默认值：保持历史行为，已有规则照常触发。
+stop_hook_event = "session.ended"
+
+# 可选：仅当这一轮被优雅取消、会话被保留时，触发更精确的事件。
+stop_hook_event = "turn.cancelled"
+```
+
+两种模式下，当会话真正被销毁时（Agent 不支持优雅取消，或取消失败、进程被杀死）都会触发 `session.ended`。一次 `/stop` 只触发两者之一，因此 `event = "*"` 的规则每次 stop 仍然只收到一个事件。
 
 ## 定时任务 (Cron)
 

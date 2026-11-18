@@ -749,6 +749,54 @@
           "models": ["deepseek-ai/DeepSeek-V4.1-Flash", "zai-org/GLM-5.3", "Qwen/Qwen3.8-Flash"]
         }
       }
+    },
+    {
+      "name": "requesty",
+      "display_name": "Requesty",
+      "description": "LLM gateway that routes to first-party providers (Anthropic, OpenAI, Google and more) through OpenAI and Anthropic compatible APIs.",
+      "description_zh": "LLM 网关，通过 OpenAI 和 Anthropic 兼容 API 将请求路由到一方模型供应商（Anthropic、OpenAI、Google 等）。",
+      "features": ["OpenAI Compatible", "Anthropic Compatible", "First-Party Providers"],
+      "tier": 3,
+      "website": "https://www.requesty.ai",
+      "agents": {
+        "claudecode": {
+          "base_url": "https://router.requesty.ai",
+          "model": "anthropic/claude-sonnet-5-5",
+          "models": ["anthropic/claude-sonnet-5-5", "anthropic/claude-opus-5-5", "anthropic/claude-haiku-5-5"]
+        },
+        "codex": {
+          "base_url": "https://router.requesty.ai/v1",
+          "model": "openai/gpt-5.4",
+          "models": ["openai/gpt-5.4", "openai/gpt-5.4-mini"],
+          "codex_config": { "wire_api": "responses" }
+        },
+        "opencode": {
+          "base_url": "https://router.requesty.ai/v1",
+          "model": "anthropic/claude-sonnet-5-5",
+          "models": ["anthropic/claude-sonnet-5-5", "openai/gpt-5.4", "google/gemini-3.6-flash"]
+        }
+      }
+    },
+    {
+      "name": "trustedrouter",
+      "display_name": "TrustedRouter",
+      "description": "AI gateway with 600+ models from many providers behind one key, through OpenAI and Anthropic compatible APIs.",
+      "description_zh": "AI 网关，一个密钥即可通过 OpenAI 和 Anthropic 兼容 API 使用多家供应商的 600+ 个模型。",
+      "features": ["600+ Models", "OpenAI + Anthropic API"],
+      "tier": 3,
+      "website": "https://trustedrouter.com",
+      "agents": {
+        "claudecode": {
+          "base_url": "https://api.trustedrouter.com",
+          "model": "anthropic/claude-sonnet-4.6",
+          "models": ["anthropic/claude-sonnet-4.6", "anthropic/claude-opus-5"]
+        },
+        "opencode": {
+          "base_url": "https://api.trustedrouter.com/v1",
+          "model": "anthropic/claude-sonnet-4.6",
+          "models": ["anthropic/claude-sonnet-4.6", "openai/gpt-5.5"]
+        }
+      }
     }
   ]
 }
