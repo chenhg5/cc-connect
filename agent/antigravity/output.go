@@ -94,7 +94,9 @@ func (p *agyOutputParser) parseLine(line []byte) (recognized bool, events []core
 				p.responseStep = step.StepIndex
 			}
 		case "tool":
-			// A late completion for an older tool must not consume a newer answer.
+			// A late or same-index tool must not consume a newer answer. AGY
+			// supplies no phase marker; only a strictly later tool establishes
+			// commentary. Ambiguous text remains on the final-answer path.
 			if step.StepIndex > p.responseStep {
 				events = append(events, p.flushResponse(core.EventCommentary)...)
 			}

@@ -168,7 +168,8 @@ func TestCUJ_A9_PsProgressArrivesBeforeTaskCompletion(t *testing.T) {
 	}
 	s := &commentaryPsSession{events: make(chan Event, 8), started: make(chan struct{})}
 	e := NewEngine("test", &resultAgent{session: s}, []Platform{p}, "", LangEnglish)
-	e.SetDisplayConfig(DisplayCfg{Mode: "quiet", CardMode: "rich"})
+	enabled := true
+	e.SetDisplayConfig(DisplayCfg{Mode: "quiet", CardMode: "rich", CommentaryMessages: &enabled})
 	t.Cleanup(func() {
 		if err := e.Stop(); err != nil {
 			t.Error(err)

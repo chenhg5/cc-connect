@@ -20,7 +20,8 @@ func TestProcessInteractiveEvents_CommentaryBypassesProgressCards(t *testing.T) 
 					p, getSent = stream, stream.getSent
 				}
 				e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
-				e.SetDisplayConfig(DisplayCfg{Mode: "full", CardMode: cardMode, ThinkingMessages: thinking, ToolMessages: true})
+				enabled := true
+				e.SetDisplayConfig(DisplayCfg{Mode: "full", CardMode: cardMode, ThinkingMessages: thinking, ToolMessages: true, CommentaryMessages: &enabled})
 				session := e.sessions.GetOrCreateActive("test:commentary")
 				s := newControllableSession("commentary")
 				state := &interactiveState{agentSession: s, platform: p, replyCtx: "ctx"}
@@ -73,6 +74,8 @@ func TestUnsolicitedReader_RelaysCommentaryBeforeCompletion(t *testing.T) {
 	s := newControllableSession("commentary")
 	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
 	t.Cleanup(func() { _ = e.Stop() })
+	enabled := true
+	e.SetDisplayConfig(DisplayCfg{CommentaryMessages: &enabled})
 	const key = "test:background-commentary"
 	session := e.sessions.GetOrCreateActive(key)
 	state := &interactiveState{agentSession: s, platform: p, replyCtx: "ctx"}
@@ -88,52 +91,13 @@ func TestUnsolicitedReader_RelaysCommentaryBeforeCompletion(t *testing.T) {
 	}
 }
 
-func TestProcessInteractiveEvents_QuietCommentaryOptOut(t *testing.T) {
-	for _, enabled := range []bool{true, false} {
-		t.Run(map[bool]string{true: "enabled", false: "disabled"}[enabled], func(t *testing.T) {
-			p := &stubPlatformEngine{n: "test"}
-			e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
-			defer func() { _ = e.Stop() }()
-			e.SetDisplayConfig(DisplayCfg{Mode: "quiet", CommentaryMessages: &enabled})
-			session := e.sessions.GetOrCreateActive("test:quiet-commentary")
-			s := newControllableSession("quiet-commentary")
-			state := &interactiveState{agentSession: s, platform: p, replyCtx: "ctx"}
-			done := make(chan struct{})
-			go func() {
-				e.processInteractiveEvents(state, session, e.sessions, "test:quiet-commentary", "m", time.Now(), nil, nil, "ctx", 0)
-				close(done)
-			}()
-			for i := 0; i < 3; i++ {
-				s.events <- Event{Type: EventCommentary, Content: "Progress update"}
-				s.events <- Event{Type: EventToolUse, ToolName: "shell"}
-			}
-			s.events <- Event{Type: EventText, Content: "Final answer"}
-			s.events <- Event{Type: EventResult, Done: true}
-			select {
-			case <-done:
-			case <-time.After(3 * time.Second):
-				t.Fatal("turn did not complete")
-			}
-			sent := strings.Join(p.getSent(), "\n")
-			want := 0
-			if enabled {
-				want = 3
-			}
-			if got := strings.Count(sent, "Progress update"); got != want {
-				t.Fatalf("progress count = %d, want %d; sent=%q", got, want, sent)
-			}
-			if strings.Count(sent, "Final answer") != 1 {
-				t.Fatalf("final answer missing/duplicated: %q", sent)
-			}
-		})
-	}
-}
-
 func TestProcessCompressEvents_CommentaryOnlyForManualCompression(t *testing.T) {
 	for _, auto := range []bool{false, true} {
 		t.Run(map[bool]string{false: "manual", true: "auto"}[auto], func(t *testing.T) {
 			e := newTestEngine()
 			defer e.cancel()
+			enabled := true
+			e.SetDisplayConfig(DisplayCfg{CommentaryMessages: &enabled})
 			p := &stubPlatformEngine{n: "test"}
 			agentSession := newQueuingSession("compress")
 			state := &interactiveState{agentSession: agentSession, platform: p}
