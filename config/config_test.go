@@ -1803,6 +1803,45 @@ func TestLoad_RejectsNegativeResetOnIdleMins(t *testing.T) {
 	}
 }
 
+func TestLoad_ParsesResetIdleNotice(t *testing.T) {
+	configPath := writeConfigFixture(t, projectWithResetIdleNoticeFixture)
+
+	cfg, err := Load(configPath)
+	if err != nil {
+		t.Fatalf("Load returned error: %v", err)
+	}
+	if cfg.Projects[0].ResetIdleNotice == nil {
+		t.Fatal("expected reset_idle_notice to be parsed")
+	}
+	if got := *cfg.Projects[0].ResetIdleNotice; got != "off" {
+		t.Fatalf("reset_idle_notice = %q, want off", got)
+	}
+}
+
+func TestLoad_ResetIdleNoticeUnsetStaysNil(t *testing.T) {
+	configPath := writeConfigFixture(t, projectWithoutFeishuFixture)
+
+	cfg, err := Load(configPath)
+	if err != nil {
+		t.Fatalf("Load returned error: %v", err)
+	}
+	if cfg.Projects[0].ResetIdleNotice != nil {
+		t.Fatalf("reset_idle_notice = %q, want nil when unset", *cfg.Projects[0].ResetIdleNotice)
+	}
+}
+
+func TestLoad_RejectsInvalidResetIdleNotice(t *testing.T) {
+	configPath := writeConfigFixture(t, projectWithInvalidResetIdleNoticeFixture)
+
+	_, err := Load(configPath)
+	if err == nil {
+		t.Fatal("expected error for invalid reset_idle_notice")
+	}
+	if !strings.Contains(err.Error(), "reset_idle_notice") {
+		t.Fatalf("error = %q, want reset_idle_notice validation", err.Error())
+	}
+}
+
 func TestLoad_ParsesAgentSessionIdleTimeoutMins(t *testing.T) {
 	configPath := writeConfigFixture(t, projectWithAgentSessionIdleTimeoutFixture)
 
@@ -2305,6 +2344,43 @@ const projectWithResetOnIdleFixture = `
 [[projects]]
 name = "beta"
 reset_on_idle_mins = 60
+
+[projects.agent]
+type = "codex"
+
+[projects.agent.options]
+work_dir = "/tmp/beta"
+
+[[projects.platforms]]
+type = "telegram"
+
+[projects.platforms.options]
+bot_token = "token_xxx"
+`
+
+const projectWithResetIdleNoticeFixture = `
+[[projects]]
+name = "beta"
+reset_on_idle_mins = 30
+reset_idle_notice = "off"
+
+[projects.agent]
+type = "codex"
+
+[projects.agent.options]
+work_dir = "/tmp/beta"
+
+[[projects.platforms]]
+type = "telegram"
+
+[projects.platforms.options]
+bot_token = "token_xxx"
+`
+
+const projectWithInvalidResetIdleNoticeFixture = `
+[[projects]]
+name = "beta"
+reset_idle_notice = "maybe"
 
 [projects.agent]
 type = "codex"

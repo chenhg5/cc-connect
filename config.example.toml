@@ -209,6 +209,15 @@ level = "info" # debug, info, warn, error
 # 默认值为 30 分钟（未设置时）。设为 0 可以禁用此行为，恢复始终继续上次会话。
 # [[projects]]
 # reset_on_idle_mins = 30   # default when unset / 未设置时的默认值；设为 0 表示禁用
+#
+# Control the chat notice posted when reset_on_idle_mins rotates the session.
+# "on" (default) keeps the notice. "off" suppresses only that message — the
+# rotation itself and its "auto-resetting idle session" log line still happen,
+# which suits unattended / customer-facing deployments that want silent rotation.
+# 控制 reset_on_idle_mins 轮转会话时发给用户的提示。
+# "on"（默认）保留提示；"off" 仅抑制这条提示，轮转行为与
+# "auto-resetting idle session" 日志不变——适用于希望静默轮转的无人值守或客服场景。
+# reset_idle_notice = "on"
 
 # Close an idle live agent process after a clean turn while preserving the
 # cc-connect session and saved agent session ID. The next message in the same

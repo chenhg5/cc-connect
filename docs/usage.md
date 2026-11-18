@@ -74,6 +74,17 @@ The next normal message after a long idle period starts in a fresh session autom
 
 To restore the previous behavior of always continuing, set `reset_on_idle_mins = 0`.
 
+The rotation posts a short chat notice ("Session auto-reset after N minute(s) of inactivity"). For unattended or customer-facing deployments (for example a support bot in a customer group) you can keep the rotation but silence that notice:
+
+```toml
+[[projects]]
+name = "demo"
+reset_on_idle_mins = 30
+reset_idle_notice = "off"   # "on" (default) keeps the notice
+```
+
+`reset_idle_notice` accepts `"on"` (default when unset) and `"off"`. With `"off"` the session still rotates and the `auto-resetting idle session` log line is still written; only the user-visible message is suppressed.
+
 ### Model switch preserves history
 
 `/model` preserves the current session — the agent resumes the conversation with the new model (no extra token cost). Model switching affects the shared agent instance — if multiple platforms use the same project, the model change applies to all of them.

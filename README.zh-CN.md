@@ -514,6 +514,16 @@ cc-connect update --pre     # 含预发布版本
 reset_on_idle_mins = 60
 ```
 
+轮转时会向聊天窗口发送一条提示。若希望静默轮转（无人值守或面向客户的机器人），可保留轮转、只关闭该提示：
+
+```toml
+[[projects]]
+reset_on_idle_mins = 30
+reset_idle_notice = "off"   # 默认 "on"，保留提示
+```
+
+`reset_idle_notice` 取值为 `"on"`（默认）或 `"off"`。设为 `"off"` 时会话仍会自动轮转、日志仍会输出 `auto-resetting idle session`，只抑制发给用户的那条消息。
+
 
 ### 🛡️ 系统用户隔离 (`run_as_user`)
 

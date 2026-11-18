@@ -518,6 +518,12 @@ type ProjectConfig struct {
 	// the current session has been inactive for the specified number of minutes.
 	// 0 or nil disables the behavior.
 	ResetOnIdleMins *int `toml:"reset_on_idle_mins,omitempty"`
+	// ResetIdleNotice controls the user-visible notice posted when
+	// reset_on_idle_mins rotates the active session. "on" (default) keeps the
+	// notice; "off" suppresses only that chat message — the rotation itself and
+	// the "auto-resetting idle session" log line are unaffected. Useful for
+	// unattended or customer-facing deployments that want silent rotation.
+	ResetIdleNotice *string `toml:"reset_idle_notice,omitempty"`
 	// AgentSessionIdleTimeoutMins 在指定分钟数后关闭空闲的 live agent 进程，
 	// 同时保留已保存的 session ID，便于下一条消息继续恢复。0 或 nil 表示禁用。
 	AgentSessionIdleTimeoutMins *int `toml:"agent_session_idle_timeout_mins,omitempty"`
@@ -1134,6 +1140,13 @@ func (c *Config) validateInternal(permissive bool) error {
 		}
 		if proj.ResetOnIdleMins != nil && *proj.ResetOnIdleMins < 0 {
 			return fmt.Errorf("config: %s.reset_on_idle_mins must be >= 0", prefix)
+		}
+		if proj.ResetIdleNotice != nil {
+			switch strings.ToLower(strings.TrimSpace(*proj.ResetIdleNotice)) {
+			case "", "on", "off":
+			default:
+				return fmt.Errorf("config: %s.reset_idle_notice must be \"on\" or \"off\"", prefix)
+			}
 		}
 		if proj.AgentSessionIdleTimeoutMins != nil && *proj.AgentSessionIdleTimeoutMins < 0 {
 			return fmt.Errorf("config: %s.agent_session_idle_timeout_mins must be >= 0", prefix)

@@ -59,6 +59,17 @@ func resolveResetOnIdle(configured *int) (time.Duration, bool) {
 	return time.Duration(defaultResetOnIdleMins) * time.Minute, true
 }
 
+// resolveResetIdleNotice returns whether the user-visible notice for an idle
+// auto-reset should be posted. Unset (or empty) keeps the historical
+// behaviour — the notice is on. Values other than "on"/"off" are rejected by
+// config validation before this point.
+func resolveResetIdleNotice(configured *string) bool {
+	if configured == nil {
+		return true
+	}
+	return strings.ToLower(strings.TrimSpace(*configured)) != "off"
+}
+
 // logSizeSource describes where the resolved log size came from, so the
 // caller can log it and operators can audit the active setting without
 // grepping systemd/launchd definitions.
@@ -722,6 +733,7 @@ func main() {
 		}
 		resetIdle, defaulted := resolveResetOnIdle(proj.ResetOnIdleMins)
 		engine.SetResetOnIdle(resetIdle)
+		engine.SetResetIdleNotice(resolveResetIdleNotice(proj.ResetIdleNotice))
 		if defaulted {
 			slog.Info("project: reset_on_idle_mins not set, applying default — set reset_on_idle_mins = 0 to opt out, see docs/usage.md",
 				"project", proj.Name, "default_minutes", defaultResetOnIdleMins)
@@ -1858,6 +1870,7 @@ func reloadConfig(configPath, projName string, engine *core.Engine) (*core.Confi
 	}
 	resetIdle, defaulted := resolveResetOnIdle(proj.ResetOnIdleMins)
 	engine.SetResetOnIdle(resetIdle)
+	engine.SetResetIdleNotice(resolveResetIdleNotice(proj.ResetIdleNotice))
 	if defaulted {
 		slog.Info("project: reset_on_idle_mins not set, applying default — set reset_on_idle_mins = 0 to opt out, see docs/usage.md",
 			"project", proj.Name, "default_minutes", defaultResetOnIdleMins)

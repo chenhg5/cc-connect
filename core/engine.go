@@ -449,6 +449,10 @@ type Engine struct {
 	// processInteractiveEvents.
 	autoCompressAllowHeuristic bool
 	resetOnIdle                time.Duration
+	// resetIdleNotice gates the user-visible notice posted after an idle
+	// auto-reset (reset_on_idle_mins). Default true; "off" suppresses only that
+	// chat message — the rotation and its log line are unaffected.
+	resetIdleNotice bool
 
 	// Reply footer composition flags. The footer renders up to two lines:
 	//   line 1 — model · [effort ·] out/in/cw/cr · ctx%   (gated by showContextIndicator)
@@ -791,6 +795,7 @@ func NewEngine(name string, ag Agent, platforms []Platform, sessionStorePath str
 		cancel:                cancel,
 		i18n:                  NewI18n(lang),
 		attachmentSendEnabled: true,
+		resetIdleNotice:       true,
 		display:               DisplayCfg{Mode: "full", ThinkingMessages: true, ThinkingMaxLen: defaultThinkingMaxLen, ToolMaxLen: defaultToolMaxLen, ToolMessages: true, CardMode: "legacy"},
 		commands:              NewCommandRegistry(),
 		skills:                NewSkillRegistry(),
@@ -998,6 +1003,15 @@ func (e *Engine) SetResetOnIdle(d time.Duration) {
 		return
 	}
 	e.resetOnIdle = d
+}
+
+// SetResetIdleNotice toggles the user-visible notice posted when
+// reset_on_idle_mins rotates the active session. Disabling it keeps the
+// rotation and its "auto-resetting idle session" log line; only the chat
+// message is suppressed, so unattended or customer-facing deployments can
+// rotate silently. Enabled by default.
+func (e *Engine) SetResetIdleNotice(enabled bool) {
+	e.resetIdleNotice = enabled
 }
 
 // SetAgentSessionIdleTimeout 配置单轮正常结束后的 live agent 空闲关闭时间。
@@ -3427,7 +3441,11 @@ func (e *Engine) maybeAutoResetSessionOnIdle(p Platform, msg *Message, sessions 
 	e.cleanupInteractiveState(interactiveKey)
 	session.UnlockWithoutUpdate(lockGen)
 
-	e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgSessionAutoResetIdle, int(e.resetOnIdle/time.Minute)))
+	// The rotation itself and the "auto-resetting idle session" log above are
+	// unconditional; reset_idle_notice = "off" only silences this chat notice.
+	if e.resetIdleNotice {
+		e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgSessionAutoResetIdle, int(e.resetOnIdle/time.Minute)))
+	}
 	return newSession, newGen
 }
 

@@ -519,6 +519,16 @@ reset_on_idle_mins = 30   # default when unset; set to 0 to disable
 
 The default is **30 minutes** when unset. Set `reset_on_idle_mins = 0` to opt out and always continue the previous session.
 
+Keep the rotation but silence the user-visible notice (useful for unattended or customer-facing bots):
+
+```toml
+[[projects]]
+reset_on_idle_mins = 30
+reset_idle_notice = "off"   # "on" (default) keeps the "session auto-reset" notice
+```
+
+`reset_idle_notice` accepts `"on"` (default) or `"off"`. With `"off"` the session still rotates and the `auto-resetting idle session` log line is still written — only the chat message is suppressed.
+
 ### 🛡️ OS-User Isolation (`run_as_user`)
 
 On Linux/macOS, a project can spawn its agent under a different Unix
