@@ -7082,6 +7082,60 @@ func TestHandlePendingPermission_AskUserQuestion_SingleQuestion(t *testing.T) {
 	state.mu.Unlock()
 }
 
+// A card click whose answer the platform already rendered in place must not
+// also be echoed as a chat message — the user would see the same answer twice
+// (card swapped to "✅ answer" plus a text reply saying "✅ question: answer").
+func TestHandlePendingPermission_AskUserQuestion_CardAnswerRenderedSuppressesEcho(t *testing.T) {
+	for _, rendered := range []bool{true, false} {
+		e := newTestEngine()
+		p := &stubPlatformEngine{n: "test"}
+		rec := &recordingAgentSession{}
+
+		state := &interactiveState{
+			agentSession: rec,
+			platform:     p,
+			replyCtx:     "ctx",
+			pending: &pendingPermission{
+				RequestID: "req-1",
+				ToolName:  "AskUserQuestion",
+				ToolInput: map[string]any{
+					"questions": []any{map[string]any{"question": "Which?"}},
+				},
+				Questions: testQuestions(),
+				Resolved:  make(chan struct{}),
+			},
+		}
+		key := "test:chat:user1"
+		e.interactiveMu.Lock()
+		e.interactiveStates[key] = state
+		e.interactiveMu.Unlock()
+
+		handled := e.handlePendingPermission(p, &Message{
+			SessionKey:         key,
+			UserID:             "user1",
+			Content:            "2",
+			ReplyCtx:           "ctx",
+			CardAnswerRendered: rendered,
+		}, "2", "")
+		if !handled {
+			t.Fatal("expected handlePendingPermission to return true")
+		}
+		if rec.calls != 1 {
+			t.Fatalf("rendered=%v: expected 1 RespondPermission call, got %d", rendered, rec.calls)
+		}
+
+		p.mu.Lock()
+		sent := append([]string(nil), p.sent...)
+		p.mu.Unlock()
+		if rendered && len(sent) != 0 {
+			t.Errorf("CardAnswerRendered=true produced %d echo message(s): %q", len(sent), sent)
+		}
+		if !rendered && len(sent) != 1 {
+			t.Errorf("CardAnswerRendered=false produced %d echo message(s), want 1 (typed answers still get one)", len(sent))
+		}
+	}
+}
+
 func TestHandlePendingPermission_AskUserQuestion_MultiQuestion_Sequential(t *testing.T) {
 	e := newTestEngine()
 	p := &stubPlatformEngine{n: "test"}

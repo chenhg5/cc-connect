@@ -281,3 +281,18 @@ func TestOnCardAction_AllowFromMultiListRespectsExactMember(t *testing.T) {
 	}
 	waitNoMessage(t, msgCh, 200*time.Millisecond, "cmd:/bar from ou_d (not listed)")
 }
+
+// An askq option click is answered by replacing the card in the callback
+// response, so the dispatched message marks the answer rendered and the
+// engine must not echo it as a second chat message.
+func TestOnCardAction_AskqMarksAnswerRendered(t *testing.T) {
+	ip, msgCh := newAllowFromTestPlatform(t, "*")
+	_, err := ip.onCardAction(cardActionEvent("ou_owner", "askq:0:1"))
+	if err != nil {
+		t.Fatalf("onCardAction() error = %v", err)
+	}
+	msg := waitAnyMessage(t, msgCh, 3*time.Second, "askq option click")
+	if !msg.CardAnswerRendered {
+		t.Error("CardAnswerRendered = false, want true for an in-place replaced askq card")
+	}
+}
