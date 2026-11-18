@@ -97,6 +97,7 @@ func TestCmdHistory_AgentTranscriptFallbackAndFailureWithCache(t *testing.T) {
 	}{
 		{name: "empty transcript", id: "current-thread"},
 		{name: "no agent session"},
+		{name: "unsupported transcript", id: "current-thread", err: ErrHistoryUnsupported},
 		{name: "unreadable transcript", id: "current-thread", err: errors.New("private transcript path")},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
@@ -114,7 +115,7 @@ func TestCmdHistory_AgentTranscriptFallbackAndFailureWithCache(t *testing.T) {
 			if len(sent) != 1 {
 				t.Fatalf("replies = %d, want 1", len(sent))
 			}
-			if tt.err != nil {
+			if tt.err != nil && !errors.Is(tt.err, ErrHistoryUnsupported) {
 				if sent[0] != e.i18n.T(MsgHistoryReadFailed) {
 					t.Fatalf("reply = %q, want localized read failure", sent[0])
 				}
@@ -123,6 +124,56 @@ func TestCmdHistory_AgentTranscriptFallbackAndFailureWithCache(t *testing.T) {
 			}
 			if tt.id == "" && len(agent.ids) != 0 {
 				t.Fatal("must not query a transcript before the agent session starts")
+			}
+		})
+	}
+}
+
+func TestCmdHistory_UnsupportedTranscriptFallsBackForTextAndCard(t *testing.T) {
+	for _, cards := range []bool{false, true} {
+		name := "text"
+		if cards {
+			name = "card"
+		}
+		t.Run(name, func(t *testing.T) {
+			agent := &historyProviderStub{err: ErrHistoryUnsupported}
+			plain := &stubPlatformEngine{n: "history"}
+			var platform Platform = plain
+			cardPlatform := &stubCardPlatform{stubPlatformEngine: stubPlatformEngine{n: "cards"}}
+			if cards {
+				platform = cardPlatform
+			}
+			e := NewEngine("test", agent, []Platform{platform}, "", LangEnglish)
+			msg := &Message{SessionKey: "test:history", ReplyCtx: "ctx"}
+			s := e.sessions.GetOrCreateActive(msg.SessionKey)
+			s.SetAgentSessionID("current-thread", "stub")
+			s.AddHistory("user", "cached question")
+			s.AddHistory("assistant", "cached answer")
+
+			args := []string{"10"}
+			if cards {
+				args = nil
+			}
+			e.cmdHistory(platform, msg, args)
+
+			var got string
+			if cards {
+				if len(cardPlatform.repliedCards) != 1 {
+					t.Fatalf("card replies = %d, want 1", len(cardPlatform.repliedCards))
+				}
+				got = cardPlatform.repliedCards[0].RenderText()
+			} else {
+				sent := plain.getSent()
+				if len(sent) != 1 {
+					t.Fatalf("text replies = %d, want 1", len(sent))
+				}
+				got = sent[0]
+			}
+			if !strings.Contains(got, "cached question") || !strings.Contains(got, "cached answer") {
+				t.Fatalf("history = %q, want cached conversation", got)
+			}
+			if strings.Contains(got, e.i18n.T(MsgHistoryReadFailed)) {
+				t.Fatalf("unsupported transcript surfaced as read failure: %q", got)
 			}
 		})
 	}

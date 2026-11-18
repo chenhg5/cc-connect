@@ -10001,10 +10001,11 @@ func (e *Engine) loadSessionHistory(agent Agent, session *Session, limit int) ([
 			// cache cannot know about, including after resuming a session.
 			entries, err := hp.GetSessionHistory(e.ctx, agentSID, limit)
 			if err != nil {
-				slog.Warn("history: agent transcript read failed", "session_id", agentSID, "error", err)
-				return nil, err
-			}
-			if len(entries) > 0 {
+				if !errors.Is(err, ErrHistoryUnsupported) {
+					slog.Warn("history: agent transcript read failed", "session_id", agentSID, "error", err)
+					return nil, err
+				}
+			} else if len(entries) > 0 {
 				return entries, nil
 			}
 		}
