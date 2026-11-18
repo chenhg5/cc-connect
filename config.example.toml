@@ -2042,6 +2042,11 @@ app_secret = "your-feishu-app-secret"
 # Optional: specify a model (provider/model format) / 可选：指定模型
 # model = "anthropic/claude-sonnet-4-20250514"
 #
+# Optional: set the OpenCode reasoning variant / 可选：指定 OpenCode 推理档位
+# The value also becomes the initial level for `/reasoning` runtime switching.
+# / 该值也会作为 `/reasoning` 运行时切换的初始档位。
+# reasoning_effort = "high"  # "low" | "medium" | "high" | "xhigh" | "max" | "ultra"
+#
 # Optional: transport used to drive OpenCode / 可选：驱动 OpenCode 的传输方式
 # - "run" (default): one `opencode run --format json` process per turn.
 #   / 默认：每个回合启动一个 `opencode run --format json` 进程。

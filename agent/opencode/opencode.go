@@ -34,6 +34,7 @@ const defaultOpencodeBin = "opencode"
 type Agent struct {
 	workDir              string
 	model                string
+	reasoningEffort      string
 	mode                 string
 	transport            string        // "run" (default) or "server" — see server_session.go
 	stallTimeout         time.Duration // server transport: silence before a turn is aborted (0 = default, negative = off)
@@ -73,6 +74,8 @@ func New(opts map[string]any) (core.Agent, error) {
 		workDir = "."
 	}
 	model, _ := opts["model"].(string)
+	reasoningEffort, _ := opts["reasoning_effort"].(string)
+	reasoningEffort = normalizeOpencodeReasoningEffort(reasoningEffort)
 	mode, _ := opts["mode"].(string)
 	mode = normalizeMode(mode)
 	transport, _ := opts["opencode_transport"].(string)
@@ -109,6 +112,7 @@ func New(opts map[string]any) (core.Agent, error) {
 	return &Agent{
 		workDir:              workDir,
 		model:                model,
+		reasoningEffort:      reasoningEffort,
 		mode:                 mode,
 		transport:            transport,
 		stallTimeout:         stallTimeout,
@@ -121,6 +125,33 @@ func New(opts map[string]any) (core.Agent, error) {
 		modelCachePath:       modelCachePath,
 		persistentModelCache: persistentModelCache,
 	}, nil
+}
+
+func normalizeOpencodeReasoningEffort(raw string) string {
+	effort := strings.ToLower(strings.TrimSpace(raw))
+	switch effort {
+	case "low", "medium", "high", "xhigh", "max", "ultra":
+		return effort
+	default:
+		return ""
+	}
+}
+
+func (a *Agent) SetReasoningEffort(effort string) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.reasoningEffort = normalizeOpencodeReasoningEffort(effort)
+	slog.Info("opencode: reasoning effort changed", "reasoning_effort", a.reasoningEffort)
+}
+
+func (a *Agent) GetReasoningEffort() string {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	return a.reasoningEffort
+}
+
+func (a *Agent) AvailableReasoningEfforts() []string {
+	return []string{"low", "medium", "high", "xhigh", "max", "ultra"}
 }
 
 func opencodeProjectModelCachePath(dataDir, project string) string {
@@ -264,6 +295,9 @@ func (a *Agent) WorkspaceAgentOptions() map[string]any {
 	}
 	if a.model != "" {
 		opts["model"] = a.model
+	}
+	if a.reasoningEffort != "" {
+		opts["reasoning_effort"] = a.reasoningEffort
 	}
 	if a.agentName != "" {
 		opts["agent"] = a.agentName
@@ -548,6 +582,7 @@ func (a *Agent) SetSessionEnv(env []string) {
 func (a *Agent) StartSession(ctx context.Context, sessionID string) (core.AgentSession, error) {
 	a.mu.Lock()
 	model := a.model
+	reasoningEffort := a.reasoningEffort
 	mode := a.mode
 	transport := a.transport
 	cmd := a.cmd
@@ -578,10 +613,10 @@ func (a *Agent) StartSession(ctx context.Context, sessionID string) (core.AgentS
 			providerScope: a.providerScope(),
 			stallTimeout:  a.stallTimeout,
 			serverIdleTTL: a.serverIdleTTL,
-		}, model, mode, agentName, sessionID)
+		}, model, reasoningEffort, mode, agentName, sessionID)
 	}
 
-	return newOpencodeSession(ctx, cmd, extraArgs, workDir, model, mode, agentName, sessionID, extraEnv)
+	return newOpencodeSession(ctx, cmd, extraArgs, workDir, model, reasoningEffort, mode, agentName, sessionID, extraEnv)
 }
 
 // ListSessions runs `opencode session list` and parses the JSON output.

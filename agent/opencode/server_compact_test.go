@@ -82,7 +82,7 @@ func TestServerSession_CompactUsesTheConversationModelWhenNoneIsConfigured(t *te
 			"providerID": "deepseek", "modelID": "deepseek-flash"}},
 	}
 	cfg := opencodeServeConfig{cmd: "opencode", workDir: "/tmp/ws"}
-	s, err := newServerSessionOn(context.Background(), f.srv(), cfg, "", "yolo", "", "ses_existing")
+	s, err := newServerSessionOn(context.Background(), f.srv(), cfg, "", "", "yolo", "", "ses_existing")
 	if err != nil {
 		t.Fatalf("newServerSessionOn: %v", err)
 	}

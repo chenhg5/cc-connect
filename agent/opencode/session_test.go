@@ -62,7 +62,7 @@ func TestOpencodeSessionEntry_Unmarshal(t *testing.T) {
 // the ContinueSession sentinel (__continue__) is not passed as a literal
 // session ID to the CLI. This was fixed in PR #249.
 func TestNewOpencodeSession_ContinueSessionTreatedAsFresh(t *testing.T) {
-	s, err := newOpencodeSession(context.Background(), "echo", nil, "/tmp", "", "default", "", core.ContinueSession, nil)
+	s, err := newOpencodeSession(context.Background(), "echo", nil, "/tmp", "", "", "default", "", core.ContinueSession, nil)
 	if err != nil {
 		t.Fatalf("newOpencodeSession: %v", err)
 	}
@@ -120,6 +120,20 @@ func TestOpencodeSessionBuildRunArgsIncludesImagesAsFiles(t *testing.T) {
 	}
 }
 
+func TestOpencodeSessionBuildRunArgsIncludesReasoningVariant(t *testing.T) {
+	s := &opencodeSession{model: "openai/gpt-6.2-astra", reasoningEffort: "high"}
+	got := s.buildRunArgs("hi", nil, "")
+	want := []string{
+		"run", "--format", "json",
+		"--model", "openai/gpt-6.2-astra",
+		"--variant", "high",
+		"--thinking",
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("args = %#v, want %#v", got, want)
+	}
+}
+
 // opencode v2's `run` rejects --dir, so the work dir must only reach opencode
 // as the process cwd (#2076).
 func TestOpencodeSessionBuildRunArgsOmitsDirFlag(t *testing.T) {
@@ -164,6 +178,7 @@ func TestOpencodeSessionSendRunsInWorkDir(t *testing.T) {
 		os.Args[0],
 		[]string{"-test.run=TestOpencodeSessionSendRunsInWorkDir", "--"},
 		workDir,
+		"",
 		"",
 		"default",
 		"",

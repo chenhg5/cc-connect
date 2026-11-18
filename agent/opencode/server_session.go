@@ -646,13 +646,16 @@ func (srv *opencodeServer) createSession(ctx context.Context, directory, agentNa
 // sendMessage posts a prompt to a session. When the session already has a turn
 // in flight, OpenCode appends the message to that turn instead of interrupting
 // it — this is what makes /ps non-destructive.
-func (srv *opencodeServer) sendMessage(ctx context.Context, sessionID string, parts []map[string]any, agentName, model string) error {
+func (srv *opencodeServer) sendMessage(ctx context.Context, sessionID string, parts []map[string]any, agentName, model, reasoningEffort string) error {
 	body := map[string]any{"parts": parts}
 	if agentName != "" {
 		body["agent"] = agentName
 	}
 	if m := parseProviderScopedModel(model); m != nil {
 		body["model"] = m
+	}
+	if reasoningEffort != "" {
+		body["variant"] = reasoningEffort
 	}
 	var out map[string]any
 	return srv.do(ctx, http.MethodPost, "/session/"+url.PathEscape(sessionID)+"/message", body, &out)
@@ -673,11 +676,14 @@ func isCompactPrompt(prompt string) bool {
 // POST /session/{id}/summarize with the model that writes the summary. The
 // request returns once the compaction is over; its progress arrives on the event
 // stream like any other turn.
-func (srv *opencodeServer) summarizeSession(ctx context.Context, sessionID string, model map[string]any) error {
+func (srv *opencodeServer) summarizeSession(ctx context.Context, sessionID string, model map[string]any, reasoningEffort string) error {
 	if model == nil {
 		return errors.New("opencode: no provider/model to compact the conversation with")
 	}
 	body := map[string]any{"providerID": model["providerID"], "modelID": model["modelID"]}
+	if reasoningEffort != "" {
+		body["variant"] = reasoningEffort
+	}
 	var out any
 	return srv.do(ctx, http.MethodPost, "/session/"+url.PathEscape(sessionID)+"/summarize", body, &out)
 }
@@ -1035,15 +1041,15 @@ type serverSession struct {
 // started by the first turn (see acquireTurnServer): a conversation that never
 // runs a prompt must not keep an `opencode serve` process alive, and a
 // conversation that goes idle releases its process again.
-func newServerSession(ctx context.Context, serveCfg opencodeServeConfig, model, mode, agentName, resumeID string) (*serverSession, error) {
-	return newServerSessionOn(ctx, nil, serveCfg, model, mode, agentName, resumeID)
+func newServerSession(ctx context.Context, serveCfg opencodeServeConfig, model, reasoningEffort, mode, agentName, resumeID string) (*serverSession, error) {
+	return newServerSessionOn(ctx, nil, serveCfg, model, reasoningEffort, mode, agentName, resumeID)
 }
 
 // newServerSessionOn builds a session around srv, which may be nil: the first
 // turn then attaches one. Split out from newServerSession so tests can drive the
 // session against a stub server.
-func newServerSessionOn(ctx context.Context, srv *opencodeServer, serveCfg opencodeServeConfig, model, mode, agentName, resumeID string) (*serverSession, error) {
-	inner, err := newOpencodeSession(ctx, serveCfg.cmd, serveCfg.extraArgs, serveCfg.workDir, model, mode, agentName, resumeID, serveCfg.extraEnv)
+func newServerSessionOn(ctx context.Context, srv *opencodeServer, serveCfg opencodeServeConfig, model, reasoningEffort, mode, agentName, resumeID string) (*serverSession, error) {
+	inner, err := newOpencodeSession(ctx, serveCfg.cmd, serveCfg.extraArgs, serveCfg.workDir, model, reasoningEffort, mode, agentName, resumeID, serveCfg.extraEnv)
 	if err != nil {
 		return nil, err
 	}
@@ -1194,10 +1200,10 @@ func (s *serverSession) Send(prompt string, messageID string, images []core.Imag
 			if model == nil {
 				model = srv.lastAssistantModel(s.inner.ctx, sessionID, s.workDir)
 			}
-			done <- srv.summarizeSession(s.inner.ctx, sessionID, model)
+			done <- srv.summarizeSession(s.inner.ctx, sessionID, model, s.inner.reasoningEffort)
 			return
 		}
-		err := srv.sendMessage(s.inner.ctx, sessionID, parts, s.agentName, s.model)
+		err := srv.sendMessage(s.inner.ctx, sessionID, parts, s.agentName, s.model, s.inner.reasoningEffort)
 		if isSessionMissing(err) {
 			slog.Warn("opencode server session: stored session no longer exists, starting a fresh one",
 				"session_id", sessionID)
@@ -1207,7 +1213,7 @@ func (s *serverSession) Send(prompt string, messageID string, images []core.Imag
 				done <- cerr
 				return
 			}
-			err = srv.sendMessage(s.inner.ctx, fresh, parts, s.agentName, s.model)
+			err = srv.sendMessage(s.inner.ctx, fresh, parts, s.agentName, s.model, s.inner.reasoningEffort)
 		}
 		done <- err
 	}()

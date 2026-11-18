@@ -28,6 +28,7 @@ type opencodeSession struct {
 	extraArgs         []string // extra args from cmd, prepended before opencode args
 	workDir           string
 	model             string
+	reasoningEffort   string
 	mode              string
 	agentName         string
 	extraEnv          []string
@@ -41,20 +42,21 @@ type opencodeSession struct {
 	resultSent        atomic.Bool // true when EventResult has been sent for this turn
 }
 
-func newOpencodeSession(ctx context.Context, cmd string, extraArgs []string, workDir, model, mode, agentName, resumeID string, extraEnv []string) (*opencodeSession, error) {
+func newOpencodeSession(ctx context.Context, cmd string, extraArgs []string, workDir, model, reasoningEffort, mode, agentName, resumeID string, extraEnv []string) (*opencodeSession, error) {
 	sessionCtx, cancel := context.WithCancel(ctx)
 
 	s := &opencodeSession{
-		cmd:       cmd,
-		extraArgs: extraArgs,
-		workDir:   workDir,
-		model:     model,
-		mode:      mode,
-		agentName: agentName,
-		extraEnv:  extraEnv,
-		events:    make(chan core.Event, 64),
-		ctx:       sessionCtx,
-		cancel:    cancel,
+		cmd:             cmd,
+		extraArgs:       extraArgs,
+		workDir:         workDir,
+		model:           model,
+		reasoningEffort: reasoningEffort,
+		mode:            mode,
+		agentName:       agentName,
+		extraEnv:        extraEnv,
+		events:          make(chan core.Event, 64),
+		ctx:             sessionCtx,
+		cancel:          cancel,
 	}
 	s.alive.Store(true)
 
@@ -174,6 +176,9 @@ func (s *opencodeSession) buildRunArgs(prompt string, imagePaths []string, chatI
 	}
 	if s.model != "" {
 		args = append(args, "--model", s.model)
+	}
+	if s.reasoningEffort != "" {
+		args = append(args, "--variant", s.reasoningEffort)
 	}
 	// The working directory is set as the process cwd in Send (cmd.Dir), like
 	// the other opencode invocations. `opencode run` has no --dir flag in

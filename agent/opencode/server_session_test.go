@@ -422,7 +422,7 @@ func newTestServerSession(t *testing.T, f *fakeOpencodeServer, resumeID string) 
 func newTestServerSessionWithMode(t *testing.T, f *fakeOpencodeServer, resumeID, mode string) *serverSession {
 	t.Helper()
 	cfg := opencodeServeConfig{cmd: "opencode", workDir: "/tmp/ws"}
-	s, err := newServerSessionOn(context.Background(), f.srv(), cfg, "openai/gpt-5.6-sol", mode, "", resumeID)
+	s, err := newServerSessionOn(context.Background(), f.srv(), cfg, "openai/gpt-5.6-sol", "", mode, "", resumeID)
 	if err != nil {
 		t.Fatalf("newServerSessionOn: %v", err)
 	}
@@ -2357,7 +2357,7 @@ func TestServerSession_TurnLeaseIsScopedToTheTurn(t *testing.T) {
 	f.holdMessages.Store(true)
 	cfg := opencodeServeConfig{cmd: "opencode", workDir: "/tmp/ws"}
 	stub := f.srv()
-	s, err := newServerSessionOn(context.Background(), stub, cfg, "openai/gpt-5.6-sol", "yolo", "", "ses_stub")
+	s, err := newServerSessionOn(context.Background(), stub, cfg, "openai/gpt-5.6-sol", "", "yolo", "", "ses_stub")
 	if err != nil {
 		t.Fatalf("newServerSessionOn: %v", err)
 	}
@@ -2398,7 +2398,7 @@ func TestServerSession_CloseDropsTheTurnLease(t *testing.T) {
 	f.holdMessages.Store(true)
 	cfg := opencodeServeConfig{cmd: "opencode", workDir: "/tmp/ws"}
 	stub := f.srv()
-	s, err := newServerSessionOn(context.Background(), stub, cfg, "openai/gpt-5.6-sol", "yolo", "", "ses_stub")
+	s, err := newServerSessionOn(context.Background(), stub, cfg, "openai/gpt-5.6-sol", "", "yolo", "", "ses_stub")
 	if err != nil {
 		t.Fatalf("newServerSessionOn: %v", err)
 	}
@@ -2419,7 +2419,7 @@ func TestServerSession_CloseDropsTheTurnLease(t *testing.T) {
 func TestServerSession_EventStreamDoesNotStartAServer(t *testing.T) {
 	f := newFakeOpencodeServer(t)
 	cfg := opencodeServeConfig{cmd: "opencode", workDir: "/tmp/ws"}
-	s, err := newServerSessionOn(context.Background(), nil, cfg, "openai/gpt-5.6-sol", "yolo", "", "ses_stub")
+	s, err := newServerSessionOn(context.Background(), nil, cfg, "openai/gpt-5.6-sol", "", "yolo", "", "ses_stub")
 	if err != nil {
 		t.Fatalf("newServerSessionOn: %v", err)
 	}
