@@ -1641,6 +1641,59 @@ func TestCUJ_D2_DisabledCommandRefused(t *testing.T) {
 	// We don't pin specific text; we assert the engine did not crash and
 	// gave a reply (rejection feedback). A regression that silently
 	// drops the command would leave plat empty.
+
+	// Shared-session cards must apply the clicker's role, not the session owner.
+	t.Run("shared session card clicker", func(t *testing.T) {
+		p := &userAwareCardJourneyPlatform{stubCardPlatform: stubCardPlatform{stubPlatformEngine: stubPlatformEngine{n: "test"}}}
+		agent := &stubProviderAgent{providers: []ProviderConfig{{Name: "a"}, {Name: "b"}}, active: "a"}
+		e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+		roles := NewUserRoleManager()
+		roles.Configure("", []RoleInput{
+			{Name: "admin", UserIDs: []string{"admin"}},
+			{Name: "member", UserIDs: []string{"member"}, DisabledCommands: []string{"provider"}},
+		})
+		e.SetUserRoles(roles)
+		e.onPlatformReady(p)
+		const key = "test:shared-chat"
+		// Action 1: a member opens help through the real message entrypoint.
+		e.ReceiveMessage(p, &Message{SessionKey: key, UserID: "member", Content: "/help", ReplyCtx: "ctx"})
+		if len(p.repliedCards) != 1 || p.navigation == nil {
+			t.Fatal("expected help card and registered navigation handler")
+		}
+		// Action 2: the member navigates to the agent tab and cannot see provider.
+		card := p.navigation("nav:/help agent", key, "member")
+		if _, ok := findCardAction(card, "nav:/provider"); ok {
+			t.Fatal("member can see the disabled provider action")
+		}
+		// Action 3: an admin in the same session can still open provider controls.
+		card = p.navigation("nav:/provider", key, "admin")
+		if card == nil || !strings.Contains(card.RenderText(), fmt.Sprintf(e.i18n.T(MsgProviderCurrent), "a")) {
+			t.Fatalf("admin provider card = %v, want current provider a", card)
+		}
+		// Action 4: clicking that admin-opened card as a member must be refused.
+		card = p.navigation("act:/provider b", key, "member")
+		if card == nil || !strings.Contains(card.RenderText(), "Command `/provider` is disabled") {
+			t.Fatalf("member switch card = %v, want disabled notice", card)
+		}
+		// Action 5: reopening provider as admin still shows the unchanged provider.
+		card = p.navigation("nav:/provider", key, "admin")
+		if card == nil || !strings.Contains(card.RenderText(), fmt.Sprintf(e.i18n.T(MsgProviderCurrent), "a")) {
+			t.Fatalf("provider changed after member click: %v", card)
+		}
+		// Action 6: the member opens another card with their own session key.
+		const memberKey = "test:shared-chat:member"
+		e.ReceiveMessage(p, &Message{SessionKey: memberKey, UserID: "member", Content: "/help", ReplyCtx: "ctx"})
+		// Action 7: an admin clicks that member-created card and gets admin controls.
+		card = p.navigation("nav:/help agent", memberKey, "admin")
+		if _, ok := findCardAction(card, "nav:/provider"); !ok {
+			t.Fatal("admin inherited member's disabled commands from the card")
+		}
+		// Action 8: the admin switches successfully while keeping that session key.
+		card = p.navigation("act:/provider b", memberKey, "admin")
+		if card == nil || !strings.Contains(card.RenderText(), fmt.Sprintf(e.i18n.T(MsgProviderCurrent), "b")) {
+			t.Fatalf("admin could not switch through member-created card: %v", card)
+		}
+	})
 }
 
 // CUJ-D3 · admin_from grants privileged-command access — admin gating is

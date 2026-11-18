@@ -2564,7 +2564,9 @@ func (e *Engine) initPlatformCapabilities(p Platform) {
 		}
 	}
 
-	if nav, ok := p.(CardNavigable); ok {
+	if nav, ok := p.(UserAwareCardNavigable); ok {
+		nav.SetUserAwareCardNavigationHandler(e.handleCardNavForUser)
+	} else if nav, ok := p.(CardNavigable); ok {
 		nav.SetCardNavigationHandler(e.handleCardNav)
 	}
 }
@@ -7251,6 +7253,41 @@ func splitCommandArgs(s string) []string {
 	return tokens
 }
 
+// disabledCmdsFor resolves the disabled commands for userID: role-based if
+// available, else project-level.
+func (e *Engine) disabledCmdsFor(userID string) map[string]bool {
+	e.userRolesMu.RLock()
+	disabledCmds := e.disabledCmds
+	urm := e.userRoles
+	e.userRolesMu.RUnlock()
+	if urm != nil {
+		if role := urm.ResolveRole(userID); role != nil {
+			disabledCmds = role.DisabledCmds
+		}
+	}
+	return disabledCmds
+}
+
+// cardActionCommandID maps the command of a card action ("/provider/add",
+// "/delete-mode") to the built-in command it belongs to, or "" if none.
+func cardActionCommandID(cmd string) string {
+	name := strings.ToLower(strings.TrimPrefix(cmd, "/"))
+	if i := strings.IndexByte(name, '/'); i >= 0 {
+		name = name[:i]
+	}
+	if name == "delete-mode" {
+		return "delete"
+	}
+	for _, c := range builtinCommands {
+		for _, n := range c.names {
+			if n == name {
+				return c.id
+			}
+		}
+	}
+	return ""
+}
+
 func (e *Engine) handleCommand(p Platform, msg *Message, raw string) bool {
 	parts := splitCommandArgs(raw)
 	cmd := strings.ToLower(strings.TrimPrefix(parts[0], "/"))
@@ -7258,16 +7295,7 @@ func (e *Engine) handleCommand(p Platform, msg *Message, raw string) bool {
 
 	cmdID := matchPrefix(cmd, builtinCommands)
 
-	// Resolve effective disabled commands: role-based if available, else project-level
-	e.userRolesMu.RLock()
-	disabledCmds := e.disabledCmds
-	urm := e.userRoles
-	e.userRolesMu.RUnlock()
-	if urm != nil {
-		if role := urm.ResolveRole(msg.UserID); role != nil {
-			disabledCmds = role.DisabledCmds
-		}
-	}
+	disabledCmds := e.disabledCmdsFor(msg.UserID)
 
 	if cmdID != "" && disabledCmds[cmdID] {
 		slog.Info("audit: command_blocked",
@@ -10107,7 +10135,7 @@ func (e *Engine) cmdHelp(p Platform, msg *Message) {
 		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgHelp))
 		return
 	}
-	e.replyWithCard(p, msg.ReplyCtx, e.renderHelpCard())
+	e.replyWithCard(p, msg.ReplyCtx, e.renderHelpGroupCardFor(defaultHelpGroup, e.disabledCmdsFor(msg.UserID)))
 }
 
 // cmdStart handles the `/start` slash command.
@@ -10211,10 +10239,6 @@ func helpCardGroups() []helpCardGroup {
 	}
 }
 
-func (e *Engine) renderHelpCard() *Card {
-	return e.renderHelpGroupCard(defaultHelpGroup)
-}
-
 // splitHelpTabRows splits tab buttons into rows. Card-based platforms
 // get 2 buttons per row for better layout; others get all in one row.
 func splitHelpTabRows(useMultiRow bool, tabs []CardButton) [][]CardButton {
@@ -10232,7 +10256,9 @@ func splitHelpTabRows(useMultiRow bool, tabs []CardButton) [][]CardButton {
 	return [][]CardButton{tabs}
 }
 
-func (e *Engine) renderHelpGroupCard(groupKey string) *Card {
+// renderHelpGroupCardFor renders the help card without the commands in
+// disabled, so it offers no button that would only be refused.
+func (e *Engine) renderHelpGroupCardFor(groupKey string, disabled map[string]bool) *Card {
 	sectionTitle := func(key MsgKey) string {
 		section := e.i18n.T(key)
 		if idx := strings.IndexByte(section, '\n'); idx >= 0 {
@@ -10270,6 +10296,9 @@ func (e *Engine) renderHelpGroupCard(groupKey string) *Card {
 		cb.ButtonsEqual(row...)
 	}
 	for _, item := range current.items {
+		if disabled[cardActionCommandID(item.command)] {
+			continue
+		}
 		cb.ListItem(commandText(item.command), "▶", item.action)
 	}
 	cb.Note(e.i18n.T(MsgHelpTip))
@@ -11573,7 +11602,7 @@ func (e *Engine) cmdProviderAdd(p Platform, msg *Message, switcher ProviderSwitc
 	raw = strings.TrimSpace(raw)
 
 	if strings.HasPrefix(raw, "{") {
-		// JSON format: /provider add {"name":"relay","api_key":"sk-xxx",...}
+		// JSON format: /provider add {"name":"relay",...}
 		var jp struct {
 			Name    string            `json:"name"`
 			APIKey  string            `json:"api_key"`
@@ -12903,6 +12932,13 @@ func (e *Engine) sendWithCard(p Platform, replyCtx any, card *Card) {
 // handleCardNav is called by platforms that support in-place card updates.
 // It routes nav: and act: prefixed actions to the appropriate render function.
 func (e *Engine) handleCardNav(action string, sessionKey string) *Card {
+	// Legacy adapters cannot identify the clicker. Never treat the card's
+	// embedded session owner as the actor; identity-dependent actions fail
+	// closed below until the adapter implements UserAwareCardNavigable.
+	return e.handleCardNavForUser(action, sessionKey, "")
+}
+
+func (e *Engine) handleCardNavForUser(action, sessionKey, userID string) *Card {
 	var prefix, body string
 	if i := strings.Index(action, ":"); i >= 0 {
 		prefix = action[:i]
@@ -12917,6 +12953,38 @@ func (e *Engine) handleCardNav(action string, sessionKey string) *Card {
 		args = strings.TrimSpace(body[i+1:])
 	}
 
+	// Card buttons reach commands without going through handleCommand, so a
+	// disabled command must be refused here too: the /help card links to
+	// /provider, /dir and /upgrade whatever disabled_commands says.
+	if cmdID := cardActionCommandID(cmd); cmdID != "" {
+		if e.disabledCmdsFor(userID)[cmdID] {
+			slog.Info("audit: command_blocked",
+				"user_id", userID, "project", e.name,
+				"command", cmdID, "reason", "disabled", "via", "card")
+			return e.simpleCard("/"+cmdID, "red", fmt.Sprintf(e.i18n.T(MsgCommandDisabled), "/"+cmdID))
+		}
+		privileged := isPrivilegedCommandInvocation(cmdID, splitCommandArgs(args))
+		if userID == "" {
+			e.userRolesMu.RLock()
+			hasRoles := e.userRoles != nil
+			e.userRolesMu.RUnlock()
+			if hasRoles || privileged {
+				slog.Info("audit: command_blocked",
+					"project", e.name, "command", cmdID,
+					"reason", "missing_actor", "via", "card")
+				return e.simpleCard("/"+cmdID, "red", e.i18n.T(MsgCardActorRequired))
+			}
+		}
+		// Apply the same privilege gate as text commands before any rendering
+		// or mutation. The card's session owner is not the acting user.
+		if privileged && !e.isAdmin(userID) {
+			slog.Info("audit: command_blocked",
+				"user_id", userID, "project", e.name,
+				"command", cmdID, "reason", "unauthorized", "via", "card")
+			return e.simpleCard("/"+cmdID, "red", fmt.Sprintf(e.i18n.T(MsgAdminRequired), "/"+cmdID))
+		}
+	}
+
 	if prefix == "act" && cmd == "/model" {
 		return e.handleModelCardAction(args, sessionKey)
 	}
@@ -12927,7 +12995,7 @@ func (e *Engine) handleCardNav(action string, sessionKey string) *Card {
 
 	switch cmd {
 	case "/help":
-		return e.renderHelpGroupCard(args)
+		return e.renderHelpGroupCardFor(args, e.disabledCmdsFor(userID))
 	case "/model":
 		return e.renderModelCard(sessionKey)
 	case "/reasoning":
@@ -12938,7 +13006,7 @@ func (e *Engine) handleCardNav(action string, sessionKey string) *Card {
 	case "/lang":
 		return e.renderLangCard()
 	case "/status":
-		return e.renderStatusCard(sessionKey, extractUserID(sessionKey))
+		return e.renderStatusCard(sessionKey, userID)
 	case "/list":
 		page := 1
 		if args != "" {
@@ -12964,9 +13032,9 @@ func (e *Engine) handleCardNav(action string, sessionKey string) *Card {
 	case "/provider/add", "/provider/add-other", "/provider/add-cancel":
 		return e.renderProviderAddCard(sessionKey)
 	case "/cron":
-		return e.renderCronCard(sessionKey, extractUserID(sessionKey))
+		return e.renderCronCard(sessionKey, userID)
 	case "/timer":
-		return e.renderTimerCard(sessionKey, extractUserID(sessionKey))
+		return e.renderTimerCard(sessionKey, userID)
 	case "/heartbeat":
 		return e.renderHeartbeatCard()
 	case "/commands":
@@ -12982,7 +13050,7 @@ func (e *Engine) handleCardNav(action string, sessionKey string) *Card {
 	case "/whoami":
 		return e.renderWhoamiCard(&Message{
 			SessionKey: sessionKey,
-			UserID:     extractUserID(sessionKey),
+			UserID:     userID,
 			Platform:   extractPlatformName(sessionKey),
 		})
 	case "/version":
@@ -12997,7 +13065,7 @@ func (e *Engine) handleCardNav(action string, sessionKey string) *Card {
 		}
 		return e.renderDeleteModeCard(sessionKey)
 	case "/stop":
-		return e.renderStatusCard(sessionKey, extractUserID(sessionKey))
+		return e.renderStatusCard(sessionKey, userID)
 	case "/upgrade":
 		return e.renderUpgradeCard()
 	}

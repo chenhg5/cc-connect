@@ -553,6 +553,7 @@ const (
 	MsgBannedWordBlocked MsgKey = "banned_word_blocked"
 	MsgCommandDisabled   MsgKey = "command_disabled"
 	MsgAdminRequired     MsgKey = "admin_required"
+	MsgCardActorRequired MsgKey = "card_actor_required"
 	MsgRateLimited       MsgKey = "rate_limited"
 	MsgPsSent            MsgKey = "ps_sent"
 	MsgPsSendFailed      MsgKey = "ps_send_failed"
@@ -3439,6 +3440,13 @@ var messages = map[MsgKey]map[Language]string{
 		LangTraditionalChinese: "🚫 命令 `%s` 在當前專案中已被停用。",
 		LangJapanese:           "🚫 コマンド `%s` はこのプロジェクトで無効化されています。",
 		LangSpanish:            "🚫 El comando `%s` está deshabilitado para este proyecto.",
+	},
+	MsgCardActorRequired: {
+		LangEnglish:            "🔒 Cannot verify who clicked this card. Please use the text command instead.",
+		LangChinese:            "🔒 无法确认此卡片的点击者身份，请改用文本命令。",
+		LangTraditionalChinese: "🔒 無法確認此卡片的點擊者身分，請改用文字命令。",
+		LangJapanese:           "🔒 このカードをクリックしたユーザーを確認できません。テキストコマンドを使用してください。",
+		LangSpanish:            "🔒 No se puede verificar quién pulsó esta tarjeta. Usa el comando de texto.",
 	},
 	MsgAdminRequired: {
 		LangEnglish:            "🔒 Command `%s` requires admin privilege. Set `admin_from` in config to authorize users.",
