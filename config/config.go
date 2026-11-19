@@ -215,6 +215,14 @@ type DisplayConfig struct {
 	ShowContextIndicator *bool   `toml:"show_context_indicator"` // whether [ctx: ~N%] suffix is shown; default true
 	ReplyFooter          *bool   `toml:"reply_footer"`           // whether Codex-like footer is shown; default true
 	HideAgentFooter      *bool   `toml:"hide_agent_footer"`      // strip agent-emitted model/token footer lines; default false
+	// RichThrottleChars and RichThrottleMs control how often the rich card
+	// (card_mode = "rich") pushes a text update to the platform. They were
+	// previously hard-coded to 20 chars / 200ms for platforms with native
+	// streaming text, which costs one HTTP round-trip per 20 characters and
+	// dominates long replies. Raise them to trade typewriter smoothness for
+	// fewer updates.
+	RichThrottleChars *int `toml:"rich_throttle_chars"` // min new chars per update; default 20
+	RichThrottleMs    *int `toml:"rich_throttle_ms"`    // min ms between updates; default 200
 }
 
 // StreamPreviewConfig controls real-time streaming preview in IM.
@@ -1070,6 +1078,43 @@ func EffectiveCardMode(cfg *Config, proj *ProjectConfig) string {
 		}
 	}
 	return "legacy"
+}
+
+// EffectiveRichThrottle returns the update throttle for the rich card text
+// stream: the minimum number of new characters and the minimum interval in
+// milliseconds between two pushes. Per-project overrides global. Defaults
+// (20 chars / 200 ms) match the values previously hard-coded in the engine.
+func EffectiveRichThrottle(cfg *Config, proj *ProjectConfig) (chars int, ms int) {
+	chars = 20
+	ms = 200
+
+	var projDisp *DisplayConfig
+	if proj != nil {
+		projDisp = proj.Display
+	}
+	// Global first, then the project-level value overrides it (same
+	// precedence as EffectiveCardMode / EffectiveDisplay).
+	if cfg.Display.RichThrottleChars != nil {
+		chars = *cfg.Display.RichThrottleChars
+	}
+	if cfg.Display.RichThrottleMs != nil {
+		ms = *cfg.Display.RichThrottleMs
+	}
+	if projDisp != nil {
+		if projDisp.RichThrottleChars != nil {
+			chars = *projDisp.RichThrottleChars
+		}
+		if projDisp.RichThrottleMs != nil {
+			ms = *projDisp.RichThrottleMs
+		}
+	}
+	if chars < 1 {
+		chars = 1
+	}
+	if ms < 0 {
+		ms = 0
+	}
+	return chars, ms
 }
 
 // validatePermissive is like validate but skips the "at least one platform"
