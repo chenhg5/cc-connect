@@ -282,20 +282,43 @@ type cardkitCall struct {
 	body         map[string]any
 }
 
-// SendPreviewStart sends a progress card as a card entity and UpdateMessage
-// refreshes it with batch_update, never by replacing the whole card.
-func TestProgressCardEntity_RefreshesInPlace(t *testing.T) {
-	var mu sync.Mutex
-	var calls []cardkitCall
-	batchCode := 0
+// cardkitStub is an Open API stub for progress cards: it creates card_1, sends
+// om_progress, and answers each batch_update with the next queued response
+// (HTTP status, code), then with success.
+type cardkitStub struct {
+	mu      sync.Mutex
+	calls   []cardkitCall
+	batches [][2]int
+}
+
+func (s *cardkitStub) queueBatch(status, code int) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.batches = append(s.batches, [2]int{status, code})
+}
+
+func (s *cardkitStub) take() []cardkitCall {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	calls := s.calls
+	s.calls = nil
+	return calls
+}
+
+func newCardkitStubPlatform(t *testing.T) (*Platform, *cardkitStub) {
+	t.Helper()
+	stub := &cardkitStub{}
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		raw, _ := io.ReadAll(r.Body)
 		var body map[string]any
 		_ = json.Unmarshal(raw, &body)
-		mu.Lock()
-		calls = append(calls, cardkitCall{r.Method, r.URL.Path, body})
-		code := batchCode
-		mu.Unlock()
+		stub.mu.Lock()
+		stub.calls = append(stub.calls, cardkitCall{r.Method, r.URL.Path, body})
+		next := [2]int{http.StatusOK, 0}
+		if strings.HasSuffix(r.URL.Path, "/batch_update") && len(stub.batches) > 0 {
+			next, stub.batches = stub.batches[0], stub.batches[1:]
+		}
+		stub.mu.Unlock()
 		w.Header().Set("Content-Type", "application/json")
 		switch {
 		case r.URL.Path == "/open-apis/auth/v3/tenant_access_token/internal":
@@ -305,13 +328,14 @@ func TestProgressCardEntity_RefreshesInPlace(t *testing.T) {
 		case r.URL.Path == "/open-apis/im/v1/messages" && r.Method == http.MethodPost:
 			writeJSON(t, w, map[string]any{"code": 0, "msg": "ok", "data": map[string]any{"message_id": "om_progress"}})
 		case strings.HasSuffix(r.URL.Path, "/batch_update"):
-			writeJSON(t, w, map[string]any{"code": code, "msg": "batch result"})
+			w.WriteHeader(next[0])
+			writeJSON(t, w, map[string]any{"code": next[1], "msg": "batch result"})
 		default:
 			writeJSON(t, w, map[string]any{"code": 0, "msg": "ok"})
 		}
 	}))
-	defer srv.Close()
-	p := &Platform{
+	t.Cleanup(srv.Close)
+	return &Platform{
 		platformName:       "feishu",
 		domain:             srv.URL,
 		appID:              "cli_test",
@@ -320,24 +344,21 @@ func TestProgressCardEntity_RefreshesInPlace(t *testing.T) {
 		client:             lark.NewClient("cli_test", "secret", lark.WithOpenBaseUrl(srv.URL), lark.WithHttpClient(srv.Client())),
 		replayClient: lark.NewClient("cli_test", "secret", lark.WithEnableTokenCache(false),
 			lark.WithOpenBaseUrl(srv.URL), lark.WithHttpClient(srv.Client())),
-	}
-	think := core.ProgressCardEntry{Kind: core.ProgressEntryThinking, Text: "planning"}
-	pwd := core.ProgressCardEntry{Kind: core.ProgressEntryToolUse, Tool: "Bash", Text: "pwd"}
-	payload := func(items ...core.ProgressCardEntry) string {
-		return core.BuildProgressCardPayloadV2(items, false, "Codex", core.LangChinese, core.ProgressCardStateRunning)
-	}
+	}, stub
+}
 
-	handle, err := p.SendPreviewStart(context.Background(), replyContext{chatID: "oc_chat"}, payload(think))
-	if err != nil {
-		t.Fatalf("SendPreviewStart() error = %v", err)
-	}
-	for _, content := range []string{payload(think, pwd), payload(think, pwd, pwd)} {
-		if err := p.UpdateMessage(context.Background(), handle, content); err != nil {
-			t.Fatalf("UpdateMessage() error = %v", err)
-		}
-	}
+func progressContent(items ...core.ProgressCardEntry) string {
+	return core.BuildProgressCardPayloadV2(items, false, "Codex", core.LangChinese, core.ProgressCardStateRunning)
+}
 
-	mu.Lock()
+var (
+	stubThink = core.ProgressCardEntry{Kind: core.ProgressEntryThinking, Text: "planning"}
+	stubPwd   = core.ProgressCardEntry{Kind: core.ProgressEntryToolUse, Tool: "Bash", Text: "pwd"}
+	stubLs    = core.ProgressCardEntry{Kind: core.ProgressEntryToolUse, Tool: "Bash", Text: "ls"}
+)
+
+func batchCalls(t *testing.T, calls []cardkitCall) []cardkitCall {
+	t.Helper()
 	var batches []cardkitCall
 	for _, call := range calls {
 		switch {
@@ -349,32 +370,107 @@ func TestProgressCardEntity_RefreshesInPlace(t *testing.T) {
 			batches = append(batches, call)
 		}
 	}
-	mu.Unlock()
+	return batches
+}
+
+func replacedCard(calls []cardkitCall) bool {
+	for _, call := range calls {
+		if call.method == http.MethodPut && call.path == "/open-apis/cardkit/v1/cards/card_1" {
+			return true
+		}
+	}
+	return false
+}
+
+// SendPreviewStart sends a progress card as a card entity and UpdateMessage
+// refreshes it with batch_update, never by replacing the whole card.
+func TestProgressCardEntity_RefreshesInPlace(t *testing.T) {
+	p, stub := newCardkitStubPlatform(t)
+	ctx := context.Background()
+	handle, err := p.SendPreviewStart(ctx, replyContext{chatID: "oc_chat"}, progressContent(stubThink))
+	if err != nil {
+		t.Fatalf("SendPreviewStart() error = %v", err)
+	}
+	stub.take()
+	for _, content := range []string{progressContent(stubThink, stubPwd), progressContent(stubThink, stubPwd, stubLs)} {
+		if err := p.UpdateMessage(ctx, handle, content); err != nil {
+			t.Fatalf("UpdateMessage() error = %v", err)
+		}
+	}
+	batches := batchCalls(t, stub.take())
 	if len(batches) != 2 {
-		t.Fatalf("batch_update calls = %d, want 2: %#v", len(batches), calls)
+		t.Fatalf("batch_update calls = %d, want 2", len(batches))
 	}
 	if batches[0].body["sequence"].(float64) >= batches[1].body["sequence"].(float64) {
 		t.Fatalf("batch_update sequence must increase: %v then %v", batches[0].body["sequence"], batches[1].body["sequence"])
 	}
 
-	// A rejected in-place update falls back to replacing the card so it
-	// stays right.
-	mu.Lock()
-	batchCode = 300313
-	calls = nil
-	mu.Unlock()
-	if err := p.UpdateMessage(context.Background(), handle, payload(think, pwd, pwd, pwd)); err != nil {
+	// Feishu rejecting the actions means the card no longer matches what
+	// cc-connect thinks it shows: replace it so it stays right.
+	stub.queueBatch(http.StatusOK, 300313)
+	if err := p.UpdateMessage(ctx, handle, progressContent(stubThink, stubPwd, stubLs, stubPwd)); err != nil {
 		t.Fatalf("UpdateMessage() after a rejected batch error = %v", err)
 	}
-	mu.Lock()
-	defer mu.Unlock()
-	replaced := false
-	for _, call := range calls {
-		if call.method == http.MethodPut && call.path == "/open-apis/cardkit/v1/cards/card_1" {
-			replaced = true
-		}
+	if !replacedCard(stub.take()) {
+		t.Fatal("a rejected batch_update did not fall back to a full card update")
 	}
-	if !replaced {
-		t.Fatalf("a rejected batch_update did not fall back to a full card update: %#v", calls)
+}
+
+// A transient failure is retried with the same sequence and uuid; a failure
+// that is not Feishu rejecting the actions is returned for core to retry, and
+// the next refresh picks up from the same card. Neither replaces the card,
+// which would close the panels the reader opened.
+func TestProgressCardEntity_FailuresDoNotReplaceCard(t *testing.T) {
+	p, stub := newCardkitStubPlatform(t)
+	ctx := context.Background()
+	handle, err := p.SendPreviewStart(ctx, replyContext{chatID: "oc_chat"}, progressContent(stubThink))
+	if err != nil {
+		t.Fatalf("SendPreviewStart() error = %v", err)
+	}
+	stub.take()
+
+	stub.queueBatch(http.StatusOK, 2200) // Feishu internal error: transient
+	if err := p.UpdateMessage(ctx, handle, progressContent(stubThink, stubPwd)); err != nil {
+		t.Fatalf("UpdateMessage() after a transient failure error = %v", err)
+	}
+	batches := batchCalls(t, stub.take())
+	if len(batches) != 2 {
+		t.Fatalf("batch_update calls = %d, want the failed one and its retry", len(batches))
+	}
+	if !reflect.DeepEqual(batches[0].body, batches[1].body) {
+		t.Fatalf("retry must resend the same sequence and uuid:\n%v\n%v", batches[0].body, batches[1].body)
+	}
+	if batches[0].body["uuid"] == nil {
+		t.Fatal("batch_update carries no uuid, so a retry could apply twice")
+	}
+
+	for _, failure := range []struct {
+		name         string
+		status, code int
+	}{
+		{"server error", http.StatusInternalServerError, 0},
+		{"rate limited", http.StatusOK, 230020},
+	} {
+		stub.queueBatch(failure.status, failure.code)
+		if err := p.UpdateMessage(ctx, handle, progressContent(stubThink, stubPwd, stubLs)); err == nil {
+			t.Fatalf("%s: UpdateMessage() = nil, want the error for core to retry", failure.name)
+		}
+		if calls := stub.take(); replacedCard(calls) {
+			t.Fatalf("%s: replaced the whole card", failure.name)
+		}
+		// core retries with the same content; the diff still starts from the
+		// card as last shown, so it adds the ls row.
+		if err := p.UpdateMessage(ctx, handle, progressContent(stubThink, stubPwd, stubLs)); err != nil {
+			t.Fatalf("%s: retry UpdateMessage() error = %v", failure.name, err)
+		}
+		batches := batchCalls(t, stub.take())
+		if len(batches) != 1 || !strings.Contains(batches[0].body["actions"].(string), "add_elements") {
+			t.Fatalf("%s: retry did not resend the missing row: %#v", failure.name, batches)
+		}
+		// Undo for the next case: the card goes back to two rows.
+		if err := p.UpdateMessage(ctx, handle, progressContent(stubThink, stubPwd)); err != nil {
+			t.Fatalf("%s: reset UpdateMessage() error = %v", failure.name, err)
+		}
+		stub.take()
 	}
 }

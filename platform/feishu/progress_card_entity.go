@@ -3,6 +3,7 @@ package feishu
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -382,8 +383,17 @@ func (p *Platform) updateProgressCardEntity(ctx context.Context, h *feishuPrevie
 		return true, nil
 	}
 	if err := p.batchUpdateCardEntity(ctx, h, actions); err != nil {
+		// Only Feishu rejecting the actions means the card no longer matches
+		// what h.progress says it shows. A network failure, timeout or rate
+		// limit leaves h.progress as it was: core keeps the content and
+		// retries, and that refresh diffs from the same card again. Replacing
+		// the card would close the panels the reader opened.
+		var cardErr *feishuCardAPIError
+		if !errors.As(err, &cardErr) || isTransientError(err) || errors.Is(err, errFeishuCardRateLimited) {
+			return true, err
+		}
 		// Keep the card right even though open panels close.
-		slog.Warn(p.tag()+": progress card in-place update failed, replacing the card", "message_id", h.messageID, "error", err)
+		slog.Warn(p.tag()+": progress card in-place update rejected, replacing the card", "message_id", h.messageID, "error", err)
 		model, cardJSON := newProgressCard(payload)
 		if err := p.updateCardEntity(ctx, h, cardJSON); err != nil {
 			return true, err
@@ -413,7 +423,19 @@ func (p *Platform) batchUpdateCardEntity(ctx context.Context, h *feishuPreviewHa
 	h.mu.Unlock()
 
 	apiPath := fmt.Sprintf("/open-apis/cardkit/v1/cards/%s/batch_update", cardID)
-	body := map[string]any{"sequence": seq, "actions": string(actionsJSON)}
+	// Retries resend the same sequence and uuid, so Feishu applies the batch
+	// at most once.
+	body := map[string]any{
+		"uuid":     fmt.Sprintf("pc-%s-%d", cardID, seq),
+		"sequence": seq,
+		"actions":  string(actionsJSON),
+	}
+	return p.withTransientRetry(ctx, "batch update card entity", func() error {
+		return p.postCardEntityBatch(ctx, apiPath, body)
+	})
+}
+
+func (p *Platform) postCardEntityBatch(ctx context.Context, apiPath string, body map[string]any) error {
 	var apiResp *larkcore.ApiResp
 	if err := p.withFreshTenantAccessTokenRetry(ctx, "batch update card entity", func(client *lark.Client, options ...larkcore.RequestOptionFunc) error {
 		var err error
