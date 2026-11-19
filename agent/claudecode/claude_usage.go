@@ -17,7 +17,6 @@ import (
 	"unicode/utf8"
 
 	"github.com/chenhg5/cc-connect/core"
-	"github.com/creack/pty"
 )
 
 const (
@@ -26,6 +25,8 @@ const (
 	claudeUsagePollInterval         = 100 * time.Millisecond
 	claudeUsageStableFor            = 450 * time.Millisecond
 	claudeUsageActionGap            = 250 * time.Millisecond
+	claudeUsageRows                 = 40
+	claudeUsageCols                 = 120
 )
 
 var (
@@ -107,7 +108,7 @@ func (a *Agent) runClaudeUsageProbe(ctx context.Context) (string, error) {
 	var stderr lockedBuffer
 	cmd.Stderr = &stderr
 
-	ptmx, err := pty.StartWithSize(cmd, &pty.Winsize{Rows: 40, Cols: 120})
+	ptmx, waitProcess, err := startClaudeUsagePTY(cmd, claudeUsageRows, claudeUsageCols)
 	if err != nil {
 		return "", fmt.Errorf("claudecode: start claude usage probe: %w", err)
 	}
@@ -115,11 +116,11 @@ func (a *Agent) runClaudeUsageProbe(ctx context.Context) (string, error) {
 	var waitErr error
 	processDone := make(chan struct{})
 	go func() {
-		waitErr = cmd.Wait()
+		waitErr = waitProcess()
 		close(processDone)
 	}()
 
-	terminal := newClaudeUsageTerminal()
+	terminal := newClaudeUsageProbeTerminal(claudeUsageRows, claudeUsageCols)
 	// readDone carries the reader's single result and may be consumed by the
 	// loop below; readerExited is closed when the reader returns, so cleanup can
 	// wait on it no matter who received from readDone.
@@ -483,6 +484,12 @@ type claudeUsageTerminal struct {
 	lines [][]rune
 	row   int
 	col   int
+
+	// width and height are zero unless the terminal emulates a fixed-size
+	// screen (see newClaudeUsageScreenTerminal); wrapPending is only used then.
+	width       int
+	height      int
+	wrapPending bool
 }
 
 func newClaudeUsageTerminal() *claudeUsageTerminal {
@@ -506,15 +513,16 @@ func (t *claudeUsageTerminal) Write(p []byte) {
 			}
 		case '\r':
 			t.col = 0
+			t.wrapPending = false
 			i++
 		case '\n':
-			t.row++
-			t.ensureRow(t.row)
+			t.lineFeed()
 			i++
 		case '\b':
 			if t.col > 0 {
 				t.col--
 			}
+			t.wrapPending = false
 			i++
 		case '\t':
 			advance := 4 - (t.col % 4)
@@ -578,6 +586,11 @@ func (t *claudeUsageTerminal) consumeEscape(p []byte) int {
 }
 
 func (t *claudeUsageTerminal) applyCSI(params string, final byte) {
+	if csiCancelsPendingWrap(final) {
+		t.wrapPending = false
+	}
+	defer t.clampCursorToScreen()
+
 	switch final {
 	case 'A', 'B', 'C', 'D':
 		n := parseCSIInt(params, 1)
@@ -624,11 +637,17 @@ func (t *claudeUsageTerminal) applyCSI(params string, final byte) {
 			t.lines[t.row] = nil
 			t.col = 0
 		}
+	case 'X':
+		t.eraseScreenChars(parseCSIInt(params, 1))
 	default:
 	}
 }
 
 func (t *claudeUsageTerminal) writeRune(r rune) {
+	if t.width > 0 {
+		t.writeScreenRune(r)
+		return
+	}
 	if t.row >= maxTerminalRows || t.col >= maxTerminalCols {
 		return
 	}
@@ -643,7 +662,7 @@ const maxTerminalRows = 500
 const maxTerminalCols = 500
 
 func (t *claudeUsageTerminal) ensureRow(row int) {
-	if row >= maxTerminalRows {
+	if row >= maxTerminalRows || (t.height > 0 && row >= t.height) {
 		return
 	}
 	for len(t.lines) <= row {
