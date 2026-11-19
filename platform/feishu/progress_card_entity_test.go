@@ -405,14 +405,28 @@ func TestProgressCardEntity_RefreshesInPlace(t *testing.T) {
 		t.Fatalf("batch_update sequence must increase: %v then %v", batches[0].body["sequence"], batches[1].body["sequence"])
 	}
 
-	// Feishu rejecting the actions means the card no longer matches what
-	// cc-connect thinks it shows: replace it so it stays right.
-	stub.queueBatch(http.StatusOK, 300313)
-	if err := p.UpdateMessage(ctx, handle, progressContent(stubThink, stubPwd, stubLs, stubPwd)); err != nil {
-		t.Fatalf("UpdateMessage() after a rejected batch error = %v", err)
-	}
-	if !replacedCard(stub.take()) {
-		t.Fatal("a rejected batch_update did not fall back to a full card update")
+	// Feishu rejecting the actions (HTTP 400 with a code, as cardkit answers)
+	// means the card no longer matches what cc-connect thinks it shows:
+	// replace it so it stays right, and later refreshes go back to batches.
+	// 300301 is what a batch that took effect but timed out on the client
+	// gets when its rows are added again.
+	content := []core.ProgressCardEntry{stubThink, stubPwd, stubLs}
+	for _, code := range []int{300313, 300301} {
+		content = append(content, stubPwd)
+		stub.queueBatch(http.StatusBadRequest, code)
+		if err := p.UpdateMessage(ctx, handle, progressContent(content...)); err != nil {
+			t.Fatalf("UpdateMessage() after batch rejected with %d error = %v", code, err)
+		}
+		if !replacedCard(stub.take()) {
+			t.Fatalf("batch_update rejected with HTTP 400 code %d did not fall back to a full card update", code)
+		}
+		content = append(content, stubLs)
+		if err := p.UpdateMessage(ctx, handle, progressContent(content...)); err != nil {
+			t.Fatalf("UpdateMessage() after the fallback error = %v", err)
+		}
+		if batches := batchCalls(t, stub.take()); len(batches) != 1 {
+			t.Fatalf("refresh after the fallback sent %d batch_update calls, want 1", len(batches))
+		}
 	}
 }
 

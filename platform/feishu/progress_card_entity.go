@@ -444,22 +444,26 @@ func (p *Platform) postCardEntityBatch(ctx context.Context, apiPath string, body
 	}); err != nil {
 		return fmt.Errorf("%s: batch update card entity: %w", p.tag(), err)
 	}
-	if apiResp == nil || apiResp.StatusCode != http.StatusOK {
-		status := 0
-		if apiResp != nil {
-			status = apiResp.StatusCode
-		}
-		return fmt.Errorf("%s: batch update card entity: HTTP status %d", p.tag(), status)
+	if apiResp == nil {
+		return fmt.Errorf("%s: batch update card entity: no response", p.tag())
 	}
+	// Feishu rejects actions with HTTP 400 and a code in the body (300301
+	// duplicate element id, 300313 unknown element id, ...), so read the code
+	// before the status: a rejection must reach the caller as a
+	// feishuCardAPIError, or the refresh would retry the same diff forever.
 	var resp struct {
 		Code int    `json:"code"`
 		Msg  string `json:"msg"`
 	}
-	if err := json.Unmarshal(apiResp.RawBody, &resp); err != nil {
-		return fmt.Errorf("%s: batch update card entity: parse response: %w", p.tag(), err)
-	}
-	if resp.Code != 0 {
+	parseErr := json.Unmarshal(apiResp.RawBody, &resp)
+	if parseErr == nil && resp.Code != 0 {
 		return fmt.Errorf("%s: %w", p.tag(), classifyFeishuCardAPIError("batch update card entity", resp.Code, resp.Msg))
+	}
+	if apiResp.StatusCode != http.StatusOK {
+		return fmt.Errorf("%s: batch update card entity: HTTP status %d", p.tag(), apiResp.StatusCode)
+	}
+	if parseErr != nil {
+		return fmt.Errorf("%s: batch update card entity: parse response: %w", p.tag(), parseErr)
 	}
 	return nil
 }
