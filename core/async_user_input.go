@@ -124,9 +124,17 @@ func (e *Engine) answerFeedback(p Platform, msg *Message, q *AsyncQuestion, key 
 	}
 	if msg.OnAnswerStatus != nil {
 		msg.OnAnswerStatus(card.Build())
-	} else {
-		e.reply(p, msg.ReplyCtx, text)
+		return
 	}
+	if key == MsgAnswerRecorded || key == MsgAnswerSubmitted {
+		if msg.CardAnswerRendered {
+			return
+		}
+		if q != nil && q.Current >= 0 && q.Current < len(q.Questions) && q.Current < len(q.Answers) {
+			text = "✅ " + q.Questions[q.Current].Question + ": **" + q.Answers[q.Current] + "**\n" + text
+		}
+	}
+	e.reply(p, msg.ReplyCtx, text)
 }
 
 // Only Send/steer acknowledgement is success; admission to a queue isn't.

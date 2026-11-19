@@ -52,7 +52,7 @@ func TestAsyncReview_SharedCardDispatchStopsAfterOwner(t *testing.T) {
 
 func TestAsyncReview_FailedCardPatchFallsBackToText(t *testing.T) {
 	var mu sync.Mutex
-	var sent []string
+	var sent, receiveTypes []string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		switch {
@@ -64,6 +64,7 @@ func TestAsyncReview_FailedCardPatchFallsBackToText(t *testing.T) {
 			raw, _ := io.ReadAll(r.Body)
 			mu.Lock()
 			sent = append(sent, string(raw))
+			receiveTypes = append(receiveTypes, r.URL.Query().Get("receive_id_type"))
 			mu.Unlock()
 			_, _ = io.WriteString(w, `{"code":0,"data":{"message_id":"feedback"}}`)
 		default:
@@ -76,15 +77,21 @@ func TestAsyncReview_FailedCardPatchFallsBackToText(t *testing.T) {
 	p.chatNameCache.Store("oc_test_chat", "Test chat")
 	p.domain = srv.URL
 	p.client = lark.NewClient("review-app", "secret", lark.WithOpenBaseUrl(srv.URL), lark.WithHttpClient(srv.Client()))
-	_, err := p.onCardAction(cardActionEvent("ou_allowed", "askq:cTE:0:2"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	msg := waitAnyMessage(t, messages, time.Second, "answer")
-	msg.OnAnswerStatus(core.NewCard().Title("Answer submitted", "green").Build())
-	mu.Lock()
-	defer mu.Unlock()
-	if len(sent) != 1 || !strings.Contains(sent[0], "Answer submitted") {
-		t.Fatalf("fallback messages=%v", sent)
+	for i, tc := range []struct{ chatID, idType, recipient string }{
+		{"oc_test_chat", "chat_id", "oc_test_chat"},
+		{"", "open_id", "ou_allowed"},
+	} {
+		event := cardActionEvent("ou_allowed", "askq:cTE:0:2")
+		event.Event.Context.OpenChatID = tc.chatID
+		if _, err := p.onCardAction(event); err != nil {
+			t.Fatal(err)
+		}
+		msg := waitAnyMessage(t, messages, time.Second, "answer")
+		msg.OnAnswerStatus(core.NewCard().Title("Answer submitted", "green").Build())
+		mu.Lock()
+		if len(sent) != i+1 || receiveTypes[i] != tc.idType || !strings.Contains(sent[i], tc.recipient) || !strings.Contains(sent[i], "Answer submitted") {
+			t.Errorf("want one %s feedback to %q, got types=%v messages=%v", tc.idType, tc.recipient, receiveTypes, sent)
+		}
+		mu.Unlock()
 	}
 }

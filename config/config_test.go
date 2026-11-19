@@ -1,6 +1,7 @@
 package config
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -2112,6 +2113,84 @@ func TestLoadRejectsInvalidRelayVisibility(t *testing.T) {
 		t.Fatalf("error = %q, want relay.visibility validation error", err.Error())
 	}
 }
+
+const stopHookEventConfigFixture = `
+stop_hook_event = "%s"
+
+[[projects]]
+name = "alpha"
+
+[projects.agent]
+type = "codex"
+
+[projects.agent.options]
+work_dir = "/tmp/alpha"
+
+[[projects.platforms]]
+type = "telegram"
+
+[projects.platforms.options]
+bot_token = "token_xxx"
+`
+
+// TestLoadStopHookEvent verifies both accepted values are parsed through.
+func TestLoadStopHookEvent(t *testing.T) {
+	for _, want := range []string{"session.ended", "turn.cancelled"} {
+		configPath := writeConfigFixture(t, fmt.Sprintf(stopHookEventConfigFixture, want))
+
+		cfg, err := Load(configPath)
+		if err != nil {
+			t.Fatalf("Load(%q) returned error: %v", want, err)
+		}
+		if cfg.StopHookEvent != want {
+			t.Fatalf("cfg.StopHookEvent = %q, want %q", cfg.StopHookEvent, want)
+		}
+	}
+}
+
+// TestLoadStopHookEventDefaultsToEmpty verifies that omitting the key leaves
+// it empty, which the engine treats as "session.ended" (the historical
+// behavior).
+func TestLoadStopHookEventDefaultsToEmpty(t *testing.T) {
+	configPath := writeConfigFixture(t, `
+[[projects]]
+name = "alpha"
+
+[projects.agent]
+type = "codex"
+
+[projects.agent.options]
+work_dir = "/tmp/alpha"
+
+[[projects.platforms]]
+type = "telegram"
+
+[projects.platforms.options]
+bot_token = "token_xxx"
+`)
+
+	cfg, err := Load(configPath)
+	if err != nil {
+		t.Fatalf("Load returned error: %v", err)
+	}
+	if cfg.StopHookEvent != "" {
+		t.Fatalf("cfg.StopHookEvent = %q, want empty (engine default)", cfg.StopHookEvent)
+	}
+}
+
+// TestLoadRejectsInvalidStopHookEvent verifies that a typo is caught at
+// config load time instead of silently falling back to a default.
+func TestLoadRejectsInvalidStopHookEvent(t *testing.T) {
+	configPath := writeConfigFixture(t, fmt.Sprintf(stopHookEventConfigFixture, "turn.cancelledd"))
+
+	_, err := Load(configPath)
+	if err == nil {
+		t.Fatal("expected error for invalid stop_hook_event, got nil")
+	}
+	if !strings.Contains(err.Error(), `stop_hook_event must be "session.ended" or "turn.cancelled"`) {
+		t.Fatalf("error = %q, want stop_hook_event validation error", err.Error())
+	}
+}
 func writeConfigFixture(t *testing.T, content string) string {
 	t.Helper()
 	dir := t.TempDir()
@@ -2960,6 +3039,15 @@ func TestSaveProjectSettings_WorkspaceModeAndBaseDir(t *testing.T) {
 	}
 	if proj.BaseDir != wsBaseDir {
 		t.Fatalf("BaseDir = %q, want %q", proj.BaseDir, wsBaseDir)
+	}
+
+	// The saved file must still load: multi-workspace mode and an agent
+	// work_dir are mutually exclusive, so enabling the mode drops work_dir.
+	if _, ok := proj.Agent.Options["work_dir"]; ok {
+		t.Fatalf("work_dir still set after enabling multi-workspace mode: %v", proj.Agent.Options["work_dir"])
+	}
+	if _, err := Load(configPath); err != nil {
+		t.Fatalf("config saved by SaveProjectSettings no longer loads: %v", err)
 	}
 
 	details := GetProjectConfigDetails("alpha")
