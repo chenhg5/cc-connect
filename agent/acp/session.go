@@ -22,6 +22,20 @@ import (
 // roughly half the map (iteration order is arbitrary) to bound memory.
 const toolInputCacheMaxEntries = 1000
 
+// capabilityAdvertised reports whether an optional ACP capability is really
+// available. ACP servers signal "not supported" either by omitting the field
+// or by sending JSON null; a present-but-empty object ({}), which is what most
+// servers send, still means supported. Checking length alone is therefore not
+// enough: json.RawMessage holding null has length 4 and would be read as
+// "supported", making the caller issue a request the server cannot answer.
+func capabilityAdvertised(raw json.RawMessage) bool {
+	trimmed := bytes.TrimSpace(raw)
+	if len(trimmed) == 0 {
+		return false
+	}
+	return !bytes.Equal(trimmed, []byte("null"))
+}
+
 type acpSession struct {
 	workDir string
 	events  chan core.Event
@@ -227,8 +241,8 @@ func (s *acpSession) handshake(resumeSessionID string, authMethod string) error 
 	if err := json.Unmarshal(res, &initOut); err != nil {
 		return fmt.Errorf("acp: parse initialize result: %w", err)
 	}
-	listSupported := len(initOut.AgentCapabilities.SessionCapabilities.List) > 0
-	resumeSupported := len(initOut.AgentCapabilities.SessionCapabilities.Resume) > 0
+	listSupported := capabilityAdvertised(initOut.AgentCapabilities.SessionCapabilities.List)
+	resumeSupported := capabilityAdvertised(initOut.AgentCapabilities.SessionCapabilities.Resume)
 	slog.Debug("acp: initialized",
 		"protocol", initOut.ProtocolVersion,
 		"load_session", initOut.AgentCapabilities.LoadSession,
@@ -258,12 +272,18 @@ func (s *acpSession) handshake(resumeSessionID string, authMethod string) error 
 	// conversation, so this must not degrade to `session/new` while a
 	// resume capability is still on the table.
 	if resumeSessionID != "" && resumeSessionID != core.ContinueSession {
-		var resumeMethod string
-		switch {
-		case resumeSupported:
-			resumeMethod = "session/resume"
-		case initOut.AgentCapabilities.LoadSession:
-			resumeMethod = "session/load"
+		// Try every resume method the server advertises, newest first, and
+		// only start a fresh session once all of them have failed. Some
+		// servers advertise a capability they do not actually answer (for
+		// example CodeBuddy reports sessionCapabilities.resume as null yet
+		// only implements session/load), so a failed attempt must fall
+		// through to the next method instead of dropping the conversation.
+		var resumeMethods []string
+		if resumeSupported {
+			resumeMethods = append(resumeMethods, "session/resume")
+		}
+		if initOut.AgentCapabilities.LoadSession {
+			resumeMethods = append(resumeMethods, "session/load")
 		}
 		// Both resume methods may replay conversation history the way
 		// `session/load` does, and a long replay can fill the bounded
@@ -273,45 +293,45 @@ func (s *acpSession) handshake(resumeSessionID string, authMethod string) error 
 		// that guard lands it has to cover this path too, otherwise
 		// servers advertising `resume` reintroduce the deadlock #2038
 		// was written to fix.
-		if resumeMethod != "" {
+		for _, resumeMethod := range resumeMethods {
 			resumeRes, err := s.tr.call(s.ctx, resumeMethod, map[string]any{
 				"sessionId":  resumeSessionID,
 				"cwd":        s.workDir,
 				"mcpServers": []any{},
 			})
 			if err != nil {
-				slog.Warn("acp: session resume failed, starting new session",
+				slog.Warn("acp: session resume failed, trying next method",
 					"method", resumeMethod, "error", err)
-			} else {
-				var rr struct {
-					SessionID     string            `json:"sessionId"`
-					Modes         *acpModesBlock    `json:"modes"`
-					ConfigOptions []acpConfigOption `json:"configOptions"`
-				}
-				if uerr := json.Unmarshal(resumeRes, &rr); uerr != nil {
-					// The body is allowed to be a configOptions-only
-					// object, but a malformed one is worth a trace: we
-					// adopt the requested id regardless, so this line is
-					// the only evidence it happened.
-					slog.Debug("acp: parse resume result failed, keeping requested session id",
-						"method", resumeMethod, "error", uerr)
-				}
-				// A successful resume acknowledges the id we asked for.
-				// Servers may echo it back, but some (e.g. servers that
-				// only return configOptions) omit it - adopting the
-				// requested id is the correct reading either way. Without
-				// this, a server that returns no sessionId would never be
-				// resumed and the conversation would be silently replaced
-				// by a fresh session.
-				resumedID := rr.SessionID
-				if resumedID == "" {
-					resumedID = resumeSessionID
-				}
-				s.setACPSessionID(resumedID)
-				s.absorbModes(rr.Modes)
-				s.absorbConfigOptions(rr.ConfigOptions)
-				return nil
+				continue
 			}
+			var rr struct {
+				SessionID     string            `json:"sessionId"`
+				Modes         *acpModesBlock    `json:"modes"`
+				ConfigOptions []acpConfigOption `json:"configOptions"`
+			}
+			if uerr := json.Unmarshal(resumeRes, &rr); uerr != nil {
+				// The body is allowed to be a configOptions-only
+				// object, but a malformed one is worth a trace: we
+				// adopt the requested id regardless, so this line is
+				// the only evidence it happened.
+				slog.Debug("acp: parse resume result failed, keeping requested session id",
+					"method", resumeMethod, "error", uerr)
+			}
+			// A successful resume acknowledges the id we asked for.
+			// Servers may echo it back, but some (e.g. servers that
+			// only return configOptions) omit it - adopting the
+			// requested id is the correct reading either way. Without
+			// this, a server that returns no sessionId would never be
+			// resumed and the conversation would be silently replaced
+			// by a fresh session.
+			resumedID := rr.SessionID
+			if resumedID == "" {
+				resumedID = resumeSessionID
+			}
+			s.setACPSessionID(resumedID)
+			s.absorbModes(rr.Modes)
+			s.absorbConfigOptions(rr.ConfigOptions)
+			return nil
 		}
 	}
 
