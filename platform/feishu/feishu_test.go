@@ -355,6 +355,9 @@ func TestOnMessageThreadIsolationBootstrapsExistingThreadContext(t *testing.T) {
 			writeJSON(t, w, map[string]any{"code": 0, "msg": "success"})
 		case strings.HasPrefix(r.URL.Path, "/open-apis/im/v1/chats/"):
 			writeJSON(t, w, map[string]any{"code": 0, "msg": "success"})
+		case r.URL.Path == "/open-apis/im/v1/messages":
+			// Thread attachment backfill for the @bot trigger: nothing to forward.
+			writeJSON(t, w, map[string]any{"code": 0, "msg": "success", "data": map[string]any{"items": []any{}}})
 		default:
 			t.Fatalf("unexpected path %s", r.URL.Path)
 		}

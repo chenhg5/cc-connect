@@ -133,6 +133,10 @@ type replyContext struct {
 	// receiveIDType selects which Feishu ID space chatID belongs to:
 	// "" or "chat_id" (default), "open_id", "union_id".
 	receiveIDType string
+	// backfillThreadID is the Feishu thread whose earlier attachments from
+	// the sender are forwarded with this explicit @bot message; see
+	// thread_files.go.
+	backfillThreadID string
 }
 
 type Platform struct {
@@ -206,6 +210,9 @@ type Platform struct {
 	// activeThreadSessions tracks accepted threads so the agent context is
 	// bootstrapped from the parent/root message only on the first dispatch.
 	activeThreadSessions sync.Map // sessionKey -> time.Time
+	// threadBackfillDenied remembers threads already told that listing them
+	// is denied, so a missing scope reaches the agent once, not every turn.
+	threadBackfillDenied sync.Map // threadID -> struct{}
 
 	// pendingGroupHistory keeps text/post messages that were observed in an
 	// allowed group chat without an explicit bot trigger. It is deliberately
@@ -2160,6 +2167,12 @@ func (p *Platform) onMessage(ctx context.Context, event *larkim.P2MessageReceive
 	// On the first accepted message in an existing thread, bootstrap the agent
 	// context from the parent/root message.
 	rctx.bootstrapThread = p.markThreadSessionActive(sessionKey)
+	// File and image messages cannot @-mention the bot, so the mention filter
+	// above drops them. Let an explicit @bot message in a thread pick up what
+	// its sender uploaded there since their previous @bot message.
+	if p.threadIsolation && chatType == "group" && botMentioned && !groupReplyAllForChat && isThreadSessionKey(sessionKey) {
+		rctx.backfillThreadID = stringValue(msg.ThreadId)
+	}
 	if rctx.bootstrapThread && parentID == "" {
 		parentID = stringValue(msg.RootId)
 	}
@@ -2245,7 +2258,11 @@ func (p *Platform) dispatchMessageWithHistory(ctx context.Context, msgType, cont
 		// zero file-resource API calls.
 		approvedFileMetas := p.filterQuotedFilesForUser(quoted.files, mentions, userID)
 		quotedFiles := p.downloadQuotedFiles(ctx, approvedFileMetas)
-		if text == "" && historyText == "" && quoted.text == "" && len(quoted.images) == 0 && len(quotedFiles) == 0 {
+		backfill := p.backfillThreadAttachments(ctx, rctx, messageID, userID, text, createTimeMs, quotedMessageIDs(parentID, approvedFileMetas))
+		quotedFiles = append(quotedFiles, backfill.files...)
+		quotedImages := append(quoted.images, backfill.images...)
+		extraContent := joinFeishuExtraContent(append([]string{quoted.text}, backfill.notices...)...)
+		if text == "" && historyText == "" && extraContent == "" && len(quotedImages) == 0 && len(quotedFiles) == 0 {
 			slog.Debug(p.tag()+": dropping empty text after mention stripping",
 				"message_id", messageID,
 				"raw_text_len", len(textBody.Text),
@@ -2261,7 +2278,7 @@ func (p *Platform) dispatchMessageWithHistory(ctx context.Context, msgType, cont
 			SessionKey: sessionKey, Platform: p.platformName,
 			MessageID: messageID,
 			UserID:    userID, UserName: userName, ChatName: chatName,
-			Content: text, ExtraContent: quoted.text, Images: quoted.images, Files: quotedFiles, ReplyCtx: rctx,
+			Content: text, ExtraContent: extraContent, Images: quotedImages, Files: quotedFiles, ReplyCtx: rctx,
 			UserMessageTimeMs: createTimeMs,
 		})
 
@@ -2359,9 +2376,14 @@ func (p *Platform) dispatchMessageWithHistory(ctx context.Context, msgType, cont
 		textParts, images := p.extractPostParts(messageID, post, mentions...)
 		files, notices := p.downloadPostFiles(messageID, post.Files, strings.Join(textParts, "\n"))
 		textParts = append(textParts, notices...)
-		files = append(files, p.downloadQuotedFiles(ctx, p.filterQuotedFilesForUser(quoted.files, mentions, userID))...)
+		approvedFileMetas := p.filterQuotedFilesForUser(quoted.files, mentions, userID)
+		files = append(files, p.downloadQuotedFiles(ctx, approvedFileMetas)...)
 		text := stripMentions(strings.Join(textParts, "\n"), mentions, p.getBotOpenID())
-		if text == "" && historyText == "" && len(images) == 0 && len(files) == 0 && quoted.text == "" && len(quoted.images) == 0 {
+		backfill := p.backfillThreadAttachments(ctx, rctx, messageID, userID, text, createTimeMs, quotedMessageIDs(parentID, approvedFileMetas))
+		files = append(files, backfill.files...)
+		images = append(images, backfill.images...)
+		extraContent := joinFeishuExtraContent(append([]string{quoted.text}, backfill.notices...)...)
+		if text == "" && historyText == "" && len(images) == 0 && len(files) == 0 && extraContent == "" && len(quoted.images) == 0 {
 			return
 		}
 		// Flush any image batch buffered earlier in this session (#1686 P1-B).
@@ -2370,7 +2392,7 @@ func (p *Platform) dispatchMessageWithHistory(ctx context.Context, msgType, cont
 			SessionKey: sessionKey, Platform: p.platformName,
 			MessageID: messageID,
 			UserID:    userID, UserName: userName, ChatName: chatName,
-			Content: text, ExtraContent: quoted.text, Images: append(quoted.images, images...), Files: files,
+			Content: text, ExtraContent: extraContent, Images: append(quoted.images, images...), Files: files,
 			ReplyCtx:          rctx,
 			UserMessageTimeMs: createTimeMs,
 		})
