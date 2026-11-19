@@ -22,6 +22,11 @@ import (
 // roughly half the map (iteration order is arbitrary) to bound memory.
 const toolInputCacheMaxEntries = 1000
 
+// thinkingFlushWindow bounds how long reasoning chunks are coalesced before
+// being emitted as a single EventThinking. 800ms keeps the stream feeling live
+// while collapsing hundreds of token-level chunks into a handful of lines.
+const thinkingFlushWindow = 800 * time.Millisecond
+
 type acpSession struct {
 	workDir string
 	events  chan core.Event
@@ -37,6 +42,14 @@ type acpSession struct {
 	acpSessID string
 
 	sendMu sync.Mutex
+
+	// thinkingBuf coalesces token-level reasoning chunks into one EventThinking
+	// per thinkingFlushWindow. Some servers (CodeBuddy) push an
+	// agent_thought_chunk per token; forwarding each as its own event makes
+	// the IM client render one line per word.
+	thinkingMu    sync.Mutex
+	thinkingBuf   strings.Builder
+	thinkingTimer *time.Timer
 
 	permMu   sync.Mutex
 	permByID map[string]permState
@@ -538,6 +551,10 @@ func (s *acpSession) onNotification(method string, params json.RawMessage) {
 		if ev.Type == core.EventText && ev.Content != "" {
 			hasVisible = true
 		}
+		if ev.Type == core.EventThinking {
+			s.emitThinking(ev)
+			continue
+		}
 		s.emit(ev)
 	}
 	// Out-of-turn text (background work reporting after its turn ended —
@@ -840,6 +857,44 @@ func (s *acpSession) handleElicitationRequest(id json.RawMessage, params json.Ra
 	})
 }
 
+// emitThinking buffers a reasoning chunk and schedules a window flush. Some
+// ACP servers (CodeBuddy) emit one agent_thought_chunk per token; forwarding
+// each one as its own EventThinking makes the client render a line per word.
+func (s *acpSession) emitThinking(ev core.Event) {
+	if ev.Content == "" {
+		return
+	}
+	s.thinkingMu.Lock()
+	s.thinkingBuf.WriteString(ev.Content)
+	if s.thinkingTimer == nil {
+		s.thinkingTimer = time.AfterFunc(thinkingFlushWindow, s.flushThinking)
+	}
+	s.thinkingMu.Unlock()
+}
+
+// flushThinking emits everything buffered so far as a single EventThinking.
+// Called by the window timer and again at the end of every turn so the tail of
+// a reasoning stream is never dropped.
+func (s *acpSession) flushThinking() {
+	s.thinkingMu.Lock()
+	text := s.thinkingBuf.String()
+	s.thinkingBuf.Reset()
+	if s.thinkingTimer != nil {
+		s.thinkingTimer.Stop()
+		s.thinkingTimer = nil
+	}
+	s.thinkingMu.Unlock()
+
+	if strings.TrimSpace(text) == "" {
+		return
+	}
+	s.emit(core.Event{
+		Type:      core.EventThinking,
+		Content:   text,
+		SessionID: s.currentACPSessionID(),
+	})
+}
+
 func (s *acpSession) emit(ev core.Event) {
 	if ev.SessionID == "" {
 		ev.SessionID = s.currentACPSessionID()
@@ -882,6 +937,7 @@ func (s *acpSession) Send(prompt string, messageID string, images []core.ImageAt
 	res, err := s.tr.call(s.ctx, "session/prompt", params)
 	if err != nil {
 		s.promptInFlight.Add(-1)
+		s.flushThinking()
 		s.emit(core.Event{Type: core.EventError, Error: err})
 		return fmt.Errorf("acp: session/prompt: %w", err)
 	}
@@ -911,7 +967,9 @@ func (s *acpSession) Send(prompt string, messageID string, images []core.ImageAt
 	// Text was streamed via session/update; engine aggregates EventText.
 	// Keep the in-flight mark until after EventResult is queued so a text
 	// chunk racing in from the read loop is not mistaken for out-of-turn
-	// background output.
+	// background output. Reasoning still sitting in the coalescing buffer has
+	// to go out first, otherwise it would land after the result and be dropped.
+	s.flushThinking()
 	s.emit(core.Event{
 		Type:      core.EventResult,
 		SessionID: sid,
