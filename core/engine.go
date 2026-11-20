@@ -6715,7 +6715,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				toolSteps = append(toolSteps, ToolStep{
 					Kind:    ToolStepKindTool,
 					Name:    event.ToolName,
-					Summary: truncateIf(event.ToolInput, e.display.ToolMaxLen),
+					Summary: truncateToolInput(event.ToolInput, e.display.ToolMaxLen),
 				})
 				if cardMessageID == nil {
 					card := buildResolvedRichCard(CardStatusWorking, "", toolSteps, partialText, true, e.composeRichStatusFooter(true, turnStart, e.agent, state.agentSession, state.workspaceDir))
@@ -6827,7 +6827,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				// Truncate the tool input that goes into the progress card payload so
 				// tool_max_len applies uniformly to progress_style=card, matching
 				// the rich-card path. event.ToolInput itself is left untouched.
-				cardToolInput := truncateIf(toolInput, e.display.ToolMaxLen)
+				cardToolInput := truncateToolInput(toolInput, e.display.ToolMaxLen)
 				if !cp.AppendEvent(ProgressEntryToolUse, cardToolInput, event.ToolName, toolMsg) {
 					// Compact/card progress is best-effort. If its editable card
 					// fails, do not turn every subsequent tool event into a new
@@ -8130,7 +8130,7 @@ func mergeRichToolResult(steps []ToolStep, event Event, result string, maxLen in
 	if idx == -1 {
 		summary := strings.TrimSpace(event.ToolInput)
 		if summary != "" {
-			summary = truncateIf(summary, maxLen)
+			summary = truncateToolInput(summary, maxLen)
 		}
 		steps = append(steps, ToolStep{
 			Kind:    ToolStepKindTool,
@@ -8147,7 +8147,7 @@ func mergeRichToolResult(steps []ToolStep, event Event, result string, maxLen in
 		steps[idx].Kind = ToolStepKindTool
 	}
 	if strings.TrimSpace(steps[idx].Summary) == "" && strings.TrimSpace(event.ToolInput) != "" {
-		steps[idx].Summary = truncateIf(strings.TrimSpace(event.ToolInput), maxLen)
+		steps[idx].Summary = truncateToolInput(strings.TrimSpace(event.ToolInput), maxLen)
 	}
 	steps[idx].Result = result
 	steps[idx].Status = strings.TrimSpace(event.ToolStatus)
@@ -18596,6 +18596,73 @@ func truncateIf(s string, maxLen int) string {
 		return s
 	}
 	return string([]rune(s)[:maxLen]) + "..."
+}
+
+// truncatedJSONMarker marks string values shortened by truncateToolInput.
+const truncatedJSONMarker = "...(truncated)"
+
+// truncateToolInput caps a tool-input payload while keeping JSON objects
+// parseable. Platform renderers decode this payload to show structured fields;
+// cutting the raw JSON mid-string makes the decode fail, and they then fall
+// back to the first quoted token in the broken JSON — a bare key name such as
+// "patchText" instead of the patch itself.
+func truncateToolInput(s string, maxLen int) string {
+	if maxLen <= 0 || utf8.RuneCountInString(s) <= maxLen {
+		return s
+	}
+	var payload map[string]any
+	if err := json.Unmarshal([]byte(s), &payload); err != nil {
+		return truncateIf(s, maxLen)
+	}
+	for {
+		b, err := json.Marshal(payload)
+		if err != nil {
+			return truncateIf(s, maxLen)
+		}
+		over := utf8.RuneCount(b) - maxLen
+		if over <= 0 {
+			return string(b)
+		}
+		key := longestJSONStringValue(payload)
+		if key == "" {
+			return truncateIf(s, maxLen)
+		}
+		runes := []rune(payload[key].(string))
+		budget := len(runes) - over
+		if budget < 0 {
+			budget = 0
+		}
+		keep := budget - utf8.RuneCountInString(truncatedJSONMarker)
+		switch {
+		case keep > 0:
+			payload[key] = string(runes[:keep]) + truncatedJSONMarker
+		case budget > 0:
+			payload[key] = string(runes[:budget])
+		default:
+			payload[key] = ""
+		}
+	}
+}
+
+// longestJSONStringValue returns the longest top-level string value that has
+// not been truncated yet, breaking ties by key so the result is deterministic.
+func longestJSONStringValue(payload map[string]any) string {
+	key := ""
+	longest := 0
+	for k, v := range payload {
+		s, ok := v.(string)
+		if !ok || strings.HasSuffix(s, truncatedJSONMarker) {
+			continue
+		}
+		n := utf8.RuneCountInString(s)
+		if n == 0 {
+			continue
+		}
+		if n > longest || (n == longest && (key == "" || k < key)) {
+			key, longest = k, n
+		}
+	}
+	return key
 }
 
 func splitMessage(text string, maxLen int) []string {

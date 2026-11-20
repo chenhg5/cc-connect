@@ -6847,9 +6847,24 @@ func extractScalarText(value any) string {
 	}
 }
 
+// looksLikeBrokenToolJSON reports whether text is a JSON payload that was cut
+// off before it could close. On parse failure the summary fallback would grab
+// the first quoted token, which in a truncated payload is just a key name such
+// as "patchText" — worse than showing the raw truncated content.
+func looksLikeBrokenToolJSON(text string) bool {
+	trimmed := strings.TrimSpace(text)
+	if trimmed == "" || (trimmed[0] != '{' && trimmed[0] != '[') {
+		return false
+	}
+	return !json.Valid([]byte(trimmed))
+}
+
 func extractToolDetailFromSummary(text string, desc toolDescriptor) string {
 	text = strings.TrimSpace(text)
 	if text == "" {
+		return ""
+	}
+	if looksLikeBrokenToolJSON(text) {
 		return ""
 	}
 	for _, line := range strings.Split(strings.ReplaceAll(text, "\r\n", "\n"), "\n") {
