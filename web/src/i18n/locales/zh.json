@@ -119,7 +119,15 @@
     "linkGlobal": "关联全局服务商",
     "addCustom": "自定义添加",
     "allLinked": "所有全局服务商已关联。",
-    "manageGlobal": "管理全局服务商"
+    "manageGlobal": "管理全局服务商",
+    "notSupportedTag": "不支持",
+    "notSupportedTitle": "该 agent 类型不支持 provider 切换",
+    "notSupportedHint": "下方已关联的服务商仅供查看，该类型不支持切换、激活或删除服务商。",
+    "linkedReadOnly": "已关联的服务商（只读）",
+    "noLinkedRefs": "未关联任何服务商。",
+    "loadFailed": "加载服务商列表失败",
+    "loadFailedHint": "服务商列表加载失败，这并不代表该项目没有配置服务商。",
+    "retry": "重试"
   },
   "cron": {
     "title": "定时任务",

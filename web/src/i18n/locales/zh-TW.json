@@ -119,7 +119,15 @@
     "linkGlobal": "關聯全域服務商",
     "addCustom": "自訂新增",
     "allLinked": "所有全域服務商已關聯。",
-    "manageGlobal": "管理全域服務商"
+    "manageGlobal": "管理全域服務商",
+    "notSupportedTag": "不支援",
+    "notSupportedTitle": "此 agent 類型不支援 provider 切換",
+    "notSupportedHint": "下方已關聯的服務商僅供查看，此類型不支援切換、啟用或刪除服務商。",
+    "linkedReadOnly": "已關聯的服務商（唯讀）",
+    "noLinkedRefs": "未關聯任何服務商。",
+    "loadFailed": "載入服務商清單失敗",
+    "loadFailedHint": "服務商清單載入失敗，這不代表此專案未設定服務商。",
+    "retry": "重試"
   },
   "cron": {
     "title": "排程工作",

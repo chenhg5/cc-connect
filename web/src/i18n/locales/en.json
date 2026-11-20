@@ -119,7 +119,15 @@
     "linkGlobal": "Link global",
     "addCustom": "Add custom",
     "allLinked": "All global providers are already linked.",
-    "manageGlobal": "Manage global providers"
+    "manageGlobal": "Manage global providers",
+    "notSupportedTag": "Not supported",
+    "notSupportedTitle": "Provider switching is not supported for this agent type",
+    "notSupportedHint": "Linked providers below are read-only. Switching, activating or removing providers is not available for this agent type.",
+    "linkedReadOnly": "Linked providers (read-only)",
+    "noLinkedRefs": "No providers linked.",
+    "loadFailed": "Failed to load providers",
+    "loadFailedHint": "The provider list could not be loaded. This does not mean the project has no providers configured.",
+    "retry": "Retry"
   },
   "cron": {
     "title": "Scheduled jobs",

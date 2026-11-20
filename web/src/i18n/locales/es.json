@@ -119,7 +119,15 @@
     "linkGlobal": "Vincular global",
     "addCustom": "Añadir personalizado",
     "allLinked": "Todos los proveedores globales ya están vinculados.",
-    "manageGlobal": "Gestionar proveedores globales"
+    "manageGlobal": "Gestionar proveedores globales",
+    "notSupportedTag": "No compatible",
+    "notSupportedTitle": "Este tipo de agente no admite el cambio de proveedor",
+    "notSupportedHint": "Los proveedores vinculados abajo son de solo lectura. Este tipo de agente no permite cambiar, activar ni eliminar proveedores.",
+    "linkedReadOnly": "Proveedores vinculados (solo lectura)",
+    "noLinkedRefs": "No hay proveedores vinculados.",
+    "loadFailed": "No se pudo cargar la lista de proveedores",
+    "loadFailedHint": "No se pudo cargar la lista de proveedores. Esto no significa que el proyecto no tenga proveedores configurados.",
+    "retry": "Reintentar"
   },
   "cron": {
     "title": "Tareas programadas",
