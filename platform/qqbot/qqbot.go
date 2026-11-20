@@ -69,6 +69,8 @@ type Platform struct {
 	shareSessionInChannel bool
 	intents               int
 	markdownSupport       bool // enable markdown messages (msg_type: 2)
+	completionGroup       string
+	completionWorkspace   string
 	handler               core.MessageHandler
 	ctx                   context.Context // lifetime context for the platform
 	cancel                context.CancelFunc
@@ -117,6 +119,7 @@ type replyContext struct {
 	groupOpenID string // for group messages
 	userOpenID  string // user's openid (member_openid for group, user_openid for c2c)
 	eventMsgID  string // msg_id from the incoming event, used for passive reply
+	eventTime   time.Time
 	sessionKey  string // pre-computed session key for button_data embedding and session routing
 }
 
@@ -160,6 +163,8 @@ func New(opts map[string]any) (core.Platform, error) {
 	allowFrom, _ := opts["allow_from"].(string)
 	shareSessionInChannel, _ := opts["share_session_in_channel"].(bool)
 	markdownSupport, _ := opts["markdown_support"].(bool)
+	completionGroup, _ := opts["task_completion_group"].(string)
+	completionWorkspace, _ := opts["task_completion_workspace"].(string)
 
 	intents := defaultIntents
 	if v, ok := opts["intents"].(int); ok && v > 0 {
@@ -178,6 +183,8 @@ func New(opts map[string]any) (core.Platform, error) {
 		shareSessionInChannel: shareSessionInChannel,
 		intents:               intents,
 		markdownSupport:       markdownSupport,
+		completionGroup:       strings.TrimSpace(completionGroup),
+		completionWorkspace:   strings.TrimSpace(completionWorkspace),
 		messageCachePath:      qqbotMessageCachePath(dataDir),
 	}, nil
 }
@@ -355,7 +362,7 @@ func (p *Platform) apiRequestJSON(method, url string, body any, result any) erro
 
 		if resp2.StatusCode >= 300 {
 			raw, _ := io.ReadAll(resp2.Body)
-			return fmt.Errorf("qqbot: api %s %s returned %d (after retry): %s", method, url, resp2.StatusCode, raw)
+			return newAPIError(method, url, resp2.StatusCode, raw, true)
 		}
 		if result != nil {
 			if err := json.NewDecoder(resp2.Body).Decode(result); err != nil {
@@ -367,7 +374,7 @@ func (p *Platform) apiRequestJSON(method, url string, body any, result any) erro
 
 	if resp.StatusCode >= 300 {
 		raw, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("qqbot: api %s %s returned %d: %s", method, url, resp.StatusCode, raw)
+		return newAPIError(method, url, resp.StatusCode, raw, false)
 	}
 	if result != nil {
 		if err := json.NewDecoder(resp.Body).Decode(result); err != nil {
@@ -1216,11 +1223,16 @@ func (p *Platform) handleGroupMessage(data json.RawMessage) {
 		sessionKey = fmt.Sprintf("qqbot:%s:%s", d.GroupOpenID, d.Author.MemberOpenID)
 	}
 
+	eventTime, err := time.Parse(time.RFC3339, d.Timestamp)
+	if err != nil {
+		eventTime = time.Now()
+	}
 	rctx := &replyContext{
 		messageType: "group",
 		groupOpenID: d.GroupOpenID,
 		userOpenID:  d.Author.MemberOpenID,
 		eventMsgID:  d.ID,
+		eventTime:   eventTime,
 		sessionKey:  sessionKey,
 	}
 
@@ -1326,6 +1338,10 @@ func (p *Platform) handleC2CMessage(data json.RawMessage) {
 // ---------------------------------------------------------------------------
 
 func (p *Platform) sendMessage(rctx *replyContext, content string) error {
+	return p.sendMessageWithFormat(rctx, content, p.markdownSupport)
+}
+
+func (p *Platform) sendMessageWithFormat(rctx *replyContext, content string, markdown bool) error {
 	var url string
 	switch rctx.messageType {
 	case "group":
@@ -1337,7 +1353,7 @@ func (p *Platform) sendMessage(rctx *replyContext, content string) error {
 	}
 
 	var body map[string]any
-	if p.markdownSupport {
+	if markdown {
 		// Markdown format (msg_type: 2)
 		body = map[string]any{
 			"markdown": map[string]any{
@@ -1414,70 +1430,7 @@ func (p *Platform) apiBase() string {
 }
 
 func (p *Platform) apiRequest(method, url string, body any) error {
-	var bodyReader io.Reader
-	if body != nil {
-		data, err := json.Marshal(body)
-		if err != nil {
-			return fmt.Errorf("qqbot: marshal body: %w", err)
-		}
-		bodyReader = bytes.NewReader(data)
-	}
-
-	token, err := p.getAccessToken()
-	if err != nil {
-		return fmt.Errorf("qqbot: get token: %w", err)
-	}
-
-	req, err := http.NewRequest(method, url, bodyReader)
-	if err != nil {
-		return err
-	}
-	req.Header.Set("Authorization", "QQBot "+token)
-	req.Header.Set("Content-Type", "application/json")
-
-	resp, err := core.HTTPClient.Do(req)
-	if err != nil {
-		return fmt.Errorf("qqbot: api request failed: %w", err)
-	}
-	defer resp.Body.Close()
-
-	// Retry once on 401 (token may have expired)
-	if resp.StatusCode == http.StatusUnauthorized {
-		if err := p.refreshToken(); err != nil {
-			return fmt.Errorf("qqbot: token refresh on 401: %w", err)
-		}
-		token, _ = p.getAccessToken()
-
-		// Rebuild the request body reader
-		if body != nil {
-			data, _ := json.Marshal(body)
-			bodyReader = bytes.NewReader(data)
-		}
-		req2, err := http.NewRequest(method, url, bodyReader)
-		if err != nil {
-			return fmt.Errorf("qqbot: build retry request: %w", err)
-		}
-		req2.Header.Set("Authorization", "QQBot "+token)
-		req2.Header.Set("Content-Type", "application/json")
-
-		resp2, err := core.HTTPClient.Do(req2)
-		if err != nil {
-			return fmt.Errorf("qqbot: api retry failed: %w", err)
-		}
-		defer resp2.Body.Close()
-
-		if resp2.StatusCode >= 300 {
-			raw, _ := io.ReadAll(resp2.Body)
-			return fmt.Errorf("qqbot: api %s %s returned %d (after retry): %s", method, url, resp2.StatusCode, raw)
-		}
-		return nil
-	}
-
-	if resp.StatusCode >= 300 {
-		raw, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("qqbot: api %s %s returned %d: %s", method, url, resp.StatusCode, raw)
-	}
-	return nil
+	return p.apiRequestJSON(method, url, body, nil)
 }
 
 // attachment represents an image/file attachment in the QQ Bot API event payload.
