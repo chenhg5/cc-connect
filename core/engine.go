@@ -615,6 +615,7 @@ type interactiveState struct {
 	// currentTurnUserMessageTimeMs is the UserMessageTimeMs for the in-flight
 	// foreground turn (including a queued turn after EventResult).
 	currentTurnUserMessageTimeMs int64
+	goalContinuations            int
 }
 
 // latestUserMessageWatermarkLocked returns the highest UserMessageTimeMs among
@@ -4103,6 +4104,7 @@ func (e *Engine) processInteractiveMessageWith(p Platform, msg *Message, session
 	state.replyCtx = msg.ReplyCtx
 	state.currentMessageID = msg.MessageID
 	state.currentTurnUserMessageTimeMs = msg.UserMessageTimeMs
+	state.goalContinuations = 0
 	state.mu.Unlock()
 	stopRecallMonitor := e.startMessageRecallMonitor(interactiveKey)
 	defer stopRecallMonitor()
@@ -6683,15 +6685,17 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 					"dropped", droppedStale,
 				)
 			}
-			if len(state.pendingMessages) > 0 {
-				queued := state.pendingMessages[0]
-				state.pendingMessages = state.pendingMessages[1:]
+			queued, synthetic, hasNext := nextInteractiveTurnLocked(state)
+			if hasNext {
 				remainingQueue := len(state.pendingMessages)
 				state.platform = queued.platform
 				state.replyCtx = queued.replyCtx
 				state.currentMessageID = queued.messageID
 				state.fromVoice = queued.fromVoice
 				state.currentTurnUserMessageTimeMs = queued.userMessageTimeMs
+				if !synthetic {
+					state.goalContinuations = 0
+				}
 				state.mu.Unlock()
 
 				// Stop the previous turn's typing indicator
@@ -6717,7 +6721,10 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 					}
 				}
 
-				queuedPrompt := e.buildSenderPrompt(queued.content, queued.userID, queued.userName, queued.msgPlatform, queued.msgSessionKey, queued.channelKey)
+				queuedPrompt := queued.content
+				if !synthetic {
+					queuedPrompt = e.buildSenderPrompt(queued.content, queued.userID, queued.userName, queued.msgPlatform, queued.msgSessionKey, queued.channelKey)
+				}
 
 				state.mu.Lock()
 				as := state.agentSession // capture under lock to avoid race with cleanup
@@ -6735,7 +6742,9 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 
 				// Detect language now (deferred from queue time to avoid
 				// flipping locale while the previous turn is still running).
-				e.i18n.DetectAndSet(queued.content)
+				if !synthetic {
+					e.i18n.DetectAndSet(queued.content)
+				}
 
 				// Reset per-turn state for the next turn
 				msgID = queued.messageID
@@ -6783,7 +6792,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				}
 
 				// Send instant reply for queued turn if no streaming card is active.
-				if e.instantReply.Enabled && streamCard == nil {
+				if !synthetic && e.instantReply.Enabled && streamCard == nil {
 					replyContent := e.instantReply.Content
 					if replyContent == "" {
 						replyContent = e.i18n.T(MsgStarting)
@@ -6791,7 +6800,9 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 					e.send(queued.platform, queued.replyCtx, replyContent)
 				}
 
-				session.AddHistory("user", queued.content)
+				if !synthetic {
+					session.AddHistory("user", queued.content)
+				}
 				// Persist queued user message immediately (mirror of the
 				// initial AddHistory("user",...) save above).
 				sessions.Save()
@@ -6812,6 +6823,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				)
 				continue
 			}
+
 			state.mu.Unlock()
 
 			if pendingSend != nil {
