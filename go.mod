@@ -5,6 +5,7 @@ go 1.25.0
 require (
 	cloud.google.com/go/pubsub/v2 v2.4.0
 	github.com/BurntSushi/toml v1.6.0
+	github.com/Microsoft/go-winio v0.6.2
 	github.com/bwmarrin/discordgo v0.29.0
 	github.com/charmbracelet/bubbles v1.0.0
 	github.com/charmbracelet/bubbletea v1.3.10
@@ -22,6 +23,7 @@ require (
 	github.com/stretchr/testify v1.11.1
 	golang.org/x/crypto v0.50.0
 	golang.org/x/oauth2 v0.36.0
+	golang.org/x/sys v0.43.0
 	google.golang.org/api v0.272.0
 	maunium.net/go/mautrix v0.27.0
 	modernc.org/sqlite v1.49.1
@@ -90,7 +92,6 @@ require (
 	golang.org/x/exp v0.0.0-20260410095643-746e56fc9e2f // indirect
 	golang.org/x/net v0.53.0 // indirect
 	golang.org/x/sync v0.20.0 // indirect
-	golang.org/x/sys v0.43.0 // indirect
 	golang.org/x/term v0.42.0 // indirect
 	golang.org/x/text v0.36.0 // indirect
 	golang.org/x/time v0.15.0 // indirect
