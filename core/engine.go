@@ -501,7 +501,7 @@ type Engine struct {
 	closingSessions map[string]chan struct{} // sessionKey → closed when teardown finishes
 	unsafeResume    map[string]bool          // sessionKey → next spawn must start fresh, not resume
 
-	platformLifecycleMu sync.Mutex
+	platformLifecycleMu sync.RWMutex
 	platformReady       map[Platform]bool
 	stopping            bool
 	replyFooterMu       sync.Mutex
@@ -2457,13 +2457,18 @@ func (e *Engine) Start() error {
 // BeginShutdown rejects new work before Stop tears down engine resources.
 func (e *Engine) BeginShutdown() {
 	e.platformLifecycleMu.Lock()
+	if e.stopping {
+		e.platformLifecycleMu.Unlock()
+		return
+	}
 	e.stopping = true
 	e.platformLifecycleMu.Unlock()
+	slog.Warn("engine shutdown: no longer accepting new work", "project", e.name)
 }
 
 func (e *Engine) isStopping() bool {
-	e.platformLifecycleMu.Lock()
-	defer e.platformLifecycleMu.Unlock()
+	e.platformLifecycleMu.RLock()
+	defer e.platformLifecycleMu.RUnlock()
 	return e.stopping || e.ctx.Err() != nil
 }
 
@@ -4390,7 +4395,6 @@ func (e *Engine) workspaceContext(workspace, sessionKey string) (Agent, *Session
 	return wsAgent, wsSessions, interactiveKey, effectiveDir, nil
 }
 
-// getOrCreateInteractiveStateWith accepts an optional agent override for multi-workspace mode.
 // adoptPendingFromPlaceholder copies pendingMessages from an existing placeholder
 // state to newState so queued messages are not lost when the map entry is replaced.
 // Must be called under interactiveMu.
@@ -4406,7 +4410,8 @@ func adoptPendingFromPlaceholder(existing, newState *interactiveState) {
 	existing.mu.Unlock()
 }
 
-// When agentOverride is non-nil it is used instead of e.agent to start the session.
+// getOrCreateInteractiveStateWith accepts an optional agent override for multi-workspace mode.
+// During shutdown it returns nil without creating a placeholder, so pending work is discarded.
 // ccSessionKey, when non-empty, is used for CC_SESSION_KEY env injection; otherwise sessionKey is used.
 func (e *Engine) getOrCreateInteractiveStateWith(sessionKey string, p Platform, replyCtx any, session *Session, sessions *SessionManager, agentOverride Agent, ccSessionKey string) *interactiveState {
 	// /stop removes the state from the map immediately but tears the process

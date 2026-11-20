@@ -3,6 +3,9 @@ package core
 import (
 	"context"
 	"errors"
+	"log/slog"
+	"os"
+	"strings"
 	"testing"
 	"testing/synctest"
 )
@@ -38,6 +41,36 @@ func TestEngine_BeginShutdownRejectsInboundWork(t *testing.T) {
 	}
 	if len(agent.calls) != 0 || len(platform.getSent()) != 0 {
 		t.Fatal("closed ingress started an agent or sent a reply")
+	}
+}
+
+func TestEngine_BeginShutdownWarnsOnce(t *testing.T) {
+	logFile, err := os.CreateTemp(t.TempDir(), "shutdown-*.log")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		if err := logFile.Close(); err != nil {
+			t.Error(err)
+		}
+	}()
+	previous := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(logFile, &slog.HandlerOptions{Level: slog.LevelWarn})))
+	defer slog.SetDefault(previous)
+
+	engine := NewEngine("shutdown-test", &stubStartSessionAgent{}, nil, "", LangEnglish)
+	engine.BeginShutdown()
+	engine.BeginShutdown()
+	if err := engine.Stop(); err != nil {
+		t.Fatal(err)
+	}
+
+	logs, err := os.ReadFile(logFile.Name())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if count := strings.Count(string(logs), `level=WARN msg="engine shutdown: no longer accepting new work" project=shutdown-test`); count != 1 {
+		t.Fatalf("got %d ingress shutdown warnings, want 1; logs: %s", count, logs)
 	}
 }
 

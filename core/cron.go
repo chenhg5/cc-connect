@@ -938,6 +938,11 @@ func (cs *CronScheduler) runJob(job *CronJob, manual bool, stop <-chan struct{})
 	default:
 	}
 
+	if errors.Is(err, errCronShutdown) {
+		cs.store.MarkRun(job.ID, nil)
+		slog.Warn("cron: job interrupted by shutdown", "id", job.ID, "project", job.Project, "manual", manual)
+		return true
+	}
 	cs.store.MarkRun(job.ID, err)
 
 	if err != nil {

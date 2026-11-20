@@ -50,10 +50,12 @@ func TestCronScheduler_StopInterruptsRunningJob(t *testing.T) {
 				if err != nil {
 					test.Fatal(err)
 				}
+				previousRun := time.Now().Add(-time.Minute)
 				job := &CronJob{
 					ID: "shutdown", Project: "test", SessionKey: "test:shutdown",
 					CronExpr: "@every 3s", Prompt: "wait", Enabled: true, Mute: true,
 					TimeoutMins: &testcase.timeout, SessionMode: "new_per_run",
+					LastRun: previousRun, LastError: "previous failure",
 				}
 				if err := store.Add(job); err != nil {
 					test.Fatal(err)
@@ -105,7 +107,7 @@ func TestCronScheduler_StopInterruptsRunningJob(t *testing.T) {
 					test.Fatal(err)
 				}
 				interrupted := reloaded.Get(job.ID)
-				if interrupted == nil || !interrupted.Enabled || interrupted.LastRun.IsZero() || interrupted.LastError != "interrupted by shutdown" {
+				if interrupted == nil || !interrupted.Enabled || !interrupted.LastRun.After(previousRun) || interrupted.LastError != "" {
 					test.Fatalf("interrupted cron did not persist the expected state: %+v", interrupted)
 				}
 				interruptedAt := interrupted.LastRun
