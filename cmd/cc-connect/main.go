@@ -1343,33 +1343,43 @@ func main() {
 	}
 
 	slog.Info("shutting down...")
+	slog.Info("shutdown: stopping engine ingress", "projects", len(engines))
+	for _, e := range engines {
+		e.BeginShutdown()
+	}
+	if cronSched != nil {
+		slog.Info("shutdown: stopping cron scheduler")
+		cronSched.Stop()
+	}
 	if mgmtSrv != nil {
+		slog.Info("shutdown: stopping management server")
 		mgmtSrv.Stop()
 	}
 	if bridgeSrv != nil {
+		slog.Info("shutdown: stopping bridge server")
 		bridgeSrv.Stop()
 	}
 	if webhookSrv != nil {
+		slog.Info("shutdown: stopping webhook server")
 		webhookSrv.Stop()
 	}
+	slog.Info("shutdown: stopping heartbeat scheduler")
 	heartbeatSched.Stop()
 	if timerSched != nil {
+		slog.Info("shutdown: stopping timer scheduler")
 		timerSched.Stop()
 	}
-	if cronSched != nil {
-		cronSched.Stop()
-	}
 	if apiSrv != nil {
+		slog.Info("shutdown: stopping API server")
 		apiSrv.Stop()
 	}
 	for _, e := range engines {
+		slog.Info("shutdown: stopping engine", "project", e.ProjectName())
 		if err := e.Stop(); err != nil {
-			slog.Error("shutdown error", "error", err)
+			slog.Error("shutdown error", "project", e.ProjectName(), "error", err)
 		}
 	}
-	if logCloser != nil {
-		logCloser.Close()
-	}
+	slog.Info("shutdown: releasing instance lock")
 	instanceLock.Release()
 
 	if restartReq != nil {
@@ -1396,7 +1406,15 @@ func main() {
 		}
 	}
 
+	if logCloser != nil {
+		slog.Info("shutdown: closing log writer")
+	}
 	slog.Info("bye")
+	if logCloser != nil {
+		if err := logCloser.Close(); err != nil {
+			fmt.Fprintf(os.Stderr, "shutdown: close log writer: %v\n", err)
+		}
+	}
 }
 
 func runTopLevelCommand(args []string) bool {

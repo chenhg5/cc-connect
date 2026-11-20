@@ -1293,7 +1293,7 @@ func TestCronScheduler_MultipleJobsAllFire(t *testing.T) {
 	// Fire directly. fireDueJobs calls store.Get + runJob, both of which
 	// short-circuit when the engine is nil (no engine registered for the
 	// project). The nextRun advancement we care about happens after.
-	cs.fireDueJobs()
+	cs.fireDueJobs(cs.run.stop)
 
 	// Every entry's nextRun should now be in the future (the schedule
 	// has been advanced past the past-due state).
