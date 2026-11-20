@@ -45,6 +45,16 @@ export const platformMeta: Record<string, PlatformMeta> = {
       { key: 'share_session_in_channel', labelKey: 'fields.sharedChannelSession', type: 'boolean', group: 'advanced' },
     ],
   },
+  teams: {
+    label: 'Microsoft Teams',
+    fields: [
+      { key: 'app_id', labelKey: 'fields.appId', required: true, placeholder: '00000000-0000-0000-0000-000000000000' },
+      { key: 'app_password', labelKey: 'fields.appSecret', required: true, type: 'password' },
+      { key: 'tenant_id', labelKey: 'fields.tenantId', required: true, placeholder: '00000000-0000-0000-0000-000000000000' },
+      { key: 'allow_from', labelKey: 'fields.allowFrom', placeholder: '* (all)', group: 'advanced' },
+      { key: 'session_scope', labelKey: 'fields.sessionScope', type: 'select', options: ['thread', 'channel', 'user'], group: 'advanced' },
+    ],
+  },
   dingtalk: {
     label: 'DingTalk',
     fields: [
