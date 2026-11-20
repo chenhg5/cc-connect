@@ -7199,6 +7199,22 @@ func matchPrefix(prefix string, candidates []struct {
 	return matched
 }
 
+// IsBuiltinCommand reports whether text invokes a built-in slash command,
+// resolved the way the engine does (name, alias or unambiguous prefix).
+// Platforms use it to tell messages the engine consumes from slash messages
+// (skills, custom or unknown commands) that still reach the agent.
+func IsBuiltinCommand(text string) bool {
+	text = strings.TrimSpace(text)
+	if !strings.HasPrefix(text, "/") {
+		return false
+	}
+	parts := splitCommandArgs(text)
+	if len(parts) == 0 {
+		return false
+	}
+	return matchPrefix(strings.ToLower(strings.TrimPrefix(parts[0], "/")), builtinCommands) != ""
+}
+
 // matchSubCommand does prefix matching against a flat list of subcommand names.
 func matchSubCommand(input string, candidates []string) string {
 	for _, c := range candidates {
