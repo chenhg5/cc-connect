@@ -382,10 +382,11 @@ func (s *reasonixSession) dispatchEvent(data []byte) {
 			status = "failed"
 		}
 		s.emit(core.Event{
-			Type:       core.EventToolResult,
-			ToolName:   we.Tool.Name,
-			ToolResult: we.Tool.Output,
-			ToolStatus: status,
+			Type:           core.EventToolResult,
+			ToolName:       we.Tool.Name,
+			ToolResult:     we.Tool.Output,
+			ToolResultTail: core.ToolOutputTail(we.Tool.Output),
+			ToolStatus:     status,
 		})
 
 	case "approval_request":

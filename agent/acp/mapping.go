@@ -179,10 +179,11 @@ func mapToolCallUpdate(sessionID string, update json.RawMessage) []core.Event {
 			body = "(failed)"
 		}
 		return []core.Event{{
-			Type:      core.EventToolResult,
-			ToolName:  toolLabel,
-			Content:   truncateRunes(body, 800),
-			SessionID: sessionID,
+			Type:           core.EventToolResult,
+			ToolName:       toolLabel,
+			Content:        truncateRunes(body, 800),
+			ToolResultTail: core.ToolOutputTail(body),
+			SessionID:      sessionID,
 		}}
 	case st == "in_progress" || st == "pending":
 		// Stream intermediate tool output to IM (ACP allows content while not terminal).
@@ -190,18 +191,20 @@ func mapToolCallUpdate(sessionID string, update json.RawMessage) []core.Event {
 			return nil
 		}
 		return []core.Event{{
-			Type:      core.EventToolResult,
-			ToolName:  toolLabel,
-			Content:   truncateRunes(body, 800),
-			SessionID: sessionID,
+			Type:           core.EventToolResult,
+			ToolName:       toolLabel,
+			Content:        truncateRunes(body, 800),
+			ToolResultTail: core.ToolOutputTail(body),
+			SessionID:      sessionID,
 		}}
 	default:
 		if body != "" {
 			return []core.Event{{
-				Type:      core.EventToolResult,
-				ToolName:  toolLabel,
-				Content:   truncateRunes(body, 800),
-				SessionID: sessionID,
+				Type:           core.EventToolResult,
+				ToolName:       toolLabel,
+				Content:        truncateRunes(body, 800),
+				ToolResultTail: core.ToolOutputTail(body),
+				SessionID:      sessionID,
 			}}
 		}
 		return nil

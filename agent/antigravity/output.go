@@ -130,6 +130,7 @@ func (p *agyOutputParser) parseLine(line []byte) (recognized bool, events []core
 					}
 				}
 				result.ToolSuccess = &success
+				result.ToolResultTail = core.ToolOutputTail(result.ToolResult)
 				events = append(events, result)
 			}
 		}
