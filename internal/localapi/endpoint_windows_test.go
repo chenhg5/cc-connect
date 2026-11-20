@@ -320,9 +320,29 @@ func TestWindowsPrivateDACLRejectsUnknownGrant(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	sd, err := windows.SecurityDescriptorFromString("O:" + security.sid.String() + "D:P(OA;;GA;;;" + security.sid.String() + ")")
+	// Windows normalizes an object ACE without a GUID to a plain allow ACE.
+	// A GUID preserves the unsupported kind; zero rights grant no access.
+	sd, err := windows.SecurityDescriptorFromString("O:" + security.sid.String() + "D:P(OA;;0x0;11111111-2222-3333-4444-555555555555;;" + security.sid.String() + ")")
 	if err != nil {
 		t.Fatal(err)
+	}
+	if !sd.IsValid() {
+		t.Fatal("fixture is not a valid Windows security descriptor")
+	}
+	dacl, _, err := sd.DACL()
+	if err != nil || dacl == nil || dacl.AceCount != 1 {
+		t.Fatalf("fixture DACL = %v, %v", dacl, err)
+	}
+	var ace *windows.ACCESS_ALLOWED_ACE
+	if err := windows.GetAce(dacl, 0, &ace); err != nil {
+		t.Fatal(err)
+	}
+	if ace == nil {
+		t.Fatal("fixture has no ACE")
+	}
+	t.Logf("fixture ACE type=%d mask=%#x", ace.Header.AceType, ace.Mask)
+	if ace.Header.AceType != 5 || ace.Mask != 0 { // ACCESS_ALLOWED_OBJECT_ACE_TYPE
+		t.Fatal("fixture did not preserve a zero-rights object ACE")
 	}
 	if err := security.checkPrivateDescriptor(sd); err == nil {
 		t.Fatal("accepted an unsupported object-allow ACE")
