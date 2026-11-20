@@ -12224,6 +12224,78 @@ func TestTruncateRunes(t *testing.T) {
 	})
 }
 
+// --- truncateToolInput tests ---
+
+func TestTruncateToolInput_KeepsLongPatchJSONParseable(t *testing.T) {
+	patch := "*** Begin Patch\n*** Update File: /tmp/a.go\n" + strings.Repeat("+line\n", 400)
+	raw, err := json.Marshal(map[string]any{"patchText": patch})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+
+	got := truncateToolInput(string(raw), 500)
+	if runes := utf8.RuneCountInString(got); runes > 500 {
+		t.Fatalf("result is %d runes, want <= 500", runes)
+	}
+
+	var payload map[string]any
+	if err := json.Unmarshal([]byte(got), &payload); err != nil {
+		t.Fatalf("truncated tool input is not valid JSON: %v (got %q)", err, got)
+	}
+	text, _ := payload["patchText"].(string)
+	if !strings.Contains(text, "*** Begin Patch") {
+		t.Errorf("patch body lost, got %q", text)
+	}
+	if text == "patchText" {
+		t.Errorf("patch body collapsed to the field name")
+	}
+}
+
+func TestTruncateToolInput_NonJSONFallsBackToPlainTruncation(t *testing.T) {
+	raw := strings.Repeat("a", 600)
+	if got := truncateToolInput(raw, 500); got != truncateIf(raw, 500) {
+		t.Errorf("expected plain truncation fallback, got %q", got)
+	}
+}
+
+func TestTruncateToolInput_KeepsShortFieldsVisible(t *testing.T) {
+	raw, err := json.Marshal(map[string]any{
+		"filePath":  "/tmp/a.go",
+		"offset":    10,
+		"patchText": strings.Repeat("x", 2000),
+	})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+
+	got := truncateToolInput(string(raw), 500)
+	var payload map[string]any
+	if err := json.Unmarshal([]byte(got), &payload); err != nil {
+		t.Fatalf("not valid JSON: %v", err)
+	}
+	if payload["filePath"] != "/tmp/a.go" {
+		t.Errorf("short field lost: %v", payload["filePath"])
+	}
+	if payload["offset"] != float64(10) {
+		t.Errorf("numeric field lost: %v", payload["offset"])
+	}
+	text, _ := payload["patchText"].(string)
+	if !strings.Contains(text, truncatedJSONMarker) {
+		t.Errorf("long field not marked truncated: %q", text)
+	}
+}
+
+func TestTruncateToolInput_SmallBudgetTerminates(t *testing.T) {
+	raw, err := json.Marshal(map[string]any{"patchText": strings.Repeat("y", 500)})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	got := truncateToolInput(string(raw), 10)
+	if runes := utf8.RuneCountInString(got); runes > len([]rune(string(raw))) {
+		t.Fatalf("result grew: %d runes", runes)
+	}
+}
+
 // --- runShellWithProgress tests ---
 
 func TestRunShellWithProgress_BasicOutput(t *testing.T) {
