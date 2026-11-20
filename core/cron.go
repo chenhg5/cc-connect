@@ -917,31 +917,41 @@ func (cs *CronScheduler) runJob(job *CronJob, manual bool, stop <-chan struct{})
 		done <- engine.ExecuteCronJob(job)
 	}()
 
-	timeout := job.ExecutionTimeout()
+	err := waitForCronJob(done, job.ExecutionTimeout(), stop)
+	cs.recordJobResult(job, manual, stop, err)
+	return true
+}
+
+func waitForCronJob(done <-chan error, timeout time.Duration, stop <-chan struct{}) error {
 	var timeoutCh <-chan time.Time
 	if timeout > 0 {
 		timer := time.NewTimer(timeout)
 		defer timer.Stop()
 		timeoutCh = timer.C
 	}
-	var err error
 	select {
-	case err = <-done:
+	case err := <-done:
+		return err
 	case <-timeoutCh:
-		err = fmt.Errorf("job timed out after %v", timeout)
+		return fmt.Errorf("job timed out after %v", timeout)
 	case <-stop:
-		err = errCronShutdown
+		return errCronShutdown
 	}
-	select {
-	case <-stop:
-		err = errCronShutdown
-	default:
+}
+
+func (cs *CronScheduler) recordJobResult(job *CronJob, manual bool, stop <-chan struct{}, err error) {
+	if err == nil {
+		select {
+		case <-stop:
+			err = errCronShutdown
+		default:
+		}
 	}
 
 	if errors.Is(err, errCronShutdown) {
 		cs.store.MarkRun(job.ID, nil)
 		slog.Warn("cron: job interrupted by shutdown", "id", job.ID, "project", job.Project, "manual", manual)
-		return true
+		return
 	}
 	cs.store.MarkRun(job.ID, err)
 
@@ -950,7 +960,6 @@ func (cs *CronScheduler) runJob(job *CronJob, manual bool, stop <-chan struct{})
 	} else {
 		slog.Info("cron: job completed", "id", job.ID, "manual", manual)
 	}
-	return true
 }
 
 // mutePlatform wraps a Platform and discards all outgoing messages.

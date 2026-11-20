@@ -254,8 +254,8 @@ func (e *Engine) runPendingRestartNotify(req *RestartRequest, firedCh chan struc
 // lookupReadyPlatform returns the platform with the given name if it has
 // reached ready state, otherwise nil.
 func (e *Engine) lookupReadyPlatform(platformName string) Platform {
-	e.platformLifecycleMu.Lock()
-	defer e.platformLifecycleMu.Unlock()
+	e.platformLifecycleMu.RLock()
+	defer e.platformLifecycleMu.RUnlock()
 	for p, ready := range e.platformReady {
 		if ready && p.Name() == platformName {
 			return p

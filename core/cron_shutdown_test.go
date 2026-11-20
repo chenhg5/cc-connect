@@ -1,6 +1,7 @@
 package core
 
 import (
+	"errors"
 	"sync/atomic"
 	"testing"
 	"testing/synctest"
@@ -136,6 +137,49 @@ func TestCronScheduler_StopInterruptsRunningJob(t *testing.T) {
 				}
 				if latest := reloaded.snapshotJob(job.ID); latest.LastError != "" || !latest.LastRun.After(interruptedAt) {
 					test.Fatalf("next cycle did not record success: %+v", latest)
+				}
+			})
+		})
+	}
+}
+
+func TestCronScheduler_ShutdownPreservesJobError(t *testing.T) {
+	for _, testcase := range []struct {
+		name          string
+		workerError   error
+		timeout       time.Duration
+		wantLastError string
+	}{
+		{name: "worker error", workerError: errors.New("worker failed"), wantLastError: "worker failed"},
+		{name: "timeout", timeout: time.Minute, wantLastError: "job timed out after 1m0s"},
+	} {
+		t.Run(testcase.name, func(t *testing.T) {
+			dir := t.TempDir()
+			synctest.Test(t, func(test *testing.T) {
+				store, err := NewCronStore(dir)
+				if err != nil {
+					test.Fatal(err)
+				}
+				job := &CronJob{ID: "shutdown", Project: "test", LastRun: time.Now().Add(-time.Minute)}
+				if err := store.Add(job); err != nil {
+					test.Fatal(err)
+				}
+				done := make(chan error, 1)
+				if testcase.workerError != nil {
+					done <- testcase.workerError
+				}
+				stop := make(chan struct{})
+				result := waitForCronJob(done, testcase.timeout, stop)
+				close(stop)
+				NewCronScheduler(store).recordJobResult(job, false, stop, result)
+
+				reloaded, err := NewCronStore(dir)
+				if err != nil {
+					test.Fatal(err)
+				}
+				persisted := reloaded.Get(job.ID)
+				if persisted == nil || !persisted.LastRun.Equal(time.Now()) || persisted.LastError != testcase.wantLastError {
+					test.Fatalf("persisted job = %+v, want current LastRun and LastError %q", persisted, testcase.wantLastError)
 				}
 			})
 		})
