@@ -387,6 +387,10 @@ func main() {
 			}
 			opts["cc_data_dir"] = cfg.DataDir
 			opts["cc_project"] = proj.Name
+			// Rich cards use the native typewriter animation by default. When
+			// card_animation = false the platform updates the card with a
+			// full-card Patch instead, so text lands at once.
+			opts["cc_card_animation"] = config.EffectiveCardAnimation(cfg, &proj)
 			p, err := core.CreatePlatform(pc.Type, opts)
 			if err != nil {
 				slog.Error("failed to create platform", "project", proj.Name, "type", pc.Type, "error", err)
