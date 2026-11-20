@@ -300,7 +300,7 @@ func TestEffectiveDisplayQuiet(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			mode, tm, tool, _, _, _, _, _ := EffectiveDisplay(&tt.cfg, &tt.proj)
+			mode, tm, tool, _, _, _, _, _, _ := EffectiveDisplay(&tt.cfg, &tt.proj)
 			if mode != tt.wantMode {
 				t.Fatalf("Mode = %q, want %q", mode, tt.wantMode)
 			}
@@ -309,6 +309,50 @@ func TestEffectiveDisplayQuiet(t *testing.T) {
 			}
 			if tool != tt.wantTool {
 				t.Fatalf("ToolMessages = %v, want %v", tool, tt.wantTool)
+			}
+		})
+	}
+}
+
+func TestEffectiveDisplay_PrependPreToolText(t *testing.T) {
+	tru, fal := true, false
+	quiet := DisplayModeQuiet
+	tests := []struct {
+		name string
+		cfg  Config
+		proj ProjectConfig
+		want bool
+	}{
+		{
+			name: "default false when unset",
+			cfg:  Config{Display: DisplayConfig{Mode: &quiet}},
+			proj: ProjectConfig{},
+			want: false,
+		},
+		{
+			name: "global true wins when project unset",
+			cfg:  Config{Display: DisplayConfig{Mode: &quiet, PrependPreToolText: &tru}},
+			proj: ProjectConfig{},
+			want: true,
+		},
+		{
+			name: "project true wins over global false",
+			cfg:  Config{Display: DisplayConfig{PrependPreToolText: &fal}},
+			proj: ProjectConfig{Display: &DisplayConfig{PrependPreToolText: &tru}},
+			want: true,
+		},
+		{
+			name: "project false wins over global true",
+			cfg:  Config{Display: DisplayConfig{PrependPreToolText: &tru}},
+			proj: ProjectConfig{Display: &DisplayConfig{PrependPreToolText: &fal}},
+			want: false,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, _, _, _, _, _, _, _, got := EffectiveDisplay(&tt.cfg, &tt.proj)
+			if got != tt.want {
+				t.Errorf("PrependPreToolText = %v, want %v", got, tt.want)
 			}
 		})
 	}
@@ -413,7 +457,7 @@ func TestEffectiveDisplay_ProjectOverride(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			_, tm, tool, thinkLen, toolMaxLen, _, _, _ := EffectiveDisplay(&tt.cfg, &tt.proj)
+			_, tm, tool, thinkLen, toolMaxLen, _, _, _, _ := EffectiveDisplay(&tt.cfg, &tt.proj)
 			if tm != tt.wantTM {
 				t.Errorf("ThinkingMessages = %v, want %v", tm, tt.wantTM)
 			}
@@ -514,7 +558,7 @@ func TestEffectiveDisplayHideAgentFooter(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			_, _, _, _, _, _, _, got := EffectiveDisplay(&tt.cfg, &tt.proj)
+			_, _, _, _, _, _, _, got, _ := EffectiveDisplay(&tt.cfg, &tt.proj)
 			if got != tt.want {
 				t.Fatalf("hideAgentFooter = %v, want %v", got, tt.want)
 			}
