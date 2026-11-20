@@ -13,6 +13,9 @@ export interface GlobalSettings {
   stream_preview_interval_ms: number;
   rate_limit_max_messages: number;
   rate_limit_window_secs: number;
+  retriable_error_initial_delay_secs: number;
+  retriable_error_retry_delay_secs: number;
+  retriable_error_max_attempts: number;
 }
 
 export const getGlobalSettings = () => api.get<GlobalSettings>('/settings');

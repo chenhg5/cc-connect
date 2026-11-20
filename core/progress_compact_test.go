@@ -3,6 +3,8 @@ package core
 import (
 	"context"
 	"errors"
+
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -100,6 +102,34 @@ func TestBuildAndParseProgressCardPayload(t *testing.T) {
 	}
 	if parsed.Items[0].Kind != ProgressEntryInfo || parsed.Items[0].Text != "step1" {
 		t.Fatalf("items[0] = %#v, want info/step1", parsed.Items[0])
+	}
+}
+
+// TestBuildStreamingCardPayload_EmptyReturnsEmpty guards against the empty
+// progress-payload leak: a streaming-card turn with no thinking, no step text,
+// no tool calls and no answer must produce no transport payload at all.
+// Otherwise the empty payload (rejected by ParseProgressCardPayload) is
+// rendered as raw markdown on Feishu and the internal
+// "__cc_connect_progress_card_v1__:..." JSON is shown verbatim to the user on
+// every simple Q&A turn.
+func TestBuildStreamingCardPayload_EmptyReturnsEmpty(t *testing.T) {
+	got := BuildStreamingCardPayload("", nil, nil, "", "opencode", LangChinese, ProgressCardStateCompleted)
+	if got != "" {
+		t.Fatalf("BuildStreamingCardPayload(empty) = %q, want empty string", got)
+	}
+
+	// Sanity: a non-empty turn still builds a parseable payload with the
+	// answer body intact.
+	payload := BuildStreamingCardPayload("思考中", nil, nil, "最终答复", "opencode", LangChinese, ProgressCardStateCompleted)
+	if payload == "" {
+		t.Fatal("BuildStreamingCardPayload(non-empty) returned empty string")
+	}
+	parsed, ok := ParseProgressCardPayload(payload)
+	if !ok {
+		t.Fatalf("ParseProgressCardPayload() failed for %q", payload)
+	}
+	if parsed.Answer != "最终答复" {
+		t.Fatalf("answer = %q, want %q", parsed.Answer, "最终答复")
 	}
 }
 
@@ -425,5 +455,53 @@ func TestCompactProgressWriter_CancellationStopsRecovery(t *testing.T) {
 	}
 	if w.Finalize(ProgressCardStateCompleted) {
 		t.Fatal("cancelled final update should report failure")
+	}
+}
+
+// TestBuildStreamingCardPayload_CapsPanelEntries is the regression test for
+// the Feishu cardkit "element exceeds the limit" failure (code 300305): a
+// long agent turn with dozens of tool calls must be capped per panel so the
+// final card stays within the platform element budget. Excess entries are
+// dropped from the head and the payload is marked truncated.
+func TestBuildStreamingCardPayload_CapsPanelEntries(t *testing.T) {
+	var stepTexts []string
+	for i := 0; i < maxThinkingPanelEntries+5; i++ {
+		stepTexts = append(stepTexts, fmt.Sprintf("思考步骤 %d", i+1))
+	}
+	var tools []cardToolEntry
+	for i := 0; i < 41; i++ {
+		tools = append(tools, cardToolEntry{Index: i, Name: "bash", Input: fmt.Sprintf("cmd %d", i)})
+	}
+
+	content := BuildStreamingCardPayload("", stepTexts, tools, "最终答案。", "test", LangChinese, ProgressCardStateCompleted)
+	payload, ok := ParseProgressCardPayload(content)
+	if !ok {
+		t.Fatalf("ParseProgressCardPayload failed")
+	}
+	thinkingCount, toolCount := 0, 0
+	for _, item := range payload.Items {
+		switch item.Kind {
+		case ProgressEntryThinking:
+			thinkingCount++
+		case ProgressEntryToolUse:
+			toolCount++
+		}
+	}
+	if thinkingCount > maxThinkingPanelEntries {
+		t.Errorf("thinking entries = %d, want <= %d", thinkingCount, maxThinkingPanelEntries)
+	}
+	if toolCount > maxToolPanelEntries {
+		t.Errorf("tool entries = %d, want <= %d", toolCount, maxToolPanelEntries)
+	}
+	if !payload.Truncated {
+		t.Error("payload.Truncated = false, want true (entries were capped)")
+	}
+	if payload.Answer != "最终答案。" {
+		t.Errorf("answer = %q, want %q", payload.Answer, "最终答案。")
+	}
+	// The newest tool entry survives (the live panel is a rolling window).
+	lastTool := payload.Items[len(payload.Items)-1]
+	if lastTool.Tool != "bash" || !strings.Contains(lastTool.Text, "cmd 40") {
+		t.Errorf("last tool entry = %+v, want bash/cmd 40", lastTool)
 	}
 }

@@ -536,6 +536,58 @@ func (sp *streamPreview) setStatus(status CardStatus) {
 	}
 }
 
+func (sp *streamPreview) updateStatusFooter(status CardStatus, statusFooter string) bool {
+	statusFooter = strings.TrimSpace(statusFooter)
+	if statusFooter == "" {
+		return false
+	}
+
+	sp.mu.Lock()
+	defer sp.mu.Unlock()
+
+	sp.pendingStatus = status
+	if sp.previewMsgID == nil || sp.degraded {
+		return false
+	}
+
+	body := sp.fullText
+	maxChars := sp.cfg.MaxChars
+	if maxChars > 0 && len([]rune(body)) > maxChars {
+		body = string([]rune(body)[:maxChars]) + "…"
+	}
+	if sp.transform != nil {
+		body = sp.transform(body)
+	}
+
+	if sfu, ok := sp.platform.(StatusFooterUpdater); ok {
+		if err := sfu.UpdateMessageWithStatusFooter(sp.ctx, sp.previewMsgID, body, statusFooter); err == nil {
+			if statusUpdater, ok := sp.platform.(PreviewStatusUpdater); ok {
+				statusUpdater.SetPreviewStatus(sp.previewMsgID, status)
+			}
+			return true
+		} else {
+			slog.Debug("stream preview status footer update failed, falling back", "error", err)
+		}
+	}
+
+	updater, ok := sp.platform.(MessageUpdater)
+	if !ok {
+		return false
+	}
+	content := appendReplyFooter(body, statusFooter)
+	if err := updater.UpdateMessage(sp.ctx, sp.previewMsgID, content); err != nil {
+		slog.Debug("stream preview inline status footer update failed", "error", err)
+		return false
+	}
+	sp.lastSentText = content
+	sp.lastSentViaUpdate = true
+	sp.lastSentAt = time.Now()
+	if statusUpdater, ok := sp.platform.(PreviewStatusUpdater); ok {
+		statusUpdater.SetPreviewStatus(sp.previewMsgID, status)
+	}
+	return true
+}
+
 // detachPreview clears the preview message handle so that finish() won't
 // delete it. Call this after freeze() when the frozen preview should remain
 // visible as a permanent message (e.g. text before the first tool call).
