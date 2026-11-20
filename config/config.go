@@ -212,6 +212,8 @@ type DisplayConfig struct {
 	ToolMaxLen           *int    `toml:"tool_max_len"`           // max chars for tool use messages; 0 = no truncation; default 500
 	ToolMessages         *bool   `toml:"tool_messages"`          // whether tool progress messages are shown; default true
 	HistoryMaxLen        *int    `toml:"history_max_len"`        // max chars per /history entry; 0 = no truncation; default 1000
+	ShowUsage5h          *bool   `toml:"show_usage_5h"`          // footer 5-hour quota remaining percentage; default false
+	ShowUsageWeek        *bool   `toml:"show_usage_week"`        // footer weekly quota remaining percentage; default false
 	ShowContextIndicator *bool   `toml:"show_context_indicator"` // whether [ctx: ~N%] suffix is shown; default true
 	ReplyFooter          *bool   `toml:"reply_footer"`           // whether Codex-like footer is shown; default true
 	HideAgentFooter      *bool   `toml:"hide_agent_footer"`      // strip agent-emitted model/token footer lines; default false
@@ -542,6 +544,9 @@ type ProjectConfig struct {
 	// ShowWorkdirIndicator: nil/true = render the reply footer's second line
 	// (workspace directory); false = hide that line. Subordinate to ReplyFooter.
 	ShowWorkdirIndicator *bool `toml:"show_workdir_indicator,omitempty"`
+	// Optional quota segments, independent of ShowContextIndicator; default false.
+	ShowUsage5h   *bool `toml:"show_usage_5h,omitempty"`
+	ShowUsageWeek *bool `toml:"show_usage_week,omitempty"`
 	// ReplyFooter: nil/true = render the reply footer; false = disable it
 	// entirely (the per-line indicator flags above become no-ops).
 	ReplyFooter      *bool        `toml:"reply_footer,omitempty"`
@@ -1004,6 +1009,27 @@ func EffectiveDisplay(cfg *Config, proj *ProjectConfig) (mode string, thinkingMe
 	)
 
 	return
+}
+
+// EffectiveFooterUsage resolves quota segments independently, with precedence:
+// project field > project display > global display > false.
+func EffectiveFooterUsage(cfg *Config, proj *ProjectConfig) (show5h, showWeek bool) {
+	pick := func(direct, project, global *bool) bool {
+		for _, value := range []*bool{direct, project, global} {
+			if value != nil {
+				return *value
+			}
+		}
+		return false
+	}
+	var direct5h, directWeek, display5h, displayWeek *bool
+	if proj != nil {
+		direct5h, directWeek = proj.ShowUsage5h, proj.ShowUsageWeek
+		if proj.Display != nil {
+			display5h, displayWeek = proj.Display.ShowUsage5h, proj.Display.ShowUsageWeek
+		}
+	}
+	return pick(direct5h, display5h, cfg.Display.ShowUsage5h), pick(directWeek, displayWeek, cfg.Display.ShowUsageWeek)
 }
 
 // EffectiveHistoryMaxLen returns the per-entry /history truncation length.
@@ -3457,6 +3483,8 @@ type ProjectSettingsUpdate struct {
 	AgentType            *string
 	ShowContextIndicator *bool
 	ShowWorkdirIndicator *bool
+	ShowUsage5h          *bool
+	ShowUsageWeek        *bool
 	ReplyFooter          *bool
 	InjectSender         *bool
 	PlatformAllowFrom    map[string]string
@@ -3540,6 +3568,14 @@ func SaveProjectSettings(projectName string, update ProjectSettingsUpdate) error
 		if update.ShowContextIndicator != nil {
 			v := *update.ShowContextIndicator
 			proj.ShowContextIndicator = &v
+		}
+		if update.ShowUsage5h != nil {
+			v := *update.ShowUsage5h
+			proj.ShowUsage5h = &v
+		}
+		if update.ShowUsageWeek != nil {
+			v := *update.ShowUsageWeek
+			proj.ShowUsageWeek = &v
 		}
 		if update.ShowWorkdirIndicator != nil {
 			v := *update.ShowWorkdirIndicator
@@ -3654,6 +3690,12 @@ func GetProjectConfigDetails(projectName string) map[string]any {
 		}
 		if p.ShowContextIndicator != nil {
 			result["show_context_indicator"] = *p.ShowContextIndicator
+		}
+		if p.ShowUsage5h != nil {
+			result["show_usage_5h"] = *p.ShowUsage5h
+		}
+		if p.ShowUsageWeek != nil {
+			result["show_usage_week"] = *p.ShowUsageWeek
 		}
 		if p.ShowWorkdirIndicator != nil {
 			result["show_workdir_indicator"] = *p.ShowWorkdirIndicator
