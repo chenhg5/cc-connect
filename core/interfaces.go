@@ -369,7 +369,8 @@ type Agent interface {
 	Stop() error
 }
 
-// AgentSession represents a running interactive agent session with a persistent process.
+// AgentSession represents a reusable interactive conversation managed by a backend.
+// A backend can keep a persistent process or spawn a process for each turn.
 type AgentSession interface {
 	// Send sends a user message (with optional images and files) to the running
 	// agent process. messageID is the platform message ID; agents thread it
@@ -384,7 +385,9 @@ type AgentSession interface {
 	Events() <-chan Event
 	// CurrentSessionID returns the current agent-side session ID.
 	CurrentSessionID() string
-	// Alive returns true if the underlying process is still running.
+	// Alive reports the backend-defined AgentSession lifecycle state.
+	// Persistent backends may track a process; exec backends can remain alive
+	// between turns without a running child process. It does not imply readiness.
 	Alive() bool
 	// Close terminates the session and its underlying process.
 	Close() error

@@ -466,6 +466,9 @@ GET /api/v1/status?token=mgmt-secret
         "name": "work",
         "platform": "telegram",
         "active": true,
+        "live": true,
+        "busy": false,
+        "agent_session_alive": true,
         "created_at": "2026-03-10T09:00:00Z",
         "updated_at": "2026-03-10T10:30:00Z",
         "history_count": 12
@@ -474,6 +477,17 @@ GET /api/v1/status?token=mgmt-secret
   }
 }
 ```
+
+列表和详情 GET 接口均返回以下临时运行状态字段：
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| `busy` | boolean | 此保存会话的 cc-connect 执行锁是否被持有。`false` 仅表示锁空闲，不代表所有执行路径都空闲。 |
+| `agent_session_alive` | boolean 或 null | 与此保存会话关联、登记在交互状态中的 `AgentSession.Alive()` 值。`null` 表示没有可观测的关联交互会话；`false` 表示后端报告该 AgentSession 已不再存活。这不是操作系统子进程存活检查。 |
+
+这些字段不持久化，也不构成跨会话的原子快照。`active` 仅表示会话选择；兼容字段 `live` 和 `active_keys` 仅表示路由键存在桥接状态条目。AgentSession 的生命周期按 Engine 的实际 Session 关联归属，不随选择自动转移。
+
+**观测范围：** `busy` 观测 cc-connect 执行锁，`agent_session_alive` 仅观测已登记在交互状态中的 AgentSession。relay 等未登记路径可能在返回 `busy: false, agent_session_alive: null` 时仍在执行，因此不能据此推断全局空闲或没有子进程。Codex exec 后端在两轮之间没有运行中的子进程时，AgentSession 仍可存活。`true` 不保证存在进程、已就绪或有任务进展；两个字段均不表示平台连接状态。
 
 ---
 
@@ -539,6 +553,9 @@ GET /api/v1/status?token=mgmt-secret
     "name": "work",
     "platform": "telegram",
     "active": true,
+    "live": true,
+    "busy": false,
+    "agent_session_alive": true,
     "agent_session_id": "as_xxx",
     "created_at": "2026-03-10T09:00:00Z",
     "updated_at": "2026-03-10T10:30:00Z",
@@ -611,21 +628,21 @@ GET /api/v1/status?token=mgmt-secret
 
 #### POST /api/v1/projects/{name}/send
 
-向会话发送消息。消息会像用户通过平台发送一样传递给 Agent。
+向 `session_key` 对应的平台路由投递出站消息，使用已有回复上下文，或由平台的 `ReplyContextReconstructor` 能力重建上下文。它调用平台发送操作，不调用 `AgentSession.Send`，也不会向编码 Agent 提交提示词。交互 AgentSession 不是发送前提：只要能解析平台路由，即使 `live: false`、`agent_session_alive: null` 也可发送成功。成功只表示平台发送操作完成，不表示 Agent 执行任务。
 
 **请求体：**
 
 ```json
 {
   "session_key": "telegram:123:456",
-  "message": "Review the latest commit"
+  "message": "The latest build is ready"
 }
 ```
 
 | 字段          | 类型   | 必填 | 说明                    |
 |---------------|--------|------|-------------------------|
 | `session_key` | string | 是   | 平台路由键              |
-| `message`     | string | 是   | 发送给 Agent 的文本     |
+| `message`     | string | 是   | 向平台路由投递的文本     |
 
 **响应：**
 
