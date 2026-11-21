@@ -658,6 +658,29 @@ func (p *Platform) buildSessionKey(chatID int64, threadID int, userID int64) str
 	return fmt.Sprintf("telegram:%d:%d", chatID, userID)
 }
 
+// ChannelKeyFromSessionKey implements core.ChannelScopedSessionKey. Telegram
+// topics encode their thread ID in the session key, while ordinary chats do
+// not. In shared-session mode the topic key has three segments; per-user mode
+// adds the user ID as a fourth segment.
+func (p *Platform) ChannelKeyFromSessionKey(sessionKey string) (string, bool) {
+	parts := strings.SplitN(sessionKey, ":", 4)
+	if len(parts) < 3 || parts[0] != p.Name() {
+		return "", false
+	}
+	chatID, err := strconv.ParseInt(parts[1], 10, 64)
+	if err != nil {
+		return "", false
+	}
+	if len(parts) == 3 && !p.shareSessionInChannel {
+		return "", false
+	}
+	threadID, err := strconv.Atoi(parts[2])
+	if err != nil || threadID <= 0 {
+		return "", false
+	}
+	return buildChannelKey(chatID, threadID), true
+}
+
 func buildChannelKey(chatID int64, threadID int) string {
 	if threadID != 0 {
 		return fmt.Sprintf("%d:%d", chatID, threadID)

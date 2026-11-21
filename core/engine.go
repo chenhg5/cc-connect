@@ -16729,16 +16729,33 @@ func (e *Engine) relayContextForSourceSessionKey(fromProject, sourceSessionKey s
 		return e.agent, e.sessions, relaySessionKey, nil
 	}
 
-	channelKey := workspaceChannelKey(platformName, chatID)
-	workspace, _, err := e.resolveWorkspace(e.platformForName(platformName), chatID)
-	if err != nil {
-		return nil, nil, "", fmt.Errorf("resolve relay workspace: %w", err)
+	platform := e.platformForName(platformName)
+	channelIDs := e.workspaceChannelIDsFromSessionKey(sourceSessionKey)
+	primaryChannelKey := ""
+	var workspace string
+	for _, channelID := range channelIDs {
+		channelKey := workspaceChannelKey(platformName, channelID)
+		if primaryChannelKey == "" {
+			primaryChannelKey = channelKey
+		}
+		if binding, _, usable := e.lookupEffectiveWorkspaceBinding(channelKey); binding != nil {
+			if !usable {
+				return nil, nil, "", fmt.Errorf("workspace binding unavailable for source channel %q", channelKey)
+			}
+			workspace = normalizeWorkspacePath(binding.Workspace)
+		} else {
+			var err error
+			workspace, _, err = e.resolveWorkspace(platform, channelID)
+			if err != nil {
+				return nil, nil, "", fmt.Errorf("resolve relay workspace: %w", err)
+			}
+		}
+		if workspace != "" {
+			break
+		}
 	}
 	if workspace == "" {
-		if b, _, usable := e.lookupEffectiveWorkspaceBinding(channelKey); b != nil && !usable {
-			return nil, nil, "", fmt.Errorf("workspace binding unavailable for source channel %q", channelKey)
-		}
-		return nil, nil, "", fmt.Errorf("no workspace binding for source channel %q", channelKey)
+		return nil, nil, "", fmt.Errorf("no workspace binding for source channel %q", primaryChannelKey)
 	}
 
 	agent, sessions, err := e.getOrCreateWorkspaceAgent(workspace)
@@ -17254,14 +17271,39 @@ func extractWorkspaceChannelKey(sessionKey string) string {
 // through ChannelScopedSessionKey.
 func (e *Engine) extractWorkspaceChannelKey(sessionKey string) string {
 	platformName := extractPlatformName(sessionKey)
+	return workspaceChannelKey(platformName, e.workspaceChannelIDFromSessionKey(sessionKey))
+}
+
+// workspaceChannelIDFromSessionKey asks the originating platform to recover
+// its channel scope (for example, a Telegram topic) before using the generic
+// chat-level session-key parser.
+func (e *Engine) workspaceChannelIDFromSessionKey(sessionKey string) string {
+	platformName := extractPlatformName(sessionKey)
 	if e != nil {
 		if scoped, ok := e.platformForName(platformName).(ChannelScopedSessionKey); ok {
-			if channelKey, ok := scoped.ChannelKeyFromSessionKey(sessionKey); ok && channelKey != "" {
-				return workspaceChannelKey(platformName, channelKey)
+			if channelID, ok := scoped.ChannelKeyFromSessionKey(sessionKey); ok && channelID != "" {
+				return channelID
 			}
 		}
 	}
-	return workspaceChannelKey(platformName, extractChannelID(sessionKey))
+	return extractChannelID(sessionKey)
+}
+
+// workspaceChannelIDsFromSessionKey returns the platform-scoped channel first,
+// then the chat-level channel as a default-binding fallback. A thread-specific
+// workspace therefore wins, while topics without their own binding inherit the
+// chat workspace.
+func (e *Engine) workspaceChannelIDsFromSessionKey(sessionKey string) []string {
+	channelID := e.workspaceChannelIDFromSessionKey(sessionKey)
+	if channelID == "" {
+		return nil
+	}
+	ids := []string{channelID}
+	chatID := extractChannelID(sessionKey)
+	if chatID != "" && chatID != channelID {
+		ids = append(ids, chatID)
+	}
+	return ids
 }
 
 // effectiveChannelID returns the channel identifier from a Message.
@@ -17349,8 +17391,13 @@ func (e *Engine) sessionContextForKey(sessionKey string) (Agent, *SessionManager
 	if !e.multiWorkspace || e.workspaceBindings == nil {
 		return e.agent, e.sessions
 	}
-	if channelKey := e.extractWorkspaceChannelKey(sessionKey); channelKey != "" {
-		if b, _, usable := e.lookupEffectiveWorkspaceBinding(channelKey); usable {
+	platformName := extractPlatformName(sessionKey)
+	for _, channelID := range e.workspaceChannelIDsFromSessionKey(sessionKey) {
+		channelKey := workspaceChannelKey(platformName, channelID)
+		if b, _, usable := e.lookupEffectiveWorkspaceBinding(channelKey); b != nil {
+			if !usable {
+				break
+			}
 			workspace := normalizeWorkspacePath(b.Workspace)
 			// Resolve through workspaceContext so a /dir inside the topic is
 			// honoured: multi-workspace /dir records a per-interactive-key
@@ -17496,8 +17543,13 @@ func (e *Engine) interactiveKeyForSessionKeyLocked(sessionKey string) string {
 	if _, ok := e.interactiveStates[sessionKey]; ok {
 		return sessionKey
 	}
-	if channelKey := e.extractWorkspaceChannelKey(sessionKey); channelKey != "" {
-		if b, _, usable := e.lookupEffectiveWorkspaceBinding(channelKey); usable {
+	platformName := extractPlatformName(sessionKey)
+	for _, channelID := range e.workspaceChannelIDsFromSessionKey(sessionKey) {
+		channelKey := workspaceChannelKey(platformName, channelID)
+		if b, _, usable := e.lookupEffectiveWorkspaceBinding(channelKey); b != nil {
+			if !usable {
+				break
+			}
 			return normalizeWorkspacePath(b.Workspace) + ":" + sessionKey
 		}
 	}
