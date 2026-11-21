@@ -7883,7 +7883,10 @@ func (e *Engine) cmdSwitch(p Platform, msg *Message, args []string) {
 	// original conversation; wiping it makes /history return empty after a
 	// /switch round-trip. When SwitchToAgentSession creates a fresh Session
 	// (no prior match), History is already nil, so preserving is a no-op.
-	_ = sessions.SwitchToAgentSession(msg.SessionKey, matched.ID, agent.Name(), matched.Summary)
+	if sessions.SwitchToAgentSession(msg.SessionKey, matched.ID, agent.Name(), matched.Summary) == nil {
+		e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgSwitchNoMatch, query))
+		return
+	}
 
 	shortID := matched.ID
 	if len(shortID) > 12 {
@@ -16516,22 +16519,20 @@ func (e *Engine) deleteSingleSessionReply(msg *Message, deleter SessionDeleter, 
 		return ""
 	}
 
-	// Prevent deleting the currently active session
 	_, sessions := e.sessionContextForKey(msg.SessionKey)
-	activeSession := sessions.GetOrCreateActive(msg.SessionKey)
-	if activeSession.GetAgentSessionID() == matched.ID {
-		return e.i18n.T(MsgDeleteActiveDenied)
-	}
-
 	displayName := e.deleteSessionDisplayName(sessions, matched)
-
-	if err := deleter.DeleteSession(e.ctx, matched.ID); err != nil {
+	err := sessions.DeleteAgentSessionIfInactive(matched.ID, msg.SessionKey, func() error {
+		return deleter.DeleteSession(e.ctx, matched.ID)
+	})
+	switch {
+	case errors.Is(err, ErrAgentSessionActive):
+		return e.i18n.T(MsgDeleteActiveDenied)
+	case errors.Is(err, ErrAgentSessionActiveElsewhere):
+		return e.i18n.Tf(MsgDeleteInUseDenied, displayName)
+	case err != nil:
 		return e.i18n.Tf(MsgFailedToDeleteSession, displayName, err)
 	}
 
-	// Keep local session snapshot aligned with agent-side deletion.
-	sessions.DeleteByAgentSessionID(matched.ID)
-	sessions.SetSessionName(matched.ID, "")
 	return fmt.Sprintf(e.i18n.T(MsgDeleteSuccess), displayName)
 }
 

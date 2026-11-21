@@ -587,6 +587,9 @@ type SkillCatalogProvider interface {
 }
 
 // SessionDeleter is an optional interface for agents that support deleting sessions.
+// For a nonempty ID, a nil error confirms deletion. Unsupported operations and
+// failures must return an error so callers do not discard state for a session
+// that still exists.
 type SessionDeleter interface {
 	DeleteSession(ctx context.Context, sessionID string) error
 }
