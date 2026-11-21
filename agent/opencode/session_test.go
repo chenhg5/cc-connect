@@ -251,6 +251,38 @@ func TestHandleStepStart_SessionIDFromPart(t *testing.T) {
 
 // TestHandleStepStopSendsEventResult verifies that handleStepFinish sends
 // an EventResult when reason="stop", signaling turn completion to the engine.
+// TestHandleText_ExtractsMessageID pins that the v2 messageID survives into
+// the engine event so consecutive assistant messages can be separated
+// downstream (see TestCUJ_H1_QuietProgressiveTextAndMessageBoundary).
+func TestHandleText_ExtractsMessageID(t *testing.T) {
+	jsonData := `{"type":"text","part":{"id":"prt_1","messageID":"msg-abc","type":"text","text":"hello"}}`
+
+	var raw map[string]any
+	if err := json.Unmarshal([]byte(jsonData), &raw); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	s := &opencodeSession{events: make(chan core.Event, 1), ctx: ctx}
+	s.handleText(raw)
+
+	select {
+	case evt := <-s.events:
+		if evt.Type != core.EventText {
+			t.Fatalf("event type = %q, want EventText", evt.Type)
+		}
+		if evt.MessageID != "msg-abc" {
+			t.Fatalf("event MessageID = %q, want msg-abc", evt.MessageID)
+		}
+		if evt.Content != "hello" {
+			t.Fatalf("event content = %q, want hello", evt.Content)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for EventText")
+	}
+}
+
 func TestHandleStepStopSendsEventResult(t *testing.T) {
 	jsonData := `{"type":"step_finish","part":{"reason":"stop"}}`
 
