@@ -355,3 +355,59 @@ func TestProviderPresetsIncludesTrustedRouter(t *testing.T) {
 		t.Fatalf("opencode base_url = %q", opencode.BaseURL)
 	}
 }
+
+func TestProviderPresetsIncludesWorldRouter(t *testing.T) {
+	body, err := os.ReadFile("../provider-presets.json")
+	if err != nil {
+		t.Fatalf("read provider-presets.json: %v", err)
+	}
+
+	var presets ProviderPresetsResponse
+	if err := json.Unmarshal(body, &presets); err != nil {
+		t.Fatalf("parse provider-presets.json: %v", err)
+	}
+
+	var worldrouter *ProviderPreset
+	for i := range presets.Providers {
+		if presets.Providers[i].Name == "worldrouter" {
+			worldrouter = &presets.Providers[i]
+			break
+		}
+	}
+	if worldrouter == nil {
+		t.Fatal("worldrouter preset not found")
+	}
+	if worldrouter.InviteURL != "" {
+		t.Fatalf("worldrouter invite_url = %q, want empty", worldrouter.InviteURL)
+	}
+
+	claude := worldrouter.AgentConfig("claudecode")
+	if claude == nil {
+		t.Fatal("worldrouter claudecode config missing")
+	}
+	if claude.BaseURL != "https://inference-api.worldrouter.ai" {
+		t.Fatalf("claudecode base_url = %q", claude.BaseURL)
+	}
+	if claude.Model != "claude-sonnet-5-5" {
+		t.Fatalf("claudecode model = %q", claude.Model)
+	}
+
+	codex := worldrouter.AgentConfig("codex")
+	if codex == nil {
+		t.Fatal("worldrouter codex config missing")
+	}
+	if codex.BaseURL != "https://inference-api.worldrouter.ai/v1" {
+		t.Fatalf("codex base_url = %q", codex.BaseURL)
+	}
+	if codex.CodexConfig == nil || codex.CodexConfig.WireAPI != "responses" {
+		t.Fatalf("codex wire_api = %+v, want responses", codex.CodexConfig)
+	}
+
+	opencode := worldrouter.AgentConfig("opencode")
+	if opencode == nil {
+		t.Fatal("worldrouter opencode config missing")
+	}
+	if opencode.BaseURL != "https://inference-api.worldrouter.ai/v1" {
+		t.Fatalf("opencode base_url = %q", opencode.BaseURL)
+	}
+}

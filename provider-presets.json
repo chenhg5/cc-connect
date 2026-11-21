@@ -824,6 +824,33 @@
           "models": ["anthropic/claude-sonnet-4.6", "openai/gpt-5.5"]
         }
       }
+    },
+    {
+      "name": "worldrouter",
+      "display_name": "WorldRouter",
+      "description": "AI gateway with Claude, GPT, Gemini, DeepSeek, Kimi and GLM models behind one key, through OpenAI and Anthropic compatible APIs.",
+      "description_zh": "AI 网关，一个密钥即可通过 OpenAI 和 Anthropic 兼容 API 使用 Claude、GPT、Gemini、DeepSeek、Kimi、GLM 等模型。",
+      "features": ["OpenAI Compatible", "Anthropic Compatible", "Responses API"],
+      "tier": 3,
+      "website": "https://www.worldrouter.ai",
+      "agents": {
+        "claudecode": {
+          "base_url": "https://inference-api.worldrouter.ai",
+          "model": "claude-sonnet-5-5",
+          "models": ["claude-sonnet-5-5", "claude-opus-5-5", "claude-haiku-5-5"]
+        },
+        "codex": {
+          "base_url": "https://inference-api.worldrouter.ai/v1",
+          "model": "gpt-5.4",
+          "models": ["gpt-5.4", "gpt-6.2-astra", "gpt-5.4-mini"],
+          "codex_config": {"wire_api": "responses"}
+        },
+        "opencode": {
+          "base_url": "https://inference-api.worldrouter.ai/v1",
+          "model": "claude-sonnet-5-5",
+          "models": ["claude-sonnet-5-5", "gpt-5.4", "gemini-4-neon", "deepseek-v4-flash"]
+        }
+      }
     }
   ]
 }
