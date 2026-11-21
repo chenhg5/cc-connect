@@ -31,6 +31,8 @@ func (p *WSPlatform) SendImage(ctx context.Context, rctx any, img core.ImageAtta
 		return fmt.Errorf("wecom-ws: image data is empty")
 	}
 
+	ctx, cancel := p.quota.context(ctx)
+	defer cancel()
 	mediaID, err := p.uploadWSMedia(ctx, "image", wsImageFileName(img), img.Data)
 	if err != nil {
 		return fmt.Errorf("wecom-ws: send image: %w", err)
@@ -63,7 +65,7 @@ func (p *WSPlatform) uploadWSMedia(ctx context.Context, mediaType, filename stri
 			"md5":          hex.EncodeToString(sum[:]),
 		},
 	}
-	initResp, err := p.writeAndWaitFrameWithTimeout(ctx, initFrame, initReqID, wsMediaAckTimeout)
+	initResp, err := p.writeAndWaitFrameWithTimeout(ctx, initFrame, initReqID, wsMediaAckTimeout, quotaTarget{upload: true})
 	if err != nil {
 		return "", fmt.Errorf("upload init: %w", err)
 	}
@@ -135,7 +137,7 @@ func (p *WSPlatform) sendWSMediaMessage(ctx context.Context, chatID, mediaType, 
 			},
 		},
 	}
-	return p.writeAndWaitAckStrict(ctx, frame, reqID, wsMediaAckTimeout)
+	return p.writeAndWaitAckStrict(ctx, frame, reqID, wsMediaAckTimeout, quotaTarget{recipient: chatID})
 }
 
 func wsImageFileName(img core.ImageAttachment) string {
@@ -168,6 +170,8 @@ func (p *WSPlatform) SendFile(ctx context.Context, rctx any, file core.FileAttac
 		return fmt.Errorf("wecom-ws: file data is empty")
 	}
 
+	ctx, cancel := p.quota.context(ctx)
+	defer cancel()
 	mediaID, err := p.uploadWSMedia(ctx, "file", wsFileFileName(file), file.Data)
 	if err != nil {
 		return fmt.Errorf("wecom-ws: send file: %w", err)
