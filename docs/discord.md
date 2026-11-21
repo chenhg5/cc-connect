@@ -214,6 +214,8 @@ cc-connect: Here's the project structure...
 
 If you enable `progress_style = "card"`, Discord shows one editable progress embed during the turn, then the final answer arrives as a separate normal message. This reduces channel noise compared with the legacy multi-message flow.
 
+In `compact` and `card` modes, failed progress-message creation or editing keeps recent progress buffered instead of sending each event as a standalone message. A later progress event retries after a one-second cooldown; turn completion also makes one final attempt, creating the card with its completed/failed state if necessary. Recovery is event-driven: there is no background retry after the turn ends, and the final answer is sent independently.
+
 ---
 
 ## Architecture

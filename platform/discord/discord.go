@@ -1323,7 +1323,7 @@ func (p *Platform) SendPreviewStart(ctx context.Context, rctx any, content strin
 	}
 
 	msg := buildDiscordPreviewMessage(content)
-	sent, err := p.session.ChannelMessageSendComplex(channelID, msg)
+	sent, err := p.session.ChannelMessageSendComplex(channelID, msg, discordgo.WithContext(ctx))
 	if err != nil {
 		return nil, fmt.Errorf("discord: send preview: %w", err)
 	}
@@ -1336,7 +1336,7 @@ func (p *Platform) UpdateMessage(ctx context.Context, previewHandle any, content
 	if !ok {
 		return fmt.Errorf("discord: invalid preview handle type %T", previewHandle)
 	}
-	_, err := p.session.ChannelMessageEditComplex(buildDiscordPreviewEdit(h.channelID, h.messageID, content))
+	_, err := p.session.ChannelMessageEditComplex(buildDiscordPreviewEdit(h.channelID, h.messageID, content), discordgo.WithContext(ctx))
 	if err != nil {
 		return fmt.Errorf("discord: edit message: %w", err)
 	}
