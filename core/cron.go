@@ -920,6 +920,7 @@ var cronWeekdays = map[Language][7]string{
 	LangTraditionalChinese: {"週日", "週一", "週二", "週三", "週四", "週五", "週六"},
 	LangJapanese:           {"日曜", "月曜", "火曜", "水曜", "木曜", "金曜", "土曜"},
 	LangSpanish:            {"domingo", "lunes", "martes", "miércoles", "jueves", "viernes", "sábado"},
+	LangRussian:            {"воскресеньям", "понедельникам", "вторникам", "средам", "четвергам", "пятницам", "субботам"},
 }
 
 var cronMonths = map[Language][13]string{
@@ -928,6 +929,7 @@ var cronMonths = map[Language][13]string{
 	LangTraditionalChinese: {"", "1月", "2月", "3月", "4月", "5月", "6月", "7月", "8月", "9月", "10月", "11月", "12月"},
 	LangJapanese:           {"", "1月", "2月", "3月", "4月", "5月", "6月", "7月", "8月", "9月", "10月", "11月", "12月"},
 	LangSpanish:            {"", "ene", "feb", "mar", "abr", "may", "jun", "jul", "ago", "sep", "oct", "nov", "dic"},
+	LangRussian:            {"", "января", "февраля", "марта", "апреля", "мая", "июня", "июля", "августа", "сентября", "октября", "ноября", "декабря"},
 }
 
 func cronLangNames(lang Language) (weekdays [7]string, months [13]string) {
@@ -960,6 +962,110 @@ func parseStep(field string) (int, bool) {
 	return 0, false
 }
 
+// russianCronInterval uses the accusative after «каждый/каждую» and the
+// appropriate plural. Abbreviations elsewhere avoid inflecting raw fields.
+func russianCronInterval(n int, hours bool) string {
+	if n == 1 {
+		if hours {
+			return "каждый час"
+		}
+		return "каждую минуту"
+	}
+	ending := n % 10
+	few := ending >= 2 && ending <= 4 && (n%100 < 12 || n%100 > 14)
+	if hours {
+		if ending == 1 && n%100 != 11 {
+			return fmt.Sprintf("каждый %d час", n)
+		}
+		if few {
+			return fmt.Sprintf("каждые %d часа", n)
+		}
+		return fmt.Sprintf("каждые %d часов", n)
+	}
+	if ending == 1 && n%100 != 11 {
+		return fmt.Sprintf("каждую %d минуту", n)
+	}
+	if few {
+		return fmt.Sprintf("каждые %d минуты", n)
+	}
+	return fmt.Sprintf("каждые %d минут", n)
+}
+
+// Keep unsupported expressions intact rather than inventing a misleading
+// schedule (notably lists/ranges and cron's day-of-month OR day-of-week rule).
+func cronExprToRussian(expr string, fields []string) string {
+	if _, err := cron.ParseStandard(expr); err != nil {
+		return expr
+	}
+	minute, hour, dom, month, dow := fields[0], fields[1], fields[2], fields[3], fields[4]
+	number := func(s string, min, max int) bool {
+		n, err := strconv.Atoi(s)
+		return err == nil && n >= min && n <= max
+	}
+	if (dom != "*" && !number(dom, 1, 31)) ||
+		(month != "*" && !number(month, 1, 12)) ||
+		(dow != "*" && !number(dow, 0, 6)) || (dom != "*" && dow != "*") {
+		return expr
+	}
+	minStep, stepMinute := parseStep(minute)
+	hourStep, stepHour := parseStep(hour)
+	if (minute != "*" && !number(minute, 0, 59) && (!stepMinute || minStep <= 0 || minStep > 59)) ||
+		(hour != "*" && !number(hour, 0, 23) && (!stepHour || hourStep <= 0 || hourStep > 23)) {
+		return expr
+	}
+	var when string
+	switch {
+	case hour == "*" && minute == "*":
+		when = "каждую минуту"
+	case hour == "*" && stepMinute:
+		when = russianCronInterval(minStep, false)
+	case hour == "*":
+		when = "каждый час в " + minute + " мин"
+	case stepHour && minute == "*":
+		when = fmt.Sprintf("каждую минуту в часы с шагом %d, начиная с 00:00", hourStep)
+	case stepHour && stepMinute:
+		when = fmt.Sprintf("%s в часы с шагом %d, начиная с 00:00", russianCronInterval(minStep, false), hourStep)
+	case stepHour:
+		when = fmt.Sprintf("%s в %s мин, начиная с 00:%s", russianCronInterval(hourStep, true), minute, padZero(minute))
+	case stepMinute:
+		when = fmt.Sprintf("%s с %s:00 до %s:59", russianCronInterval(minStep, false), padZero(hour), padZero(hour))
+	case minute == "*":
+		when = fmt.Sprintf("каждую минуту с %s:00 до %s:59", padZero(hour), padZero(hour))
+	default:
+		when = fmt.Sprintf("в %s:%s", padZero(hour), padZero(minute))
+	}
+	weekdays, months := cronLangNames(LangRussian)
+	var date string
+	if dom != "*" {
+		if month == "*" {
+			date = "Ежемесячно, " + dom + "-го числа"
+		} else {
+			m, _ := strconv.Atoi(month)
+			date = "Ежегодно, " + dom + " " + months[m]
+		}
+	} else if dow != "*" {
+		d, _ := strconv.Atoi(dow)
+		date = "По " + weekdays[d]
+	}
+	if month != "*" && dom == "*" {
+		// Genitive month names fit «в течение» for all twelve months.
+		m, _ := strconv.Atoi(month)
+		if date != "" {
+			date += ", в течение " + months[m]
+		} else {
+			date = "В течение " + months[m]
+		}
+	}
+	if date != "" {
+		return date + ", " + when
+	}
+	if hour != "*" && !stepHour {
+		return "Ежедневно " + when
+	}
+	runes := []rune(when)
+	return strings.ToUpper(string(runes[0])) + string(runes[1:])
+}
+
 // CronExprToHuman converts a standard 5-field cron expression to a human-readable string.
 func CronExprToHuman(expr string, lang Language) string {
 	fields := strings.Fields(expr)
@@ -968,6 +1074,9 @@ func CronExprToHuman(expr string, lang Language) string {
 	}
 	if len(fields) != 5 {
 		return expr
+	}
+	if lang == LangRussian {
+		return cronExprToRussian(expr, fields)
 	}
 	minute, hour, dom, month, dow := fields[0], fields[1], fields[2], fields[3], fields[4]
 	weekdays, months := cronLangNames(lang)
