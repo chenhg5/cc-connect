@@ -2570,6 +2570,9 @@ func (e *Engine) initPlatformCapabilities(p Platform) {
 	if la, ok := p.(LocalizerAware); ok {
 		la.SetLocalizer(e.i18n.T)
 	}
+	if aq, ok := p.(AskQuestionStateAware); ok {
+		aq.SetAskQuestionLiveCheck(e.askQuestionCallbackLive)
+	}
 }
 
 // matchBannedWord returns the first banned word found in content, or "".
@@ -3830,6 +3833,39 @@ func parseAskQuestionCallback(content string) (qIdx int, hasQIdx bool, ok bool) 
 		return qIdx, true, true
 	}
 	return 0, false, false
+}
+
+// askQuestionCallbackLive reports whether an AskUserQuestion option click
+// would answer the question that is waiting now. It applies the same rules
+// as handlePendingPermission, so a platform can avoid rendering an answer
+// that the engine is about to drop. Content that is not an option click is
+// reported live.
+func (e *Engine) askQuestionCallbackLive(sessionKey, content string) bool {
+	qIdx, hasQIdx, ok := parseAskQuestionCallback(content)
+	if !ok {
+		return true
+	}
+	iKey := e.interactiveKeyForSessionKey(sessionKey)
+	_, pending := e.lookupPending(iKey)
+	if pending == nil {
+		e.interactiveMu.Lock()
+		var cronKeys []string
+		for k := range e.interactiveStates {
+			if strings.HasPrefix(k, iKey+"#cron:") {
+				cronKeys = append(cronKeys, k)
+			}
+		}
+		e.interactiveMu.Unlock()
+		for _, k := range cronKeys {
+			if _, pending = e.lookupPending(k); pending != nil {
+				break
+			}
+		}
+	}
+	if pending == nil || len(pending.Questions) == 0 {
+		return false
+	}
+	return !hasQIdx || qIdx == pending.CurrentQuestion
 }
 
 // dropStaleAskQuestionCallback tells the user that an option click arrived
