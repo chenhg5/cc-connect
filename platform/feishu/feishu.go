@@ -5272,6 +5272,10 @@ type feishuPreviewHandle struct {
 	sequence    int    // cardkit-v1 streaming text monotonic counter (++ before use; first call = 1)
 	status      core.CardStatus
 	lastContent string
+	// progress is what a progress card sent as a card entity shows, so a
+	// refresh updates it in place (progress_card_entity.go); nil otherwise.
+	progressMu sync.Mutex
+	progress   *progressCardModel
 }
 
 // buildCardJSON builds a Feishu interactive card JSON string with a markdown element.
@@ -5672,24 +5676,6 @@ func progressPanelTitle(label string, count int, lang string) string {
 	return label
 }
 
-// Panels always start collapsed. Every card update re-sends the whole card, so
-// an expanded flag would re-open the panels on each refresh and make the text
-// below them jump while the turn is running.
-func buildProgressPanel(title string, elements []map[string]any) map[string]any {
-	return map[string]any{
-		"tag":              "collapsible_panel",
-		"expanded":         false,
-		"background_color": "grey",
-		"header": map[string]any{
-			"title": map[string]any{"tag": "plain_text", "content": title},
-		},
-		"border":           map[string]any{"color": "grey"},
-		"vertical_spacing": "8px",
-		"padding":          "4px 8px",
-		"elements":         elements,
-	}
-}
-
 func buildProgressPanelElements(items []core.ProgressCardEntry, lang string) []map[string]any {
 	elements := make([]map[string]any, 0, len(items))
 	for _, item := range items {
@@ -5698,88 +5684,12 @@ func buildProgressPanelElements(items []core.ProgressCardEntry, lang string) []m
 	return elements
 }
 
-func appendProgressGroupedElements(elements []map[string]any, items []core.ProgressCardEntry, lang string) []map[string]any {
-	reasoning, tools, others := splitProgressItemsByLane(items)
-	if len(reasoning) > 0 {
-		elements = append(elements, buildProgressPanel(
-			progressPanelTitle("Reasoning", len(reasoning), lang),
-			buildProgressPanelElements(reasoning, lang),
-		))
-	}
-	if len(tools) > 0 {
-		elements = append(elements, buildProgressPanel(
-			progressPanelTitle("Tools", len(tools), lang),
-			buildProgressPanelElements(tools, lang),
-		))
-	}
-	if len(others) > 0 {
-		elements = append(elements, buildProgressPanel(
-			progressPanelTitle("Updates", len(others), lang),
-			buildProgressPanelElements(others, lang),
-		))
-	}
-	return elements
-}
-
 func buildProgressCardJSONFromPayload(payload *core.ProgressCardPayload) string {
-	items := normalizeProgressItems(payload)
-	if len(items) == 0 {
+	if len(normalizeProgressItems(payload)) == 0 {
 		return buildCardJSON(" ")
 	}
-
-	agent := progressAgentLabel(payload.Agent)
-	title, template, footer := progressStateMeta(payload.State, payload.Lang, agent)
-
-	elements := make([]map[string]any, 0, len(items)+3)
-	if payload.Truncated {
-		truncatedText := "Showing latest updates only."
-		if isZhLikeProgressLang(payload.Lang) {
-			truncatedText = "仅显示最近更新。"
-		}
-		elements = append(elements, map[string]any{
-			"tag": "div",
-			"text": map[string]any{
-				"tag":        "plain_text",
-				"content":    truncatedText,
-				"text_size":  "notation",
-				"text_color": "grey",
-			},
-		})
-		elements = append(elements, map[string]any{"tag": "hr"})
-	}
-
-	elements = appendProgressGroupedElements(elements, items, payload.Lang)
-	if footer != "" {
-		elements = append(elements, map[string]any{"tag": "hr"})
-		elements = append(elements, map[string]any{
-			"tag": "div",
-			"text": map[string]any{
-				"tag":        "plain_text",
-				"content":    footer,
-				"text_size":  "notation",
-				"text_color": "grey",
-			},
-		})
-	}
-
-	card := map[string]any{
-		"schema": "2.0",
-		"config": map[string]any{
-			"wide_screen_mode": true,
-		},
-		"header": map[string]any{
-			"title": map[string]any{
-				"tag":     "plain_text",
-				"content": title,
-			},
-			"template": template,
-		},
-		"body": map[string]any{
-			"elements": elements,
-		},
-	}
-	b, _ := json.Marshal(card)
-	return string(b)
+	_, cardJSON := newProgressCard(payload)
+	return cardJSON
 }
 
 func buildPreviewCardJSON(content string) string {
@@ -5825,6 +5735,7 @@ func (p *Platform) SendPreviewStart(ctx context.Context, rctx any, content strin
 	var cardJSON string
 	var sendContent string // what goes into the Im.Message.Create / Reply content field
 	var cardID string      // cardkit-v1 entity id (empty = no streaming text path)
+	var progress *progressCardModel
 	if isCardJSON(content) {
 		cardJSON = content
 		// Try cardkit-v1 two-step flow regardless of Reply vs Create. Both
@@ -5837,6 +5748,19 @@ func (p *Platform) SendPreviewStart(ctx context.Context, rctx any, content strin
 		} else {
 			slog.Info(p.tag()+": create card entity failed, falling back to inline card JSON",
 				"error", err)
+			sendContent = cardJSON
+		}
+	} else if payload, ok := core.ParseProgressCardPayload(content); ok && len(normalizeProgressItems(payload)) > 0 {
+		// Sent as a card entity so refreshes update it in place and keep the
+		// panels the reader opened (progress_card_entity.go).
+		progress, cardJSON = newProgressCard(payload)
+		if id, err := p.createCardEntity(ctx, cardJSON); err == nil {
+			cardID = id
+			sendContent = fmt.Sprintf(`{"type":"card","data":{"card_id":"%s"}}`, id)
+		} else {
+			slog.Info(p.tag()+": create progress card entity failed, falling back to inline card JSON",
+				"error", err)
+			progress = nil
 			sendContent = cardJSON
 		}
 	} else {
@@ -5903,7 +5827,7 @@ func (p *Platform) SendPreviewStart(ctx context.Context, rctx any, content strin
 		return nil, fmt.Errorf("%s: send preview: no message ID returned", p.tag())
 	}
 
-	return &feishuPreviewHandle{messageID: msgID, chatID: chatID, cardID: cardID}, nil
+	return &feishuPreviewHandle{messageID: msgID, chatID: chatID, cardID: cardID, progress: progress}, nil
 }
 
 // createCardEntity calls the cardkit-v1 Create Card Entity API
@@ -6022,6 +5946,19 @@ func (p *Platform) UpdateMessage(ctx context.Context, previewHandle any, content
 		return fmt.Errorf("%s: invalid preview handle type %T", p.tag(), previewHandle)
 	}
 
+	payload, isProgress := core.ParseProgressCardPayload(content)
+	if isProgress && !isCardJSON(content) {
+		if handled, err := p.updateProgressCardEntity(ctx, h, payload); handled {
+			return err
+		}
+	} else {
+		// Anything else replaces the whole card, so it is no longer the
+		// progress card the in-place updates know.
+		h.progressMu.Lock()
+		h.progress = nil
+		h.progressMu.Unlock()
+	}
+
 	cardJSON := ""
 	if isCardJSON(content) {
 		// Card 2.0: engine passes full card JSON directly, skip all processing.
@@ -6029,7 +5966,7 @@ func (p *Platform) UpdateMessage(ctx context.Context, previewHandle any, content
 		h.mu.Lock()
 		h.lastContent = content
 		h.mu.Unlock()
-	} else if payload, ok := core.ParseProgressCardPayload(content); ok {
+	} else if isProgress {
 		cardJSON = buildProgressCardJSONFromPayload(payload)
 	} else {
 		processed := content
