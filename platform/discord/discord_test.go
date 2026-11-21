@@ -1821,4 +1821,3 @@ func basePlatformFor(t *testing.T, pAny core.Platform) *Platform {
 		return nil
 	}
 }
-

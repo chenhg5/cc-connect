@@ -138,4 +138,3 @@ func TestGetAccessToken_NormalExpiresIn_AppliesBuffer(t *testing.T) {
 		t.Errorf("tokenCache window for expires_in=7200 = %v, want ~7140s (110-120min)", window)
 	}
 }
-
