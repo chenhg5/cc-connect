@@ -1162,6 +1162,16 @@ app_secret = "your-feishu-app-secret"
 #                               # Applies after image batching; include image_batch_window_ms when considering total delay.
 #                               # 普通文字和图片的可选合批窗口，默认关闭；开启后普通文字也会等待，图片另计上面的合批延迟。
 #                               # 命令、权限回复及引用消息不等待此窗口。
+# attachment_wait = "off"   # With thread_isolation, how unmentioned attachments (image/file/video) in an
+#                           # active topic are handled. "off" (default): dispatch at once, as today.
+#                           # "mention": hold them per topic and sender; the same sender's next @bot message
+#                           # in that topic is dispatched with them attached. Unmentioned text never releases them.
+#                           # 开启 thread_isolation 时，已活跃话题里未 @ 的附件（图片/文件/视频）怎么处理。
+#                           # "off"（默认）：立即分发，与现在一致；"mention"：按话题 + 发送人暂存，等同一发送人
+#                           # 在该话题下一次 @机器人 时一起分发。未 @ 的文字不会放行。
+# attachment_wait_secs = 1800 # "mention" only: staged attachments are dropped after this many seconds (1–86400),
+#                             # and a topic stops counting as active after this long without an @bot message.
+#                             # 仅 "mention" 生效：暂存超过该秒数即丢弃；话题超过该时长没有 @机器人 也不再算活跃。
 
 # Lark (International Version) / Lark 国际版
 # Lark now supports WebSocket long-connection too; webhook mode is only needed
