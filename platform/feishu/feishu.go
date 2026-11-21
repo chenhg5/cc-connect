@@ -139,6 +139,7 @@ type replyContext struct {
 type Platform struct {
 	mu                         sync.RWMutex
 	localizer                  atomic.Pointer[core.Localizer]
+	askqLiveCheck              atomic.Pointer[core.AskQuestionLiveCheck]
 	platformName               string
 	domain                     string
 	appID                      string
@@ -1201,6 +1202,17 @@ func (p *Platform) onCardAction(event *callback.CardActionTriggerEvent) (*callba
 
 	// askq: — AskUserQuestion option selected, forward as user message
 	if strings.HasPrefix(actionVal, "askq:") {
+		// A click on a question that was already answered (e.g. by text) is
+		// dropped by the engine; do not render it as the chosen answer (#2302).
+		if c := p.askqLiveCheck.Load(); c != nil && *c != nil && !(*c)(sessionKey, actionVal) {
+			slog.Info(p.tag()+": stale ask-question click, card left unchanged", "session", sessionKey, "action", actionVal)
+			return &callback.CardActionTriggerResponse{
+				Toast: &callback.Toast{
+					Type:    "info",
+					Content: p.localize(core.MsgAskQuestionStale, askqStaleFallback),
+				},
+			}, nil
+		}
 		rctx := replyContext{messageID: messageID, chatID: chatID, sessionKey: sessionKey}
 		p.dispatchCardActionMessage(chatID, &core.Message{
 			SessionKey: sessionKey,
@@ -4729,6 +4741,14 @@ func rejectNonRequester(sessionKey, clickerOpenID, toast string) *callback.CardA
 
 // requesterOnlyFallback is used until the engine has provided a localizer.
 const requesterOnlyFallback = "此卡片仅提问者本人可操作 / Only the requester can operate this card"
+
+// askqStaleFallback is used until the engine has provided a localizer.
+const askqStaleFallback = "这个问题已经回答过了或已失效 / That question was already answered or is no longer active"
+
+// SetAskQuestionLiveCheck implements core.AskQuestionStateAware.
+func (p *Platform) SetAskQuestionLiveCheck(c core.AskQuestionLiveCheck) {
+	p.askqLiveCheck.Store(&c)
+}
 
 // SetLocalizer implements core.LocalizerAware.
 func (p *Platform) SetLocalizer(l core.Localizer) {

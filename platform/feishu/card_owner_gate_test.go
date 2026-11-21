@@ -174,3 +174,45 @@ func TestOnCardAction_NonRequesterToastIsLocalized(t *testing.T) {
 	}
 	waitNoMessage(t, msgCh, 150*time.Millisecond, "non-requester askq click")
 }
+
+// A click on a question that was already answered must not turn the card
+// green with the clicked option, and must not be dispatched (#2302).
+func TestOnCardAction_StaleAskqClickLeavesCard(t *testing.T) {
+	ip, msgCh := newAllowFromTestPlatform(t, "*")
+	var gotKey, gotAction string
+	ip.SetAskQuestionLiveCheck(func(sessionKey, action string) bool {
+		gotKey, gotAction = sessionKey, action
+		return false
+	})
+	i18n := core.NewI18n(core.LangEnglish)
+	ip.SetLocalizer(i18n.T)
+
+	resp, err := ip.onCardAction(cardActionEventWithKey("ou_owner", "askq:0:2", "feishu:oc_test_chat:ou_owner"))
+	if err != nil {
+		t.Fatalf("onCardAction() error = %v", err)
+	}
+	if resp == nil || resp.Card != nil {
+		t.Fatalf("response = %#v, want toast only (card left unchanged)", resp)
+	}
+	if resp.Toast == nil || resp.Toast.Content != i18n.T(core.MsgAskQuestionStale) {
+		t.Fatalf("Toast = %#v, want the stale-question notice", resp.Toast)
+	}
+	if gotKey != "feishu:oc_test_chat:ou_owner" || gotAction != "askq:0:2" {
+		t.Fatalf("live check got (%q, %q)", gotKey, gotAction)
+	}
+	waitNoMessage(t, msgCh, 150*time.Millisecond, "stale askq click")
+}
+
+// A live click still renders the answered card.
+func TestOnCardAction_LiveAskqClickRendersAnswer(t *testing.T) {
+	ip, _ := newAllowFromTestPlatform(t, "*")
+	ip.SetAskQuestionLiveCheck(func(string, string) bool { return true })
+
+	resp, err := ip.onCardAction(cardActionEventWithKey("ou_owner", "askq:0:2", "feishu:oc_test_chat:ou_owner"))
+	if err != nil {
+		t.Fatalf("onCardAction() error = %v", err)
+	}
+	if resp == nil || resp.Card == nil {
+		t.Fatalf("response = %#v, want the answered card", resp)
+	}
+}
