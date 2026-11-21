@@ -48,12 +48,15 @@ const (
 )
 
 type ProgressCardEntry struct {
-	Kind     ProgressCardEntryKind `json:"kind"`
-	Text     string                `json:"text"`
-	Tool     string                `json:"tool,omitempty"`
-	Status   string                `json:"status,omitempty"`
-	ExitCode *int                  `json:"exit_code,omitempty"`
-	Success  *bool                 `json:"success,omitempty"`
+	ToolCallID string                `json:"tool_call_id,omitempty"`
+	Input      string                `json:"input,omitempty"`
+	Kind       ProgressCardEntryKind `json:"kind"`
+	Text       string                `json:"text"`
+	Tool       string                `json:"tool,omitempty"`
+	Status     string                `json:"status,omitempty"`
+	ExitCode   *int                  `json:"exit_code,omitempty"`
+	Success    *bool                 `json:"success,omitempty"`
+	legacyID   uint64                // writer-local identity; never serialized into the shared payload
 }
 
 // ProgressCardPayload carries structured progress entries for platforms that
@@ -97,7 +100,7 @@ func BuildProgressCardPayloadV2(items []ProgressCardEntry, truncated bool, agent
 	cleaned := make([]ProgressCardEntry, 0, len(items))
 	for _, item := range items {
 		text := strings.TrimSpace(item.Text)
-		if text == "" {
+		if text == "" && item.Kind != ProgressEntryToolResult && item.Kind != ProgressEntryToolUse {
 			continue
 		}
 		kind := item.Kind
@@ -105,12 +108,14 @@ func BuildProgressCardPayloadV2(items []ProgressCardEntry, truncated bool, agent
 			kind = ProgressEntryInfo
 		}
 		cleaned = append(cleaned, ProgressCardEntry{
-			Kind:     kind,
-			Text:     text,
-			Tool:     strings.TrimSpace(item.Tool),
-			Status:   strings.TrimSpace(item.Status),
-			ExitCode: item.ExitCode,
-			Success:  item.Success,
+			ToolCallID: item.ToolCallID,
+			Input:      item.Input,
+			Kind:       kind,
+			Text:       text,
+			Tool:       strings.TrimSpace(item.Tool),
+			Status:     strings.TrimSpace(item.Status),
+			ExitCode:   item.ExitCode,
+			Success:    item.Success,
 		})
 	}
 	if len(cleaned) == 0 {
@@ -156,7 +161,7 @@ func ParseProgressCardPayload(content string) (*ProgressCardPayload, bool) {
 		item.Text = strings.TrimSpace(item.Text)
 		item.Tool = strings.TrimSpace(item.Tool)
 		item.Status = strings.TrimSpace(item.Status)
-		if item.Text == "" {
+		if item.Text == "" && item.Kind != ProgressEntryToolResult && item.Kind != ProgressEntryToolUse {
 			continue
 		}
 		if item.Kind == "" {
@@ -221,15 +226,19 @@ type compactProgressWriter struct {
 	style      string
 	usePayload bool
 
-	content    string
-	entries    []string
-	items      []ProgressCardEntry
-	state      ProgressCardState
-	agentName  string
-	lang       Language
-	truncated  bool
-	lastSent   string
-	maxEntries int
+	content         string
+	entries         []string
+	items           []ProgressCardEntry
+	pendingTools    map[string]ProgressCardEntry
+	legacyTools     map[string]*legacyToolCalls
+	legacySequence  uint64
+	legacyUncertain bool
+	state           ProgressCardState
+	agentName       string
+	lang            Language
+	truncated       bool
+	lastSent        string
+	maxEntries      int
 
 	// Throttle message edits to avoid platform rate limits (e.g. Discord ~5 edits/5s).
 	minUpdateInterval time.Duration
@@ -387,10 +396,10 @@ func (w *compactProgressWriter) AppendStructured(item ProgressCardEntry, fallbac
 	}
 	text := strings.TrimSpace(item.Text)
 	fallback = strings.TrimSpace(fallback)
-	if text == "" && fallback == "" {
+	if text == "" && fallback == "" && item.Kind != ProgressEntryToolResult && item.Kind != ProgressEntryToolUse {
 		return true
 	}
-	if text == "" {
+	if text == "" && item.Kind != ProgressEntryToolResult && item.Kind != ProgressEntryToolUse {
 		text = fallback
 	}
 	if fallback == "" {
@@ -414,9 +423,39 @@ func (w *compactProgressWriter) AppendStructured(item ProgressCardEntry, fallbac
 
 	switch w.style {
 	case progressStyleCard:
-		w.items = append(w.items, item)
-		w.entries = append(w.entries, fallback)
-		truncated := false
+		w.trackLegacyTool(&item)
+		if item.Kind == ProgressEntryToolUse && item.ToolCallID != "" {
+			if w.pendingTools == nil {
+				w.pendingTools = make(map[string]ProgressCardEntry)
+			}
+			w.pendingTools[item.ToolCallID] = item
+		}
+		if item.Kind == ProgressEntryToolResult && item.ToolCallID != "" {
+			if previous, ok := w.pendingTools[item.ToolCallID]; ok {
+				item.Input = previous.Text
+				if item.Tool == "" {
+					item.Tool = previous.Tool
+				}
+				delete(w.pendingTools, item.ToolCallID)
+			}
+		}
+		idx := w.matchToolResult(item)
+		if idx >= 0 {
+			previous := w.items[idx]
+			item.Input = previous.Text
+			if previous.Kind == ProgressEntryToolResult {
+				item.Input = previous.Input
+			}
+			if item.Tool == "" {
+				item.Tool = previous.Tool
+			}
+			w.items[idx] = item
+			w.entries[idx] += "\n" + fallback
+		} else {
+			w.items = append(w.items, item)
+			w.entries = append(w.entries, fallback)
+		}
+		truncated := w.truncated
 		if w.maxEntries > 0 && len(w.items) > w.maxEntries {
 			w.items = w.items[len(w.items)-w.maxEntries:]
 			if len(w.entries) > w.maxEntries {
@@ -561,4 +600,89 @@ func trimCompactProgressText(s string, maxRunes int) string {
 	rs := []rune(s)
 	tail := strings.TrimLeft(string(rs[len(rs)-maxRunes:]), "\n")
 	return "…\n" + tail
+}
+
+// Anonymous calls must be tracked beyond the visible card window. Once calls
+// overlap, their results remain ambiguous until the entire group is drained.
+type legacyToolCalls struct {
+	pending   int
+	ambiguous bool
+	last      ProgressCardEntry
+}
+
+func (w *compactProgressWriter) trackLegacyTool(item *ProgressCardEntry) {
+	if item.ToolCallID != "" {
+		return
+	}
+	if item.Kind == ProgressEntryToolUse {
+		if w.legacyTools == nil {
+			w.legacyTools = make(map[string]*legacyToolCalls)
+		}
+		group := w.legacyTools[item.Tool]
+		if group == nil {
+			group = &legacyToolCalls{}
+			w.legacyTools[item.Tool] = group
+		}
+		w.legacySequence++
+		item.legacyID = w.legacySequence
+		group.pending++
+		group.ambiguous = group.ambiguous || group.pending > 1
+		group.last = *item
+		return
+	}
+	if item.Kind != ProgressEntryToolResult {
+		return
+	}
+	for _, call := range w.pendingTools {
+		if item.Tool == "" || item.Tool == call.Tool {
+			w.legacyUncertain = true
+			return
+		}
+	}
+	tool := item.Tool
+	if tool == "" {
+		if len(w.legacyTools) != 1 {
+			w.legacyUncertain = true
+			return
+		}
+		for name := range w.legacyTools {
+			tool = name
+		}
+	}
+	group := w.legacyTools[tool]
+	if group == nil {
+		return
+	}
+	if group.pending == 1 && !group.ambiguous && !w.legacyUncertain {
+		item.legacyID = group.last.legacyID
+		item.Input = group.last.Text
+		item.Tool = group.last.Tool
+	}
+	group.pending--
+	if group.pending == 0 {
+		delete(w.legacyTools, tool)
+	}
+}
+
+// matchToolResult never guesses between concurrent invocations. Older adapters
+// without IDs can be paired only when exactly one matching call is pending.
+func (w *compactProgressWriter) matchToolResult(item ProgressCardEntry) int {
+	if item.Kind != ProgressEntryToolResult {
+		return -1
+	}
+	for i, previous := range w.items {
+		if previous.Kind != ProgressEntryToolUse && previous.Kind != ProgressEntryToolResult {
+			continue
+		}
+		if item.ToolCallID != "" {
+			if previous.ToolCallID == item.ToolCallID {
+				return i
+			}
+			continue
+		}
+		if item.legacyID != 0 && previous.legacyID == item.legacyID {
+			return i
+		}
+	}
+	return -1
 }

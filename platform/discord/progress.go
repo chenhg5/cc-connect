@@ -132,7 +132,10 @@ func buildDiscordToolUseSummary(item core.ProgressCardEntry, lang string) string
 func buildDiscordToolResultSummary(item core.ProgressCardEntry, lang string) string {
 	toolName := strings.TrimSpace(item.Tool)
 	text := compactDiscordProgressText(item.Text)
-	meta := make([]string, 0, 3)
+	meta := make([]string, 0, 4)
+	if input := compactDiscordProgressText(core.TruncateToolOutput(item.Input, maxDiscordProgressLineLen/2)); input != "" {
+		meta = append(meta, input)
+	}
 
 	if status := discordProgressStatusText(item, lang); status != "" {
 		meta = append(meta, status)

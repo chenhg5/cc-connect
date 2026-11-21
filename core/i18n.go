@@ -201,6 +201,7 @@ const (
 	MsgToolResultFmtNoOutput     MsgKey = "tool_result_fmt_no_output"
 	MsgToolResultFmtOk           MsgKey = "tool_result_fmt_ok"
 	MsgToolResultFmtFailed       MsgKey = "tool_result_fmt_failed"
+	MsgToolPreviewTruncated      MsgKey = "tool_preview_truncated"
 	MsgExecutionStopped          MsgKey = "execution_stopped"
 	MsgSessionCloseFailed        MsgKey = "session_close_failed"
 	MsgSessionResumeUnsafe       MsgKey = "session_resume_unsafe"
@@ -733,6 +734,13 @@ var messages = map[MsgKey]map[Language]string{
 		LangTraditionalChinese: "狀態",
 		LangJapanese:           "ステータス",
 		LangSpanish:            "Estado",
+	},
+	MsgToolPreviewTruncated: {
+		LangEnglish:            "Middle omitted; beginning and end retained.",
+		LangChinese:            "已省略中间内容，保留开头与结尾。",
+		LangTraditionalChinese: "已省略中間內容，保留開頭與結尾。",
+		LangJapanese:           "途中を省略し、先頭と末尾を表示しています。",
+		LangSpanish:            "Parte central omitida; se conservan el principio y el final.",
 	},
 	MsgToolResultFmtExit: {
 		LangEnglish:            "Exit",
