@@ -501,6 +501,16 @@ type UserQuestionOption struct {
 	Description string `json:"description"`
 }
 
+// ResultStatus is explicit terminal outcome evidence from an agent protocol.
+// The zero value means the protocol did not establish success or failure.
+type ResultStatus string
+
+const (
+	ResultStatusUnknown ResultStatus = ""
+	ResultStatusSuccess ResultStatus = "success"
+	ResultStatusError   ResultStatus = "error"
+)
+
 // Event represents a single piece of agent output streamed back to the engine.
 type Event struct {
 	Type                     EventType
@@ -516,6 +526,7 @@ type Event struct {
 	RequestID                string         // unique request ID for EventPermissionRequest
 	Questions                []UserQuestion // populated when ToolName == "AskUserQuestion"
 	Done                     bool
+	ResultStatus             ResultStatus // terminal evidence; absent is unknown, not success
 	Error                    error
 	InputTokens              int // token usage from agent result events
 	OutputTokens             int
