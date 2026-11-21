@@ -851,6 +851,27 @@
           "models": ["claude-sonnet-5-5", "gpt-5.4", "gemini-4-neon", "deepseek-v4-flash"]
         }
       }
+    },
+    {
+      "name": "aigrow",
+      "display_name": "AIGROW",
+      "description": "Prepaid API credit for genuine Claude, GPT, Gemini, Grok, Qwen and Kimi models on one key, through OpenAI and Anthropic compatible APIs.",
+      "description_zh": "预付费 API 额度，一个密钥即可通过 OpenAI 和 Anthropic 兼容 API 使用正版 Claude、GPT、Gemini、Grok、Qwen 和 Kimi 模型。",
+      "features": ["OpenAI + Anthropic API", "18 Models", "Genuine Models"],
+      "tier": 3,
+      "website": "https://aigrow.gg/ai-api",
+      "agents": {
+        "claudecode": {
+          "base_url": "https://aigrow.gg",
+          "model": "claude-opus-5.5",
+          "models": ["claude-opus-5.5", "claude-sonnet-5.5", "claude-haiku-5.5"]
+        },
+        "opencode": {
+          "base_url": "https://aigrow.gg/v1",
+          "model": "claude-opus-5.5",
+          "models": ["claude-opus-5.5", "claude-sonnet-5.5", "gpt-6.2-sol", "gemini-4-neon"]
+        }
+      }
     }
   ]
 }
