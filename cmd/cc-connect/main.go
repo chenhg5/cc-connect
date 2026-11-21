@@ -734,6 +734,7 @@ func main() {
 				engine.SetAgentSessionIdleTimeout(time.Duration(mins) * time.Minute)
 			}
 		}
+		engine.SetBusyMessageMode(proj.BusyMessageMode)
 
 		// Wire sender injection
 		if proj.InjectSender != nil {
@@ -1874,6 +1875,7 @@ func reloadConfig(configPath, projName string, engine *core.Engine) (*core.Confi
 		// explicitly so those stale idle-close timers cannot fire later.
 		engine.SetAgentSessionIdleTimeout(0)
 	}
+	engine.SetBusyMessageMode(proj.BusyMessageMode)
 
 	// Reload instant reply
 	if cfg.InstantReply.Enabled != nil && *cfg.InstantReply.Enabled {

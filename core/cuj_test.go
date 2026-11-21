@@ -2746,6 +2746,103 @@ func TestCUJ_H5_WorkspaceSkillDiscoveryAndInvocation(t *testing.T) {
 	assertWorkspaceSkills(t, sent[len(sent)-1], "b", "a")
 }
 
+func TestCUJ_A8_BusyFollowUpSteeringAndFallback(t *testing.T) {
+	for _, tt := range []struct {
+		name string
+		err  error
+		ack  MsgKey
+	}{
+		{name: "accepted", ack: MsgMessageSteered},
+		{name: "rejected then drained", err: ErrSteerRejected, ack: MsgMessageQueued},
+		{name: "unknown is not replayed", err: errors.New("ack timeout"), ack: MsgMessageSteerUnconfirmed},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			p := &stubPlatformEngine{n: "test"}
+			s := &busySteeringSession{queuingAgentSession: newQueuingSession("cuj-steering"), err: tt.err}
+			e := NewEngine("test", &resultAgent{session: s}, []Platform{p}, "", LangEnglish)
+			e.SetBusyMessageMode("steer")
+			e.SetStreamPreviewCfg(StreamPreviewCfg{Enabled: false})
+			t.Cleanup(func() { _ = e.Stop() })
+			const key = "test:steering-cuj"
+			send := func(id, content string) {
+				e.ReceiveMessage(p, &Message{SessionKey: key, Platform: p.Name(), UserID: "user", MessageID: id, Content: content, ReplyCtx: "ctx"})
+			}
+			visible := func(want string) {
+				t.Helper()
+				waitAsyncInput(t, func() bool { return strings.Contains(strings.Join(p.getSent(), "\n"), want) })
+			}
+			// Action 1: start a task. The external agent remains in flight.
+			send("first", "review the change")
+			waitAsyncInput(t, func() bool { s.sendMu.Lock(); defer s.sendMu.Unlock(); return len(s.sendCalls) == 1 })
+			// Action 2: add a plain-text instruction while it is busy.
+			send("second", "include a unit test")
+			visible(e.i18n.T(tt.ack))
+			s.events <- Event{Type: EventResult, Content: "original task completed", Done: true}
+			visible("original task completed")
+			if errors.Is(tt.err, ErrSteerRejected) {
+				waitAsyncInput(t, func() bool { s.sendMu.Lock(); defer s.sendMu.Unlock(); return len(s.sendCalls) == 2 })
+				s.events <- Event{Type: EventResult, Content: "queued supplement completed", Done: true}
+				visible("queued supplement completed")
+			}
+			waitAsyncInput(t, func() bool { return !e.sessions.GetOrCreateActive(key).Busy() })
+			// Action 3: inspect the history through the user's command path.
+			send("history", "/history")
+			visible("review the change")
+			visible("include a unit test")
+			if tt.err != nil && !errors.Is(tt.err, ErrSteerRejected) {
+				visible(e.i18n.T(MsgMessageSteerUnconfirmed))
+			}
+			s.sendMu.Lock()
+			defer s.sendMu.Unlock()
+			want := 1
+			if errors.Is(tt.err, ErrSteerRejected) {
+				want = 2
+			}
+			if len(s.sendCalls) != want {
+				t.Fatalf("unexpected replay/second turn: %v", s.sendCalls)
+			}
+		})
+	}
+}
+
+func TestCUJ_A8_AsyncAnswer_RestartAndSwitchContinuesOriginalConversation(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "sessions.json")
+	sm := NewSessionManager(path)
+	original := sm.GetOrCreateActive("test:user")
+	original.SetAgentSessionID("async-thread", "test")
+	original.AddHistory("assistant", "Original task finished; question remains open.")
+	original.AsyncQuestion = savedTestQuestion()
+	newer := sm.NewSession("test:user", "newer")
+	newer.AddHistory("assistant", "Different conversation.")
+	sm.Save()
+	p := &stubPlatformEngine{n: "test"}
+	s := &asyncInputSession{events: make(chan Event, 8)}
+	e := NewEngine("test", &controllableAgent{nextSession: s}, []Platform{p}, path, LangEnglish)
+	t.Cleanup(func() { _ = e.Stop() })
+	send := func(content string) {
+		e.ReceiveMessage(p, &Message{SessionKey: "test:user", Platform: "test", Content: content, ReplyCtx: "ctx"})
+	}
+	send("/history")
+	send("askq:cTE:0:2")
+	waitAsyncInput(t, func() bool { s.mu.Lock(); defer s.mu.Unlock(); return len(s.sent) == 1 })
+	send("askq:cTE:0:2")
+	s.events <- Event{Type: EventResult, Content: "Original answer updated to SQLite.", Done: true}
+	waitAsyncInput(t, func() bool {
+		return strings.Contains(strings.Join(p.getSent(), "\n"), "Original answer updated to SQLite.")
+	})
+	if e.sessions.ActiveSessionID("test:user") != original.ID || e.sessions.FindByID(original.ID).GetAgentSessionID() != "async-thread" {
+		t.Fatal("answer changed conversation identity")
+	}
+	if len(e.sessions.FindByID(newer.ID).GetHistory(0)) != 1 {
+		t.Fatal("answer entered newer conversation")
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if len(s.sent) != 1 || !strings.Contains(s.sent[0], "Which database?: SQLite") {
+		t.Fatal(s.sent)
+	}
+}
+
 // Opening, changing, and reopening reasoning controls must stay in the
 // workspace selected by the platform session, including card callbacks.
 func TestCUJ_R1_ReasoningCardsPreserveWorkspaceIsolation(t *testing.T) {
@@ -2795,4 +2892,84 @@ type reasoningJourneyPlatform struct {
 
 func (p *reasoningJourneyPlatform) SetCardNavigationHandler(h CardNavigationHandler) {
 	p.navigation = h
+}
+
+func TestCUJ_A8_AsyncAnswerSlowCloseKeepsChatResponsive(t *testing.T) {
+	for _, command := range []string{"ordinary supplement", "/stop"} {
+		t.Run(command, func(t *testing.T) {
+			p := &stubPlatformEngine{n: "test"}
+			next := &asyncInputSession{events: make(chan Event, 16)}
+			e := NewEngine("test", &controllableAgent{nextSession: next}, []Platform{p}, "", LangEnglish)
+			const key = "test:user"
+			original := e.sessions.GetOrCreateActive(key)
+			original.SetAgentSessionID("async-thread", "test")
+			original.AsyncQuestion = savedTestQuestion()
+			newer := e.sessions.NewSession(key, "newer")
+			newer.SetAgentSessionID("newer-thread", "test")
+			old := &reviewSlowCloseSession{asyncInputSession: &asyncInputSession{events: make(chan Event, 8)}, entered: make(chan struct{}), release: make(chan struct{})}
+			e.interactiveStates[key] = &interactiveState{agentSession: old, platform: p, replyCtx: "ctx", busySession: newer}
+			var release sync.Once
+			unblock := func() { release.Do(func() { close(old.release) }) }
+			t.Cleanup(func() { unblock(); _ = e.Stop() })
+			send := func(text string) {
+				e.ReceiveMessage(p, &Message{SessionKey: key, Platform: "test", Content: text, ReplyCtx: "ctx"})
+			}
+			send("/history")
+			cardDone := make(chan struct{})
+			go func() { send("askq:cTE:0:2"); close(cardDone) }()
+			select {
+			case <-old.entered:
+			case <-time.After(time.Second):
+				t.Fatal("teardown never began")
+			}
+			messageDone := make(chan struct{})
+			go func() { send(command); close(messageDone) }()
+			select {
+			case <-messageDone:
+			case <-time.After(250 * time.Millisecond):
+				t.Error("chat message blocked behind slow Close")
+			}
+			if command != "/stop" {
+				next.mu.Lock()
+				premature := len(next.sent)
+				next.mu.Unlock()
+				if premature != 0 {
+					t.Error("resumed before old process closed")
+				}
+			}
+			unblock()
+			select {
+			case <-cardDone:
+			case <-time.After(2 * time.Second):
+				t.Fatal("card handler stuck")
+			}
+			select {
+			case <-messageDone:
+			case <-time.After(2 * time.Second):
+				t.Fatal("message handler stuck")
+			}
+			if command != "/stop" {
+				waitAsyncInput(t, func() bool { next.mu.Lock(); defer next.mu.Unlock(); return len(next.sent) > 0 })
+				next.mu.Lock()
+				answer := next.sent[0]
+				next.mu.Unlock()
+				if !strings.Contains(answer, "SQLite") || e.sessions.ActiveSessionID(key) != original.ID {
+					t.Error("answer went to wrong conversation")
+				}
+				next.events <- Event{Type: EventResult, Content: "original answer applied", Done: true}
+				waitAsyncInput(t, func() bool { return strings.Contains(strings.Join(p.getSent(), "\n"), "original answer applied") })
+			} else {
+				waitAsyncInput(t, func() bool { return original.asyncQuestion().Status == "open" })
+				next.mu.Lock()
+				count := len(next.sent)
+				next.mu.Unlock()
+				if count != 0 {
+					t.Error("stopped answer resumed after teardown")
+				}
+				if !strings.Contains(strings.Join(p.getSent(), "\n"), e.i18n.T(MsgExecutionStopped)) {
+					t.Error("stop feedback missing")
+				}
+			}
+		})
+	}
 }

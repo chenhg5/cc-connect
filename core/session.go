@@ -38,6 +38,7 @@ type Session struct {
 	// — use whatever the agent's default is".
 	ActiveProvider string         `json:"active_provider,omitempty"`
 	History        []HistoryEntry `json:"history"`
+	AsyncQuestion  *AsyncQuestion `json:"async_question,omitempty"`
 	CreatedAt      time.Time      `json:"created_at"`
 	UpdatedAt      time.Time      `json:"updated_at"`
 	// LastUserActivity records when a real user message was last received.
@@ -785,6 +786,7 @@ func (sm *SessionManager) saveLocked() {
 			AgentType:           s.AgentType,
 			PastAgentSessionIDs: append([]string(nil), s.PastAgentSessionIDs...),
 			History:             append([]HistoryEntry(nil), s.History...),
+			AsyncQuestion:       cloneAsyncQuestion(s.AsyncQuestion),
 			CreatedAt:           s.CreatedAt,
 			UpdatedAt:           s.UpdatedAt,
 			LastUserActivity:    s.LastUserActivity,
@@ -890,8 +892,17 @@ func (sm *SessionManager) load() {
 		sm.userMeta = make(map[string]*UserMeta)
 	}
 
+	normalized := false
 	for _, s := range sm.sessions {
 		s.stripContinueSessionSentinel()
+		// No delivery acknowledgement can still arrive after process restart.
+		if q := s.AsyncQuestion; q != nil && q.Status == "sending" {
+			q.Status = "unknown"
+			normalized = true
+		}
+	}
+	if normalized {
+		sm.Save()
 	}
 
 	slog.Info("session: loaded from disk", "path", sm.storePath, "sessions", len(sm.sessions))
