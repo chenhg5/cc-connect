@@ -664,6 +664,10 @@ func (p *Platform) ProgressStyle() string { return p.progressStyle }
 
 func (p *Platform) SupportsProgressCardPayload() bool { return true }
 
+// ProgressUpdateInterval limits card edits so a burst of tool events does not
+// exhaust Feishu PATCH capacity or turn a transient timeout into fallback spam.
+func (p *Platform) ProgressUpdateInterval() time.Duration { return 1500 * time.Millisecond }
+
 // groupReplyAllForChat reports whether an unmentioned message from chatID
 // should bypass the local @mention gate. A non-empty per-chat list takes
 // precedence over the legacy platform-wide group_reply_all switch.
