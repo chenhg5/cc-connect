@@ -45,31 +45,58 @@ import (
 // working, then check status. Both messages have receipts before either answer;
 // draining the queue must preserve each receipt without adding another one.
 func TestCUJ_A8_ImmediateReceiptsDuringStartupAndQueue(t *testing.T) {
-	env := newReceiptAckEnv(t, nil)
+	for _, buffered := range []bool{false, true} {
+		t.Run(fmt.Sprintf("buffered_reply_%t", buffered), func(t *testing.T) {
+			env := newReceiptAckEnv(t, nil)
 
-	// User action 1: submit the first task while agent startup is blocked.
-	env.send("first", "first task", 1000)
-	env.awaitStartup()
-	env.assertReceipts("first")
-	close(env.startup.release)
-	env.awaitSendCount(1)
+			// User action 1: submit the first task while agent startup is blocked.
+			env.send("first", "first task", 1000)
+			env.awaitStartup()
+			env.assertReceipts("first")
+			close(env.startup.release)
+			env.awaitSendCount(1)
 
-	// User action 2: submit a follow-up while the first task awaits its result.
-	env.send("second", "follow-up task", 2000)
-	env.assertReceipts("first", "second")
-	env.awaitVisible(env.engine.i18n.T(MsgMessageQueued))
+			// User action 2: submit a follow-up while the first task awaits its result.
+			env.send("second", "follow-up task", 2000)
+			env.assertReceipts("first", "second")
+			env.awaitVisible(env.engine.i18n.T(MsgMessageQueued))
 
-	// User action 3: check status; local commands do not claim an agent turn.
-	env.send("status", "/status", 3000)
-	env.assertReceipts("first", "second")
+			// User action 3: check status; local commands do not claim an agent turn.
+			env.send("status", "/status", 3000)
+			env.assertReceipts("first", "second")
 
-	env.startup.session.events <- Event{Type: EventResult, Content: "first answer", Done: true}
-	env.awaitVisible("first answer")
-	env.awaitSendCount(2)
-	env.assertReceipts("first", "second")
-	env.startup.session.events <- Event{Type: EventResult, Content: "second answer", Done: true}
-	env.awaitVisible("second answer")
-	env.assertReceipts("first", "second")
+			if buffered {
+				// Pi #2161: the adapter leaves compaction inside the turn, so
+				// accumulated text must survive until its single terminal result.
+				// The real raw-event regression lives in agent/pi/issue2161_engine_test.go.
+				env.startup.session.events <- Event{Type: EventText, Content: "first "}
+				env.startup.session.events <- Event{Type: EventText, Content: "answer"}
+				env.startup.session.events <- Event{Type: EventResult, Done: true}
+			} else {
+				env.startup.session.events <- Event{Type: EventResult, Content: "first answer", Done: true}
+			}
+			env.awaitVisible("first answer")
+			env.awaitSendCount(2)
+			env.assertReceipts("first", "second")
+			env.startup.session.events <- Event{Type: EventResult, Content: "second answer", Done: true}
+			env.awaitVisible("second answer")
+			env.assertReceipts("first", "second")
+			for _, answer := range []string{"first answer", "second answer"} {
+				count := 0
+				for _, sent := range env.plat.getSent() {
+					if sent == answer {
+						count++
+					}
+					if strings.Contains(sent, env.engine.i18n.T(MsgEmptyResponse)) {
+						t.Fatalf("unexpected empty response: %v", env.plat.getSent())
+					}
+				}
+				if count != 1 {
+					t.Fatalf("answer %q delivered %d times, want once: %v", answer, count, env.plat.getSent())
+				}
+			}
+		})
+	}
 }
 
 // psSupplementSession echoes the actual supplement while leaving the initial
@@ -1344,6 +1371,11 @@ func TestCUJ_A5_FileReachesAgent(t *testing.T) {
 	agent := &cujAgent{}
 	dir := t.TempDir()
 	e := NewEngine("test", agent, []Platform{plat}, dir+"/sessions.json", LangEnglish)
+	t.Cleanup(func() {
+		if err := e.Stop(); err != nil {
+			t.Errorf("stop engine: %v", err)
+		}
+	})
 
 	msg := &Message{
 		SessionKey: "test:file", Platform: "test", MessageID: "f1",
@@ -1359,7 +1391,9 @@ func TestCUJ_A5_FileReachesAgent(t *testing.T) {
 		agent.mu.Lock()
 		n := len(agent.sessions)
 		agent.mu.Unlock()
-		if n > 0 {
+		// Session creation precedes asynchronous history saves. Wait for the
+		// visible reply and unlock before TempDir cleanup removes the store.
+		if n > 0 && len(plat.getSent()) > 0 && !e.sessions.GetOrCreateActive(msg.SessionKey).Busy() {
 			return
 		}
 		select {
@@ -2795,4 +2829,39 @@ type reasoningJourneyPlatform struct {
 
 func (p *reasoningJourneyPlatform) SetCardNavigationHandler(h CardNavigationHandler) {
 	p.navigation = h
+}
+
+func TestCUJ_A25_BusySteerRejectedImageFallsBackOnce(t *testing.T) {
+	env := newBusySteerCUJEnv(t, "")
+	env.send("original task")
+	env.input("original task")
+	env.awaitSteerReady()
+	images := []ImageAttachment{{FileName: "unknown.png", Data: []byte("image")}}
+	files := []FileAttachment{{FileName: "notes.txt", Data: []byte("notes")}}
+	env.sendMedia("keep this explanation", images, files, nil)
+	assertBusySteerCUJMedia(t, env.steer("keep this explanation"), images, files)
+	env.s.ackErr <- &SteerNotAcceptedError{Err: fmt.Errorf("invalid image metadata")}
+	env.visible(env.e.i18n.T(MsgSteerFallbackQueue))
+	env.assertNoOrdinaryInput()
+	env.finish("original task answer")
+	assertBusySteerCUJMedia(t, env.input("keep this explanation"), images, files)
+	env.finish("explanation answer")
+	env.wait("queued explanation completed", func() bool {
+		return !env.e.sessions.GetOrCreateActive("test:steer-user").Busy()
+	})
+	env.send("next task")
+	env.input("next task")
+	env.finish("next task answer")
+	env.wait("next task completed", func() bool {
+		return !env.e.sessions.GetOrCreateActive("test:steer-user").Busy()
+	})
+	env.send("/history")
+	env.visible("📜 History")
+	for _, reply := range env.p.getSent() {
+		if strings.Contains(reply, "📜 History") && strings.Count(reply, "keep this explanation") != 1 {
+			t.Fatalf("queued explanation must appear once in history: %s", reply)
+		}
+	}
+	env.assertNoOrdinaryInput()
+	env.assertNoNativeSteer()
 }
