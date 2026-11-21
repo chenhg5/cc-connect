@@ -1490,6 +1490,18 @@ func (e *Engine) SetBaseWorkDir(dir string) {
 
 func (e *Engine) SetProjectStateStore(store *ProjectStateStore) {
 	e.projectState = store
+	if store == nil {
+		return
+	}
+	switcher, ok := e.agent.(ReasoningEffortSwitcher)
+	if !ok {
+		return
+	}
+	if workDir, ok := e.agent.(interface{ GetWorkDir() string }); ok {
+		if effort := store.WorkspaceReasoningOverride(normalizeWorkspacePath(workDir.GetWorkDir())); effort != "" {
+			switcher.SetReasoningEffort(effort)
+		}
+	}
 }
 
 func (e *Engine) SetDataDir(dir string) {
@@ -4250,6 +4262,9 @@ func (e *Engine) getOrCreateWorkspaceAgent(workspace string) (Agent, *SessionMan
 	if e.projectState != nil {
 		if m := e.projectState.WorkspaceModelOverride(workspace); m != "" {
 			opts["model"] = m
+		}
+		if effort := e.projectState.WorkspaceReasoningOverride(workspace); effort != "" {
+			opts["reasoning_effort"] = effort
 		}
 	}
 
@@ -10716,7 +10731,9 @@ func (e *Engine) cmdReasoning(p Platform, msg *Message, args []string) {
 	}
 
 	switcher.SetReasoningEffort(target)
-	e.cleanupInteractiveState(e.interactiveKeyForSessionKey(msg.SessionKey))
+	interactiveKey := e.interactiveKeyForSessionKey(msg.SessionKey)
+	e.persistWorkspaceReasoningOverride(interactiveKey, msg.SessionKey, agent, target)
+	e.cleanupInteractiveState(interactiveKey)
 
 	s := sessions.GetOrCreateActive(msg.SessionKey)
 	s.SetAgentSessionID("", "")
@@ -10724,6 +10741,18 @@ func (e *Engine) cmdReasoning(p Platform, msg *Message, args []string) {
 	sessions.Save()
 
 	e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgReasoningChanged, target))
+}
+
+func (e *Engine) persistWorkspaceReasoningOverride(interactiveKey, sessionKey string, agent Agent, effort string) {
+	if e.projectState == nil || effort == "" {
+		return
+	}
+	workspace := workspaceModelOverrideKey(interactiveKey, sessionKey, agent)
+	if workspace == "" {
+		return
+	}
+	e.projectState.SetWorkspaceReasoningOverride(workspace, effort)
+	e.projectState.Save()
 }
 
 func (e *Engine) reasoningUsage(efforts []string) string {
