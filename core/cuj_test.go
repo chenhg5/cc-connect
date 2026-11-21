@@ -1735,6 +1735,43 @@ func TestCUJ_E3_CronSurvivesRestart(t *testing.T) {
 	}
 }
 
+// CUJ-E7 · A cron job with a model override runs on that model in its own
+// session while the user's chat stays on the configured model.
+// User journey: chat → /cron exec (model job) → chat → /cron exec again.
+// Regression for PR #1537 review: the override was dropped on a live chat
+// session, or leaked into later chat turns after a cold spawn.
+func TestCUJ_E7_CronModelOverrideIsolatedFromChat(t *testing.T) {
+	agent := &modelCUJAgent{}
+	e, p := newModelJobEngine(t, agent, "reuse")
+	if err := e.cronScheduler.AddJob(&CronJob{
+		ID: "cheap", Project: "test", SessionKey: modelJobKey, CronExpr: "0 9 * * *",
+		Prompt: "sweep", Description: "sweep", Model: "haiku",
+	}); err != nil {
+		t.Fatalf("AddJob: %v", err)
+	}
+
+	userTurn(t, e, p, "hello", "reply from default")
+	userTurn(t, e, p, "/cron exec cheap", "reply from haiku")
+	if !containsSent(p.getSent(), "⏰ sweep · model `haiku` (isolated session") {
+		t.Fatalf("user did not see the model start notice; sent=%q", p.getSent())
+	}
+	userTurn(t, e, p, "after", "reply from default")
+	before := len(p.getSent())
+	userTurn(t, e, p, "/cron exec cheap", "reply from haiku")
+	if last := p.getSent()[len(p.getSent())-1]; !strings.Contains(last, "haiku") {
+		t.Fatalf("second run not on haiku: %q", p.getSent()[before:])
+	}
+
+	sessions := agent.sessionsSnapshot()
+	models := agent.spawnedModels()
+	if len(models) != 3 || models[0] != "" || models[1] != "haiku" || models[2] != "haiku" {
+		t.Fatalf("spawned models = %q, want chat default + one haiku session per run", models)
+	}
+	if got := sessions[0].getSentPrompts(); len(got) != 2 {
+		t.Fatalf("chat session prompts = %q, want only hello + after", got)
+	}
+}
+
 // CUJ-E4 · /timer triggers exactly once at scheduled_at and delivers the
 // prompt all the way to the agent + reply to the user.
 //

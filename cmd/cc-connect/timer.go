@@ -38,7 +38,7 @@ func runTimer(args []string) {
 }
 
 func runTimerAdd(args []string) {
-	var project, sessionKey, delay, atTime, prompt, execCmd, desc, dataDir, sessionMode string
+	var project, sessionKey, delay, atTime, prompt, execCmd, desc, dataDir, sessionMode, model string
 	var timeoutMins *int
 	var mute bool
 
@@ -90,6 +90,13 @@ func runTimerAdd(args []string) {
 				i++
 				sessionMode = args[i]
 			}
+		case "--model":
+			if i+1 >= len(args) {
+				fmt.Fprintln(os.Stderr, "Error: --model requires a value")
+				os.Exit(1)
+			}
+			i++
+			model = args[i]
 		case "--timeout-mins":
 			if i+1 < len(args) {
 				i++
@@ -160,6 +167,9 @@ func runTimerAdd(args []string) {
 	}
 	if sessionMode != "" {
 		body["session_mode"] = sessionMode
+	}
+	if model != "" {
+		body["model"] = model
 	}
 	if timeoutMins != nil {
 		body["timeout_mins"] = *timeoutMins
@@ -413,6 +423,10 @@ Options:
       --exec <command>       Shell command (runs directly, mutually exclusive with --prompt)
       --desc <text>          Short description
       --session-mode <mode>  reuse (default) or new-per-run
+      --model <model>        Model override (e.g. haiku, sonnet, or a provider model ID). The run
+                             uses a fresh isolated session (no chat context, same workspace
+                             files). Agent must support it (currently claudecode); otherwise
+                             the run fails. Not for --exec
       --timeout-mins <n>     Max minutes to wait per run (0 = no limit; default 30)
       --mute                 Suppress all messages (start + result)
       --data-dir <path>      Data directory (default: ~/.cc-connect)
@@ -422,5 +436,6 @@ Examples:
   cc-connect timer add --delay 2h --prompt "Check PR status"
   cc-connect timer add --delay 30m --exec "df -h" --desc "Disk check"
   cc-connect timer add --at "2026-05-16T09:00" --prompt "Morning standup reminder"
+  cc-connect timer add --delay 1h --prompt "Summarize CI failures" --model haiku
   cc-connect timer add 2h Check PR status`)
 }
