@@ -70,6 +70,7 @@ allow_from = "*"
 | `mode` | ✅ | 必须为 `"websocket"` |
 | `bot_id` | ✅ | 智能机器人 BotID |
 | `bot_secret` | ✅ | 智能机器人 Secret |
+| `streaming` | ❌ | 长连接原位流式回复，默认 `true`；设为 `false` 恢复普通消息 |
 | `ws_url` | ❌ | WebSocket 端点地址（默认 `wss://openws.work.weixin.qq.com`；**私有化部署**时改为你的私有地址，如 `wss://your-wecom-host:port/im_openws?bizid=<id>`） |
 | `allow_from` | ❌ | 允许的用户 ID（默认 `"*"` 允许所有） |
 
@@ -87,6 +88,16 @@ level=INFO msg="wecom-ws: subscribed successfully" bot_id=your-bot-id
 ```
 
 在企业微信中找到你的机器人，发送一条消息测试即可。
+
+#### 流式回复
+
+长连接模式下，私聊机器人或在群中 @机器人后，回复会在同一条消息中持续更新，完成时结束流，不再重复发送整段答案。它使用整回合流式接口，独立于通用消息编辑的 `[stream_preview]` 设置。中间更新最多约每 1.5 秒一次；首帧与结束帧立即发送。实际可见的更新次数取决于 Agent 是否输出正文增量及生成速度。
+
+Codex 默认的 `exec` 后端仍会缓冲文本。要使用正文流式输出，在对应的 `[projects.agent.options]` 下设置 `backend = "app_server"`；CLI 需要提供 `item/agentMessage/delta` 通知和 `final_answer` 阶段标记。缺少阶段标记的旧协议保留原有完整消息回退，其他 Agent 只需提供 cc-connect 的增量正文事件。
+
+定时任务和主动推送没有入站消息回调，仍通过普通 Markdown 发送。流式内容上限为 20480 UTF-8 字节；最终答案超限时会结束预览，再通过原有分块消息发送完整答案。更新失败也会回退到普通消息，因此异常情况下可能同时保留一条部分预览和完整答案。停止、Agent 异常或退出时会尝试结束尚未完成的流；网络中断时该清理操作可能无法送达。
+
+协议参考：[企业微信官方 SDK `replyStream`](https://github.com/WecomTeam/aibot-node-sdk#replystream-详细说明)。每次更新发送累计正文，保持同一个 `stream_id`，最终设置 `finish=true`。
 
 引用文件时，下载成功的附件会在传给 AI 的引用上下文中标注文件名，例如 `[file: 合同.pdf]`。如果企微回调未提供文件对象或下载地址（例如群聊中引用机器人发送的文件），或下载失败，上下文会明确标注 `[file unavailable: quoted attachment could not be retrieved]`，表示本次没有取得该引用文件。此时可重新上传文件后再提问。文件名是附件的名称提示；实际落盘时可能因同名冲突而添加后缀。
 

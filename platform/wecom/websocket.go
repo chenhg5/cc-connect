@@ -25,19 +25,20 @@ const (
 // WSPlatform implements core.Platform using the WeChat Work WebSocket long-connection
 // mode (智能机器人长连接). No public URL, no message encryption, no IP allowlist required.
 type WSPlatform struct {
-	botID       string
-	secret      string
-	allowFrom   string
-	wsURL       string // WebSocket endpoint; defaults to wsEndpoint (公有云), 可经 ws_url 覆盖为私有化部署地址
-	conn        *websocket.Conn
-	handler     core.MessageHandler
-	ctx         context.Context
-	cancel      context.CancelFunc
-	mu          sync.Mutex // protects conn writes
-	dedup       core.MessageDedup
-	reqSeq      atomic.Int64 // monotonic counter for generating unique req_id
-	missedPong  atomic.Int32 // consecutive heartbeat acks not received
-	pendingAcks sync.Map     // req_id -> chan wsAckResult, for sequential send with ack waiting
+	botID            string
+	secret           string
+	allowFrom        string
+	disableStreaming bool   // opt-out for deployments that require ordinary replies
+	wsURL            string // WebSocket endpoint; defaults to wsEndpoint (公有云), 可经 ws_url 覆盖为私有化部署地址
+	conn             *websocket.Conn
+	handler          core.MessageHandler
+	ctx              context.Context
+	cancel           context.CancelFunc
+	mu               sync.Mutex // protects conn writes
+	dedup            core.MessageDedup
+	reqSeq           atomic.Int64 // monotonic counter for generating unique req_id
+	missedPong       atomic.Int32 // consecutive heartbeat acks not received
+	pendingAcks      sync.Map     // req_id -> chan wsAckResult, for sequential send with ack waiting
 }
 
 const (
@@ -125,6 +126,7 @@ func newWebSocket(opts map[string]any) (core.Platform, error) {
 		return nil, fmt.Errorf("wecom-ws: bot_id and bot_secret are required for websocket mode")
 	}
 	allowFrom, _ := opts["allow_from"].(string)
+	streaming, hasStreaming := opts["streaming"].(bool)
 	wsURL, _ := opts["ws_url"].(string)
 	wsURL = strings.TrimSpace(wsURL)
 	if wsURL == "" {
@@ -132,10 +134,11 @@ func newWebSocket(opts map[string]any) (core.Platform, error) {
 	}
 
 	return &WSPlatform{
-		botID:     botID,
-		secret:    secret,
-		allowFrom: allowFrom,
-		wsURL:     wsURL,
+		botID:            botID,
+		secret:           secret,
+		allowFrom:        allowFrom,
+		disableStreaming: hasStreaming && !streaming,
+		wsURL:            wsURL,
 	}, nil
 }
 
