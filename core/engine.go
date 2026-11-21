@@ -2567,6 +2567,9 @@ func (e *Engine) initPlatformCapabilities(p Platform) {
 	if nav, ok := p.(CardNavigable); ok {
 		nav.SetCardNavigationHandler(e.handleCardNav)
 	}
+	if la, ok := p.(LocalizerAware); ok {
+		la.SetLocalizer(e.i18n.T)
+	}
 }
 
 // matchBannedWord returns the first banned word found in content, or "".
