@@ -357,6 +357,8 @@
     "display": "표시",
     "thinkingMessages": "추론 메시지",
     "thinkingMessagesHint": "중간 추론 메시지를 표시하거나 숨깁니다",
+    "commentaryMessages": "진행 상황 메시지",
+    "commentaryMessagesHint": "조용한 모드에서도 에이전트 진행 상황을 별도 메시지로 전송합니다",
     "thinkingMaxLen": "추론 최대 길이",
     "thinkingMaxLenHint": "추론 메시지의 최대 글자 수; 0 = 잘라내지 않음",
     "toolMessages": "도구 진행 상황",

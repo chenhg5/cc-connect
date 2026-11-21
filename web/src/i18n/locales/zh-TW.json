@@ -357,6 +357,8 @@
     "display": "顯示",
     "thinkingMessages": "思考訊息",
     "thinkingMessagesHint": "顯示或隱藏中間思考過程訊息",
+    "commentaryMessages": "進展訊息",
+    "commentaryMessagesHint": "將 Agent 進展更新作為獨立訊息傳送，靜默模式下也會傳送",
     "thinkingMaxLen": "思考最大長度",
     "thinkingMaxLenHint": "思考訊息的最大字元數；0 = 不截斷",
     "toolMessages": "工具進度",

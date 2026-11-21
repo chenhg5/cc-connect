@@ -357,6 +357,8 @@
     "display": "Visualización",
     "thinkingMessages": "Mensajes de pensamiento",
     "thinkingMessagesHint": "Mostrar u ocultar mensajes de proceso de pensamiento",
+    "commentaryMessages": "Mensajes de progreso",
+    "commentaryMessagesHint": "Enviar el progreso del agente como mensajes separados, incluso en modo silencioso",
     "thinkingMaxLen": "Longitud máx. de pensamiento",
     "thinkingMaxLenHint": "Caracteres máximos para mensajes de pensamiento; 0 = sin truncar",
     "toolMessages": "Progreso de herramientas",

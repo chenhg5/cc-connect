@@ -764,7 +764,7 @@ func (s *appServerSession) handleApprovalRequest(rawID json.RawMessage, method s
 	s.pendingApprovals[requestID] = ch
 	s.approvalsMu.Unlock()
 
-	s.flushPendingAsThinking()
+	s.flushPendingAsCommentary()
 	s.emit(core.Event{
 		Type:         core.EventPermissionRequest,
 		RequestID:    requestID,
@@ -811,7 +811,7 @@ func (s *appServerSession) handlePermissionsApproval(rawID json.RawMessage, para
 	s.pendingApprovals[requestID] = ch
 	s.approvalsMu.Unlock()
 
-	s.flushPendingAsThinking()
+	s.flushPendingAsCommentary()
 	s.emit(core.Event{
 		Type:         core.EventPermissionRequest,
 		RequestID:    requestID,
@@ -879,7 +879,7 @@ func (s *appServerSession) handleRequestUserInput(rawID json.RawMessage, paramsR
 	s.pendingApprovals[requestID] = ch
 	s.approvalsMu.Unlock()
 
-	s.flushPendingAsThinking()
+	s.flushPendingAsCommentary()
 	s.emit(core.Event{
 		Type:         core.EventPermissionRequest,
 		RequestID:    requestID,
@@ -1373,7 +1373,7 @@ func (s *appServerSession) handleItemStarted(item map[string]any) {
 		return
 	}
 
-	s.flushPendingAsThinking()
+	s.flushPendingAsCommentary()
 
 	switch itemType {
 	case "commandExecution":
@@ -1418,6 +1418,16 @@ func (s *appServerSession) handleItemCompleted(item map[string]any) {
 		}
 		text, _ := item["text"].(string)
 		if strings.TrimSpace(text) != "" {
+			if phase, _ := item["phase"].(string); phase == "commentary" {
+				s.flushPendingAsCommentary()
+				s.emit(core.Event{Type: core.EventCommentary, Content: text})
+				return
+			}
+			if phase, _ := item["phase"].(string); phase == "partial_answer" || phase == "final_answer" {
+				s.flushPendingAsCommentary()
+				s.emit(core.Event{Type: core.EventText, Content: text})
+				return
+			}
 			s.stateMu.Lock()
 			s.pendingMsgs = append(s.pendingMsgs, text)
 			s.stateMu.Unlock()
@@ -1739,7 +1749,7 @@ func (s *appServerSession) failTurn(err error) bool {
 	return true
 }
 
-func (s *appServerSession) flushPendingAsThinking() {
+func (s *appServerSession) flushPendingAsCommentary() {
 	s.stateMu.Lock()
 	msgs := append([]string(nil), s.pendingMsgs...)
 	s.pendingMsgs = s.pendingMsgs[:0]
@@ -1747,7 +1757,7 @@ func (s *appServerSession) flushPendingAsThinking() {
 
 	for _, text := range msgs {
 		if strings.TrimSpace(text) != "" {
-			s.emit(core.Event{Type: core.EventThinking, Content: text})
+			s.emit(core.Event{Type: core.EventCommentary, Content: text})
 		}
 	}
 }
