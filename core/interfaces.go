@@ -324,6 +324,17 @@ type CardNavigable interface {
 	SetCardNavigationHandler(h CardNavigationHandler)
 }
 
+// Localizer returns the user-facing text for key in the engine's current
+// language.
+type Localizer func(key MsgKey) string
+
+// LocalizerAware is an optional interface for platforms that show
+// user-facing text of their own (toasts, inline notices). The engine hands
+// them its localizer so that text follows the configured language.
+type LocalizerAware interface {
+	SetLocalizer(l Localizer)
+}
+
 // CardRefresher is an optional interface for platforms that can update a
 // previously rendered card in-place after the original callback has returned.
 // This is used when async operations (e.g. delete-mode deletion) need to

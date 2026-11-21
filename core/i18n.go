@@ -217,6 +217,7 @@ const (
 	MsgToolAllowedNew            MsgKey = "tool_allowed_new"
 	MsgError                     MsgKey = "error"
 	MsgAttachmentUnavailable     MsgKey = "attachment_unavailable"
+	MsgCardRequesterOnly         MsgKey = "card_requester_only"
 	MsgSessionNotFound           MsgKey = "session_not_found"
 	MsgFailedToStartAgentSession MsgKey = "failed_to_start_agent_session"
 	MsgFailedToDeleteSession     MsgKey = "failed_to_delete_session"
@@ -859,6 +860,13 @@ var messages = map[MsgKey]map[Language]string{
 		LangTraditionalChinese: "✅ 工具 `%s` 已預授權。將在下次會話生效。",
 		LangJapanese:           "✅ ツール `%s` を事前許可しました。次のセッションから有効になります。",
 		LangSpanish:            "✅ Herramienta `%s` pre-autorizada. Se aplicará en la próxima sesión.",
+	},
+	MsgCardRequesterOnly: {
+		LangEnglish:            "Only the requester can operate this card",
+		LangChinese:            "此卡片仅提问者本人可操作",
+		LangTraditionalChinese: "此卡片僅提問者本人可操作",
+		LangJapanese:           "このカードは質問者本人のみ操作できます",
+		LangSpanish:            "Solo quien hizo la solicitud puede usar esta tarjeta",
 	},
 	MsgAttachmentUnavailable: {
 		LangEnglish:            "Attachment unavailable: %s. The attachment was sent but could not be read.",

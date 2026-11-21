@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/chenhg5/cc-connect/core"
 	callback "github.com/larksuite/oapi-sdk-go/v3/event/dispatcher/callback"
 )
 
@@ -154,4 +155,22 @@ func TestOnCardAction_ThreadSessionAskqNotGated(t *testing.T) {
 		t.Fatalf("onCardAction() error = %v", err)
 	}
 	waitAnyMessage(t, msgCh, 3*time.Second, "thread-session askq click")
+}
+
+// The requester-only toast follows the engine's language once a localizer is
+// set, instead of the hard-coded bilingual fallback (#2303).
+func TestOnCardAction_NonRequesterToastIsLocalized(t *testing.T) {
+	ip, msgCh := newAllowFromTestPlatform(t, "*")
+	i18n := core.NewI18n(core.LangJapanese)
+	ip.SetLocalizer(i18n.T)
+
+	resp, err := ip.onCardAction(cardActionEventWithKey("ou_intruder", "askq:0:1", "feishu:oc_test_chat:ou_owner"))
+	if err != nil {
+		t.Fatalf("onCardAction() error = %v", err)
+	}
+	want := i18n.T(core.MsgCardRequesterOnly)
+	if resp == nil || resp.Toast == nil || resp.Toast.Content != want {
+		t.Fatalf("Toast = %#v, want %q", resp, want)
+	}
+	waitNoMessage(t, msgCh, 150*time.Millisecond, "non-requester askq click")
 }
