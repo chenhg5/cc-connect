@@ -1,9 +1,12 @@
 package opencode
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"reflect"
 	"strings"
@@ -452,3 +455,173 @@ func TestHandleToolUseErrorNoMessageNoText(t *testing.T) {
 
 // verify Agent implements core.Agent
 var _ core.Agent = (*Agent)(nil)
+
+// Regression test for #1891: a turn that ends without the step_finish{stop}
+// that normally closes it (crash, kill, or an empty model response) used to be
+// reported as a normal completion, so the user saw partial output and silence.
+func TestHandleProcessExit_AbnormalExitReportsError(t *testing.T) {
+	s := &opencodeSession{events: make(chan core.Event, 4), ctx: context.Background()}
+	s.handleStepFinish(map[string]any{"type": "step_finish", "part": map[string]any{"reason": "unknown"}})
+	s.events = make(chan core.Event, 4)
+
+	s.handleProcessExit("", nil)
+
+	if len(s.events) != 2 {
+		t.Fatalf("expected error + result events, got %d", len(s.events))
+	}
+	first := <-s.events
+	if first.Type != core.EventError || first.Error == nil {
+		t.Fatalf("first event = %+v, want EventError with a message", first)
+	}
+	if !strings.Contains(first.Error.Error(), "before the turn finished") {
+		t.Errorf("error message = %q, want it to say the turn did not finish", first.Error)
+	}
+	second := <-s.events
+	if second.Type != core.EventResult || !second.Done {
+		t.Fatalf("second event = %+v, want a terminal EventResult", second)
+	}
+}
+
+// A turn that reached step_finish{stop} already sent its result; the exit path
+// must not add a second EventResult or a spurious error.
+func TestHandleProcessExit_CompletedTurnReportsNoError(t *testing.T) {
+	s := &opencodeSession{events: make(chan core.Event, 4), ctx: context.Background()}
+	s.resultSent.Store(true)
+
+	s.handleProcessExit("", nil)
+
+	if len(s.events) != 0 {
+		t.Fatalf("expected no events for an already-completed turn, got %d", len(s.events))
+	}
+}
+
+// An older CLI that never emits step_finish and exits cleanly keeps the plain
+// fallback: no error, just the completion the engine needs.
+func TestHandleProcessExit_CleanExitWithoutStepFinishKeepsFallback(t *testing.T) {
+	s := &opencodeSession{events: make(chan core.Event, 4), ctx: context.Background()}
+
+	s.handleProcessExit("", nil)
+
+	if len(s.events) != 1 {
+		t.Fatalf("expected only EventResult, got %d events", len(s.events))
+	}
+	if evt := <-s.events; evt.Type != core.EventResult {
+		t.Fatalf("event = %+v, want EventResult", evt)
+	}
+}
+
+// A process killed mid-turn exits non-zero without a step_finish; that is the
+// crash case, not a clean legacy exit.
+func TestHandleProcessExit_NonZeroExitWithoutStepFinishReportsError(t *testing.T) {
+	s := &opencodeSession{events: make(chan core.Event, 4), ctx: context.Background()}
+
+	s.handleProcessExit("", errors.New("signal: killed"))
+
+	if len(s.events) != 2 {
+		t.Fatalf("expected error + result events, got %d", len(s.events))
+	}
+	if evt := <-s.events; evt.Type != core.EventError {
+		t.Fatalf("first event = %+v, want EventError", evt)
+	}
+	if evt := <-s.events; evt.Type != core.EventResult {
+		t.Fatalf("second event = %+v, want EventResult", evt)
+	}
+}
+
+// The issue's empty-response case reaches the exit path after a step_finish
+// with reason=unknown, i.e. the process reported a step but no terminal result.
+func TestHandleProcessExit_StepFinishWithoutResultReportsError(t *testing.T) {
+	s := &opencodeSession{events: make(chan core.Event, 4), ctx: context.Background()}
+	s.handleStepFinish(map[string]any{"type": "step_finish", "part": map[string]any{"reason": "unknown"}})
+	s.events = make(chan core.Event, 4)
+
+	s.handleProcessExit("", nil)
+
+	if len(s.events) != 2 {
+		t.Fatalf("expected error + result events, got %d", len(s.events))
+	}
+	if evt := <-s.events; evt.Type != core.EventError {
+		t.Fatalf("first event = %+v, want EventError", evt)
+	}
+	if evt := <-s.events; evt.Type != core.EventResult {
+		t.Fatalf("second event = %+v, want EventResult", evt)
+	}
+}
+
+// /stop and shutdown cancel the session context and kill the process; that is a
+// deliberate interruption, not an abnormal exit.
+func TestHandleProcessExit_CancelledTurnReportsNoError(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	s := &opencodeSession{events: make(chan core.Event, 4), ctx: ctx}
+
+	s.handleProcessExit("", nil)
+
+	// sendEventResult races with the cancelled context for delivery; what
+	// matters is that no error was produced and the turn was marked complete.
+	select {
+	case evt := <-s.events:
+		if evt.Type != core.EventResult {
+			t.Fatalf("event = %+v, want EventResult", evt)
+		}
+	default:
+		if !s.resultSent.Load() {
+			t.Fatal("cancelled turn should be completed without an error event")
+		}
+	}
+}
+
+// A process that wrote to stderr keeps reporting that text; the exit path does
+// not also claim the turn ended without a result.
+func TestHandleProcessExit_StderrReportsOnlyStderrError(t *testing.T) {
+	s := &opencodeSession{events: make(chan core.Event, 4), ctx: context.Background()}
+
+	s.handleProcessExit("boom: model request failed\n", nil)
+
+	if len(s.events) != 1 {
+		t.Fatalf("expected a single error event, got %d", len(s.events))
+	}
+	evt := <-s.events
+	if evt.Type != core.EventError || !strings.Contains(evt.Error.Error(), "boom: model request failed") {
+		t.Fatalf("event = %+v, want the stderr text", evt)
+	}
+}
+
+// End-to-end version of the abnormal-exit regression: the real readLoop drives
+// a process that reports a step and then exits without step_finish{stop}. Before
+// the fix this sent only EventResult, i.e. the turn looked successfully done.
+func TestReadLoop_AbnormalExitSurfacesError(t *testing.T) {
+	if _, err := exec.LookPath("sh"); err != nil {
+		t.Skip("sh not available")
+	}
+	cmd := exec.Command("sh", "-c", `printf '%s\n' '{"type":"step_finish","part":{"reason":"unknown"}}'; exit 0`)
+	var stderrBuf bytes.Buffer
+	cmd.Stderr = &stderrBuf
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		t.Fatalf("stdout pipe: %v", err)
+	}
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	s := &opencodeSession{events: make(chan core.Event, 8), ctx: ctx}
+	s.wg.Add(1)
+	s.readLoop(cmd, stdout, &stderrBuf)
+
+	var events []core.Event
+	for len(s.events) > 0 {
+		events = append(events, <-s.events)
+	}
+	if len(events) != 2 {
+		t.Fatalf("expected error + result events, got %d: %+v", len(events), events)
+	}
+	if events[0].Type != core.EventError {
+		t.Fatalf("first event = %+v, want EventError", events[0])
+	}
+	if events[1].Type != core.EventResult {
+		t.Fatalf("second event = %+v, want EventResult", events[1])
+	}
+}
