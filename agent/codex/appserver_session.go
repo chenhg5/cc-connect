@@ -201,9 +201,11 @@ type appServerSession struct {
 	turnRevision uint64 // terminal notifications can precede the turn/start response
 	preambleSent bool
 
-	runtimeMu sync.RWMutex
-	usage     *core.UsageReport
-	context   *core.ContextUsage
+	goal         *core.Goal
+	goalRevision uint64
+	runtimeMu    sync.RWMutex
+	usage        *core.UsageReport
+	context      *core.ContextUsage
 }
 
 const (
@@ -250,6 +252,9 @@ func newAppServerSession(ctx context.Context, cliBin string, cliExtraArgs []stri
 	if err := s.ensureThread(resumeID); err != nil {
 		_ = s.Close()
 		return nil, err
+	}
+	if _, err := s.GetGoal(); err != nil {
+		slog.Debug("codex native goals unavailable", "error", err)
 	}
 	if err := s.refreshUsage(context.Background()); err != nil {
 		slog.Debug("codex app-server: initial rate limit fetch failed", "error", err)
@@ -1264,6 +1269,8 @@ func (s *appServerSession) handleResponse(resp rpcResponseEnvelope) {
 
 func (s *appServerSession) handleNotification(method string, paramsRaw json.RawMessage) {
 	switch method {
+	case "thread/goal/updated", "thread/goal/cleared":
+		s.handleGoalNotification(method, paramsRaw)
 	case "turn/started":
 		var notif turnNotification
 		if err := json.Unmarshal(paramsRaw, &notif); err == nil && s.acceptsThreadNotification(method, notif.ThreadID) {

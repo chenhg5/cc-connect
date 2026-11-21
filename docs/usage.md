@@ -178,6 +178,51 @@ cp ~/.codex/auth.json ~/.codex/config.toml ~/.codex-cc-connect/
 
 Then set the absolute path under `[projects.agent.options]`, for example `/Users/you/.codex-cc-connect`. To reuse one isolated home across projects, set `CODEX_HOME` in the environment that starts cc-connect instead; an explicit `codex_home` wins over the environment variable.
 
+### Native Codex Goals
+
+Use a Codex CLI with the native `thread/goal/*` API (verified with 0.164.0):
+
+```toml
+[projects.agent.options]
+backend = "app_server"
+app_server_url = "stdio"
+```
+
+| Chat command | Operation |
+|---|---|
+| `/goal` or `/goal show` | Read the objective, native status, token budget/usage and elapsed seconds |
+| `/goal set <objective> [--budget N]` or `/goal <objective>` | Create or replace a Goal and start native continuation |
+| `/goal edit <objective> [--budget N]` | Replace the objective, preserving its status and unspecified budget |
+| `/goal pause` | Pause continuation and interrupt the current turn |
+| `/goal resume` | Resume native continuation |
+| `/goal budget N` or `/goal budget none` | Set a positive token budget or remove it |
+| `/goal clear` | Remove the Goal and interrupt its current turn |
+
+Objectives are limited to 4,000 characters. Codex owns continuation, completion,
+usage and budget limits; cc-connect neither infers state from model text nor
+inserts continuation prompts. Changing the objective resets native usage
+accounting; updating status or budget preserves it. Lifecycle changes are sent
+to the chat; token-only updates do not produce messages. Regular messages during
+a running Goal steer the current turn, including attachments.
+
+`/stop` pauses the Goal before cancelling the turn. Active Goals prevent idle
+process cleanup. On restart, cc-connect reloads active Goals for each chat's
+selected session after its messaging platform becomes ready; Codex reconciles
+the persisted state. Paused/stopped Goals require `/goal resume`. Automatic
+recovery requires a platform that reconstructs reply contexts. A failed
+Goal-thread resume preserves the saved thread and reports failure instead of
+silently creating a new one.
+
+The `exec` backend is explicitly unsupported. This integration starts its own
+app-server, independently of the official desktop app. Use a separate
+`codex_home` if another client might load the same thread. A CLI without the
+required RPCs reports an error instead of treating `/goal` as a prompt. Goals
+must be enabled in Codex (`codex features enable goals` if needed). This path
+uses no rollout parser or `goal_auto_continue` setting.
+
+After budget exhaustion, a paused Goal may still report the native
+`budgetLimited` status. Increase or remove its budget before `/goal resume`.
+
 ### Cursor Agent Modes
 
 | Mode | Config Value | Behavior |

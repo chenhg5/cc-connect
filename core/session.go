@@ -56,10 +56,26 @@ type Session struct {
 	// sessions cannot permanently occupy the active slot.
 	ExplicitActivatedAt time.Time `json:"explicit_activated_at,omitempty"`
 
-	mu        sync.Mutex `json:"-"`
-	busy      bool       `json:"-"`
-	busySince time.Time  `json:"-"` // custom 2026-09-12: when the busy lock was acquired (stale-lock self-heal)
-	lockGen   uint64     `json:"-"` // custom 2026-09-12: lock generation, invalidates late unlocks after BreakStaleLock
+	// ResumeGoal records continuation intent; native goal state stays authoritative.
+	ResumeGoal bool `json:"resume_goal,omitempty"`
+
+	mu                 sync.Mutex `json:"-"`
+	busy               bool       `json:"-"`
+	busySince          time.Time  `json:"-"` // custom 2026-09-12: when the busy lock was acquired (stale-lock self-heal)
+	lockGen            uint64     `json:"-"` // custom 2026-09-12: lock generation, invalidates late unlocks after BreakStaleLock
+	goalStopGeneration uint64     // invalidates Goal commands that began before /stop
+}
+
+func (s *Session) SetResumeGoal(active bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.ResumeGoal = active
+}
+
+func (s *Session) GetResumeGoal() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.ResumeGoal
 }
 
 // TryLock acquires the busy lock for a new turn. It returns a generation
@@ -792,6 +808,7 @@ func (sm *SessionManager) saveLocked() {
 			// restart; otherwise a /switch followed by a crash would lose the
 			// exemption and the next message after restart would be rotated.
 			ExplicitActivatedAt: s.ExplicitActivatedAt,
+			ResumeGoal:          s.ResumeGoal,
 		}
 		s.mu.Unlock()
 	}
