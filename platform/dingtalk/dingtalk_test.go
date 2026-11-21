@@ -1897,19 +1897,29 @@ func TestMentionText(t *testing.T) {
 		name    string
 		content string
 		staffID string
+		nick    string
 		want    string
 	}{
-		{name: "prepends id and strips injected name", content: "@温温 hello world", staffID: "194252073827812352", want: "@194252073827812352 hello world"},
-		{name: "prepends id when no leading mention", content: "hello world", staffID: "123", want: "@123 hello world"},
-		{name: "strips only one leading mention", content: "@温温 @温温 hi", staffID: "123", want: "@123 @温温 hi"},
-		{name: "no duplicate when already id-prefixed", content: "@123 hi", staffID: "123", want: "@123 hi"},
-		{name: "empty content yields bare mention", content: "", staffID: "123", want: "@123"},
-		{name: "empty staff id leaves content untouched", content: "@温温 hello", staffID: "", want: "@温温 hello"},
+		{name: "prepends id and strips injected name", content: "@温温 hello world", staffID: "194252073827812352", nick: "温温", want: "@194252073827812352 hello world"},
+		{name: "prepends id when no leading mention", content: "hello world", staffID: "123", nick: "温温", want: "@123 hello world"},
+		{name: "strips only one leading mention", content: "@温温 @温温 hi", staffID: "123", nick: "温温", want: "@123 @温温 hi"},
+		{name: "no duplicate when already id-prefixed", content: "@123 hi", staffID: "123", nick: "温温", want: "@123 hi"},
+		{name: "empty content yields bare mention", content: "", staffID: "123", nick: "温温", want: "@123"},
+		{name: "empty staff id leaves content untouched", content: "@温温 hello", staffID: "", nick: "温温", want: "@温温 hello"},
+		{name: "empty nick falls back to id-only stripping", content: "@温温 hello world", staffID: "194252073827812352", nick: "", want: "@194252073827812352 @温温 hello world"},
+		// Review #1973 P1-b: agent reply text must survive verbatim — file paths,
+		// path-like tokens, TODO markers and salutations are NOT sender mentions.
+		{name: "file path mention is not stripped", content: "@src/main.go 里有个 bug", staffID: "123", nick: "温温", want: "@123 @src/main.go 里有个 bug"},
+		{name: "nested path survives", content: "@github/workflows/ci.yml 改好了", staffID: "123", nick: "温温", want: "@123 @github/workflows/ci.yml 改好了"},
+		{name: "TODO marker survives", content: "@TODO: 记得修一下", staffID: "123", nick: "温温", want: "@123 @TODO: 记得修一下"},
+		{name: "salutation to another user survives", content: "@Alice 请看下这个 PR", staffID: "123", nick: "温温", want: "@123 @Alice 请看下这个 PR"},
+		{name: "bare id mention collapses to single mention", content: "@194252073827812352", staffID: "194252073827812352", nick: "温温", want: "@194252073827812352"},
+		{name: "id prefix boundary is respected", content: "@1234 hi", staffID: "123", nick: "温温", want: "@123 @1234 hi"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := mentionText(tt.content, tt.staffID); got != tt.want {
-				t.Fatalf("mentionText(%q, %q) = %q, want %q", tt.content, tt.staffID, got, tt.want)
+			if got := mentionText(tt.content, tt.staffID, tt.nick); got != tt.want {
+				t.Fatalf("mentionText(%q, %q, %q) = %q, want %q", tt.content, tt.staffID, tt.nick, got, tt.want)
 			}
 		})
 	}
@@ -1922,13 +1932,20 @@ func TestSend_GroupAtMentionEnabled_UsesTextMsgtype(t *testing.T) {
 		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
 			t.Errorf("decode payload: %v", err)
 		}
-		gotPayload <- payload
+		// Non-blocking send: only the first payload is asserted, and a fallback
+		// second POST must never wedge the handler (validateSendResponse reads
+		// the body below, so it only completes after this handler returns).
+		select {
+		case gotPayload <- payload:
+		default:
+		}
 		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"errcode":0,"errmsg":"ok"}`)) // real webhook body shape
 	}))
 	defer sessionWebhook.Close()
 
 	p := &Platform{atGroups: true}
-	rc := replyContext{sessionWebhook: sessionWebhook.URL, isGroup: true, senderStaffId: "194252073827812352"}
+	rc := replyContext{sessionWebhook: sessionWebhook.URL, isGroup: true, senderStaffId: "194252073827812352", senderNick: "温温"}
 	if err := p.Send(context.Background(), rc, "@温温 你好呀～"); err != nil {
 		t.Fatalf("Send: %v", err)
 	}
@@ -1959,6 +1976,7 @@ func TestSend_GroupAtMentionDisabled_UsesMarkdown(t *testing.T) {
 		_ = json.NewDecoder(r.Body).Decode(&payload)
 		gotPayload <- payload
 		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"errcode":0,"errmsg":"ok"}`))
 	}))
 	defer sessionWebhook.Close()
 
@@ -1984,6 +2002,7 @@ func TestSend_DirectAtMentionEnabled_Unaffected(t *testing.T) {
 		_ = json.NewDecoder(r.Body).Decode(&payload)
 		gotPayload <- payload
 		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"errcode":0,"errmsg":"ok"}`))
 	}))
 	defer sessionWebhook.Close()
 
@@ -2015,10 +2034,12 @@ func TestSend_GroupAtMentionFallsBackToMarkdownOnFailure(t *testing.T) {
 		n := len(msgtypes)
 		mu.Unlock()
 		if n == 1 {
+			// First (text) attempt must fail so Send degrades to markdown.
 			w.WriteHeader(http.StatusInternalServerError)
 			return
 		}
 		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"errcode":0,"errmsg":"ok"}`)) // real webhook body shape
 	}))
 	defer sessionWebhook.Close()
 
