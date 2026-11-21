@@ -552,16 +552,18 @@ func main() {
 		// Wire display truncation settings (includes legacy quiet → display mapping)
 		{
 			mode, tm, tool, tmlen, toollen, _, _, hideAgentFooter := config.EffectiveDisplay(cfg, &proj)
+			commentary := config.EffectiveCommentaryMessages(cfg, &proj)
 			historyMaxLen := config.EffectiveHistoryMaxLen(cfg, &proj)
 			engine.SetDisplayConfig(core.DisplayCfg{
-				Mode:             mode,
-				CardMode:         config.EffectiveCardMode(cfg, &proj),
-				ThinkingMessages: tm,
-				ThinkingMaxLen:   tmlen,
-				ToolMaxLen:       toollen,
-				ToolMessages:     tool,
-				HistoryMaxLen:    &historyMaxLen,
-				HideAgentFooter:  hideAgentFooter,
+				Mode:               mode,
+				CardMode:           config.EffectiveCardMode(cfg, &proj),
+				ThinkingMessages:   tm,
+				CommentaryMessages: &commentary,
+				ThinkingMaxLen:     tmlen,
+				ToolMaxLen:         toollen,
+				ToolMessages:       tool,
+				HistoryMaxLen:      &historyMaxLen,
+				HideAgentFooter:    hideAgentFooter,
 			})
 		}
 
@@ -1198,52 +1200,7 @@ func main() {
 		mgmtSrv.SetSaveProviderRefs(config.SaveProviderRefs)
 		mgmtSrv.SetConfigFilePath(configPath)
 		mgmtSrv.SetGetGlobalSettings(config.GetGlobalSettings)
-		mgmtSrv.SetSaveGlobalSettings(func(updates map[string]any) error {
-			u := config.GlobalSettingsUpdate{}
-			if v, ok := updates["language"].(string); ok {
-				u.Language = &v
-			}
-			if v, ok := updates["attachment_send"].(string); ok {
-				u.AttachmentSend = &v
-			}
-			if v, ok := updates["log_level"].(string); ok {
-				u.LogLevel = &v
-			}
-			if v, ok := updates["idle_timeout_mins"].(float64); ok {
-				iv := int(v)
-				u.IdleTimeoutMins = &iv
-			}
-			if v, ok := updates["thinking_messages"].(bool); ok {
-				u.ThinkingMessages = &v
-			}
-			if v, ok := updates["thinking_max_len"].(float64); ok {
-				iv := int(v)
-				u.ThinkingMaxLen = &iv
-			}
-			if v, ok := updates["tool_messages"].(bool); ok {
-				u.ToolMessages = &v
-			}
-			if v, ok := updates["tool_max_len"].(float64); ok {
-				iv := int(v)
-				u.ToolMaxLen = &iv
-			}
-			if v, ok := updates["stream_preview_enabled"].(bool); ok {
-				u.StreamPreviewOn = &v
-			}
-			if v, ok := updates["stream_preview_interval_ms"].(float64); ok {
-				iv := int(v)
-				u.StreamPreviewIntMs = &iv
-			}
-			if v, ok := updates["rate_limit_max_messages"].(float64); ok {
-				iv := int(v)
-				u.RateLimitMax = &iv
-			}
-			if v, ok := updates["rate_limit_window_secs"].(float64); ok {
-				iv := int(v)
-				u.RateLimitWindow = &iv
-			}
-			return config.SaveGlobalSettings(u)
-		})
+		mgmtSrv.SetSaveGlobalSettings(saveGlobalSettings)
 		mgmtSrv.SetListGlobalProviders(func() ([]core.GlobalProviderInfo, error) {
 			providers, err := config.ListGlobalProviders()
 			if err != nil {
@@ -1791,6 +1748,58 @@ func setupLogger(level string, w io.Writer) {
 	})))
 }
 
+// saveGlobalSettings is the management API callback. Keep the conversion here so
+// save/reload tests exercise the same mapping used by the server.
+func saveGlobalSettings(updates map[string]any) error {
+	u := config.GlobalSettingsUpdate{}
+	if v, ok := updates["language"].(string); ok {
+		u.Language = &v
+	}
+	if v, ok := updates["attachment_send"].(string); ok {
+		u.AttachmentSend = &v
+	}
+	if v, ok := updates["log_level"].(string); ok {
+		u.LogLevel = &v
+	}
+	if v, ok := updates["idle_timeout_mins"].(float64); ok {
+		iv := int(v)
+		u.IdleTimeoutMins = &iv
+	}
+	if v, ok := updates["commentary_messages"].(bool); ok {
+		u.CommentaryMessages = &v
+	}
+	if v, ok := updates["thinking_messages"].(bool); ok {
+		u.ThinkingMessages = &v
+	}
+	if v, ok := updates["thinking_max_len"].(float64); ok {
+		iv := int(v)
+		u.ThinkingMaxLen = &iv
+	}
+	if v, ok := updates["tool_messages"].(bool); ok {
+		u.ToolMessages = &v
+	}
+	if v, ok := updates["tool_max_len"].(float64); ok {
+		iv := int(v)
+		u.ToolMaxLen = &iv
+	}
+	if v, ok := updates["stream_preview_enabled"].(bool); ok {
+		u.StreamPreviewOn = &v
+	}
+	if v, ok := updates["stream_preview_interval_ms"].(float64); ok {
+		iv := int(v)
+		u.StreamPreviewIntMs = &iv
+	}
+	if v, ok := updates["rate_limit_max_messages"].(float64); ok {
+		iv := int(v)
+		u.RateLimitMax = &iv
+	}
+	if v, ok := updates["rate_limit_window_secs"].(float64); ok {
+		iv := int(v)
+		u.RateLimitWindow = &iv
+	}
+	return config.SaveGlobalSettings(u)
+}
+
 // reloadConfig re-reads config.toml and applies hot-reloadable settings
 // (display, providers, commands) to the given engine.
 func reloadConfig(configPath, projName string, engine *core.Engine) (*core.ConfigReloadResult, error) {
@@ -1820,16 +1829,18 @@ func reloadConfig(configPath, projName string, engine *core.Engine) (*core.Confi
 
 	// Reload display config (includes legacy quiet → display mapping)
 	mode, tm, tool, tmlen, toollen, showCtx, showFooter, hideAgentFooter := config.EffectiveDisplay(cfg, proj)
+	commentary := config.EffectiveCommentaryMessages(cfg, proj)
 	historyMaxLen := config.EffectiveHistoryMaxLen(cfg, proj)
 	engine.SetDisplayConfig(core.DisplayCfg{
-		Mode:             mode,
-		CardMode:         config.EffectiveCardMode(cfg, proj),
-		ThinkingMessages: tm,
-		ThinkingMaxLen:   tmlen,
-		ToolMaxLen:       toollen,
-		ToolMessages:     tool,
-		HistoryMaxLen:    &historyMaxLen,
-		HideAgentFooter:  hideAgentFooter,
+		Mode:               mode,
+		CardMode:           config.EffectiveCardMode(cfg, proj),
+		ThinkingMessages:   tm,
+		CommentaryMessages: &commentary,
+		ThinkingMaxLen:     tmlen,
+		ToolMaxLen:         toollen,
+		ToolMessages:       tool,
+		HistoryMaxLen:      &historyMaxLen,
+		HideAgentFooter:    hideAgentFooter,
 	})
 	result.DisplayUpdated = true
 

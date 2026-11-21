@@ -320,6 +320,14 @@ func TestAntigravitySession_StreamResponseDiagnostics(t *testing.T) {
 		{"tool_only", `{"event":"step_update","step_update":{"step_index":1,"state":"DONE","step_type":"tool","tool_info":{"name":"run_command","output":"tool output"}}}`, ""},
 		{"whitespace", `{"event":"step_update","step_update":{"step_type":"agent_response","text_delta":"  "}}`, ""},
 		{"text_delta", `{"event":"step_update","step_update":{"step_type":"agent_response","text_delta":"answer"}}`, "answer"},
+		{"commentary_only", `{"event":"step_update","step_update":{"step_index":1,"step_type":"agent_response","text_delta":"working"}}
+{"event":"step_update","step_update":{"step_index":2,"step_type":"tool","tool_name":"run_command"}}`, ""},
+		{"commentary_then_whitespace", `{"event":"step_update","step_update":{"step_index":1,"step_type":"agent_response","text_delta":"working"}}
+{"event":"step_update","step_update":{"step_index":2,"step_type":"tool","tool_name":"run_command"}}
+{"event":"step_update","step_update":{"step_index":3,"step_type":"agent_response","text_delta":"  "}}`, ""},
+		{"commentary_then_answer_at_eof", `{"event":"step_update","step_update":{"step_index":1,"step_type":"agent_response","text_delta":"working"}}
+{"event":"step_update","step_update":{"step_index":2,"step_type":"tool","tool_name":"run_command"}}
+{"event":"step_update","step_update":{"step_index":3,"step_type":"agent_response","text_delta":"answer"}}`, "answer"},
 		{"final_response", `{"event":"result","result":{"status":"SUCCESS","response":"answer"}}`, "answer"},
 		{"plain_text", "answer", "answer\n"},
 	} {

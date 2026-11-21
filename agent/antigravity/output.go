@@ -8,9 +8,11 @@ import (
 )
 
 type agyOutputParser struct {
-	sessionID string
-	hasText   bool
-	toolSteps map[int]bool
+	sessionID       string
+	hasText         bool
+	toolSteps       map[int]bool
+	pendingResponse strings.Builder
+	responseStep    int
 }
 
 type agyOutputEnvelope struct {
@@ -86,10 +88,18 @@ func (p *agyOutputParser) parseLine(line []byte) (recognized bool, events []core
 		switch step.StepType {
 		case "agent_response":
 			if step.TextDelta != "" {
-				p.hasText = true
-				events = append(events, core.Event{Type: core.EventText, Content: step.TextDelta})
+				// AGY has no commentary/final phase marker. Keep response
+				// deltas together until a later tool proves they are progress.
+				p.pendingResponse.WriteString(step.TextDelta)
+				p.responseStep = step.StepIndex
 			}
 		case "tool":
+			// A late or same-index tool must not consume a newer answer. AGY
+			// supplies no phase marker; only a strictly later tool establishes
+			// commentary. Ambiguous text remains on the final-answer path.
+			if step.StepIndex > p.responseStep {
+				events = append(events, p.flushResponse(core.EventCommentary)...)
+			}
 			toolName := step.ToolName
 			var input map[string]any
 			if step.ToolInfo != nil {
@@ -134,12 +144,26 @@ func (p *agyOutputParser) parseLine(line []byte) (recognized bool, events []core
 			}
 		}
 	case "result":
+		events = append(events, p.flushResponse(core.EventText)...)
 		if !p.hasText && envelope.Result.Response != "" {
 			p.hasText = true
 			events = append(events, core.Event{Type: core.EventText, Content: envelope.Result.Response})
 		}
 	}
 	return true, events
+}
+
+// flushResponse is also used at EOF by wrappers that omit the result envelope.
+func (p *agyOutputParser) flushResponse(kind core.EventType) []core.Event {
+	if p.pendingResponse.Len() == 0 {
+		return nil
+	}
+	text := p.pendingResponse.String()
+	p.pendingResponse.Reset()
+	if kind == core.EventText {
+		p.hasText = true
+	}
+	return []core.Event{{Type: kind, Content: text}}
 }
 
 func formatAgyOutputValue(value any) string {

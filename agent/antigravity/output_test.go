@@ -1,6 +1,7 @@
 package antigravity
 
 import (
+	"encoding/json"
 	"testing"
 
 	"github.com/chenhg5/cc-connect/core"
@@ -15,16 +16,16 @@ func TestAgyOutputParser_MapsResponseAndToolSteps(t *testing.T) {
 	}
 
 	_, events = parser.parseLine([]byte(`{"event":"step_update","step_update":{"step_index":0,"state":"ACTIVE","step_type":"agent_response","text_delta":"Working"}}`))
-	if len(events) != 1 || events[0].Type != core.EventText || events[0].Content != "Working" {
-		t.Fatalf("response events = %+v, want streamed text", events)
+	if len(events) != 0 {
+		t.Fatalf("response events = %+v, want buffered text until classification", events)
 	}
 
 	_, events = parser.parseLine([]byte(`{"event":"step_update","step_update":{"step_index":1,"state":"ACTIVE","step_type":"tool","tool_name":"run_command","tool_info":{"name":"run_command","parameters":{"CommandLine":"pwd"}}}}`))
-	if len(events) != 1 || events[0].Type != core.EventToolUse {
-		t.Fatalf("tool start events = %+v, want one tool-use event", events)
+	if len(events) != 2 || events[0].Type != core.EventCommentary || events[0].Content != "Working" || events[1].Type != core.EventToolUse {
+		t.Fatalf("tool start events = %+v, want commentary then tool-use", events)
 	}
-	if events[0].ToolName != "run_command" || events[0].ToolInput != "pwd" {
-		t.Fatalf("tool event = %+v, want run_command with pwd input", events[0])
+	if events[1].ToolName != "run_command" || events[1].ToolInput != "pwd" {
+		t.Fatalf("tool event = %+v, want run_command with pwd input", events[1])
 	}
 
 	_, events = parser.parseLine([]byte(`{"event":"step_update","step_update":{"step_index":1,"state":"DONE","step_type":"tool","tool_name":"run_command","tool_info":{"name":"run_command","parameters":{"CommandLine":"pwd"},"output":"/workspace\n"}}}`))
@@ -40,9 +41,9 @@ func TestAgyOutputParser_MapsResponseAndToolSteps(t *testing.T) {
 		t.Fatalf("repeated tool completion events = %+v, want result only", events)
 	}
 
-	_, events = parser.parseLine([]byte(`{"event":"result","result":{"conversation_id":"session-1","status":"SUCCESS","response":"Working"}}`))
-	if len(events) != 0 {
-		t.Fatalf("final result duplicated streamed text: %+v", events)
+	_, events = parser.parseLine([]byte(`{"event":"result","result":{"conversation_id":"session-1","status":"SUCCESS","response":"Done"}}`))
+	if len(events) != 1 || events[0].Type != core.EventText || events[0].Content != "Done" {
+		t.Fatalf("final result = %+v, want answer after commentary", events)
 	}
 }
 
@@ -59,5 +60,56 @@ func TestAgyOutputParser_PlainTextFallback(t *testing.T) {
 	recognized, events := parser.parseLine([]byte("plain response"))
 	if recognized || len(events) != 0 {
 		t.Fatalf("plain line = recognized %v, events %+v", recognized, events)
+	}
+}
+
+func TestAgyOutputParser_CommentaryBeforeToolDoesNotEnterFinalAnswer(t *testing.T) {
+	p := newAgyOutputParser()
+	for _, delta := range []string{"Checking ", "the build"} {
+		line, _ := json.Marshal(map[string]any{"event": "step_update", "step_update": map[string]any{"step_index": 0, "state": "ACTIVE", "step_type": "agent_response", "text_delta": delta}})
+		_, events := p.parseLine(line)
+		if len(events) != 0 {
+			t.Fatalf("unclassified response entered final text before tool boundary: %+v", events)
+		}
+	}
+	_, events := p.parseLine([]byte(`{"event":"step_update","step_update":{"step_index":1,"state":"ACTIVE","step_type":"tool","tool_name":"run_command"}}`))
+	if len(events) != 2 || events[0].Type != core.EventCommentary || events[0].Content != "Checking the build" || events[1].Type != core.EventToolUse {
+		t.Fatalf("tool boundary = %+v, want coalesced commentary before tool", events)
+	}
+	_, events = p.parseLine([]byte(`{"event":"step_update","step_update":{"step_index":2,"state":"DONE","step_type":"agent_response","text_delta":"Build passed"}}`))
+	if len(events) != 0 {
+		t.Fatalf("answer should wait for classification: %+v", events)
+	}
+	_, events = p.parseLine([]byte(`{"event":"result","result":{"status":"SUCCESS","response":"Build passed"}}`))
+	if len(events) != 1 || events[0].Type != core.EventText || events[0].Content != "Build passed" {
+		t.Fatalf("final response = %+v, want final text without commentary", events)
+	}
+}
+
+func TestAgyOutputParser_ResultFallbackAfterCommentary(t *testing.T) {
+	p := newAgyOutputParser()
+	_, _ = p.parseLine([]byte(`{"event":"step_update","step_update":{"step_index":0,"step_type":"agent_response","text_delta":"Working"}}`))
+	_, _ = p.parseLine([]byte(`{"event":"step_update","step_update":{"step_index":1,"step_type":"tool","tool_name":"run_command"}}`))
+	_, events := p.parseLine([]byte(`{"event":"result","result":{"status":"SUCCESS","response":"Final answer"}}`))
+	if len(events) != 1 || events[0].Type != core.EventText || events[0].Content != "Final answer" {
+		t.Fatalf("result-only final answer lost after commentary: %+v", events)
+	}
+}
+
+func TestAgyOutputParser_LateToolResultDoesNotConsumeFinalAnswer(t *testing.T) {
+	p := newAgyOutputParser()
+	_, _ = p.parseLine([]byte(`{"event":"step_update","step_update":{"step_index":2,"step_type":"agent_response","text_delta":"Final answer"}}`))
+	_, events := p.parseLine([]byte(`{"event":"step_update","step_update":{"step_index":1,"state":"DONE","step_type":"tool","tool_name":"run_command"}}`))
+	for _, event := range events {
+		if event.Type == core.EventCommentary {
+			t.Fatalf("late tool reclassified final answer: %+v", events)
+		}
+	}
+	events = p.flushResponse(core.EventText)
+	if len(events) != 1 || events[0].Content != "Final answer" {
+		t.Fatalf("EOF lost final answer: %+v", events)
+	}
+	if events = p.flushResponse(core.EventText); len(events) != 0 {
+		t.Fatalf("EOF duplicated final: %+v", events)
 	}
 }
