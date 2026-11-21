@@ -546,6 +546,7 @@ type ProjectConfig struct {
 	// entirely (the per-line indicator flags above become no-ops).
 	ReplyFooter      *bool        `toml:"reply_footer,omitempty"`
 	InjectSender     *bool        `toml:"inject_sender,omitempty"`     // prepend sender identity (platform + user ID) to each message sent to the agent
+	QueueNotice      *bool        `toml:"queue_notice,omitempty"`      // nil/true = reply "will process after the current task" when a busy message is queued; false = queue it silently (a full queue is still reported)
 	DisabledCommands []string     `toml:"disabled_commands,omitempty"` // commands to disable for this project (e.g. ["restart", "upgrade"])
 	AdminFrom        string       `toml:"admin_from,omitempty"`        // comma-separated user IDs allowed to run privileged commands; "*" = all allowed users
 	Users            *UsersConfig `toml:"users,omitempty"`             // per-user role config; nil = legacy behavior
@@ -3663,6 +3664,9 @@ func GetProjectConfigDetails(projectName string) map[string]any {
 		}
 		if p.InjectSender != nil {
 			result["inject_sender"] = *p.InjectSender
+		}
+		if p.QueueNotice != nil {
+			result["queue_notice"] = *p.QueueNotice
 		}
 		if strings.TrimSpace(p.Mode) != "" {
 			result["workspace_mode"] = p.Mode

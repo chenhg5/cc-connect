@@ -366,6 +366,7 @@ type Engine struct {
 	tts                   *TTSCfg
 	display               DisplayCfg
 	injectSender          bool
+	queueNotice           bool // reply MsgMessageQueued when a busy message is queued
 	attachmentSendEnabled bool
 	startedAt             time.Time
 
@@ -801,6 +802,7 @@ func NewEngine(name string, ag Agent, platforms []Platform, sessionStorePath str
 		sendWorkDirs:          make(map[string]string),
 		platformReady:         make(map[Platform]bool),
 		startedAt:             time.Now(),
+		queueNotice:           true,
 		streamPreview:         DefaultStreamPreviewCfg(),
 		references:            DefaultReferenceRenderCfg(),
 		eventIdleTimeout:      defaultEventIdleTimeout,
@@ -1069,6 +1071,14 @@ func (e *Engine) SetSkipGit(skipGit bool) {
 // accordingly (e.g. personal task views, role-based access control).
 func (e *Engine) SetInjectSender(v bool) {
 	e.injectSender = v
+}
+
+// SetQueueNotice controls whether a message queued behind the running turn
+// gets the "will process after the current task" reply (default true). Off,
+// the message waits silently and is answered in order; a full queue is still
+// reported, since that message is not kept.
+func (e *Engine) SetQueueNotice(enabled bool) {
+	e.queueNotice = enabled
 }
 
 // SetAttachmentSendEnabled controls whether side-channel image/file delivery is allowed.
@@ -3512,7 +3522,9 @@ func (e *Engine) queueMessageForBusySession(p Platform, msg *Message, interactiv
 		"user", msg.UserName,
 		"queue_depth", queueDepth,
 	)
-	e.reply(p, msg.ReplyCtx, e.i18n.T(MsgMessageQueued))
+	if e.queueNotice {
+		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgMessageQueued))
+	}
 	return true
 }
 
