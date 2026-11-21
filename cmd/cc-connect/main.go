@@ -543,6 +543,7 @@ func main() {
 
 		// Wire admin allowlist for privileged commands
 		engine.SetAdminFrom(proj.AdminFrom)
+		engine.SetGlobalSessionRouting(proj.GlobalSessionRouting, proj.GlobalSessionRoots)
 
 		// Wire per-user role-based policies
 		if proj.Users != nil {
@@ -1938,6 +1939,7 @@ func reloadConfig(configPath, projName string, engine *core.Engine) (*core.Confi
 
 	// Reload admin allowlist
 	engine.SetAdminFrom(proj.AdminFrom)
+	engine.SetGlobalSessionRouting(proj.GlobalSessionRouting, proj.GlobalSessionRoots)
 
 	// Reload per-user role-based policies
 	if proj.Users != nil {
