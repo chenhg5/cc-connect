@@ -154,6 +154,9 @@ level = "info" # debug, info, warn, error
 # [display]。已设字段优先，未设字段回落到全局值，再回落到默认值。
 #
 # [[projects]]
+# Optional native agent profiles for /agent; values reference existing project names.
+# /agent 每次切换都新建会话；别名映射到本配置中已有项目的 Agent 配置。
+# agent_choices = { claude = "claude-project", codex = "codex-project", kimi = "kimi-project" }
 # name = "noisy-project"
 # [projects.display]
 # thinking_messages = false  # Override only this field; others inherit from global

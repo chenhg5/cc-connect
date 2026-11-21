@@ -419,6 +419,8 @@ func main() {
 		}
 
 		engine := core.NewEngine(proj.Name, agent, platforms, sessionFile, lang)
+		defaultChoice, agentChoices := buildAgentChoices(cfg, proj)
+		engine.SetAgentChoices(defaultChoice, agentChoices)
 		// Wire display settings including show_context_indicator and reply_footer
 		// Global [display] config can be overridden by project-level settings
 		_, _, _, _, _, showCtx, showFooter, _ := config.EffectiveDisplay(cfg, &proj)

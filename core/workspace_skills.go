@@ -55,5 +55,5 @@ func (e *Engine) skillsCardForSession(sessionKey string) *Card {
 	if err != nil {
 		return e.simpleCard(e.i18n.T(MsgCardTitleSkills), "purple", e.i18n.Tf(MsgWsResolutionError, err))
 	}
-	return e.renderSkillsCard(registry)
+	return e.renderSkillsCard(registry, sessionKey)
 }

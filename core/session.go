@@ -25,6 +25,7 @@ const ExplicitActivationTTL = 7 * 24 * time.Hour
 
 // Session tracks one conversation between a user and the agent.
 type Session struct {
+	AgentProfile        string   `json:"agent_profile,omitempty"`
 	ID                  string   `json:"id"`
 	Name                string   `json:"name"`
 	AgentSessionID      string   `json:"agent_session_id"`
@@ -159,6 +160,24 @@ func (s *Session) ForceUnlock() bool {
 	s.busySince = time.Time{}
 	s.lockGen++
 	return true
+}
+
+func (s *Session) GetAgentType() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.AgentType
+}
+
+func (s *Session) GetAgentProfile() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.AgentProfile
+}
+
+func (s *Session) SetAgentProfile(profile string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.AgentProfile = profile
 }
 
 func (s *Session) AddHistory(role, content string) {
@@ -478,6 +497,9 @@ func (sm *SessionManager) createLocked(userKey, name string) *Session {
 		CreatedAt: now,
 		UpdatedAt: now,
 	}
+	if previous := sm.sessions[sm.activeSession[userKey]]; previous != nil {
+		s.AgentProfile = previous.GetAgentProfile()
+	}
 	sm.sessions[id] = s
 	sm.activeSession[userKey] = id
 	sm.userSessions[userKey] = append(sm.userSessions[userKey], id)
@@ -783,6 +805,7 @@ func (sm *SessionManager) saveLocked() {
 			Name:                s.Name,
 			AgentSessionID:      agentSID,
 			AgentType:           s.AgentType,
+			AgentProfile:        s.AgentProfile,
 			PastAgentSessionIDs: append([]string(nil), s.PastAgentSessionIDs...),
 			History:             append([]HistoryEntry(nil), s.History...),
 			CreatedAt:           s.CreatedAt,
@@ -908,7 +931,7 @@ func (sm *SessionManager) InvalidateForAgent(agentType string) {
 	invalidated := 0
 	for _, s := range sm.sessions {
 		s.mu.Lock()
-		if s.AgentSessionID != "" && s.AgentType != "" && s.AgentType != agentType {
+		if s.AgentProfile == "" && s.AgentSessionID != "" && s.AgentType != "" && s.AgentType != agentType {
 			slog.Info("session: invalidating stale agent session",
 				"session", s.ID,
 				"old_agent", s.AgentType,
