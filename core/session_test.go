@@ -3,6 +3,7 @@ package core
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -396,6 +397,119 @@ func TestSessionManager_Save_StripsContinueSentinel(t *testing.T) {
 	s2 := sm2.GetOrCreateActive("u1")
 	if got := s2.GetAgentSessionID(); got != "" {
 		t.Fatalf("after save+reload want empty agent_session_id, got %q", got)
+	}
+}
+
+// A background save must never land after a newer snapshot: the earlier
+// implementation used `go sessions.Save()` while Save() held only a read lock,
+// so two writers could rename out of order and the older one could win,
+// rolling the file (and every session in it) back to a pre-reply snapshot.
+func TestSessionManager_SaveAsyncCannotRevertNewerSnapshot(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "sessions.json")
+	sm := NewSessionManager(path)
+	s := sm.GetOrCreateActive("u1")
+	s.AddHistory("user", "first-message")
+
+	entered := make(chan struct{}, 1)
+	release := make(chan struct{})
+	var once sync.Once
+	orig := writeSessionFile
+	writeSessionFile = func(p string, data []byte, perm os.FileMode) error {
+		if p == path {
+			blocked := false
+			once.Do(func() { blocked = true })
+			if blocked {
+				entered <- struct{}{}
+				<-release
+			}
+		}
+		return AtomicWriteFile(p, data, perm)
+	}
+	t.Cleanup(func() { writeSessionFile = orig })
+
+	sm.SaveAsync()
+	select {
+	case <-entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("background save did not reach the write")
+	}
+
+	s.AddHistory("user", "second-message")
+	syncDone := make(chan struct{})
+	go func() {
+		sm.Save()
+		close(syncDone)
+	}()
+
+	select {
+	case <-syncDone:
+		t.Fatal("synchronous Save overlapped the background write instead of waiting for it")
+	case <-time.After(100 * time.Millisecond):
+	}
+
+	close(release)
+	select {
+	case <-syncDone:
+	case <-time.After(5 * time.Second):
+		t.Fatal("synchronous Save did not finish after the background write was released")
+	}
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(data), "second-message") {
+		t.Fatalf("session file was reverted by the background write; contents=%s", data)
+	}
+}
+
+func TestSessionManager_FlushAsyncSaveWaitsForBackgroundWrite(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "sessions.json")
+	sm := NewSessionManager(path)
+	sm.GetOrCreateActive("u1")
+
+	entered := make(chan struct{}, 1)
+	release := make(chan struct{})
+	var once sync.Once
+	orig := writeSessionFile
+	writeSessionFile = func(p string, data []byte, perm os.FileMode) error {
+		if p == path {
+			blocked := false
+			once.Do(func() { blocked = true })
+			if blocked {
+				entered <- struct{}{}
+				<-release
+			}
+		}
+		return AtomicWriteFile(p, data, perm)
+	}
+	t.Cleanup(func() { writeSessionFile = orig })
+
+	sm.SaveAsync()
+	select {
+	case <-entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("background save did not reach the write")
+	}
+
+	flushed := make(chan struct{})
+	go func() {
+		sm.FlushAsyncSave()
+		close(flushed)
+	}()
+	select {
+	case <-flushed:
+		t.Fatal("FlushAsyncSave returned while the background write was still running")
+	case <-time.After(100 * time.Millisecond):
+	}
+
+	close(release)
+	select {
+	case <-flushed:
+	case <-time.After(5 * time.Second):
+		t.Fatal("FlushAsyncSave did not return after the write finished")
 	}
 }
 
