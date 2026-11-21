@@ -438,7 +438,7 @@ func TestParseRootCLIOptionsGlobalFlagsBeforeSubcommand(t *testing.T) {
 }
 
 func TestTopLevelCommandHandlersIncludeTimerAliases(t *testing.T) {
-	for _, command := range []string{"timer", "at"} {
+	for _, command := range []string{"timer", "at", "agents"} {
 		if topLevelCommandHandlers[command] == nil {
 			t.Fatalf("topLevelCommandHandlers[%q] is nil", command)
 		}
@@ -467,7 +467,7 @@ func TestParseRootCLIOptionsHelp(t *testing.T) {
 }
 
 func TestRunTopLevelCommandUnknown(t *testing.T) {
-	if runTopLevelCommand([]string{"bind", "--help"}) {
+	if runTopLevelCommand([]string{"bind", "--help"}, "") {
 		t.Fatal("runTopLevelCommand() handled unknown command")
 	}
 }

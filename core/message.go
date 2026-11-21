@@ -537,6 +537,7 @@ type HistoryEntry struct {
 type AgentSessionInfo struct {
 	ID           string
 	Summary      string
+	WorkDir      string
 	MessageCount int
 	ModifiedAt   time.Time
 	GitBranch    string

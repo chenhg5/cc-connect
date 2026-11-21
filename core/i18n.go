@@ -592,6 +592,7 @@ const (
 
 	MsgBuiltinCmdNew       MsgKey = "new"
 	MsgBuiltinCmdList      MsgKey = "list"
+	MsgBuiltinCmdAgents    MsgKey = "agents"
 	MsgBuiltinCmdSearch    MsgKey = "search"
 	MsgBuiltinCmdSwitch    MsgKey = "switch"
 	MsgBuiltinCmdDelete    MsgKey = "delete"
@@ -1053,6 +1054,7 @@ var messages = map[MsgKey]map[Language]string{
 		LangEnglish: "📖 Available Commands\n\n" +
 			"/new [name]\n  Start a new session\n\n" +
 			"/list\n  List agent sessions\n\n" +
+			"/agents [list]\n  List all Codex sessions across working directories\n\n" +
 			"/search <keyword>\n  Search sessions by name or ID\n\n" +
 			"/switch <number>\n  Resume a session by its list number\n\n" +
 			"/delete <number>|1,2,3|3-7|1,3-5,8\n  Delete sessions by list number(s)\n\n" +
@@ -1097,6 +1099,7 @@ var messages = map[MsgKey]map[Language]string{
 		LangChinese: "📖 可用命令\n\n" +
 			"/new [名称]\n  创建新会话\n\n" +
 			"/list\n  列出 Agent 会话列表\n\n" +
+			"/agents [list]\n  列出所有工作目录中的 Codex 会话\n\n" +
 			"/search <关键词>\n  搜索会话名称或 ID\n\n" +
 			"/switch <序号>\n  按列表序号切换会话\n\n" +
 			"/delete <序号>|1,2,3|3-7|1,3-5,8\n  按列表序号批量/单个删除会话\n\n" +
@@ -1141,6 +1144,7 @@ var messages = map[MsgKey]map[Language]string{
 		LangTraditionalChinese: "📖 可用命令\n\n" +
 			"/new [名稱]\n  建立新會話\n\n" +
 			"/list\n  列出 Agent 會話列表\n\n" +
+			"/agents [list]\n  列出所有工作目錄中的 Codex 會話\n\n" +
 			"/search <關鍵詞>\n  搜尋會話名稱或 ID\n\n" +
 			"/switch <序號>\n  按列表序號切換會話\n\n" +
 			"/delete <序號>|1,2,3|3-7|1,3-5,8\n  按列表序號批量/單筆刪除會話\n\n" +
@@ -1184,6 +1188,7 @@ var messages = map[MsgKey]map[Language]string{
 		LangJapanese: "📖 利用可能なコマンド\n\n" +
 			"/new [名前]\n  新しいセッションを開始\n\n" +
 			"/list\n  エージェントセッション一覧\n\n" +
+			"/agents [list]\n  すべての作業ディレクトリの Codex セッション一覧\n\n" +
 			"/switch <番号>\n  リスト番号でセッションを切り替え\n\n" +
 			"/delete <番号>|1,2,3|3-7|1,3-5,8\n  リスト番号でセッションを単体/複数削除\n\n" +
 			"/name [番号] <名前>\n  セッションに名前を付ける\n\n" +
@@ -1226,6 +1231,7 @@ var messages = map[MsgKey]map[Language]string{
 		LangSpanish: "📖 Comandos disponibles\n\n" +
 			"/new [nombre]\n  Iniciar una nueva sesión\n\n" +
 			"/list\n  Listar sesiones del agente\n\n" +
+			"/agents [list]\n  Listar todas las sesiones de Codex en los directorios de trabajo\n\n" +
 			"/switch <número>\n  Reanudar sesión por su número en la lista\n\n" +
 			"/delete <número>|1,2,3|3-7|1,3-5,8\n  Eliminar una o varias sesiones por número de lista\n\n" +
 			"/name [número] <texto>\n  Nombrar una sesión para fácil identificación\n\n" +
@@ -3668,6 +3674,13 @@ var messages = map[MsgKey]map[Language]string{
 		LangTraditionalChinese: "列出 Agent 會話列表",
 		LangJapanese:           "エージェントセッション一覧",
 		LangSpanish:            "Listar sesiones del agente",
+	},
+	MsgBuiltinCmdAgents: {
+		LangEnglish:            "List all Codex sessions across working directories",
+		LangChinese:            "列出所有工作目录中的 Codex 会话",
+		LangTraditionalChinese: "列出所有工作目錄中的 Codex 會話",
+		LangJapanese:           "すべての作業ディレクトリの Codex セッション一覧",
+		LangSpanish:            "Listar todas las sesiones de Codex en los directorios de trabajo",
 	},
 	MsgBuiltinCmdSearch: {
 		LangEnglish:            "Search sessions by name or ID, arg: <keyword>",

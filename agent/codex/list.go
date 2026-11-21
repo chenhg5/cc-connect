@@ -38,12 +38,16 @@ func resolveCodexHomeDir(explicit string) string {
 	return filepath.Join(homeDir, ".codex")
 }
 
-// listCodexSessions scans the codex sessions directory for JSONL transcript
-// files whose cwd matches workDir.
+// listCodexSessions scans the Codex sessions directory for JSONL transcripts.
+// When workDir is non-empty, only transcripts with that cwd are returned;
+// an empty workDir scans every working directory.
 func listCodexSessions(workDir, codexHome string) ([]core.AgentSessionInfo, error) {
-	absWorkDir, err := filepath.Abs(workDir)
-	if err != nil {
-		absWorkDir = workDir
+	filterCwd := ""
+	if strings.TrimSpace(workDir) != "" {
+		filterCwd, _ = filepath.Abs(workDir)
+		if filterCwd == "" {
+			filterCwd = workDir
+		}
 	}
 
 	sessionsDir := filepath.Join(resolveCodexHomeDir(codexHome), "sessions")
@@ -71,7 +75,7 @@ func listCodexSessions(workDir, codexHome string) ([]core.AgentSessionInfo, erro
 	}
 	sessionsByID := make(map[string]sessionAggregate)
 	for _, f := range files {
-		info := parseCodexSessionFile(f, absWorkDir)
+		info := parseCodexSessionFile(f, filterCwd)
 		if info != nil {
 			if title := sessionTitles[info.ID]; title != "" {
 				if titleRunes := []rune(title); len(titleRunes) > 60 {
@@ -255,6 +259,7 @@ func parseCodexSessionFile(path, filterCwd string) *core.AgentSessionInfo {
 	return &core.AgentSessionInfo{
 		ID:           sessionID,
 		Summary:      summary,
+		WorkDir:      sessionCwd,
 		MessageCount: msgCount,
 		ModifiedAt:   stat.ModTime(),
 	}

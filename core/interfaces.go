@@ -369,6 +369,13 @@ type Agent interface {
 	Stop() error
 }
 
+// AllAgentSessionsLister is an optional capability for agents that can list
+// sessions across all working directories. Agent.ListSessions remains scoped
+// to the agent's configured project work directory for bridge commands.
+type AllAgentSessionsLister interface {
+	ListAllSessions(ctx context.Context) ([]AgentSessionInfo, error)
+}
+
 // AgentSession represents a running interactive agent session with a persistent process.
 type AgentSession interface {
 	// Send sends a user message (with optional images and files) to the running
