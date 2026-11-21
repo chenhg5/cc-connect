@@ -26,7 +26,7 @@ func sdkResultError(raw map[string]any) error {
 	// Do not put the raw SDK payload or provider response into runtime logs.
 	// Content remains on the Event for callers that need the original result.
 	if status, ok := raw["api_error_status"].(float64); ok && status >= 100 && status < 600 && status == float64(int(status)) {
-		return fmt.Errorf("Claude Code returned an error result (HTTP %d)", int(status))
+		return fmt.Errorf("claude code returned an error result (HTTP %d)", int(status))
 	}
-	return errors.New("Claude Code returned an error result")
+	return errors.New("claude code returned an error result")
 }
