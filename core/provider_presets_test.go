@@ -356,6 +356,51 @@ func TestProviderPresetsIncludesTrustedRouter(t *testing.T) {
 	}
 }
 
+func TestProviderPresetsIncludesAIGROW(t *testing.T) {
+	body, err := os.ReadFile("../provider-presets.json")
+	if err != nil {
+		t.Fatalf("read provider-presets.json: %v", err)
+	}
+
+	var presets ProviderPresetsResponse
+	if err := json.Unmarshal(body, &presets); err != nil {
+		t.Fatalf("parse provider-presets.json: %v", err)
+	}
+
+	var aigrow *ProviderPreset
+	for i := range presets.Providers {
+		if presets.Providers[i].Name == "aigrow" {
+			aigrow = &presets.Providers[i]
+			break
+		}
+	}
+	if aigrow == nil {
+		t.Fatal("aigrow preset not found")
+	}
+	if aigrow.InviteURL != "" {
+		t.Fatalf("aigrow invite_url = %q, want empty", aigrow.InviteURL)
+	}
+
+	claude := aigrow.AgentConfig("claudecode")
+	if claude == nil {
+		t.Fatal("aigrow claudecode config missing")
+	}
+	if claude.BaseURL != "https://aigrow.gg" {
+		t.Fatalf("claudecode base_url = %q", claude.BaseURL)
+	}
+	if claude.Model != "claude-opus-5.5" {
+		t.Fatalf("claudecode model = %q", claude.Model)
+	}
+
+	opencode := aigrow.AgentConfig("opencode")
+	if opencode == nil {
+		t.Fatal("aigrow opencode config missing")
+	}
+	if opencode.BaseURL != "https://aigrow.gg/v1" {
+		t.Fatalf("opencode base_url = %q", opencode.BaseURL)
+	}
+}
+
 func TestProviderPresetsIncludesWorldRouter(t *testing.T) {
 	body, err := os.ReadFile("../provider-presets.json")
 	if err != nil {
