@@ -686,6 +686,14 @@ type StreamingCard interface {
 	Failed() bool
 }
 
+// StreamingCardStatusFooter is an optional interface for a StreamingCard that
+// can render the reply footer (model / usage / workdir) separately from the
+// body — e.g. as small/dim text. Cards that don't implement it get the footer
+// appended inline to the finalized content.
+type StreamingCardStatusFooter interface {
+	FinalizeWithStatusFooter(ctx context.Context, content, statusFooter string) error
+}
+
 // StreamingCardPlatform is an optional interface for platforms that support
 // aggregating an entire agent turn into a single updatable card message
 // (e.g. DingTalk AI Card). When the engine detects this interface, it
