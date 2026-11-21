@@ -46,10 +46,12 @@ func (j *CronJob) IsShellJob() bool {
 }
 
 const defaultCronJobTimeout = 30 * time.Minute
+const maxCronStopWait = 5 * time.Second
 
 var (
 	ErrCronJobNotFound     = errors.New("cron job not found")
 	ErrCronProjectNotFound = errors.New("cron project not found")
+	errCronShutdown        = errors.New("interrupted by shutdown")
 )
 
 // ExecutionTimeout returns how long the scheduler waits for the job goroutine to finish.
@@ -276,6 +278,21 @@ func (s *CronStore) ListBySessionKey(sessionKey string) []*CronJob {
 func (s *CronStore) Get(id string) *CronJob {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	return s.getLocked(id)
+}
+
+func (s *CronStore) snapshotJob(id string) *CronJob {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	job := s.getLocked(id)
+	if job == nil {
+		return nil
+	}
+	snapshot := *job
+	return &snapshot
+}
+
+func (s *CronStore) getLocked(id string) *CronJob {
 	for _, j := range s.jobs {
 		if j.ID == id {
 			return j
@@ -440,6 +457,19 @@ type cronEntry struct {
 	prevRun  time.Time // last firing time; zero = never fired
 }
 
+// cronSchedulerRun tracks the loop and manual job waiters, not the engine workers.
+// The scheduler closes stop to cancel all waiters and done when they have drained.
+type cronSchedulerRun struct {
+	stop    chan struct{}
+	done    chan struct{}
+	waiters sync.WaitGroup
+	started bool
+}
+
+func newCronSchedulerRun() *cronSchedulerRun {
+	return &cronSchedulerRun{stop: make(chan struct{}), done: make(chan struct{})}
+}
+
 // CronScheduler runs cron jobs by injecting synthetic messages into engines.
 type CronScheduler struct {
 	store              *CronStore
@@ -449,13 +479,8 @@ type CronScheduler struct {
 	defaultSilent      bool   // global default for suppressing cron start notifications
 	defaultSessionMode string // global default session mode; "" = reuse, "new_per_run" = fresh session each run
 
-	// runLoop plumbing. wakeUp carries a "schedule changed, re-evaluate"
-	// signal (buffered 1). stop ends the loop. done closes when the loop
-	// returns. running guards Start/Stop against double-init.
-	wakeUp  chan struct{}
-	stop    chan struct{}
-	done    chan struct{}
-	running bool
+	wakeUp chan struct{}
+	run    *cronSchedulerRun
 }
 
 func NewCronScheduler(store *CronStore) *CronScheduler {
@@ -463,6 +488,8 @@ func NewCronScheduler(store *CronStore) *CronScheduler {
 		store:   store,
 		engines: make(map[string]*Engine),
 		entries: make(map[string]*cronEntry),
+		wakeUp:  make(chan struct{}, 1),
+		run:     newCronSchedulerRun(),
 	}
 }
 
@@ -499,18 +526,24 @@ func (cs *CronScheduler) UsesNewSession(job *CronJob) bool {
 
 func (cs *CronScheduler) Start() error {
 	cs.mu.Lock()
-	if cs.running {
+	select {
+	case <-cs.run.stop:
+		select {
+		case <-cs.run.done:
+			cs.run = newCronSchedulerRun()
+		default:
+			cs.mu.Unlock()
+			return errCronShutdown
+		}
+	default:
+	}
+	run := cs.run
+	if run.started {
 		cs.mu.Unlock()
 		return nil
 	}
-	cs.running = true
-	// Buffered so a Stop signal sent before runLoop has started (or
-	// during the small window before runLoop reaches its select) is not
-	// dropped. Wake-up signaling is also buffered so a flurry of
-	// AddJob/RemoveJob collapses to a single re-evaluation.
-	cs.wakeUp = make(chan struct{}, 1)
-	cs.stop = make(chan struct{}, 1)
-	cs.done = make(chan struct{})
+	run.started = true
+	run.waiters.Add(1)
 	cs.mu.Unlock()
 
 	jobs := cs.store.List()
@@ -521,43 +554,42 @@ func (cs *CronScheduler) Start() error {
 			}
 		}
 	}
-	go cs.runLoop()
+	go cs.runLoop(run)
 	slog.Info("cron: scheduler started", "jobs", len(jobs))
 	return nil
 }
 
-// Stop signals the runLoop to exit and waits for it to return. Safe to call
-// when Start was never invoked.
+// Stop cancels the scheduler's job waits and gives bookkeeping up to
+// maxCronStopWait to finish. Engine workers are canceled separately by Engine.Stop.
 func (cs *CronScheduler) Stop() {
 	cs.mu.Lock()
-	if !cs.running {
-		cs.mu.Unlock()
-		return
+	run := cs.run
+	select {
+	case <-run.stop:
+	default:
+		close(run.stop)
+		go func() {
+			run.waiters.Wait()
+			close(run.done)
+		}()
 	}
-	cs.running = false
-	stopCh := cs.stop
-	doneCh := cs.done
 	cs.mu.Unlock()
 
+	timer := time.NewTimer(maxCronStopWait)
+	defer timer.Stop()
 	select {
-	case stopCh <- struct{}{}:
-	default:
+	case <-run.done:
+	case <-timer.C:
+		slog.Warn("cron: scheduler shutdown wait timed out", "timeout", maxCronStopWait)
 	}
-	<-doneCh
 }
 
 // signalWakeUp nudges the runLoop to re-evaluate the next firing time.
 // Non-blocking: if a signal is already pending, the buffered channel absorbs
-// the dedup. Safe to call before Start (no-op) and after Stop (no-op).
+// the dedup. Safe to call before Start and after Stop.
 func (cs *CronScheduler) signalWakeUp() {
-	cs.mu.RLock()
-	ch := cs.wakeUp
-	cs.mu.RUnlock()
-	if ch == nil {
-		return
-	}
 	select {
-	case ch <- struct{}{}:
+	case cs.wakeUp <- struct{}{}:
 	default:
 	}
 }
@@ -570,8 +602,8 @@ func (cs *CronScheduler) signalWakeUp() {
 // `time.NewTimer` (e.g. hours) would not fire while the OS is asleep and
 // Go's monotonic clock wouldn't have advanced, so we'd miss catch-up. The
 // cap guarantees we re-check at most every maxCronTimerSpan after wake.
-func (cs *CronScheduler) runLoop() {
-	defer close(cs.done)
+func (cs *CronScheduler) runLoop(run *cronSchedulerRun) {
+	defer run.waiters.Done()
 	for {
 		// Compute the earliest entry and the next wait duration under
 		// the read lock. We must read `earliest.nextRun` while still
@@ -611,12 +643,12 @@ func (cs *CronScheduler) runLoop() {
 		timer := time.NewTimer(wait)
 		select {
 		case <-timer.C:
-			cs.fireDueJobs()
+			cs.fireDueJobs(run.stop)
 		case <-cs.wakeUp:
 			timer.Stop()
 			// Re-iterate: a job may have been added/removed, or its
 			// schedule changed. Recompute earliest.
-		case <-cs.stop:
+		case <-run.stop:
 			timer.Stop()
 			return
 		}
@@ -626,7 +658,7 @@ func (cs *CronScheduler) runLoop() {
 // fireDueJobs runs every entry whose nextRun has elapsed and advances their
 // nextRun. Jobs whose `Enabled` flag was flipped off since the entry was
 // scheduled are silently skipped (runJob re-checks the store).
-func (cs *CronScheduler) fireDueJobs() {
+func (cs *CronScheduler) fireDueJobs(stop <-chan struct{}) {
 	now := time.Now()
 
 	cs.mu.RLock()
@@ -639,9 +671,14 @@ func (cs *CronScheduler) fireDueJobs() {
 	cs.mu.RUnlock()
 
 	for _, e := range due {
-		job := cs.store.Get(e.jobID)
-		if job != nil {
-			cs.runJob(job, false)
+		select {
+		case <-stop:
+			return
+		default:
+		}
+		job := cs.store.snapshotJob(e.jobID)
+		if job != nil && !cs.runJob(job, false, stop) {
+			return
 		}
 
 		// Advance nextRun under the write lock so concurrent
@@ -828,27 +865,39 @@ func (cs *CronScheduler) scheduleJob(job *CronJob) error {
 // RunJobNow triggers a persisted cron job immediately in the background.
 // Disabled jobs are allowed to run manually; only scheduled executions enforce Enabled.
 func (cs *CronScheduler) RunJobNow(id string) error {
-	job := cs.store.Get(id)
+	job := cs.store.snapshotJob(id)
 	if job == nil {
 		return fmt.Errorf("%w: %q", ErrCronJobNotFound, id)
 	}
 	cs.mu.RLock()
+	defer cs.mu.RUnlock()
+	run := cs.run
+	select {
+	case <-run.stop:
+		return errCronShutdown
+	default:
+	}
 	_, ok := cs.engines[job.Project]
-	cs.mu.RUnlock()
 	if !ok {
 		return fmt.Errorf("%w: %q", ErrCronProjectNotFound, job.Project)
 	}
-	snapshot := *job
-	go cs.runJob(&snapshot, true)
+	run.waiters.Add(1)
+	go func() {
+		defer run.waiters.Done()
+		cs.runJob(job, true, run.stop)
+	}()
 	return nil
 }
 
-func (cs *CronScheduler) runJob(job *CronJob, manual bool) {
-	if job == nil {
-		return
+// runJob reports false if shutdown prevents it from starting the job.
+func (cs *CronScheduler) runJob(job *CronJob, manual bool, stop <-chan struct{}) bool {
+	select {
+	case <-stop:
+		return false
+	default:
 	}
 	if !manual && !job.Enabled {
-		return
+		return true
 	}
 
 	cs.mu.RLock()
@@ -858,7 +907,7 @@ func (cs *CronScheduler) runJob(job *CronJob, manual bool) {
 	if !ok {
 		slog.Error("cron: project not found", "job", job.ID, "project", job.Project, "manual", manual)
 		cs.store.MarkRun(job.ID, fmt.Errorf("project %q not found", job.Project))
-		return
+		return true
 	}
 
 	slog.Info("cron: executing job", "id", job.ID, "project", job.Project, "manual", manual, "prompt", truncateStr(job.Prompt, 60))
@@ -868,18 +917,42 @@ func (cs *CronScheduler) runJob(job *CronJob, manual bool) {
 		done <- engine.ExecuteCronJob(job)
 	}()
 
-	var err error
-	timeout := job.ExecutionTimeout()
+	err := waitForCronJob(done, job.ExecutionTimeout(), stop)
+	cs.recordJobResult(job, manual, stop, err)
+	return true
+}
+
+func waitForCronJob(done <-chan error, timeout time.Duration, stop <-chan struct{}) error {
+	var timeoutCh <-chan time.Time
 	if timeout > 0 {
+		timer := time.NewTimer(timeout)
+		defer timer.Stop()
+		timeoutCh = timer.C
+	}
+	select {
+	case err := <-done:
+		return err
+	case <-timeoutCh:
+		return fmt.Errorf("job timed out after %v", timeout)
+	case <-stop:
+		return errCronShutdown
+	}
+}
+
+func (cs *CronScheduler) recordJobResult(job *CronJob, manual bool, stop <-chan struct{}, err error) {
+	if err == nil {
 		select {
-		case err = <-done:
-		case <-time.After(timeout):
-			err = fmt.Errorf("job timed out after %v", timeout)
+		case <-stop:
+			err = errCronShutdown
+		default:
 		}
-	} else {
-		err = <-done
 	}
 
+	if errors.Is(err, errCronShutdown) {
+		cs.store.MarkRun(job.ID, nil)
+		slog.Warn("cron: job interrupted by shutdown", "id", job.ID, "project", job.Project, "manual", manual)
+		return
+	}
 	cs.store.MarkRun(job.ID, err)
 
 	if err != nil {

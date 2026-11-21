@@ -254,8 +254,8 @@ func (e *Engine) runPendingRestartNotify(req *RestartRequest, firedCh chan struc
 // lookupReadyPlatform returns the platform with the given name if it has
 // reached ready state, otherwise nil.
 func (e *Engine) lookupReadyPlatform(platformName string) Platform {
-	e.platformLifecycleMu.Lock()
-	defer e.platformLifecycleMu.Unlock()
+	e.platformLifecycleMu.RLock()
+	defer e.platformLifecycleMu.RUnlock()
 	for p, ready := range e.platformReady {
 		if ready && p.Name() == platformName {
 			return p
@@ -501,7 +501,7 @@ type Engine struct {
 	closingSessions map[string]chan struct{} // sessionKey → closed when teardown finishes
 	unsafeResume    map[string]bool          // sessionKey → next spawn must start fresh, not resume
 
-	platformLifecycleMu sync.Mutex
+	platformLifecycleMu sync.RWMutex
 	platformReady       map[Platform]bool
 	stopping            bool
 	replyFooterMu       sync.Mutex
@@ -1540,6 +1540,9 @@ func (e *Engine) ActiveSessionKeys() []string {
 // It finds the platform that owns the session key, reconstructs a reply context,
 // and processes the message as if the user sent it.
 func (e *Engine) ExecuteCronJob(job *CronJob) error {
+	if e.isStopping() {
+		return errCronShutdown
+	}
 	e.hooks.Emit(HookEvent{
 		Event:      HookEventCronTriggered,
 		SessionKey: job.SessionKey,
@@ -1609,6 +1612,9 @@ func (e *Engine) ExecuteCronJob(job *CronJob) error {
 			return fmt.Errorf("reconstruct reply context: %w", err)
 		}
 	}
+	if e.isStopping() {
+		return errCronShutdown
+	}
 
 	// Wrap platform to discard all outgoing messages when muted
 	effectivePlatform := targetPlatform
@@ -1638,6 +1644,9 @@ func (e *Engine) ExecuteCronJob(job *CronJob) error {
 	}
 
 	if job.IsShellJob() {
+		if e.isStopping() {
+			return errCronShutdown
+		}
 		return e.executeCronShell(effectivePlatform, replyCtx, job)
 	}
 
@@ -1704,6 +1713,9 @@ func (e *Engine) ExecuteCronJob(job *CronJob) error {
 		useNewSession = job.UsesNewSessionPerRun()
 	}
 
+	if e.isStopping() {
+		return errCronShutdown
+	}
 	if useNewSession {
 		msg.SessionKey = runSessionKey
 		session := sessions.NewSideSession(runSessionKey, "cron-"+job.ID)
@@ -2442,11 +2454,26 @@ func (e *Engine) Start() error {
 	return nil
 }
 
-func (e *Engine) Stop() error {
+// BeginShutdown rejects new work before Stop tears down engine resources.
+func (e *Engine) BeginShutdown() {
 	e.platformLifecycleMu.Lock()
+	if e.stopping {
+		e.platformLifecycleMu.Unlock()
+		return
+	}
 	e.stopping = true
 	e.platformLifecycleMu.Unlock()
+	slog.Warn("engine shutdown: no longer accepting new work", "project", e.name)
+}
 
+func (e *Engine) isStopping() bool {
+	e.platformLifecycleMu.RLock()
+	defer e.platformLifecycleMu.RUnlock()
+	return e.stopping || e.ctx.Err() != nil
+}
+
+func (e *Engine) Stop() error {
+	e.BeginShutdown()
 	// Cancel first so late lifecycle callbacks observe shutdown immediately.
 	e.cancel()
 
@@ -3009,6 +3036,10 @@ func (e *Engine) startMessageRecallMonitor(sessionKey string) context.CancelFunc
 }
 
 func (e *Engine) handleMessage(p Platform, msg *Message) {
+	if e.isStopping() {
+		slog.Debug("dropping inbound message during shutdown", "project", e.name, "platform", msg.Platform)
+		return
+	}
 	if msg.Recalled {
 		e.handleMessageRecall(p, msg)
 		return
@@ -3165,6 +3196,9 @@ func (e *Engine) handleMessage(p Platform, msg *Message) {
 		}
 	}
 
+	if e.isStopping() {
+		return
+	}
 	// Select session manager and agent based on workspace mode
 	sessions := e.sessions
 	agent := e.agent
@@ -3237,6 +3271,9 @@ func (e *Engine) handleMessage(p Platform, msg *Message) {
 		return
 	}
 
+	if e.isStopping() {
+		return
+	}
 	session := sessions.GetOrCreateActive(msg.SessionKey)
 	sessions.UpdateUserMeta(msg.SessionKey, msg.UserName, msg.ChatName)
 	// Ensure an interactiveState entry exists before taking the session lock.
@@ -4065,7 +4102,7 @@ func (e *Engine) processInteractiveMessageWith(p Platform, msg *Message, session
 		}
 	}()
 
-	if e.ctx.Err() != nil {
+	if e.isStopping() {
 		return
 	}
 
@@ -4084,6 +4121,9 @@ func (e *Engine) processInteractiveMessageWith(p Platform, msg *Message, session
 		agentOverride = agent
 	}
 	state := e.getOrCreateInteractiveStateWith(interactiveKey, p, msg.ReplyCtx, session, sessions, agentOverride, ccSessionKey)
+	if state == nil || e.isStopping() {
+		return
+	}
 
 	// Set workspaceDir on the state for idle reaper identification
 	if workspaceDir != "" {
@@ -4190,6 +4230,9 @@ func (e *Engine) processInteractiveMessageWith(p Platform, msg *Message, session
 		slog.Warn("slow agent send", "elapsed", elapsed, "session", msg.SessionKey, "content_len", len(msg.Content))
 	}
 	stopTyping = nil // ownership transferred; prevent defer from double-stopping
+	if e.isStopping() {
+		return
+	}
 
 	// Start unsolicited reader and arm the idle close timer BEFORE draining
 	// queued messages. drainPendingMessages releases the session lock, and
@@ -4221,6 +4264,10 @@ func (e *Engine) processInteractiveMessageWith(p Platform, msg *Message, session
 // workspace must be a normalized path (from resolveWorkspace or normalizeWorkspacePath).
 func (e *Engine) getOrCreateWorkspaceAgent(workspace string) (Agent, *SessionManager, error) {
 	e.interactiveMu.Lock()
+	if e.isStopping() {
+		e.interactiveMu.Unlock()
+		return nil, nil, context.Canceled
+	}
 	if e.workspacePool == nil {
 		e.workspacePool = newWorkspacePool(DefaultWorkspaceIdleTimeout)
 	}
@@ -4348,7 +4395,6 @@ func (e *Engine) workspaceContext(workspace, sessionKey string) (Agent, *Session
 	return wsAgent, wsSessions, interactiveKey, effectiveDir, nil
 }
 
-// getOrCreateInteractiveStateWith accepts an optional agent override for multi-workspace mode.
 // adoptPendingFromPlaceholder copies pendingMessages from an existing placeholder
 // state to newState so queued messages are not lost when the map entry is replaced.
 // Must be called under interactiveMu.
@@ -4364,7 +4410,8 @@ func adoptPendingFromPlaceholder(existing, newState *interactiveState) {
 	existing.mu.Unlock()
 }
 
-// When agentOverride is non-nil it is used instead of e.agent to start the session.
+// getOrCreateInteractiveStateWith accepts an optional agent override for multi-workspace mode.
+// During shutdown it returns nil without creating a placeholder, so pending work is discarded.
 // ccSessionKey, when non-empty, is used for CC_SESSION_KEY env injection; otherwise sessionKey is used.
 func (e *Engine) getOrCreateInteractiveStateWith(sessionKey string, p Platform, replyCtx any, session *Session, sessions *SessionManager, agentOverride Agent, ccSessionKey string) *interactiveState {
 	// /stop removes the state from the map immediately but tears the process
@@ -4376,6 +4423,9 @@ func (e *Engine) getOrCreateInteractiveStateWith(sessionKey string, p Platform, 
 	e.interactiveMu.Lock()
 	defer e.interactiveMu.Unlock()
 
+	if e.isStopping() {
+		return nil
+	}
 	state, ok := e.interactiveStates[sessionKey]
 	if ok && state.agentSession != nil && state.agentSession.Alive() {
 		// Verify the running agent session matches the current active session.
@@ -4453,14 +4503,8 @@ func (e *Engine) getOrCreateInteractiveStateWith(sessionKey string, p Platform, 
 		ppi.SetPlatformPrompt(prompt)
 	}
 
-	// Check if context is already canceled (e.g. during shutdown/restart)
-	if e.ctx.Err() != nil {
-		slog.Debug("skipping session start: context canceled", "session_key", sessionKey)
-		newState := &interactiveState{platform: p, replyCtx: replyCtx, agent: agent, eventsNeedResync: true, busySession: session}
-		adoptPendingFromPlaceholder(e.interactiveStates[sessionKey], newState)
-		state = newState
-		e.interactiveStates[sessionKey] = state
-		return state
+	if e.isStopping() {
+		return nil
 	}
 
 	// Restore the agent's active provider from the session before starting a
@@ -4504,10 +4548,16 @@ func (e *Engine) getOrCreateInteractiveStateWith(sessionKey string, p Platform, 
 	}
 
 	isResume := startSessionID != ""
+	if e.isStopping() {
+		return nil
+	}
 	startAt := time.Now()
 	agentSession, err := agent.StartSession(e.ctx, startSessionID)
 	startElapsed := time.Since(startAt)
 	if err != nil {
+		if e.isStopping() {
+			return nil
+		}
 		// If resume/continue failed, try a fresh session as fallback.
 		if startSessionID != "" {
 			slog.Error("session resume failed, falling back to fresh session",
@@ -12903,6 +12953,9 @@ func (e *Engine) sendWithCard(p Platform, replyCtx any, card *Card) {
 // handleCardNav is called by platforms that support in-place card updates.
 // It routes nav: and act: prefixed actions to the appropriate render function.
 func (e *Engine) handleCardNav(action string, sessionKey string) *Card {
+	if e.isStopping() {
+		return nil
+	}
 	var prefix, body string
 	if i := strings.Index(action, ":"); i >= 0 {
 		prefix = action[:i]
@@ -16755,9 +16808,15 @@ func (e *Engine) relayContextForSourceSessionKey(fromProject, sourceSessionKey s
 // dedicated relay session, sends the message to the agent, and blocks until
 // the complete response is collected (or the relay context times out).
 func (e *Engine) HandleRelay(ctx context.Context, fromProject, sourceSessionKey, message string) (string, error) {
+	if e.isStopping() {
+		return "", context.Canceled
+	}
 	agent, sessions, relaySessionKey, err := e.relayContextForSourceSessionKey(fromProject, sourceSessionKey)
 	if err != nil {
 		return "", err
+	}
+	if e.isStopping() {
+		return "", context.Canceled
 	}
 	session := sessions.GetOrCreateActive(relaySessionKey)
 
@@ -16778,8 +16837,14 @@ func (e *Engine) HandleRelay(ctx context.Context, fromProject, sourceSessionKey,
 	// Use the engine context (not the relay timeout context) so that the
 	// agent process is not killed when the relay deadline fires. The relay
 	// timeout only controls how long we *wait* for the response.
+	if e.isStopping() {
+		return "", context.Canceled
+	}
 	agentSession, err := agent.StartSession(e.ctx, session.GetAgentSessionID())
 	if err != nil {
+		if e.isStopping() {
+			return "", context.Canceled
+		}
 		// Resume failed — fall back to a fresh session so the relay is not
 		// permanently broken by a corrupted/stale session ID.
 		if session.GetAgentSessionID() != "" {
