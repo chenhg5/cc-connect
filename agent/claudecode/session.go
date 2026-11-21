@@ -28,6 +28,15 @@ import (
 // In "auto" mode, permission requests are auto-approved internally
 // (avoiding --dangerously-skip-permissions which fails under root).
 type claudeSession struct {
+	// Mid-turn input (SendMidTurn): messages not yet folded or run, and a
+	// turn's result held or merged while a follow-up turn may start.
+	midTurnMu      sync.Mutex
+	midTurnPending []uint64
+	midTurnNextID  uint64
+	heldResult     *core.Event
+	heldTimer      *time.Timer
+	mergedResult   *core.Event
+
 	cmd             *exec.Cmd
 	stdin           io.WriteCloser
 	stdinMu         sync.Mutex
@@ -628,6 +637,7 @@ func (cs *claudeSession) startReadLoopWait(stdout io.ReadCloser) (<-chan error, 
 
 func (cs *claudeSession) finishReadLoop(waitErrCh <-chan error, stderrBuf *bytes.Buffer) {
 	err := <-waitErrCh
+	cs.releaseHeldResult()
 
 	cs.alive.Store(false)
 	// A dead process has no active turn; clear the flag so a later /stop
@@ -689,6 +699,14 @@ func (cs *claudeSession) handleReadLoopLine(line string) {
 
 	eventType, _ := raw["type"].(string)
 	slog.Debug("claudeSession: event", "type", eventType)
+
+	// Once a mid-turn write is expected, unrelated stream events must not
+	// release the held result. Some CLI versions emit echoes or system events
+	// before init; a subsequent result can also identify the follow-up.
+	subtype, _ := raw["subtype"].(string)
+	if eventType == "system" && subtype == "init" {
+		cs.followUpTurnStarted()
+	}
 
 	switch eventType {
 	case "system":
@@ -1373,11 +1391,11 @@ func (cs *claudeSession) handleResult(raw map[string]any) {
 		CacheCreationInputTokens: cacheCreationTokens,
 		CacheReadInputTokens:     cacheReadTokens,
 	}
-	select {
-	case cs.events <- evt:
-	case <-cs.ctx.Done():
+	if isCompaction {
+		cs.emit(evt)
 		return
 	}
+	cs.deliverResult(evt)
 }
 
 func (cs *claudeSession) handleControlRequest(raw map[string]any) {
@@ -1936,6 +1954,153 @@ func (cs *claudeSession) signalTurnTerminated() {
 // plus the Close() escalation ladder — stays in the same ballpark as the
 // pre-#1765 behaviour, instead of stacking two long waits.
 const defaultCancelConfirmTimeout = 5 * time.Second
+
+// followUpTurnWindow is how long a turn's result is held, after a mid-turn
+// message, for Claude Code to start a follow-up turn. It starts one within
+// milliseconds of the result (measured 8ms on 2.1.280); the window only
+// delays the final reply when the message was folded into the turn.
+var followUpTurnWindow = 2 * time.Second
+
+// SendMidTurn writes a user message while a turn is running. Claude Code reads
+// stream-json user messages from the same stdin and folds a mid-turn message
+// into the active turn at its next tool boundary. When the turn has no
+// boundary left, it runs the message as a follow-up turn right after the
+// result instead; that turn is merged into the running one (see
+// deliverResult), so the engine still sees exactly one EventResult.
+func (cs *claudeSession) SendMidTurn(prompt string, messageID string, images []core.ImageAttachment, files []core.FileAttachment) error {
+	// Reserve before writing: the reader can receive a result as soon as
+	// stdin accepts the message, even before Send returns.
+	cs.midTurnMu.Lock()
+	cs.midTurnNextID++
+	reservation := cs.midTurnNextID
+	cs.midTurnPending = append(cs.midTurnPending, reservation)
+	cs.midTurnMu.Unlock()
+	if err := cs.Send(prompt, messageID, images, files); err != nil {
+		cs.midTurnMu.Lock()
+		// Remove only this write's reservation. A follow-up may already
+		// have consumed it while another input is still outstanding.
+		for i, id := range cs.midTurnPending {
+			if id == reservation {
+				cs.midTurnPending = append(cs.midTurnPending[:i], cs.midTurnPending[i+1:]...)
+				break
+			}
+		}
+		if len(cs.midTurnPending) == 0 {
+			cs.releaseHeldResultLocked()
+		}
+		cs.midTurnMu.Unlock()
+		return err
+	}
+	return nil
+}
+
+var _ core.MidTurnInputSender = (*claudeSession)(nil)
+
+// deliverResult emits a turn-ending result, first prepending any earlier turn
+// merged into it. While mid-turn messages are outstanding it holds the result
+// instead: a follow-up turn starting within followUpTurnWindow is merged
+// (followUpTurnStarted), otherwise the result is released unchanged.
+func (cs *claudeSession) deliverResult(evt core.Event) {
+	cs.midTurnMu.Lock()
+	// A terminal foreground result inside the window is enough evidence
+	// of the expected follow-up, even if no init event was emitted.
+	cs.followUpTurnStartedLocked()
+	if prev := cs.mergedResult; prev != nil {
+		cs.mergedResult = nil
+		evt = mergeTurnResults(*prev, evt)
+	}
+	if len(cs.midTurnPending) > 0 {
+		cs.heldResult = &evt
+		cs.heldTimer = time.AfterFunc(followUpTurnWindow, func() {
+			cs.midTurnMu.Lock()
+			defer cs.midTurnMu.Unlock()
+			// An expired callback must not release a later held result.
+			if cs.heldResult == &evt {
+				cs.releaseHeldResultLocked()
+			}
+		})
+		cs.midTurnMu.Unlock()
+		return
+	}
+	cs.midTurnMu.Unlock()
+	cs.emit(evt)
+}
+
+// followUpTurnStarted is called on a turn's system init. If a result is held,
+// the new turn runs a mid-turn message: keep the held result to merge into it.
+func (cs *claudeSession) followUpTurnStarted() {
+	cs.midTurnMu.Lock()
+	defer cs.midTurnMu.Unlock()
+	if cs.heldResult != nil {
+		// The prior result cleared turnActive. A confirmed follow-up init
+		// starts another native turn, so cancellation must not take idle's
+		// fast path. Do not do this in the result-only fallback helper.
+		cs.turnActive.Store(true)
+	}
+	cs.followUpTurnStartedLocked()
+}
+
+// midTurnMu must be held. The holder of the mutex wins against expiry;
+// stale timer callbacks are tied to their original result.
+func (cs *claudeSession) followUpTurnStartedLocked() {
+	if cs.heldResult == nil {
+		return
+	}
+	cs.heldTimer.Stop()
+	cs.mergedResult = cs.heldResult
+	cs.heldResult = nil
+	if len(cs.midTurnPending) > 0 {
+		cs.midTurnPending = cs.midTurnPending[1:]
+	}
+	slog.Info("claudeSession: mid-turn message runs as a follow-up turn; merging it into the running turn",
+		"session_id", cs.CurrentSessionID())
+}
+
+// releaseHeldResult emits a held result: the mid-turn messages were folded
+// into the turn, the write failed, or the process exited. Holding midTurnMu across the send
+// keeps it ahead of whatever the read loop emits next.
+func (cs *claudeSession) releaseHeldResult() {
+	cs.midTurnMu.Lock()
+	defer cs.midTurnMu.Unlock()
+	cs.releaseHeldResultLocked()
+}
+
+// midTurnMu must be held.
+func (cs *claudeSession) releaseHeldResultLocked() {
+	if cs.heldResult == nil {
+		return
+	}
+	cs.heldTimer.Stop()
+	evt := *cs.heldResult
+	cs.heldResult = nil
+	cs.midTurnPending = nil
+	cs.emit(evt)
+}
+
+func (cs *claudeSession) emit(evt core.Event) {
+	select {
+	case cs.events <- evt:
+	case <-cs.ctx.Done():
+	}
+}
+
+// mergeTurnResults reports two consecutive turns as one: the reply text of
+// both, in order, and the usage of both.
+func mergeTurnResults(first, second core.Event) core.Event {
+	merged := second
+	switch {
+	case strings.TrimSpace(first.Content) == "":
+	case strings.TrimSpace(second.Content) == "":
+		merged.Content = first.Content
+	default:
+		merged.Content = first.Content + "\n\n" + second.Content
+	}
+	merged.InputTokens += first.InputTokens
+	merged.OutputTokens += first.OutputTokens
+	merged.CacheCreationInputTokens += first.CacheCreationInputTokens
+	merged.CacheReadInputTokens += first.CacheReadInputTokens
+	return merged
+}
 
 // defaultGracefulStopTimeout 是 Close() Phase 1「关掉 stdin、等它自己干净退出」
 // 的等待上限。
