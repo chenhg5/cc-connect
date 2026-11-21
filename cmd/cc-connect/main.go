@@ -335,6 +335,11 @@ func main() {
 	}
 
 	config.ConfigPath = configPath
+	// The workspace key form is process-global: every engine must agree on it or
+	// the same workspace would resolve to two different session files. It must be
+	// set before the first engine is constructed, and it is startup-only (not
+	// hot-reloaded) for the same reason.
+	core.SetWorkspaceKeyMode(config.EffectiveWorkspaceKeyMode(cfg))
 	slog.Info("config loaded", "path", configPath)
 
 	if len(cfg.Projects) == 0 {
