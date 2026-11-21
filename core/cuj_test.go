@@ -1388,6 +1388,12 @@ func TestCUJ_A6_A7_CoveredByPlatformLayer(t *testing.T) {
 
 // CUJ-B1 · /new creates a fresh session independent from the previous one.
 func TestCUJ_B1_NewCreatesIndependentSession(t *testing.T) {
+	t.Run("messages_during_close", func(t *testing.T) {
+		testIssue600ReceiveMessageDuringNew(t, false, "success", true)
+	})
+	t.Run("messages_before_close_starts", testIssue600ReceiveMessageBeforeCloseStarts)
+	t.Run("overlapping_new_preserves_stop_control", testIssue600OverlappingNew)
+
 	env := newCUJEnv(t)
 	key := "test:b1"
 	env.userSends("b1", "first message")
