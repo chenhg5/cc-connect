@@ -2,6 +2,7 @@ package acp
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os/exec"
@@ -298,14 +299,18 @@ func (a *Agent) Stop() error { return nil }
 // GetSessionHistory implements core.HistoryProvider. ACP itself defines no
 // history retrieval RPC, but backends like Kimi Code CLI (`kimi acp`) persist
 // transcripts locally; read them so /last and /history work after /switch.
-// For non-Kimi backends this reports "session not found", which the engine
-// surfaces as an ordinary lookup failure.
+// For backends without a Kimi transcript, the engine falls back to its local
+// history cache. Other transcript read errors are surfaced to the user.
 func (a *Agent) GetSessionHistory(_ context.Context, sessionID string, limit int) ([]core.HistoryEntry, error) {
 	a.mu.RLock()
 	extra := append([]string(nil), a.extraEnv...)
 	extra = append(extra, a.sessionEnv...)
 	a.mu.RUnlock()
-	return kimi.ReadSessionHistory(sessionID, limit, extra...)
+	entries, err := kimi.ReadSessionHistory(sessionID, limit, extra...)
+	if errors.Is(err, kimi.ErrSessionNotFound) {
+		return nil, core.ErrHistoryUnsupported
+	}
+	return entries, err
 }
 
 var _ core.HistoryProvider = (*Agent)(nil)
