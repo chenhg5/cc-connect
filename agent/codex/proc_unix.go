@@ -19,6 +19,9 @@ func prepareCmdForKill(cmd *exec.Cmd) {
 	cmd.SysProcAttr.Setpgid = true
 }
 
+// attachCmdToKillJob is a no-op on unix; see proc_windows.go.
+func attachCmdToKillJob(cmd *exec.Cmd) {}
+
 func forceKillCmd(cmd *exec.Cmd) error {
 	if cmd == nil || cmd.Process == nil {
 		return nil
