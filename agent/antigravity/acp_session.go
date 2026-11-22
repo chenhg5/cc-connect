@@ -91,9 +91,10 @@ func newAgyACPSession(ctx context.Context, command string, extraArgs []string, w
 		effort:             effort, ctxWindowOverride: window, waiters: make(map[string]chan agyACPReply), prompts: make(map[string]*agyACPPrompt), permissions: make(map[string]agyACPPermission),
 	}
 	args := append(append([]string{}, extraArgs...), "acp")
-	if mode == "yolo" {
+	switch mode {
+	case "yolo":
 		args = append(args, "--dangerously-skip-permissions")
-	} else if mode == "plan" {
+	case "plan":
 		args = append(args, "--sandbox")
 	}
 	cmd := exec.CommandContext(s.ctx, command, args...)
