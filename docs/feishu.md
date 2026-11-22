@@ -110,16 +110,19 @@ app_secret = "QhkMpxxxxxxxxxxxxxxxxxxxx"
 # domain = "https://open.feishu.cn" # 可选：覆盖运行时 API/WebSocket 域名
 # enable_feishu_card = true  # 可选：关闭后统一回退纯文本回复
 # thread_isolation = true    # 可选：按飞书 thread/root 隔离群聊会话
+# group_reply_all_chats = ["oc_group_a", "oc_group_b"] # 可选：仅指定群无需 @机器人
 # group_chat_history_share = false  # 可选：共享未 @ 机器人的群消息作为下一次触发的上下文；消息本身不会触发回复
-# solo_chat_reply_all = false  # 可选：群里只有一个人和这个机器人时无需 @；@ 了别人的消息仍不触发
 # progress_style = "legacy"  # 可选：legacy | compact | card
 # ack_emoji = "Get"           # 可选：消息被接受处理或入队时立即添加并保留的确认表情；默认禁用
 # reaction_emoji = "OnIt"      # 可选：agent 处理期间的临时表情，结束后移除
 # done_emoji = "none"          # 可选：agent 完成回复后添加的表情回复（如 "Done"）；设为 "none" 可禁用
 # image_batch_window_ms = 500  # 可选：连续多图合批窗口（默认 500ms，详见下文）
+# attachment_wait = "off"      # 可选：话题内未 @ 的附件如何处理，"off" | "mention"（详见下文）
+# attachment_wait_secs = 1800  # 可选：attachment_wait = "mention" 时的暂存时长（秒）
 ```
 
 > 如果应用没有交互卡片权限，或后台未配置卡片回调，可将 `enable_feishu_card = false`，让所有命令统一走纯文本回复，避免卡片发送失败后用户看不到内容。
+> `group_reply_all_chats` 可使用逗号分隔字符串（如 `"oc_group_a,oc_group_b"`）或字符串数组。非空列表仅让指定群绕过 @ 过滤，并优先于全局 `group_reply_all` 和 `require_mention`；其他群保留原有提及、@all 和已参与话题的附件规则。未配置或为空时沿用原有默认行为。此设置不放宽 `allow_from`、`allow_chat` 或 `group_only`，私聊行为不变。
 > 如果开启 `thread_isolation = true`，群聊里每个根消息 / reply thread 会对应一个独立 agent session；私聊行为保持原样。
 > `group_chat_history_share = true` 时，cc-connect 只在内存中保留当前进程观察到的、允许访问的群聊 text/post 消息，并在下一次明确 @ 机器人且真正进入 agent turn 时注入；未 @ 的消息不会触发回复。`/status` 等由 cc-connect 处理的命令不会消费这段待处理上下文，`/new` 会清空对应主频道或话题的上下文。
 > 在 multi-workspace 模式下，`thread_isolation = true` 也会让每个话题独立绑定 workspace；在话题内执行 `/workspace bind <name>` 不会影响同群的其他话题。已有的群级 binding 会保留为默认值，由尚未显式绑定的话题继承，因此回退到旧版本时仍可使用。
@@ -132,6 +135,7 @@ app_secret = "QhkMpxxxxxxxxxxxxxxxxxxxx"
 
 > `done_emoji` 设置后，agent 每次完成回复时会在用户消息上添加指定表情（如 `"Done"` → ✅）。先清理临时处理表情（与接收确认相同的表情会保留），再添加 done 表情。在 quiet 模式下特别有用，因为飞书卡片原地更新不触发推送，done 表情可以通知用户 agent 已完成。设为 `"none"` 或不配置则禁用。
 > `image_batch_window_ms` 控制连续多张图片合并成一条 agent 消息的等待窗口（默认 500ms）。飞书手机端一次连发多张图时，每张图是独立事件；cc-connect 会在窗口内将它们合并成一条多图消息再分发给 agent。如果你的网络/设备发送间隔超过 500ms 且仍被拆成多轮回复（每张图独立处理），可调高到 800–1200ms；如果以单图为主、希望响应更快，可适当调低。设为 `0` 时回退到默认 500ms。
+> `attachment_wait` 只在 `thread_isolation = true` 的群聊话题里生效。默认 `"off"`：已经 @ 过机器人的话题里，未 @ 的图片、文件、视频会立即单独触发一轮（与之前一致）。飞书话题里文件不能和文字放在同一条消息，常见用法是先传文件、过一两分钟再 @机器人 说要做什么；设为 `"mention"` 后，这类附件会按「话题 + 发送人」暂存，等**同一发送人**在该话题**下一次 @机器人** 的文字或富文本消息一起分发。其他人的 @、同一人未 @ 的文字都不会放行；`@机器人 /new` 会清空暂存，其他命令不消费暂存。超过 `attachment_wait_secs`（默认 1800 秒，范围 1–86400）没有等到就直接丢弃，不会单独发出；同一时长也作为话题的活跃期限，超过这么久没有 @机器人 的话题，未 @ 的附件按普通未 @ 消息忽略。语音消息不暂存，保持立即分发。暂存只在内存中，进程重启后丢失。
 
 ---
 
@@ -174,9 +178,7 @@ app_secret = "QhkMpxxxxxxxxxxxxxxxxxxxx"
 
 配置完权限后，点击「申请发布」使权限生效。
 
-如果启用了 `group_chat_history_share`，必须为应用申请并发布 `im:message.group_msg`，否则飞书只会向机器人推送被 @ 的群消息，未提及消息无法进入共享上下文。该功能不会回溯 cc-connect 启动前的历史，也不会持久化待处理消息。
-
-`solo_chat_reply_all = true` 时，群成员恰好是一个人和这个机器人（群信息接口的 `user_count`、`bot_count` 都为 1，需要 `im:chat:readonly`，结果缓存 30 秒）的群里，没有 @ 任何人的消息也会交给 agent；@ 了别人却没 @ 机器人的消息仍不触发，读取群信息失败时照旧要求 @。同样需要 `im:message.group_msg`，否则飞书不会推送未 @ 的群消息。
+如果启用了 `group_reply_all`、`group_reply_all_chats` 或 `group_chat_history_share`，必须为应用申请并发布 `im:message.group_msg`，否则飞书只会向机器人推送被 @ 的群消息，免 @ 回复及未提及消息的共享上下文无法生效。本地配置不会自动授予权限或补齐飞书未推送的事件。群上下文共享不会回溯 cc-connect 启动前的历史，也不会持久化待处理消息。
 
 ---
 
@@ -298,6 +300,10 @@ cc-connect: 🔧 执行: Bash(ls -la)
 cc-connect: ✅ 这是一个 Node.js 项目，包含以下目录...
 ```
 
+### 群聊中的交互卡片
+
+飞书投递的交互卡片带有对当前机器人的 @ 提及时，cc-connect 会把可读的卡片文字交给 Agent。若事件只带客户端升级提示，cc-connect 会尝试通过飞书消息 API 读取原卡片。群聊和发送者的访问规则同样适用。
+
 ---
 
 ## 架构图
@@ -320,6 +326,32 @@ cc-connect: ✅ 这是一个 Node.js 项目，包含以下目录...
 │                                                              │
 └─────────────────────────────────────────────────────────────┘
 ```
+
+---
+
+## Card 2.0 流式卡片的打字效果
+
+使用 Card 2.0 富卡片时，可以在飞书或 Lark 的平台选项中分别配置打字间隔、每次显示的字符数和刷新策略。三个选项都可省略，也可只设置其中一个；未设置的选项不写入卡片 JSON，由飞书使用其默认值。以下 `50 ms` 仅作调参示例，不表示 CC-Connect 设置了默认间隔；希望保留飞书默认效果时，无需填写这三项。
+
+```toml
+# 全局启用 Card 2.0 富卡片；也可在对应项目的 [projects.display] 中设置
+[display]
+card_mode = "rich"
+
+# 将以下配置加入已有的飞书或 Lark 平台选项
+[projects.platforms.options]
+print_frequency_ms = 50
+print_step = 2
+print_strategy = "fast"
+```
+
+| 配置项 | 取值 | 作用 |
+|---|---|---|
+| `print_frequency_ms` | 整数，`20–1000` ms | 客户端文字上屏间隔，值越小，打字动画越快。 |
+| `print_step` | 整数，`1–1000` | 每次上屏的字符数，值越大，每次显示越多。 |
+| `print_strategy` | `"fast"` 或 `"delay"` | `fast` 在新文字到达时快速显示积压文字；`delay` 将文字排队按打字节奏显示。 |
+
+策略字符串会去除首尾空格且不区分大小写；数字选项必须是整数，不接受字符串或小数。非法配置会在平台初始化时报错，并指出对应字段。这些选项控制客户端的显示动画，不改变模型生成速度或 CC-Connect 向飞书发送更新的频率；长连接与 Webhook 模式均适用。它们只在流式富卡片中生成 `streaming_config`，卡片完成后省略该字段，超大卡片压缩时仍保留配置。
 
 ---
 
@@ -462,6 +494,8 @@ BOT-B 机器人会收到飞书 @ 事件并被触发。
 ### Q: 长连接断开怎么办？
 
 cc-connect 内置了自动重连机制，断开后会自动尝试重新连接。
+
+如果临时网络故障耗尽了飞书 SDK 的重连次数，cc-connect 会重新创建连接客户端，按 1、2、4 秒逐步退避，最长间隔 30 秒，避免服务进程仍在运行但永久停止接收消息。主动停止服务会取消重试；SDK 判定为凭证或配置错误的故障仍需修正配置后重启。此恢复机制不会补发断线期间未投递的历史消息。
 
 ### Q: 消息发送后没有响应？
 

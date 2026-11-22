@@ -75,7 +75,7 @@ endif
 _BUILD_TAGS := $(strip $(_EXCLUDE_TAGS) goolm)
 _TAGS_FLAG  := $(if $(_BUILD_TAGS),-tags '$(_BUILD_TAGS)',)
 
-.PHONY: build run clean test test-fast test-full test-smoke test-e2e test-release test-release-local test-performance pre-test lint release release-all web
+.PHONY: build run clean test test-fast test-full test-smoke test-e2e test-release test-release-local test-blackbox-smoke test-release-smoke test-performance pre-test lint release release-all web
 
 web:
 	@if [ ! -d web/node_modules ]; then cd web && npm install; fi
@@ -146,6 +146,24 @@ test-release-local:
 	go test ./config
 	go test ./core -run 'TestEngineSendToSessionWithAttachments|TestProcessInteractiveEvents_SuppressesDuplicateSideChannelText|TestCmdList_AllSessionsVisibleAfterRepeatedNew|TestCmdList_SessionVisibleDuringAgentProcessing|TestEngine_Alias|TestEngine_BannedWords|TestEngine_DisabledCommands'
 	go test ./platform/feishu -run 'TestUserIDFromEventFallsBackToUserID|TestResolveUserNameSkipsInvalidLookupID|TestNew_CanDisableInteractiveCards'
+
+# Blackbox smoke: in-process engine and the real binary (driven through its
+# bridge WebSocket) across platform capability profiles. Needs one agent CLI
+# on PATH; agent turns use the scripted fake model (tests/blackbox/fakemodel),
+# so no model key is needed. TestSmoke_AgentTurn uses a real model and skips
+# without credentials. Point CC_BLACKBOX_BINARY at a built artifact to test
+# it instead of the current tree.
+test-blackbox-smoke:
+	go test -tags blackbox -count=1 -race ./tests/blackbox/smoke/
+
+# Release smoke: the pre-release gate. Same suite, but fail-closed: the agents
+# in CC_BLACKBOX_REQUIRE_AGENTS (default claudecode,codex) must be installed,
+# otherwise the run fails instead of skipping their scenarios. Set
+# CC_BLACKBOX_BINARY=dist/cc-connect-<ver>-<os>-<arch> to test the release
+# artifact itself instead of building the current tree.
+RELEASE_SMOKE_AGENTS ?= claudecode,codex
+test-release-smoke:
+	CC_BLACKBOX_REQUIRE_AGENTS=$(RELEASE_SMOKE_AGENTS) go test -tags blackbox,no_web -count=1 -race -timeout=30m ./tests/blackbox/fakemodel/ ./tests/blackbox/smoke/
 
 # Legacy: runs unit tests only
 test:
