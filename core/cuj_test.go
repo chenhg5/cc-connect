@@ -1359,7 +1359,8 @@ func TestCUJ_A5_FileReachesAgent(t *testing.T) {
 		agent.mu.Lock()
 		n := len(agent.sessions)
 		agent.mu.Unlock()
-		if n > 0 {
+		// Wait for the reply and persistence to finish before TempDir cleanup.
+		if n > 0 && len(plat.getSent()) > 0 && !e.sessions.GetOrCreateActive(msg.SessionKey).Busy() {
 			return
 		}
 		select {
@@ -2795,4 +2796,94 @@ type reasoningJourneyPlatform struct {
 
 func (p *reasoningJourneyPlatform) SetCardNavigationHandler(h CardNavigationHandler) {
 	p.navigation = h
+}
+
+type desktopCommandAgent struct {
+	desktopHistoryAgent
+	input, request, answer string
+	mode, messageID        string
+	fail                   bool
+}
+
+func (a *desktopCommandAgent) ReplyToThread(_ context.Context, _ string, text string) error {
+	if a.fail {
+		return context.DeadlineExceeded
+	}
+	a.input = text
+	return nil
+}
+func (a *desktopCommandAgent) ReplyToThreadWithMode(ctx context.Context, id, text, mode, messageID string) error {
+	a.mode, a.messageID = mode, messageID
+	return a.ReplyToThread(ctx, id, text)
+}
+func (a *desktopCommandAgent) AnswerThreadRequest(_ context.Context, _ string, key, text string) error {
+	if a.fail {
+		return context.DeadlineExceeded
+	}
+	a.request = key
+	a.answer = text
+	return nil
+}
+func TestCUJ_B12_DesktopCommandsUseRegisteredOwnerAndDestination(t *testing.T) {
+	env := newCUJEnv(t)
+	env.engine.SetAdminFrom("*")
+	a := &desktopCommandAgent{}
+	env.engine.agent = a
+	RegisterAgent("stub", func(map[string]any) (Agent, error) { return a, nil })
+	if err := env.engine.registerThreadNotification("test:alice", t.TempDir(), "thread", 0); err != nil {
+		t.Fatal(err)
+	}
+	env.userSends("alice", `/reply thread keep  spaces and "quotes"`)
+	if a.input != `keep  spaces and "quotes"` {
+		t.Fatal("instruction modified", a.input)
+	}
+	if !strings.Contains(strings.Join(env.plat.getSent(), "\n"), "Queued for the desktop") {
+		t.Fatal("acceptance not visible")
+	}
+	if a.mode != "queue" {
+		t.Fatal("unqualified reply did not default to queue")
+	}
+	if a.messageID != "test:test:alice:msg-/reply t" {
+		t.Fatal("platform message identity was not preserved")
+	}
+	env.userSends("alice", "/reply thread --now insert now")
+	if a.mode != "now" || a.input != "insert now" {
+		t.Fatal("immediate mode was not forwarded")
+	}
+	env.userSends("alice", "/reply thread --queue wait until idle")
+	if a.mode != "queue" || a.input != "wait until idle" {
+		t.Fatal("queue mode was not forwarded")
+	}
+	env.userSends("alice", "/reply thread --bad must not run")
+	if a.mode != "queue" || a.input != "--bad must not run" {
+		t.Fatal("leading option text was not preserved", a.input)
+	}
+	env.userSends("bob", "/reply thread leaked")
+	if !strings.Contains(strings.Join(env.plat.getSent(), "\n"), "UUID has not been notified") {
+		t.Fatal("destination rejection not visible")
+	}
+	if a.input == "leaked" {
+		t.Fatal("cross-destination route leaked")
+	}
+	env.userSends("alice", `/answer thread request {"1":"keep spaces","2":"yes"}`)
+	if a.request != "request" || a.answer != `{"1":"keep spaces","2":"yes"}` {
+		t.Fatal("answer modified", a.answer)
+	}
+	env.engine.SetDisabledCommands([]string{"reply"})
+	env.userSends("alice", "/reply thread disabled")
+	if !strings.Contains(strings.Join(env.plat.getSent(), "\n"), "disabled") {
+		t.Fatal("disabled-command feedback missing")
+	}
+	if a.input == "disabled" {
+		t.Fatal("disabled command dispatched")
+	}
+	env.engine.SetDisabledCommands(nil)
+	a.fail = true
+	env.userSends("alice", "/reply thread failed")
+	if !strings.Contains(strings.Join(env.plat.getSent(), "\n"), "deadline") {
+		t.Fatal("owner error hidden")
+	}
+	if env.engine.sendWorkDirForSession("test:alice") != "" {
+		t.Fatal("mobile session switched")
+	}
 }
