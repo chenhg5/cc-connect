@@ -306,29 +306,34 @@ func TestBuildArgs_ResumeSession_ModernDialect(t *testing.T) {
 	assert.Equal(t, "session_abc-123", args[rIdx+1])
 }
 
-// TestBuildArgs_QuietFlagGated covers the #1561 --quiet dialect difference:
-// legacy kimi-cli accepts --quiet; the Kimi Code CLI dropped it, so quiet
-// mode must be emulated by local event suppression instead of the flag.
-func TestBuildArgs_QuietFlagGated(t *testing.T) {
+// TestBuildArgs_QuietModeNeverPassesQuietFlag is the #806 regression test.
+// Legacy kimi-cli advertises --quiet as an alias for `--print --output-format
+// text` and rejects it alongside `--output-format stream-json`, which
+// cc-connect always requests; the Kimi Code CLI dropped --quiet (#1561). So
+// quiet mode must never emit --quiet and is emulated locally on both flavors.
+func TestBuildArgs_QuietModeNeverPassesQuietFlag(t *testing.T) {
 	ctx := context.Background()
 
-	legacy, err := newKimiSession(ctx, "kimi", nil, "/tmp", "", "quiet", "", nil, 0,
-		kimiFlagSupport{Print: true, Quiet: true})
-	require.NoError(t, err)
-	defer func() { _ = legacy.Close() }()
-	assert.Contains(t, legacy.buildArgs("hi"), "--quiet",
-		"legacy flavor should pass --quiet through")
-	assert.False(t, legacy.suppressIntermediateEvents(),
-		"legacy flavor lets the CLI do quiet filtering")
+	for _, tc := range []struct {
+		name    string
+		support kimiFlagSupport
+	}{
+		{"legacy advertises --quiet", kimiFlagSupport{Print: true, WorkDir: true, Quiet: true}},
+		{"modern without --quiet", kimiFlagSupport{}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ks, err := newKimiSession(ctx, "kimi", nil, "/tmp", "", "quiet", "", nil, 0, tc.support)
+			require.NoError(t, err)
+			defer func() { _ = ks.Close() }()
 
-	modern, err := newKimiSession(ctx, "kimi", nil, "/tmp", "", "quiet", "", nil, 0,
-		kimiFlagSupport{})
-	require.NoError(t, err)
-	defer func() { _ = modern.Close() }()
-	assert.NotContains(t, modern.buildArgs("hi"), "--quiet",
-		"modern flavor must not emit --quiet (unknown option)")
-	assert.True(t, modern.suppressIntermediateEvents(),
-		"modern flavor emulates quiet mode by suppressing events locally")
+			args := ks.buildArgs("hi")
+			assert.Contains(t, args, "stream-json", "args should request stream-json output")
+			assert.NotContains(t, args, "--quiet",
+				"--quiet conflicts with --output-format stream-json; got %v", args)
+			assert.True(t, ks.suppressIntermediateEvents(),
+				"quiet mode must be emulated by local event suppression")
+		})
+	}
 }
 
 // TestHandleAssistantStringContent is the #1561 content-shape regression
