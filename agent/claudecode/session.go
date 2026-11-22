@@ -1378,6 +1378,8 @@ func (cs *claudeSession) handleResult(raw map[string]any) {
 	if status == core.ResultStatusError {
 		evt.Type = core.EventError
 		evt.Error = sdkResultError(raw)
+		// Keep provider payloads out of user-visible terminal replies.
+		evt.Content = evt.Error.Error()
 	}
 	select {
 	case cs.events <- evt:

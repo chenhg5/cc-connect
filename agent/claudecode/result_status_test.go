@@ -2,7 +2,9 @@ package claudecode
 
 import (
 	"context"
+	"encoding/json"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -26,6 +28,32 @@ func newSDKResultSession(t *testing.T) *claudeSession {
 	s.sessionID.Store("sdk-result-fixture")
 	s.alive.Store(true)
 	return s
+}
+
+func TestSDKFailureMessagesAreBoundedAndExcludeProviderPayload(t *testing.T) {
+	for _, content := range []string{
+		"Prompt is too long", "Credit balance is too low", "API Error: 400", "unknown provider error",
+	} {
+		t.Run(content, func(t *testing.T) {
+			const secret = "synthetic-credential-must-not-be-delivered"
+			raw, err := json.Marshal(map[string]any{"type": "result", "subtype": "success", "is_error": true,
+				"result": content + " access_token=" + secret + " " + strings.Repeat("private_payload ", 1000)})
+			if err != nil {
+				t.Fatal(err)
+			}
+			s := newSDKResultSession(t)
+			s.handleReadLoopLine(string(raw))
+			ev := <-s.events
+			if ev.Type != core.EventError || ev.ResultStatus != core.ResultStatusError || !ev.Done || ev.Error == nil {
+				t.Fatal("SDK failure lost its error outcome")
+			}
+			for _, text := range []string{ev.Content, ev.Error.Error()} {
+				if len(text) > 256 || strings.Contains(text, secret) || strings.Contains(text, "private_payload") {
+					t.Fatal("SDK failure exposed unbounded provider payload")
+				}
+			}
+		})
+	}
 }
 
 func TestSDKTerminalResultRawContract(t *testing.T) {
