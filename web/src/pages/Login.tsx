@@ -1,5 +1,5 @@
-import { useState, useEffect, useRef } from 'react';
-import { useNavigate, useSearchParams } from 'react-router-dom';
+import { useState, useEffect } from 'react';
+import { useNavigate } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 import { Zap, AlertCircle, Languages, Sun, Moon, Monitor } from 'lucide-react';
 import { useAuthStore } from '@/store/auth';
@@ -20,37 +20,20 @@ const languages = [
 export default function Login() {
   const { t, i18n } = useTranslation();
   const navigate = useNavigate();
-  const [searchParams] = useSearchParams();
   const loginStore = useAuthStore((s) => s.login);
   const { theme, setTheme } = useThemeStore();
   const [token, setToken] = useState('');
   const [serverUrl, setServerUrl] = useState('');
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(false);
-  const autoLoginAttempted = useRef(false);
 
   useEffect(() => {
-    if (autoLoginAttempted.current) return;
-    const qToken = searchParams.get('token');
-    if (!qToken) return;
-    autoLoginAttempted.current = true;
-
-    (async () => {
-      setLoading(true);
-      try {
-        api.setToken(qToken);
-        await getStatus();
-        loginStore(qToken);
-        navigate('/', { replace: true });
-      } catch {
-        setToken(qToken);
-        setError(t('login.invalidToken'));
-        api.setToken('');
-      } finally {
-        setLoading(false);
-      }
-    })();
-  }, [searchParams, loginStore, navigate, t]);
+    const current = new URL(window.location.href);
+    if (current.searchParams.has('token')) {
+      current.searchParams.delete('token');
+      window.history.replaceState(null, '', current.pathname + current.search + current.hash);
+    }
+  }, []);
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();

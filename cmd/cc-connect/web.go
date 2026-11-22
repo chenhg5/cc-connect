@@ -2,7 +2,6 @@ package main
 
 import (
 	"fmt"
-	"net/url"
 	"os"
 	"os/exec"
 	"runtime"
@@ -66,14 +65,14 @@ func runWeb(args []string) {
 		return
 	}
 
-	loginURL := fmt.Sprintf("%s/login?token=%s",
-		baseURL, url.QueryEscape(token))
+	loginURL := baseURL + "/login"
+	fmt.Printf("Token: %s\n", token)
 
 	fmt.Printf("Opening: %s\n", baseURL)
 	if err := openBrowser(loginURL); err != nil {
 		fmt.Printf("\nCould not open browser automatically.\n")
 		fmt.Printf("Open this URL in your browser:\n")
-		fmt.Printf("  %s/login?token=%s\n", baseURL, token)
+		fmt.Printf("  %s\n", loginURL)
 		fmt.Printf("\nNote: make sure cc-connect is running (it hosts the web admin on port %d).\n", port)
 	}
 }

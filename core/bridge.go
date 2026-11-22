@@ -7,10 +7,12 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"net"
 	"net/http"
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/gorilla/websocket"
@@ -24,12 +26,14 @@ import (
 // A single instance is created globally; each project engine receives a
 // lightweight BridgePlatform handle that delegates to this server.
 type BridgeServer struct {
-	port        int
-	token       string
-	path        string
-	corsOrigins []string
-	insecure    bool // allow running without token (local dev only)
-	server      *http.Server
+	port              int
+	token             string
+	path              string
+	corsOrigins       []string
+	insecure          bool // allow running without token (local dev only)
+	server            *http.Server
+	activeConnections atomic.Int32
+	connections       map[*websocket.Conn]struct{}
 
 	mu       sync.RWMutex
 	adapters map[string]*bridgeAdapter // platform name → adapter
@@ -49,6 +53,7 @@ type bridgeAdapter struct {
 	metadata     map[string]any
 	conn         *websocket.Conn
 	writeMu      sync.Mutex
+	outgoing     bridgeBudget
 	server       *BridgeServer
 
 	previewMu       sync.Mutex
@@ -191,6 +196,7 @@ func newBridgeServer(port int, token, path string, corsOrigins []string, insecur
 		insecure:    insecure,
 		adapters:    make(map[string]*bridgeAdapter),
 		engines:     make(map[string]*bridgeEngineRef),
+		connections: make(map[*websocket.Conn]struct{}),
 	}
 }
 
@@ -262,8 +268,8 @@ func (bs *BridgeServer) setCORS(w http.ResponseWriter, r *http.Request) {
 // Stop shuts down the server and closes all adapter connections.
 func (bs *BridgeServer) Stop() {
 	bs.mu.Lock()
-	for _, a := range bs.adapters {
-		a.conn.Close()
+	for conn := range bs.connections {
+		conn.Close()
 	}
 	bs.adapters = make(map[string]*bridgeAdapter)
 	bs.mu.Unlock()
@@ -737,10 +743,17 @@ func (bs *BridgeServer) handleWS(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return
 	}
+	if bs.activeConnections.Add(1) > 16 {
+		bs.activeConnections.Add(-1)
+		http.Error(w, "connection limit reached", http.StatusTooManyRequests)
+		return
+	}
+	defer bs.activeConnections.Add(-1)
 
 	// Use a custom upgrader with origin checking
 	upgrader := websocket.Upgrader{
-		CheckOrigin: bs.checkOrigin,
+		CheckOrigin:  bs.checkOrigin,
+		Subprotocols: []string{"cc-connect"},
 	}
 
 	conn, err := upgrader.Upgrade(w, r, nil)
@@ -748,6 +761,14 @@ func (bs *BridgeServer) handleWS(w http.ResponseWriter, r *http.Request) {
 		slog.Error("bridge: websocket upgrade failed", "error", err)
 		return
 	}
+	bs.mu.Lock()
+	bs.connections[conn] = struct{}{}
+	bs.mu.Unlock()
+	defer func() {
+		bs.mu.Lock()
+		delete(bs.connections, conn)
+		bs.mu.Unlock()
+	}()
 
 	slog.Info("bridge: new connection", "remote", conn.RemoteAddr())
 	bs.handleConnection(conn)
@@ -755,6 +776,8 @@ func (bs *BridgeServer) handleWS(w http.ResponseWriter, r *http.Request) {
 
 func (bs *BridgeServer) handleConnection(conn *websocket.Conn) {
 	defer conn.Close()
+	conn.SetReadLimit(16 << 20)
+	budget := bridgeBudget{since: time.Now()}
 
 	if err := conn.SetReadDeadline(time.Now().Add(90 * time.Second)); err != nil {
 		slog.Debug("bridge: set read deadline failed", "error", err)
@@ -766,7 +789,7 @@ func (bs *BridgeServer) handleConnection(conn *websocket.Conn) {
 
 	// First message must be "register"
 	_, raw, err := conn.ReadMessage()
-	if err != nil {
+	if err != nil || !budget.take(len(raw), time.Now()) {
 		slog.Error("bridge: read register failed", "error", err)
 		return
 	}
@@ -844,6 +867,9 @@ func (bs *BridgeServer) handleConnection(conn *websocket.Conn) {
 			}
 			return
 		}
+		if !budget.take(len(raw), time.Now()) {
+			return
+		}
 
 		var base bridgeMsg
 		if err := json.Unmarshal(raw, &base); err != nil {
@@ -867,6 +893,21 @@ func (bs *BridgeServer) handleConnection(conn *websocket.Conn) {
 			slog.Debug("bridge: unknown message type", "platform", reg.Platform, "type", base.Type)
 		}
 	}
+}
+
+// Bound input work even for an authenticated adapter that keeps its socket alive.
+type bridgeBudget struct {
+	since           time.Time
+	bytes, messages int
+}
+
+func (b *bridgeBudget) take(size int, now time.Time) bool {
+	if now.Sub(b.since) >= time.Minute {
+		*b = bridgeBudget{since: now}
+	}
+	b.bytes += size
+	b.messages++
+	return b.bytes <= 64<<20 && b.messages <= 600
 }
 
 // ---------------------------------------------------------------------------
@@ -1276,8 +1317,18 @@ func (bs *BridgeServer) handleSessionSwitch(w http.ResponseWriter, r *http.Reque
 // ---------------------------------------------------------------------------
 
 func (bs *BridgeServer) authenticate(r *http.Request) bool {
+	if r.URL.Query().Has("token") || r.URL.User != nil {
+		return false
+	}
+	if bs.insecure {
+		host, _, err := net.SplitHostPort(r.RemoteAddr)
+		ip := net.ParseIP(host)
+		if err != nil || ip == nil || !ip.IsLoopback() {
+			return false
+		}
+	}
 	// If token is not set, only allow in insecure mode
-	if bs.token == "" {
+	if strings.TrimSpace(bs.token) == "" {
 		return bs.insecure
 	}
 	if auth := r.Header.Get("Authorization"); auth != "" {
@@ -1288,8 +1339,11 @@ func (bs *BridgeServer) authenticate(r *http.Request) bool {
 	if tok := r.Header.Get("X-Bridge-Token"); tok != "" {
 		return subtle.ConstantTimeCompare([]byte(tok), []byte(bs.token)) == 1
 	}
-	if tok := r.URL.Query().Get("token"); tok != "" {
-		return subtle.ConstantTimeCompare([]byte(tok), []byte(bs.token)) == 1
+	for _, protocol := range websocket.Subprotocols(r) {
+		if encoded, ok := strings.CutPrefix(protocol, "cc-connect-token."); ok {
+			token, err := base64.RawURLEncoding.DecodeString(encoded)
+			return err == nil && subtle.ConstantTimeCompare(token, []byte(bs.token)) == 1
+		}
 	}
 	return false
 }
@@ -1307,7 +1361,20 @@ func (bs *BridgeServer) sendToAdapter(platform string, msg map[string]any) error
 	if !ok {
 		return fmt.Errorf("bridge: adapter %q not connected", platform)
 	}
-	return writeJSON(a.conn, &a.writeMu, msg)
+	encoded, err := json.Marshal(msg)
+	if err != nil {
+		return fmt.Errorf("bridge: encode message: %w", err)
+	}
+	a.writeMu.Lock()
+	defer a.writeMu.Unlock()
+	if len(encoded) > 16<<20 || !a.outgoing.take(len(encoded), time.Now()) {
+		_ = a.conn.Close()
+		return fmt.Errorf("bridge: outbound traffic limit reached")
+	}
+	if err := a.conn.SetWriteDeadline(time.Now().Add(30 * time.Second)); err != nil {
+		return err
+	}
+	return a.conn.WriteMessage(websocket.TextMessage, encoded)
 }
 
 func bridgeMetadataStringListContains(metadata map[string]any, key, want string) bool {
@@ -1383,6 +1450,9 @@ func writeJSON(conn *websocket.Conn, mu *sync.Mutex, v any) error {
 	if mu != nil {
 		mu.Lock()
 		defer mu.Unlock()
+	}
+	if err := conn.SetWriteDeadline(time.Now().Add(30 * time.Second)); err != nil {
+		return err
 	}
 	return conn.WriteJSON(v)
 }

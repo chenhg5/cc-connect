@@ -78,7 +78,7 @@ export function useBridgeSocket({ bridgeCfg, platformName = 'web', sessionKey, p
     const proto = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
     // Use current page host:port so the request goes through the Vite/nginx proxy
     // instead of directly hitting the bridge port (which may not be reachable).
-    const wsUrl = `${proto}//${window.location.host}${bridgeCfg.path}?token=${encodeURIComponent(bridgeCfg.token)}`;
+    const wsUrl = `${proto}//${window.location.host}${bridgeCfg.path}`;
 
     let ws: WebSocket;
     let reconnectTimer: ReturnType<typeof setTimeout>;
@@ -87,7 +87,9 @@ export function useBridgeSocket({ bridgeCfg, platformName = 'web', sessionKey, p
     const connect = () => {
       if (!alive) return;
       setStatus('connecting');
-      ws = new WebSocket(wsUrl);
+      const credential = btoa(String.fromCharCode(...new TextEncoder().encode(bridgeCfg.token)))
+        .replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+      ws = new WebSocket(wsUrl, ['cc-connect', `cc-connect-token.${credential}`]);
       wsRef.current = ws;
 
       ws.onopen = () => {

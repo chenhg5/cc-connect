@@ -67,7 +67,7 @@ token = "your-secret"     # 认证密钥，必填
 
 | 方式 | 示例 |
 |------|------|
-| URL 查询参数 | `ws://host:9810/bridge/ws?token=your-secret` |
+| 浏览器子协议 | `cc-connect`、`cc-connect-token.<base64url token>` |
 | 请求头 | `Authorization: Bearer your-secret` |
 | 请求头 | `X-Bridge-Token: your-secret` |
 
@@ -626,7 +626,7 @@ Session key 遵循以下格式：
 | 方式 | 示例 |
 |------|------|
 | Header | `Authorization: Bearer your-secret` |
-| Query 参数 | `?token=your-secret` |
+| Header | `X-Bridge-Token: your-secret` |
 
 ### 响应格式
 
@@ -851,8 +851,8 @@ import json
 import websockets
 
 async def main():
-    uri = "ws://localhost:9810/bridge/ws?token=your-secret"
-    async with websockets.connect(uri) as ws:
+    uri = "ws://localhost:9810/bridge/ws"
+    async with websockets.connect(uri, additional_headers={"Authorization": "Bearer your-secret"}) as ws:
         # 1. 注册
         await ws.send(json.dumps({
             "type": "register",

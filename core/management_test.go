@@ -207,12 +207,12 @@ func TestMgmt_AuthRequired(t *testing.T) {
 	}
 }
 
-func TestMgmt_AuthQueryParam(t *testing.T) {
+func TestMgmt_RejectAuthQueryParam(t *testing.T) {
 	_, ts, _ := testManagementServer(t, "qp-token")
 
 	r := mgmtGet(t, ts.URL+"/api/v1/status?token=qp-token", "")
-	if !r.OK {
-		t.Fatalf("expected success with query param token, got: %s", r.Error)
+	if r.OK {
+		t.Fatal("URL token must be rejected")
 	}
 }
 
@@ -775,7 +775,8 @@ func TestMgmt_BridgeWebSocketPathProxiesToBridgeServer(t *testing.T) {
 	ts := httptest.NewServer(mgmt.buildHandler(mux))
 	defer ts.Close()
 
-	req, _ := http.NewRequest("GET", ts.URL+"/bridge/ws?token=bridge-secret", nil)
+	req, _ := http.NewRequest("GET", ts.URL+"/bridge/ws", nil)
+	req.Header.Set("Authorization", "Bearer bridge-secret")
 	req.Header.Set("Connection", "Upgrade")
 	req.Header.Set("Upgrade", "websocket")
 	req.Header.Set("Sec-WebSocket-Version", "13")
@@ -801,7 +802,8 @@ func TestMgmt_BridgeWebSocketPathWorksWhenBridgeServerSetAfterHandlerBuild(t *te
 
 	mgmt.SetBridgeServer(NewBridgeServer(9810, "bridge-secret", "/bridge/ws", []string{"*"}))
 
-	req, _ := http.NewRequest("GET", ts.URL+"/bridge/ws?token=bridge-secret", nil)
+	req, _ := http.NewRequest("GET", ts.URL+"/bridge/ws", nil)
+	req.Header.Set("Authorization", "Bearer bridge-secret")
 	req.Header.Set("Connection", "Upgrade")
 	req.Header.Set("Upgrade", "websocket")
 	req.Header.Set("Sec-WebSocket-Version", "13")
