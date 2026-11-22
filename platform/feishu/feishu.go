@@ -146,6 +146,7 @@ type Platform struct {
 	appSecret                  string
 	progressStyle              string
 	useInteractiveCard         bool
+	keepFinalReplyInPlace      bool
 	streamingConfig            map[string]any
 	self                       core.Platform
 	reactionEmoji              string
@@ -360,6 +361,10 @@ type interactivePlatform struct {
 	*Platform
 }
 
+func (p *interactivePlatform) FinalReplyAfterApproval() bool {
+	return !p.keepFinalReplyInPlace
+}
+
 type richCardImageUpload struct {
 	done chan struct{}
 }
@@ -512,6 +517,17 @@ func newPlatform(name, domain string, opts map[string]any) (core.Platform, error
 	if v, ok := opts["enable_feishu_card"].(bool); ok {
 		useInteractiveCard = v
 	}
+	finalReplyPosition := "latest_after_approval"
+	if raw, exists := opts["final_reply_position"]; exists {
+		value, ok := raw.(string)
+		if !ok {
+			return nil, fmt.Errorf("%s: final_reply_position must be a string", name)
+		}
+		finalReplyPosition = strings.ToLower(strings.TrimSpace(value))
+		if finalReplyPosition != "latest_after_approval" && finalReplyPosition != "in_place" {
+			return nil, fmt.Errorf("%s: final_reply_position must be latest_after_approval or in_place", name)
+		}
+	}
 
 	streamingConfig := map[string]any{}
 	for _, field := range []struct {
@@ -619,6 +635,7 @@ func newPlatform(name, domain string, opts map[string]any) (core.Platform, error
 		appSecret:                  appSecret,
 		progressStyle:              progressStyle,
 		useInteractiveCard:         useInteractiveCard,
+		keepFinalReplyInPlace:      finalReplyPosition == "in_place",
 		streamingConfig:            streamingConfig,
 		reactionEmoji:              reactionEmoji,
 		ackEmoji:                   ackEmoji,
@@ -1250,13 +1267,45 @@ func (p *Platform) onCardAction(event *callback.CardActionTriggerEvent) (*callba
 
 		slog.Info(p.tag()+": card action dispatched as command", "cmd", cmdText, "user", userID)
 
-		p.dispatchCardActionMessage(chatID, &core.Message{
+		msg := &core.Message{
 			SessionKey: sessionKey,
 			Platform:   p.platformName,
 			UserID:     userID,
 			Content:    cmdText,
 			ReplyCtx:   rctx,
-		})
+		}
+		// Shared approvals and async questions can report success through the
+		// action callback. Returning the card here makes the clicked card update
+		// reliably even when the message Patch API races with Feishu's callback.
+		if strings.HasPrefix(cmdText, "/decision ") || strings.HasPrefix(cmdText, "/async-answer ") {
+			result := make(chan *core.Card, 1)
+			msg.CardActionResult = func(card *core.Card) { result <- card }
+			p.dispatchCardActionMessage(chatID, msg)
+			select {
+			case card := <-result:
+				return &callback.CardActionTriggerResponse{Card: &callback.Card{Type: "raw", Data: renderCardMap(card, sessionKey)}}, nil
+			case <-time.After(2 * time.Second):
+				// The core action may still succeed after the callback deadline.
+				// Patch this exact card when it does, especially for async questions.
+				go func() {
+					select {
+					case card := <-result:
+						if messageID != "" {
+							ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+							defer cancel()
+							if err := p.patchCardMessage(ctx, messageID, renderCard(card, sessionKey)); err != nil {
+								slog.Warn(p.tag()+": delayed action card update failed", "action", cmdText, "error", err)
+							}
+						}
+					case <-time.After(15 * time.Second):
+					}
+				}()
+				// A non-nil response also tells the shared connection that this
+				// platform handled the action; another sibling must not replay it.
+				return &callback.CardActionTriggerResponse{Toast: &callback.Toast{Type: "info", Content: "⏳ Loading... / 加载中..."}}, nil
+			}
+		}
+		p.dispatchCardActionMessage(chatID, msg)
 
 		if ac, ok := event.Event.Action.Value["after_click"].(map[string]any); ok {
 			if title, _ := ac["title"].(string); title != "" {
@@ -4799,11 +4848,17 @@ func (p *Platform) buildReplyMessageReqBody(rc replyContext, msgType, content st
 }
 
 func (p *Platform) replyMessage(ctx context.Context, rc replyContext, msgType, content string) error {
+	_, err := p.replyMessageWithID(ctx, rc, msgType, content)
+	return err
+}
+
+func (p *Platform) replyMessageWithID(ctx context.Context, rc replyContext, msgType, content string) (string, error) {
 	req := larkim.NewReplyMessageReqBuilder().
 		MessageId(rc.messageID).
 		Body(p.buildReplyMessageReqBody(rc, msgType, content)).
 		Build()
-	return p.withTransientRetry(ctx, "reply", func() error {
+	var messageID string
+	err := p.withTransientRetry(ctx, "reply", func() error {
 		return p.withFreshTenantAccessTokenRetry(ctx, "reply", func(client *lark.Client, options ...larkcore.RequestOptionFunc) error {
 			resp, err := client.Im.Message.Reply(ctx, req, options...)
 			if err != nil {
@@ -4812,9 +4867,13 @@ func (p *Platform) replyMessage(ctx context.Context, rc replyContext, msgType, c
 			if !resp.Success() {
 				return fmt.Errorf("%s: reply failed code=%d msg=%s", p.tag(), resp.Code, resp.Msg)
 			}
+			if resp.Data != nil && resp.Data.MessageId != nil {
+				messageID = *resp.Data.MessageId
+			}
 			return nil
 		})
 	})
+	return messageID, err
 }
 
 // createMessageReceiveIDType maps the reply context's receive ID type onto the
@@ -4832,6 +4891,11 @@ func createMessageReceiveIDType(receiveIDType string) string {
 }
 
 func (p *Platform) createMessage(ctx context.Context, chatID, receiveIDType, msgType, content, op string) error {
+	_, err := p.createMessageWithID(ctx, chatID, receiveIDType, msgType, content, op)
+	return err
+}
+
+func (p *Platform) createMessageWithID(ctx context.Context, chatID, receiveIDType, msgType, content, op string) (string, error) {
 	req := larkim.NewCreateMessageReqBuilder().
 		ReceiveIdType(createMessageReceiveIDType(receiveIDType)).
 		Body(larkim.NewCreateMessageReqBodyBuilder().
@@ -4840,7 +4904,8 @@ func (p *Platform) createMessage(ctx context.Context, chatID, receiveIDType, msg
 			Content(content).
 			Build()).
 		Build()
-	return p.withTransientRetry(ctx, op, func() error {
+	var messageID string
+	err := p.withTransientRetry(ctx, op, func() error {
 		return p.withFreshTenantAccessTokenRetry(ctx, op, func(client *lark.Client, options ...larkcore.RequestOptionFunc) error {
 			resp, err := client.Im.Message.Create(ctx, req, options...)
 			if err != nil {
@@ -4849,9 +4914,13 @@ func (p *Platform) createMessage(ctx context.Context, chatID, receiveIDType, msg
 			if !resp.Success() {
 				return fmt.Errorf("%s: %s failed code=%d msg=%s", p.tag(), op, resp.Code, resp.Msg)
 			}
+			if resp.Data != nil && resp.Data.MessageId != nil {
+				messageID = *resp.Data.MessageId
+			}
 			return nil
 		})
 	})
+	return messageID, err
 }
 
 func (p *Platform) withFreshTenantAccessTokenRetry(ctx context.Context, operation string, fn feishuRequestFunc) error {

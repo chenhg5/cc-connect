@@ -8,6 +8,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"strconv"
 	"strings"
@@ -126,10 +127,10 @@ func runCronAdd(args []string) {
 
 	// Fallback to env vars (set by cc-connect when spawning agent)
 	if project == "" {
-		project = os.Getenv("CC_PROJECT")
+		project = agentToolLegacyEnv("CC_PROJECT")
 	}
 	if sessionKey == "" {
-		sessionKey = os.Getenv("CC_SESSION_KEY")
+		sessionKey = agentToolLegacyEnv("CC_SESSION_KEY")
 	}
 
 	// If cron expr not provided via --cron, try positional: first 5 fields are cron, rest is prompt/exec
@@ -159,12 +160,13 @@ func runCronAdd(args []string) {
 	}
 
 	body := map[string]any{
-		"project":     project,
-		"session_key": sessionKey,
-		"cron_expr":   cronExpr,
-		"prompt":      prompt,
-		"exec":        execCmd,
-		"description": desc,
+		"agent_session_id": agentToolSessionID(sessionKey),
+		"project":          project,
+		"session_key":      sessionKey,
+		"cron_expr":        cronExpr,
+		"prompt":           prompt,
+		"exec":             execCmd,
+		"description":      desc,
 	}
 	if silent {
 		body["silent"] = true
@@ -222,7 +224,7 @@ func runCronList(args []string) {
 	}
 
 	if project == "" {
-		project = os.Getenv("CC_PROJECT")
+		project = agentToolLegacyEnv("CC_PROJECT")
 	}
 
 	sockPath := resolveSocketPath(dataDir)
@@ -231,9 +233,16 @@ func runCronList(args []string) {
 		os.Exit(1)
 	}
 
-	url := "/cron/list"
+	query := url.Values{}
 	if project != "" {
-		url += "?project=" + project
+		query.Set("project", project)
+	}
+	if id := agentToolSessionID(agentToolLegacyEnv("CC_SESSION_KEY")); id != "" && project == "" {
+		query.Set("agent_session_id", id)
+	}
+	url := "/cron/list"
+	if len(query) > 0 {
+		url += "?" + query.Encode()
 	}
 
 	client := &http.Client{
