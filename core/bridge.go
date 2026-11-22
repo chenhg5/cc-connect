@@ -274,7 +274,7 @@ func (bs *BridgeServer) Stop() {
 	bs.mu.Lock()
 	bs.stopping = true
 	for conn := range bs.connections {
-		conn.Close()
+		_ = conn.Close()
 	}
 	bs.adapters = make(map[string]*bridgeAdapter)
 	bs.mu.Unlock()

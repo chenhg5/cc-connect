@@ -39,7 +39,7 @@ func TestBridgeBrowserCredentialsUseSubprotocol(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer connection.Close()
+	defer func() { _ = connection.Close() }()
 	if connection.Subprotocol() != "cc-connect" {
 		t.Fatalf("credential must not be echoed: %q", connection.Subprotocol())
 	}
@@ -54,11 +54,11 @@ func TestBridgeBoundsConnectionsBeforeRegistration(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		defer connection.Close()
+		defer func() { _ = connection.Close() }()
 	}
 	connection, response, err := websocket.DefaultDialer.Dial(address, headers)
 	if err == nil {
-		connection.Close()
+		_ = connection.Close()
 		t.Fatal("seventeenth connection accepted")
 	}
 	if response == nil || response.StatusCode != http.StatusTooManyRequests {
@@ -119,7 +119,7 @@ func TestBridgeStopRejectsNewSockets(t *testing.T) {
 	address := "ws" + server.URL[len("http"):]
 	socket, response, err := websocket.DefaultDialer.Dial(address, http.Header{"Authorization": {"Bearer secret"}})
 	if err == nil {
-		socket.Close()
+		_ = socket.Close()
 		t.Fatal("stopped bridge accepted a new socket")
 	}
 	if response == nil || response.StatusCode != http.StatusServiceUnavailable {
