@@ -34,6 +34,7 @@ type BridgeServer struct {
 	server            *http.Server
 	activeConnections atomic.Int32
 	connections       map[*websocket.Conn]struct{}
+	stopping          bool
 
 	mu       sync.RWMutex
 	adapters map[string]*bridgeAdapter // platform name → adapter
@@ -218,6 +219,9 @@ func (bs *BridgeServer) RegisterEngine(projectName string, engine *Engine, bp *B
 
 // Start launches the HTTP/WebSocket server.
 func (bs *BridgeServer) Start() {
+	bs.mu.Lock()
+	bs.stopping = false
+	bs.mu.Unlock()
 	mux := http.NewServeMux()
 	mux.HandleFunc(bs.path, bs.handleWS)
 
@@ -268,6 +272,7 @@ func (bs *BridgeServer) setCORS(w http.ResponseWriter, r *http.Request) {
 // Stop shuts down the server and closes all adapter connections.
 func (bs *BridgeServer) Stop() {
 	bs.mu.Lock()
+	bs.stopping = true
 	for conn := range bs.connections {
 		conn.Close()
 	}
@@ -743,6 +748,13 @@ func (bs *BridgeServer) handleWS(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return
 	}
+	bs.mu.RLock()
+	stopping := bs.stopping
+	bs.mu.RUnlock()
+	if stopping {
+		http.Error(w, "server stopping", http.StatusServiceUnavailable)
+		return
+	}
 	if bs.activeConnections.Add(1) > 16 {
 		bs.activeConnections.Add(-1)
 		http.Error(w, "connection limit reached", http.StatusTooManyRequests)
@@ -762,6 +774,11 @@ func (bs *BridgeServer) handleWS(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	bs.mu.Lock()
+	if bs.stopping {
+		bs.mu.Unlock()
+		_ = conn.Close()
+		return
+	}
 	bs.connections[conn] = struct{}{}
 	bs.mu.Unlock()
 	defer func() {

@@ -110,3 +110,19 @@ func TestInsecureBridgeRejectsRemoteRequestsEvenWhenProxied(t *testing.T) {
 		t.Fatal("explicit local development must still work")
 	}
 }
+
+func TestBridgeStopRejectsNewSockets(t *testing.T) {
+	bridge := NewBridgeServer(0, "secret", "", nil)
+	bridge.Stop()
+	server := httptest.NewServer(http.HandlerFunc(bridge.handleWS))
+	defer server.Close()
+	address := "ws" + server.URL[len("http"):]
+	socket, response, err := websocket.DefaultDialer.Dial(address, http.Header{"Authorization": {"Bearer secret"}})
+	if err == nil {
+		socket.Close()
+		t.Fatal("stopped bridge accepted a new socket")
+	}
+	if response == nil || response.StatusCode != http.StatusServiceUnavailable {
+		t.Fatalf("response=%v error=%v", response, err)
+	}
+}
