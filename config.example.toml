@@ -1790,6 +1790,12 @@ app_secret = "your-feishu-app-secret"
 # Requires a Codex version that confirms activePermissionProfile; see docs/usage.md.
 # 需要支持 activePermissionProfile 的 Codex 版本；详见 docs/usage.zh-CN.md。
 #
+# Optional (app_server only): minutes to wait for an AskUserQuestion answer
+# before declining it. Default 5; values <= 0 or invalid fall back to 5.
+# 可选（仅 app_server）：等待 AskUserQuestion 回答的分钟数，超时后拒绝。
+# 默认 5；<= 0 或无效值回退为 5。
+# request_user_input_timeout_mins = 5
+#
 # Mode options / 模式说明:
 # - "suggest":   read-only; app_server requests approval when needed, exec cannot prompt / 只读；app_server 按需请求审批，exec 无交互审批
 # - "auto-edit": workspace-write with no approval prompts (same as full-auto) / 工作区可写，无审批提示（等同 full-auto）
