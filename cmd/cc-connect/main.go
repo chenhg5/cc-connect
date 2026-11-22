@@ -231,6 +231,7 @@ var topLevelCommandHandlers = map[string]func([]string){
 }
 
 func main() {
+	setupLogger("info", nil)
 	// Agy hooks require stdout to contain only the final JSON decision. Handle
 	// this internal command before update checks, logging, or normal CLI setup.
 	if len(os.Args) > 1 && os.Args[1] == "_agy-permission-hook" {
@@ -249,15 +250,15 @@ func main() {
 	if logFile := os.Getenv("CC_LOG_FILE"); logFile != "" {
 		maxSize, maxSizeSrc := resolveLogMaxSize(preScanLogMaxSizeFlag(os.Args[1:]))
 		maxBackups, maxBackupsSrc := resolveLogMaxBackups(preScanLogMaxBackupsFlag(os.Args[1:]))
-		fmt.Fprintf(os.Stderr, "log: redirecting to %s with max_size=%d bytes (source: %s), max_backups=%d (source: %s)\n", logFile, maxSize, maxSizeSrc, maxBackups, maxBackupsSrc)
+		fmt.Fprintf(os.Stderr, "log: redirecting output with max_size=%d bytes (source: %s), max_backups=%d (source: %s)\n", maxSize, maxSizeSrc, maxBackups, maxBackupsSrc)
 		w, err := daemon.NewRotatingWriter(logFile, maxSize, maxBackups)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "failed to open log file %s: %v\n", logFile, err)
+			fmt.Fprintln(os.Stderr, "failed to open log file")
 			os.Exit(1)
 		}
 		logWriter = w
 		logCloser = w
-		slog.SetDefault(slog.New(slog.NewTextHandler(w, &slog.HandlerOptions{Level: slog.LevelInfo})))
+		slog.SetDefault(slog.New(slog.NewTextHandler(w, &slog.HandlerOptions{Level: slog.LevelInfo, AddSource: true, ReplaceAttr: core.OperationalLogAttr})))
 	}
 
 	rootOpts, err := parseRootCLIOptions(os.Args[1:])
@@ -1787,7 +1788,9 @@ func setupLogger(level string, w io.Writer) {
 		w = os.Stdout
 	}
 	slog.SetDefault(slog.New(slog.NewTextHandler(w, &slog.HandlerOptions{
-		Level: logLevel,
+		Level:       logLevel,
+		AddSource:   true,
+		ReplaceAttr: core.OperationalLogAttr,
 	})))
 }
 
