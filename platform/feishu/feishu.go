@@ -4859,12 +4859,6 @@ func (p *Platform) createMessage(ctx context.Context, chatID, receiveIDType, msg
 	return err
 }
 
-// createMessageID is createMessage that also returns the new message's id;
-// a non-empty uuid is Feishu's deduplication key for the send.
-func (p *Platform) createMessageID(ctx context.Context, chatID, msgType, content, op, uuid string) (string, error) {
-	return p.createMessageIDWithReceiveID(ctx, chatID, "", msgType, content, op, uuid)
-}
-
 func (p *Platform) createMessageIDWithReceiveID(ctx context.Context, chatID, receiveIDType, msgType, content, op, uuid string) (string, error) {
 	body := larkim.NewCreateMessageReqBodyBuilder().
 		ReceiveId(chatID).
