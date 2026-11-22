@@ -19,7 +19,7 @@ func runAntigravityPermissionHook() {
 		return
 	}
 
-	fmt.Fprintf(os.Stderr, "cc-connect Agy permission hook: %v\n", err)
+	fmt.Fprintln(os.Stderr, "cc-connect Agy permission hook unavailable")
 	_ = json.NewEncoder(os.Stdout).Encode(antigravityhook.BridgeResponse{
 		Decision: "deny",
 		Reason:   "cc-connect permission bridge is unavailable",

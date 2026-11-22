@@ -80,7 +80,7 @@ func resolveLogMaxSize(flagValue string) (int64, logSizeSource) {
 	if strings.TrimSpace(flagValue) != "" {
 		n, err := daemon.ParseLogSize(flagValue)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "warning: ignoring --log-max-size=%q: %v\n", flagValue, err)
+			slog.Warn("ignoring invalid log size", "value", flagValue, "error", err)
 		} else {
 			return n, logSizeSourceFlag
 		}
@@ -88,7 +88,7 @@ func resolveLogMaxSize(flagValue string) (int64, logSizeSource) {
 	if v := os.Getenv("CC_LOG_MAX_SIZE"); v != "" {
 		n, err := daemon.ParseLogSize(v)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "warning: ignoring CC_LOG_MAX_SIZE=%q: %v\n", v, err)
+			slog.Warn("ignoring invalid log size environment", "value", v, "error", err)
 		} else {
 			return n, logSizeSourceEnv
 		}
@@ -136,7 +136,7 @@ func resolveLogMaxBackups(flagValue string) (int, logBackupsSource) {
 	if strings.TrimSpace(flagValue) != "" {
 		n, err := daemon.ParseLogBackups(flagValue)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "warning: ignoring --log-max-backups=%q: %v\n", flagValue, err)
+			slog.Warn("ignoring invalid log backup count", "value", flagValue, "error", err)
 		} else {
 			return n, logBackupsSourceFlag
 		}
@@ -144,7 +144,7 @@ func resolveLogMaxBackups(flagValue string) (int, logBackupsSource) {
 	if v := os.Getenv("CC_LOG_MAX_BACKUPS"); v != "" {
 		n, err := daemon.ParseLogBackups(v)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "warning: ignoring CC_LOG_MAX_BACKUPS=%q: %v\n", v, err)
+			slog.Warn("ignoring invalid log backup environment", "value", v, "error", err)
 		} else {
 			return n, logBackupsSourceEnv
 		}
@@ -184,7 +184,7 @@ func resolveMaxAttachmentSize(cfg *config.Config) int64 {
 		if n, err := strconv.ParseInt(v, 10, 64); err == nil && n > 0 {
 			return n << 20
 		}
-		fmt.Fprintf(os.Stderr, "warning: ignoring CC_MAX_ATTACHMENT_SIZE_MB=%q: must be a positive integer (MiB)\n", v)
+		slog.Warn("ignoring invalid attachment size environment", "value", v)
 	}
 	if cfg != nil && cfg.MaxAttachmentSizeMB > 0 {
 		return int64(cfg.MaxAttachmentSizeMB) << 20
@@ -231,7 +231,6 @@ var topLevelCommandHandlers = map[string]func([]string){
 }
 
 func main() {
-	setupLogger("info", nil)
 	// Agy hooks require stdout to contain only the final JSON decision. Handle
 	// this internal command before update checks, logging, or normal CLI setup.
 	if len(os.Args) > 1 && os.Args[1] == "_agy-permission-hook" {
@@ -239,6 +238,7 @@ func main() {
 		return
 	}
 
+	setupLogger("info", os.Stderr)
 	checkUpdateAsync()
 	// When started as a daemon (CC_LOG_FILE set), redirect logs to a rotating file.
 	// Log file setup happens before flag.Parse() so the rotating writer is in
@@ -274,7 +274,7 @@ func main() {
 	// values surface a clear warning.
 	if strings.TrimSpace(rootOpts.logMaxSize) != "" {
 		if _, err := daemon.ParseLogSize(rootOpts.logMaxSize); err != nil {
-			fmt.Fprintf(os.Stderr, "warning: --log-max-size=%q: %v\n", rootOpts.logMaxSize, err)
+			slog.Warn("ignoring invalid parsed log size", "value", rootOpts.logMaxSize, "error", err)
 		}
 	}
 	if rootOpts.logMaxBackups < 0 {
@@ -291,7 +291,7 @@ func main() {
 	}
 
 	if err := validateNoExtraTopLevelArgs(rootOpts.args); err != nil {
-		fmt.Fprintf(os.Stderr, "Error: %v\n\n", err)
+		slog.Error("invalid command arguments", "error", err)
 		printUsage()
 		os.Exit(1)
 	}
@@ -313,7 +313,7 @@ func main() {
 	// Acquire instance lock to prevent duplicate processes
 	instanceLock, err := AcquireInstanceLock(configPath)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		slog.Error("cannot acquire instance lock", "error", err)
 		fmt.Fprintf(os.Stderr, "Use --force to kill the existing instance.\n")
 		os.Exit(1)
 	}
@@ -321,17 +321,17 @@ func main() {
 
 	if _, err := os.Stat(configPath); os.IsNotExist(err) {
 		if err := bootstrapConfig(configPath); err != nil {
-			fmt.Fprintf(os.Stderr, "Error creating config: %v\n", err)
+			slog.Error("cannot create configuration", "error", err)
 			os.Exit(1)
 		}
-		fmt.Printf("Created default config at %s\n", configPath)
+		slog.Info("created default configuration")
 		fmt.Println("Please edit this file to add your agent and platform credentials, then run cc-connect again.")
 		os.Exit(0)
 	}
 
 	cfg, err := config.Load(configPath)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error loading config (%s): %v\n", configPath, err)
+		slog.Error("cannot load configuration", "error", err)
 		os.Exit(1)
 	}
 
@@ -339,7 +339,7 @@ func main() {
 	slog.Info("config loaded", "path", configPath)
 
 	if len(cfg.Projects) == 0 {
-		fmt.Fprintf(os.Stderr, "Error: no projects configured in %s\n", configPath)
+		slog.Error("no projects configured")
 		fmt.Fprintln(os.Stderr, "Add at least one [[project]] section to your config.toml, or run:")
 		fmt.Fprintln(os.Stderr, "  cc-connect init")
 		os.Exit(1)
