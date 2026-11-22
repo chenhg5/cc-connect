@@ -102,6 +102,17 @@ func TestAgyACPFactoryAndMidTurnHandover(t *testing.T) {
 	nextAgyACPEvent(t, s, core.EventResult)
 }
 
+func TestAgyACPMinimumVersionKeepsCorrectSessionWorkingDirectory(t *testing.T) {
+	for version, want := range map[string]bool{"1.4.0": false, "1.5.0": false, "1.5.12": false, "1.5.13": true, "1.5.14": true, "1.6.0": true, "2.0.0": true, "unknown": false} {
+		t.Run(version, func(t *testing.T) {
+			got := supportsAgyACP(context.Background(), os.Args[0], []string{"-test.run=^TestAgyACPHelperProcess$", "--"}, t.TempDir(), []string{"CC_AGY_ACP_FIXTURE=1", "CC_AGY_ACP_VERSION=" + version})
+			if got != want {
+				t.Fatalf("ACP support for %s = %t, want %t", version, got, want)
+			}
+		})
+	}
+}
+
 func TestAgyACPMultipleSupplementsHaveOneResult(t *testing.T) {
 	s := startAgyACPFixture(t)
 	if err := s.Send("many", "", nil, nil); err != nil {
@@ -294,7 +305,11 @@ func TestAgyACPHelperProcess(t *testing.T) {
 	}
 	for _, arg := range os.Args {
 		if arg == "--version" {
-			fmt.Println("1.5.13")
+			version := os.Getenv("CC_AGY_ACP_VERSION")
+			if version == "" {
+				version = "1.5.13"
+			}
+			fmt.Println(version)
 			os.Exit(0)
 		}
 	}

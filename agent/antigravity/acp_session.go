@@ -18,8 +18,8 @@ import (
 	"github.com/chenhg5/cc-connect/core"
 )
 
-// agy 1.5.0 added the native ACP server and prompt-based steering. Older
-// CLIs and wrappers without a version surface retain the print adapter.
+// agy 1.5.13 fixed ACP's session working directory and attached file context.
+// Earlier CLIs and wrappers without a version surface retain the print adapter.
 func supportsAgyACP(ctx context.Context, command string, extraArgs []string, workDir string, env []string) bool {
 	probeCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
@@ -36,7 +36,7 @@ func supportsAgyACP(ctx context.Context, command string, extraArgs []string, wor
 	if _, err := fmt.Sscanf(version, "%d.%d.%d", &major, &minor, &patch); err != nil {
 		return false
 	}
-	return major > 1 || major == 1 && minor >= 5
+	return major > 1 || major == 1 && (minor > 5 || minor == 5 && patch >= 13)
 }
 
 type agyACPReply struct {
