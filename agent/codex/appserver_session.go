@@ -40,20 +40,29 @@ type initResponse struct {
 	ProtocolVersion string `json:"protocolVersion"`
 }
 
+// appServerActivePermissionProfile identifies the permissions selected by Codex.
+type appServerActivePermissionProfile struct {
+	ID string `json:"id"`
+}
+
+// threadStartResponse carries the new thread metadata and permission provenance.
 type threadStartResponse struct {
-	Cwd             string  `json:"cwd"`
-	Model           string  `json:"model"`
-	ReasoningEffort *string `json:"reasoningEffort"`
-	Thread          struct {
+	ActivePermissionProfile *appServerActivePermissionProfile `json:"activePermissionProfile"`
+	Cwd                     string                            `json:"cwd"`
+	Model                   string                            `json:"model"`
+	ReasoningEffort         *string                           `json:"reasoningEffort"`
+	Thread                  struct {
 		ID string `json:"id"`
 	} `json:"thread"`
 }
 
+// threadResumeResponse carries the resumed thread metadata and permission provenance.
 type threadResumeResponse struct {
-	Cwd             string  `json:"cwd"`
-	Model           string  `json:"model"`
-	ReasoningEffort *string `json:"reasoningEffort"`
-	Thread          struct {
+	ActivePermissionProfile *appServerActivePermissionProfile `json:"activePermissionProfile"`
+	Cwd                     string                            `json:"cwd"`
+	Model                   string                            `json:"model"`
+	ReasoningEffort         *string                           `json:"reasoningEffort"`
+	Thread                  struct {
 		ID string `json:"id"`
 	} `json:"thread"`
 }
@@ -62,6 +71,10 @@ type turnStartResponse struct {
 	Turn struct {
 		ID string `json:"id"`
 	} `json:"turn"`
+}
+
+type turnSteerResponse struct {
+	TurnID string `json:"turnId"`
 }
 
 type turnNotification struct {
@@ -140,19 +153,25 @@ type appServerRequestUserInputAnswer struct {
 	Answers []string `json:"answers"`
 }
 
+// appServerSession owns the stdio JSON-RPC transport and the active thread state.
 type appServerSession struct {
-	cliBin         string
-	cliExtraArgs   []string
-	url            string
-	workDir        string
-	model          string
-	effort         string
-	mode           string
-	baseURL        string
-	modelProvider  string
-	extraEnv       []string
-	codexHome      string
-	promptPreamble string
+	cliBin            string
+	cliExtraArgs      []string
+	url               string
+	workDir           string
+	model             string
+	effort            string
+	mode              string
+	permissionProfile string
+	baseURL           string
+	modelProvider     string
+	extraEnv          []string
+	codexHome         string
+	promptPreamble    string
+
+	// requestUserInputTimeout bounds the wait for an AskUserQuestion answer;
+	// <= 0 means defaultRequestUserInputTimeout.
+	requestUserInputTimeout time.Duration
 
 	events       chan core.Event
 	eventsMu     sync.RWMutex // publishers share the lock; Close owns channel closure
@@ -197,29 +216,44 @@ const (
 	appServerUsageRefreshTimeout = 1500 * time.Millisecond
 	// Longer stderr lines are logged truncated; the rest is discarded.
 	appServerStderrLineLimit = 64 * 1024
+
+	// defaultRequestUserInputTimeout is how long an item/tool/requestUserInput
+	// (AskUserQuestion) waits for the user's answer before declining.
+	defaultRequestUserInputTimeout = 5 * time.Minute
 )
 
-func newAppServerSession(ctx context.Context, cliBin string, cliExtraArgs []string, url, workDir, model, effort, mode, resumeID, baseURL, modelProvider string, extraEnv []string, codexHome string, systemPrompt string, appendPrompt string) (*appServerSession, error) {
+// userInputTimeout returns the configured AskUserQuestion wait, or the default.
+func (s *appServerSession) userInputTimeout() time.Duration {
+	if s.requestUserInputTimeout > 0 {
+		return s.requestUserInputTimeout
+	}
+	return defaultRequestUserInputTimeout
+}
+
+// newAppServerSession connects to Codex and verifies the requested permissions before returning a usable session.
+func newAppServerSession(ctx context.Context, cliBin string, cliExtraArgs []string, url, workDir, model, effort, mode, resumeID, baseURL, modelProvider string, extraEnv []string, codexHome string, systemPrompt string, appendPrompt string, permissionProfile string, requestUserInputTimeout time.Duration) (*appServerSession, error) {
 	sessionCtx, cancel := context.WithCancel(ctx)
 	s := &appServerSession{
-		cliBin:           cliBin,
-		cliExtraArgs:     append([]string(nil), cliExtraArgs...),
-		url:              url,
-		workDir:          workDir,
-		model:            model,
-		effort:           effort,
-		mode:             mode,
-		baseURL:          baseURL,
-		modelProvider:    modelProvider,
-		extraEnv:         append([]string(nil), extraEnv...),
-		codexHome:        strings.TrimSpace(codexHome),
-		promptPreamble:   buildCodexPromptPreamble(systemPrompt, appendPrompt),
-		events:           make(chan core.Event, 128),
-		ctx:              sessionCtx,
-		cancel:           cancel,
-		pending:          make(map[int64]chan rpcResponseEnvelope),
-		pendingApprovals: make(map[string]chan core.PermissionResult),
-		preambleSent:     resumeID != "" && resumeID != core.ContinueSession,
+		cliBin:                  cliBin,
+		cliExtraArgs:            append([]string(nil), cliExtraArgs...),
+		url:                     url,
+		workDir:                 workDir,
+		model:                   model,
+		effort:                  effort,
+		mode:                    mode,
+		permissionProfile:       permissionProfile,
+		baseURL:                 baseURL,
+		modelProvider:           modelProvider,
+		extraEnv:                append([]string(nil), extraEnv...),
+		codexHome:               strings.TrimSpace(codexHome),
+		promptPreamble:          buildCodexPromptPreamble(systemPrompt, appendPrompt),
+		requestUserInputTimeout: requestUserInputTimeout,
+		events:                  make(chan core.Event, 128),
+		ctx:                     sessionCtx,
+		cancel:                  cancel,
+		pending:                 make(map[int64]chan rpcResponseEnvelope),
+		pendingApprovals:        make(map[string]chan core.PermissionResult),
+		preambleSent:            resumeID != "" && resumeID != core.ContinueSession,
 	}
 	s.alive.Store(true)
 
@@ -358,6 +392,7 @@ func (s *appServerSession) initialize() error {
 	return nil
 }
 
+// ensureThread starts or resumes a thread and checks that its configured permission profile took effect.
 func (s *appServerSession) ensureThread(resumeID string) error {
 	if resumeID != "" && resumeID != core.ContinueSession {
 		params := s.threadRequestParams()
@@ -374,6 +409,9 @@ func (s *appServerSession) ensureThread(resumeID string) error {
 		if resp.Thread.ID == "" {
 			return fmt.Errorf("codex app-server resume returned empty thread id")
 		}
+		if err := s.validatePermissionProfile(resp.ActivePermissionProfile); err != nil {
+			return err
+		}
 		s.applyThreadRuntimeState(resp.Cwd, resp.Model, resp.ReasoningEffort)
 		s.threadID.Store(resp.Thread.ID)
 		slog.Info("codex app-server thread resumed", "thread_id", resp.Thread.ID)
@@ -387,12 +425,30 @@ func (s *appServerSession) ensureThread(resumeID string) error {
 	if resp.Thread.ID == "" {
 		return fmt.Errorf("codex app-server start returned empty thread id")
 	}
+	if err := s.validatePermissionProfile(resp.ActivePermissionProfile); err != nil {
+		return err
+	}
 	s.applyThreadRuntimeState(resp.Cwd, resp.Model, resp.ReasoningEffort)
 	s.threadID.Store(resp.Thread.ID)
 	slog.Info("codex app-server thread started", "thread_id", resp.Thread.ID)
 	return nil
 }
 
+// validatePermissionProfile rejects ignored or replaced profiles, including older servers that do not support the field.
+func (s *appServerSession) validatePermissionProfile(active *appServerActivePermissionProfile) error {
+	if s.permissionProfile == "" {
+		return nil
+	}
+	if active == nil {
+		return fmt.Errorf("codex app-server: permission profile %q was not confirmed; use a Codex version supporting named permission profiles", s.permissionProfile)
+	}
+	if active.ID != s.permissionProfile {
+		return fmt.Errorf("codex app-server: requested permission profile %q, received %q", s.permissionProfile, active.ID)
+	}
+	return nil
+}
+
+// threadRequestParams selects either named permissions or a legacy sandbox, never both.
 func (s *appServerSession) threadRequestParams() map[string]any {
 	params := map[string]any{
 		"experimentalRawEvents":  false,
@@ -403,7 +459,9 @@ func (s *appServerSession) threadRequestParams() map[string]any {
 	}
 	if approval, sandbox := appServerModeSettings(s.mode); approval != "" {
 		params["approvalPolicy"] = approval
-		if sandbox != "" {
+		if s.permissionProfile != "" {
+			params["permissions"] = s.permissionProfile
+		} else if sandbox != "" {
 			params["sandbox"] = sandbox
 		}
 	}
@@ -498,7 +556,8 @@ func (s *appServerSession) Send(prompt string, messageID string, images []core.I
 
 	s.stateMu.Lock()
 	turnRevision := s.turnRevision
-	if !s.preambleSent {
+	activeTurn := s.currentTurn
+	if activeTurn == "" && !s.preambleSent {
 		prompt = prependCodexPromptPreamble(prompt, s.promptPreamble)
 		s.preambleSent = true
 	}
@@ -522,6 +581,13 @@ func (s *appServerSession) Send(prompt string, messageID string, images []core.I
 		})
 	}
 
+	if activeTurn != "" {
+		return s.steerTurn(threadID, activeTurn, input)
+	}
+	return s.startTurn(threadID, input, turnRevision)
+}
+
+func (s *appServerSession) startTurn(threadID string, input []map[string]any, turnRevision uint64) error {
 	params := map[string]any{
 		"threadId": threadID,
 		"input":    input,
@@ -558,6 +624,35 @@ func (s *appServerSession) Send(prompt string, messageID string, images []core.I
 	s.pendingMsgs = s.pendingMsgs[:0]
 	s.stateMu.Unlock()
 
+	return nil
+}
+
+func (s *appServerSession) steerTurn(threadID, expectedTurnID string, input []map[string]any) error {
+	params := map[string]any{
+		"threadId":       threadID,
+		"expectedTurnId": expectedTurnID,
+		"input":          input,
+	}
+
+	var resp turnSteerResponse
+	if err := s.request("turn/steer", params, &resp); err != nil {
+		s.stateMu.Lock()
+		if s.currentTurn == expectedTurnID {
+			// A turn can finish before its delayed turn/start response is
+			// installed. Do not strand every later message on a stale ID;
+			// the next user message gets a normal turn/start instead.
+			s.currentTurn = ""
+			s.turnRevision++
+		}
+		s.stateMu.Unlock()
+		return fmt.Errorf("codex app-server turn/steer: %w", err)
+	}
+	if resp.TurnID == "" {
+		return fmt.Errorf("codex app-server turn/steer returned empty turn id")
+	}
+	if resp.TurnID != expectedTurnID {
+		return fmt.Errorf("codex app-server turn/steer returned turn id %q, want %q", resp.TurnID, expectedTurnID)
+	}
 	return nil
 }
 
@@ -819,7 +914,7 @@ func (s *appServerSession) handleRequestUserInput(rawID json.RawMessage, paramsR
 	})
 
 	go func() {
-		timer := time.NewTimer(5 * time.Minute)
+		timer := time.NewTimer(s.userInputTimeout())
 		defer timer.Stop()
 		var result core.PermissionResult
 		select {
@@ -1241,16 +1336,11 @@ func (s *appServerSession) handleNotification(method string, paramsRaw json.RawM
 		}
 
 	case "thread/status/changed":
-		var notif struct {
-			ThreadID string `json:"threadId"`
-			Status   struct {
-				Type string `json:"type"`
-			} `json:"status"`
-		}
-		if err := json.Unmarshal(paramsRaw, &notif); err == nil && notif.Status.Type == "idle" && s.acceptsThreadNotification(method, notif.ThreadID) {
-			// In codex 0.125+, thread going idle signals turn completion.
-			s.completeTurn()
-		}
+		// Thread status has neither a turn ID nor a terminal outcome. An idle
+		// notification may precede the final items or a failed turn/completed,
+		// and a delayed idle may belong to the previous turn. Only the matching
+		// turn/completed notification can finish the active turn.
+		return
 
 	case "account/rateLimits/updated":
 		var notif appServerRateLimitsResponse

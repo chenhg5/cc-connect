@@ -536,7 +536,7 @@ cc-connect supports scheduled tasks (cron jobs). You can always create them via 
 | Agent | File to create/edit |
 |-------|-------------------|
 | Codex | `AGENTS.md` |
-| Cursor Agent | `.cursorrules` |
+| Cursor Agent | `AGENTS.md` |
 | Qoder CLI | `AGENTS.md` |
 | Gemini CLI | `GEMINI.md` |
 | OpenCode | `OPENCODE.md` |
@@ -592,6 +592,8 @@ For short single-line messages:
 ```
 
 After adding this file, the agent will be able to translate natural language scheduling requests into `cc-connect cron add` commands automatically.
+
+Cursor Agent reads `AGENTS.md` in the project root on every session. `/memory` and `/cron setup` write that file. A legacy `.cursorrules` is still loaded by Cursor if you already have one, but new setup should use `AGENTS.md`. Cursor has no user-level memory file, so `/memory global` is unsupported for this agent.
 
 > **Tip:** You may want to add `AGENTS.md` / `.cursorrules` / `GEMINI.md` to your `.gitignore` if you don't want cc-connect instructions committed to version control.
 
