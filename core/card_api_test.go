@@ -384,3 +384,27 @@ func TestCardEndpoints_ResolveProjectAlike(t *testing.T) {
 		}
 	}
 }
+
+// Updating a card does not reconstruct reply context, but its configured
+// platform selection must agree with an idle send for the same key.
+func TestCards_IdleSendAndUpdatePlatformSelectionParity(t *testing.T) {
+	feishu := &stubCardReconstructPlatform{stubRawCardPlatform: &stubRawCardPlatform{stubPlatformEngine: stubPlatformEngine{n: "feishu"}}}
+	other := &stubCardReconstructPlatform{stubRawCardPlatform: &stubRawCardPlatform{stubPlatformEngine: stubPlatformEngine{n: "other"}}}
+	e := NewEngine("test", &stubAgent{}, []Platform{other, feishu}, "", LangEnglish)
+	defer e.cancel()
+	for _, key := range []string{"feishu:oc_1:ou_1", "/work/tree:feishu:oc_1:ou_1", `C:\work:other:c1:u1`, "/work/tree:unknown:c1:u1"} {
+		t.Run(key, func(t *testing.T) {
+			updatePlatform, stripped := e.platformForSessionKey(key)
+			_, sendPlatform, context, err := e.resolveOutboundSessionTarget(key, false)
+			if updatePlatform == nil {
+				if err == nil || sendPlatform != nil {
+					t.Fatalf("send accepted a key rejected by update: platform=%v err=%v", sendPlatform, err)
+				}
+				return
+			}
+			if err != nil || sendPlatform != updatePlatform || context != "rebuilt:"+stripped {
+				t.Fatalf("resolver mismatch: update=%v send=%v reply context=%v error=%v", updatePlatform, sendPlatform, context, err)
+			}
+		})
+	}
+}

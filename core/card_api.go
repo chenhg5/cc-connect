@@ -108,6 +108,34 @@ func validCardUUID(uuid string) bool {
 	return utf8.RuneCountInString(uuid) <= MaxCardUUIDLen
 }
 
+// platformForSessionKey finds the platform a session key belongs to: the one
+// named by the key's first segment, else -- for a key that multi-workspace
+// mode prefixed with the workspace path, such as
+// "/root/work:feishu:oc_1:u_1" -- the first platform whose ":name:" the key
+// contains (same heuristic as ExecuteCronJob / ExecuteHeartbeat). It also
+// returns the key without that workspace prefix. The platform is nil when
+// none matches. This mirrors the configured-platform selection in
+// resolveOutboundSessionTarget without reconstructing a reply context,
+// which is not required for updating an existing card.
+func (e *Engine) platformForSessionKey(sessionKey string) (Platform, string) {
+	if sessionKey == "" {
+		return nil, sessionKey
+	}
+	if name, _, ok := strings.Cut(sessionKey, ":"); ok && name != "" {
+		for _, candidate := range e.platforms {
+			if candidate.Name() == name {
+				return candidate, sessionKey
+			}
+		}
+	}
+	for _, candidate := range e.platforms {
+		if idx := strings.Index(sessionKey, ":"+candidate.Name()+":"); idx >= 0 {
+			return candidate, sessionKey[idx+1:]
+		}
+	}
+	return nil, sessionKey
+}
+
 // UpdateCard replaces the card message messageID in place. sessionKey, when
 // set, picks the platform the way a send to that session does (see
 // platformForSessionKey, so a workspace-prefixed key works too); otherwise

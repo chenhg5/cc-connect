@@ -390,6 +390,12 @@ type Engine struct {
 	timerScheduler     *TimerScheduler
 	heartbeatScheduler *HeartbeatScheduler
 
+	// stopHookEvent is the hook event emitted when /stop ends an agent turn.
+	// Defaults to HookEventSessionEnded (the historical behavior); set it to
+	// HookEventTurnCancelled to receive the more specific event instead.
+	// See SetStopHookEvent.
+	stopHookEvent atomic.Value // HookEventType
+
 	commands *CommandRegistry
 	skills   *SkillRegistry
 	aliases  map[string]string // trigger → command (e.g. "帮助" → "/help")
@@ -609,6 +615,12 @@ type interactiveState struct {
 	// currentTurnUserMessageTimeMs is the UserMessageTimeMs for the in-flight
 	// foreground turn (including a queued turn after EventResult).
 	currentTurnUserMessageTimeMs int64
+
+	// restartAfterTurn is set by /model when it arrives while a turn is in
+	// flight: instead of killing the running agent process (and losing its
+	// reply), drainPendingMessages restarts the session once the session
+	// goes idle so the next turn picks up the new model.
+	restartAfterTurn bool
 }
 
 // latestUserMessageWatermarkLocked returns the highest UserMessageTimeMs among
@@ -1428,6 +1440,36 @@ func (e *Engine) SetEventIdleTimeout(d time.Duration) {
 	e.eventIdleTimeout = d
 }
 
+// SetStopHookEvent selects which hook event is emitted when /stop ends an
+// agent turn.
+//
+// Historically /stop always emitted "session.ended", because stopping a turn
+// also tore the agent session down. Graceful cancellation (CancelTurn) keeps
+// the session alive, so "turn.cancelled" describes the situation more
+// precisely — but existing hook rules listen for "session.ended", and
+// switching the event name silently would break them.
+//
+// To stay backward compatible the default remains "session.ended"; opt in to
+// "turn.cancelled" explicitly. Unknown values are ignored and leave the
+// current setting untouched.
+func (e *Engine) SetStopHookEvent(ev HookEventType) {
+	switch ev {
+	case HookEventSessionEnded, HookEventTurnCancelled:
+		e.stopHookEvent.Store(ev)
+	default:
+		slog.Warn("ignoring unknown stop hook event", "event", string(ev))
+	}
+}
+
+// stopHookEventType returns the hook event to emit when /stop ends a turn.
+// Falls back to HookEventSessionEnded if nothing was configured.
+func (e *Engine) stopHookEventType() HookEventType {
+	if v, ok := e.stopHookEvent.Load().(HookEventType); ok {
+		return v
+	}
+	return HookEventSessionEnded
+}
+
 // SetMaxQueuedMessages sets the per-session message queue depth.
 // Values <= 0 are ignored.
 func (e *Engine) SetMaxQueuedMessages(n int) {
@@ -1938,12 +1980,7 @@ func (e *Engine) executeTimerShell(p Platform, replyCtx any, job *TimerJob) erro
 	ctx, cancel := context.WithTimeout(e.ctx, timeout)
 	defer cancel()
 
-	var shellCmd *exec.Cmd
-	if runtime.GOOS == "windows" {
-		shellCmd = exec.CommandContext(ctx, "powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", job.Exec)
-	} else {
-		shellCmd = exec.CommandContext(ctx, "sh", "-c", job.Exec)
-	}
+	shellCmd := shellExecCommand(ctx, e.shell, e.shellFlag, e.shellProfile, job.Exec)
 	shellCmd.Dir = workDir
 
 	stdout, err := shellCmd.StdoutPipe()
@@ -2530,6 +2567,12 @@ func (e *Engine) initPlatformCapabilities(p Platform) {
 
 	if nav, ok := p.(CardNavigable); ok {
 		nav.SetCardNavigationHandler(e.handleCardNav)
+	}
+	if la, ok := p.(LocalizerAware); ok {
+		la.SetLocalizer(e.i18n.T)
+	}
+	if aq, ok := p.(AskQuestionStateAware); ok {
+		aq.SetAskQuestionLiveCheck(e.askQuestionCallbackLive)
 	}
 }
 
@@ -3673,7 +3716,12 @@ found:
 		// More questions remaining — advance to next and send new card
 		if curIdx+1 < len(pending.Questions) {
 			pending.CurrentQuestion = curIdx + 1
-			e.reply(p, msg.ReplyCtx, fmt.Sprintf("✅ %s: **%s**", q.Question, answer))
+			// A card click already had its card replaced in place by the
+			// platform's callback response, so echoing the answer as a chat
+			// message would show the same answer twice.
+			if !msg.CardAnswerRendered {
+				e.reply(p, msg.ReplyCtx, fmt.Sprintf("✅ %s: **%s**", q.Question, answer))
+			}
 			e.sendAskQuestionPrompt(p, msg.ReplyCtx, pending.Questions, curIdx+1)
 			return true
 		}
@@ -3687,7 +3735,7 @@ found:
 		}); err != nil {
 			slog.Error("failed to send AskUserQuestion response", "error", err)
 			e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgError), err))
-		} else {
+		} else if !msg.CardAnswerRendered {
 			e.reply(p, msg.ReplyCtx, fmt.Sprintf("✅ %s: **%s**", q.Question, answer))
 		}
 
@@ -3786,6 +3834,39 @@ func parseAskQuestionCallback(content string) (qIdx int, hasQIdx bool, ok bool) 
 		return qIdx, true, true
 	}
 	return 0, false, false
+}
+
+// askQuestionCallbackLive reports whether an AskUserQuestion option click
+// would answer the question that is waiting now. It applies the same rules
+// as handlePendingPermission, so a platform can avoid rendering an answer
+// that the engine is about to drop. Content that is not an option click is
+// reported live.
+func (e *Engine) askQuestionCallbackLive(sessionKey, content string) bool {
+	qIdx, hasQIdx, ok := parseAskQuestionCallback(content)
+	if !ok {
+		return true
+	}
+	iKey := e.interactiveKeyForSessionKey(sessionKey)
+	_, pending := e.lookupPending(iKey)
+	if pending == nil {
+		e.interactiveMu.Lock()
+		var cronKeys []string
+		for k := range e.interactiveStates {
+			if strings.HasPrefix(k, iKey+"#cron:") {
+				cronKeys = append(cronKeys, k)
+			}
+		}
+		e.interactiveMu.Unlock()
+		for _, k := range cronKeys {
+			if _, pending = e.lookupPending(k); pending != nil {
+				break
+			}
+		}
+	}
+	if pending == nil || len(pending.Questions) == 0 {
+		return false
+	}
+	return !hasQIdx || qIdx == pending.CurrentQuestion
 }
 
 // dropStaleAskQuestionCallback tells the user that an option click arrived
@@ -6977,6 +7058,16 @@ func (e *Engine) notifyDroppedQueuedMessages(state *interactiveState, reason err
 func (e *Engine) drainPendingMessages(state *interactiveState, session *Session, sessions *SessionManager, sessionKey string, lockGen uint64) bool {
 	for {
 		state.mu.Lock()
+		if len(state.pendingMessages) == 0 && state.restartAfterTurn {
+			// A /model switch was deferred while the turn ran. Its reply has
+			// been delivered, so restart the agent session now, while the
+			// session lock still keeps new turns off the old process.
+			state.restartAfterTurn = false
+			state.mu.Unlock()
+			slog.Info("applying model switch deferred until turn completion", "session", sessionKey)
+			e.cleanupInteractiveState(sessionKey, state)
+			continue
+		}
 		if len(state.pendingMessages) == 0 {
 			session.Unlock(lockGen)
 			state.mu.Unlock()
@@ -6994,9 +7085,9 @@ func (e *Engine) drainPendingMessages(state *interactiveState, session *Session,
 			)
 		}
 		if len(state.pendingMessages) == 0 {
-			session.Unlock(lockGen)
+			// Re-check from the top so a deferred restart is not skipped.
 			state.mu.Unlock()
-			return true
+			continue
 		}
 		queued := state.pendingMessages[0]
 		state.pendingMessages = state.pendingMessages[1:]
@@ -10474,14 +10565,45 @@ func (e *Engine) cmdModel(p Platform, msg *Message, args []string) {
 		return
 	}
 	e.persistWorkspaceModelOverride(interactiveKey, msg.SessionKey, agent, target)
-	e.cleanupInteractiveState(interactiveKey)
+	deferred := e.deferRestartIfTurnInFlight(interactiveKey)
+	if !deferred {
+		e.cleanupInteractiveState(interactiveKey)
+	}
 
 	// Keep the existing agent session ID so the next StartSession uses
 	// --resume <id> --model <new>, which lets the CLI agent restore context
 	// natively without replaying history (no extra token cost).
 	sessions.Save()
 
+	if deferred {
+		e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgModelChangeQueued, target))
+		return
+	}
 	e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgModelChanged, target))
+}
+
+// deferRestartIfTurnInFlight reports whether a turn is running on the live
+// agent session for interactiveKey and, if so, marks the state so that
+// drainPendingMessages restarts the session once the turn (and any queued
+// messages) finish. Closing the session mid-turn would drop the reply.
+// The busy check and the flag are both made under state.mu, which
+// drainPendingMessages also holds when it releases the session lock, so a
+// flag set here is always seen by the drain loop.
+func (e *Engine) deferRestartIfTurnInFlight(interactiveKey string) bool {
+	e.interactiveMu.Lock()
+	state := e.interactiveStates[interactiveKey]
+	e.interactiveMu.Unlock()
+	if state == nil {
+		return false
+	}
+	state.mu.Lock()
+	defer state.mu.Unlock()
+	if state.stopped || state.agentSession == nil || !state.agentSession.Alive() ||
+		state.busySession == nil || !state.busySession.Busy() {
+		return false
+	}
+	state.restartAfterTurn = true
+	return true
 }
 
 // resolveModelAlias resolves a user-supplied string to a model name.
@@ -10919,11 +11041,26 @@ func (e *Engine) cmdCancel(p Platform, msg *Message) {
 
 	slog.Info("cmdCancel: stopping execution and creating new session", "session_key", msg.SessionKey)
 
+	// Capture the live agent session BEFORE stopInteractiveSession so we can
+	// force-close it regardless of which path stopInteractiveSession takes.
+	// When the agent implements AgentSessionCanceller (claudecode after
+	// PR-style fix, ACP, etc.) the canceller branch keeps the subprocess
+	// alive — without this follow-up close, cmdCancel would leak the
+	// subprocess. closeAgentSessionAsync is idempotent with the
+	// normalCleanup path, so the double-close is harmless.
+	savedAgent := e.interactiveStateForCancel(interactiveKey)
+
 	// Stop the current execution (like /stop)
 	stopped := e.stopInteractiveSession(interactiveKey, p, msg.ReplyCtx)
 	if !stopped {
 		// No execution in progress, but still create a new session
 		slog.Debug("cmdCancel: no execution to stop, proceeding with new session", "session_key", msg.SessionKey)
+	}
+
+	// Force-close the captured subprocess in case the canceller path kept
+	// it alive. Idempotent with normalCleanup, which already invoked Close.
+	if savedAgent != nil {
+		e.closeAgentSessionAsync(interactiveKey, savedAgent, p, msg.ReplyCtx)
 	}
 
 	// Clear old session's agent session ID so it cannot be resumed
@@ -10955,6 +11092,14 @@ func (e *Engine) stopInteractiveSessionWithOptions(sessionKey string, notifyQueu
 	}
 
 	// Stop unsolicited reader before touching state to avoid races.
+	//
+	// This call waits for the reader goroutine, and it runs while interactiveMu
+	// is held, so a stuck reader can stall other sessions for up to
+	// unsolicitedReaderStopTimeout (5s). That bound is deliberate: the reader
+	// must be stopped before the state below is captured, and releasing the
+	// lock to do it would let another goroutine take over this session (the
+	// same double-close hazard cleanupInteractiveState guards against with its
+	// expected-pointer check).
 	e.stopUnsolicitedReader(state)
 
 	state.mu.Lock()
@@ -10965,9 +11110,28 @@ func (e *Engine) stopInteractiveSessionWithOptions(sessionKey string, notifyQueu
 	closeReplyCtx := state.replyCtx
 	state.mu.Unlock()
 
-	// If the agent session supports graceful turn cancellation (e.g. ACP),
-	// send a cancel notification and keep the session alive for the next
-	// user message, rather than killing the process and destroying state.
+	// If the agent session supports graceful turn cancellation (e.g. ACP,
+	// claudecode via stream-json control_request interrupt), call CancelTurn
+	// and keep the session alive for the next user message rather than
+	// killing the process and destroying state.
+	//
+	// Release the engine lock BEFORE calling CancelTurn.
+	//
+	// claudecode's CancelTurn now waits for the CLI to confirm the interrupted
+	// turn actually terminated (up to its confirm timeout) — it is a blocking
+	// call, and holding e.interactiveMu across it would stall every other
+	// session's message routing for the duration.
+	//
+	// The old "hold the lock across CancelTurn so the failure path can
+	// fall through to normalCleanup without a double-unlock" arrangement is no
+	// longer needed: the failure path re-acquires the lock before entering
+	// normalCleanup, so the unlock in normalCleanup is always the matching
+	// one. Delete on an already-absent key is a no-op, so the window opened
+	// here is benign.
+	//
+	// CancelTurn implementations must NOT acquire e.interactiveMu themselves —
+	// they operate on the agent subprocess's own state (stdin write, waiting
+	// for its result event) and don't touch engine bookkeeping.
 	if canceller, ok := agentSession.(AgentSessionCanceller); ok && agentSession != nil {
 		// Keep the state in the map so the next message reuses this session.
 		// Don't markStopped — the session is still usable.
@@ -10992,14 +11156,17 @@ func (e *Engine) stopInteractiveSessionWithOptions(sessionKey string, notifyQueu
 		state.turnCancelled = true
 		state.mu.Unlock()
 
-		cancelErr := canceller.CancelTurn()
-		if cancelErr != nil {
+		if cancelErr := canceller.CancelTurn(); cancelErr != nil {
 			slog.Warn("agent session CancelTurn failed, falling back to Close",
 				"session_key", sessionKey, "error", cancelErr)
-			// Fall through to normal cleanup below.
+			// Re-acquire the lock that normalCleanup releases.
+			e.interactiveMu.Lock()
 			goto normalCleanup
 		}
 
+		// Release the busy lock: the turn is over, so the session must not stay
+		// locked against the next user message. Kept from the upstream (HEAD)
+		// side of the rebase.
 		if state.busySession != nil && state.busySession.ForceUnlock() {
 			slog.Info("session busy lock released after turn cancel", "session_key", sessionKey)
 		}
@@ -11007,8 +11174,11 @@ func (e *Engine) stopInteractiveSessionWithOptions(sessionKey string, notifyQueu
 		slog.Info("agent session turn cancelled, session kept alive",
 			"session_key", sessionKey)
 
+		// The event name is configurable for backward compatibility: by
+		// default this stays "session.ended" so existing hook rules keep
+		// firing; users can opt in to the more precise "turn.cancelled".
 		e.hooks.Emit(HookEvent{
-			Event:      HookEventSessionEnded,
+			Event:      e.stopHookEventType(),
 			SessionKey: sessionKey,
 		})
 
@@ -11017,7 +11187,15 @@ func (e *Engine) stopInteractiveSessionWithOptions(sessionKey string, notifyQueu
 
 normalCleanup:
 	state.markStopped()
-	delete(e.interactiveStates, sessionKey)
+	// Only remove the entry if it is still the state this call captured.
+	// normalCleanup is reachable after interactiveMu was released around a
+	// blocking CancelTurn, so /new (or another /stop) may have installed a
+	// fresh state for the same key in the meantime. Deleting that one would
+	// orphan its live agent session and make the next message spawn a
+	// duplicate CLI process.
+	if current, ok := e.interactiveStates[sessionKey]; ok && current == state {
+		delete(e.interactiveStates, sessionKey)
+	}
 	e.interactiveMu.Unlock()
 
 	if pending != nil {
@@ -12284,33 +12462,6 @@ func videoFormatHint(v FileAttachment) string {
 	return audioFormatHint(v)
 }
 
-// platformForSessionKey finds the platform a session key belongs to: the one
-// named by the key's first segment, else -- for a key that multi-workspace
-// mode prefixed with the workspace path, such as
-// "/root/work:feishu:oc_1:u_1" -- the first platform whose ":name:" the key
-// contains (same heuristic as ExecuteCronJob / ExecuteHeartbeat). It also
-// returns the key without that workspace prefix. The platform is nil when
-// none matches. Every path that maps a session key to a platform (sending
-// to a session, updating a card) goes through here so they agree.
-func (e *Engine) platformForSessionKey(sessionKey string) (Platform, string) {
-	if sessionKey == "" {
-		return nil, sessionKey
-	}
-	if name, _, ok := strings.Cut(sessionKey, ":"); ok && name != "" {
-		for _, candidate := range e.platforms {
-			if candidate.Name() == name {
-				return candidate, sessionKey
-			}
-		}
-	}
-	for _, candidate := range e.platforms {
-		if idx := strings.Index(sessionKey, ":"+candidate.Name()+":"); idx >= 0 {
-			return candidate, sessionKey[idx+1:]
-		}
-	}
-	return nil, sessionKey
-}
-
 func (e *Engine) resolveOutboundSessionTarget(sessionKey string, hasAttachments bool) (*interactiveState, Platform, any, error) {
 	e.interactiveMu.Lock()
 
@@ -12353,7 +12504,30 @@ func (e *Engine) resolveOutboundSessionTarget(sessionKey string, hasAttachments 
 	}
 
 	if p == nil && sessionKey != "" {
-		targetPlatform, strippedKey := e.platformForSessionKey(sessionKey)
+		strippedKey := sessionKey
+		platformName := ""
+		if idx := strings.Index(strippedKey, ":"); idx > 0 {
+			platformName = strippedKey[:idx]
+		}
+		var targetPlatform Platform
+		for _, candidate := range e.platforms {
+			if candidate.Name() == platformName {
+				targetPlatform = candidate
+				break
+			}
+		}
+		// Fallback: multi-workspace mode may prefix the session key with the
+		// workspace path (same heuristic as ExecuteCronJob / ExecuteHeartbeat).
+		if targetPlatform == nil {
+			for _, candidate := range e.platforms {
+				needle := ":" + candidate.Name() + ":"
+				if idx := strings.Index(strippedKey, needle); idx >= 0 {
+					targetPlatform = candidate
+					strippedKey = strippedKey[idx+1:]
+					break
+				}
+			}
+		}
 		if targetPlatform != nil {
 			rc, ok := targetPlatform.(ReplyContextReconstructor)
 			if !ok {
@@ -14605,7 +14779,7 @@ func (e *Engine) renderSkillsCard(registry *SkillRegistry) *Card {
 }
 
 func (e *Engine) renderDoctorCard() *Card {
-	results := RunDoctorChecks(e.ctx, e.agent, e.platforms)
+	results := RunDoctorChecks(e.ctx, e.agent, e.platforms, e.dataDir)
 	report := FormatDoctorResults(results, e.i18n)
 	return NewCard().
 		Title(e.i18n.T(MsgCardTitleDoctor), "orange").
@@ -16057,7 +16231,7 @@ func (e *Engine) renderWhoamiCard(msg *Message) *Card {
 // ── /doctor command ─────────────────────────────────────────
 
 func (e *Engine) cmdDoctor(p Platform, msg *Message) {
-	results := RunDoctorChecks(e.ctx, e.agent, e.platforms)
+	results := RunDoctorChecks(e.ctx, e.agent, e.platforms, e.dataDir)
 	report := FormatDoctorResults(results, e.i18n)
 	e.reply(p, msg.ReplyCtx, report)
 }
@@ -17453,6 +17627,23 @@ func findInteractiveKeyInStatesLocked(states map[string]*interactiveState, sessi
 		}
 	}
 	return ""
+}
+
+// interactiveStateForCancel returns the agentSession currently bound to the
+// given interactive key, or nil if none. Used by cmdCancel BEFORE it calls
+// stopInteractiveSession, so it can force-close the subprocess even when
+// the canceller branch (AgentSessionCanceller) keeps the subprocess alive
+// for the next user message. Capturing the pointer up front avoids a
+// lookup-after race where another message arrives between the stop and the
+// close and races against the impending teardown.
+func (e *Engine) interactiveStateForCancel(key string) AgentSession {
+	e.interactiveMu.Lock()
+	defer e.interactiveMu.Unlock()
+	state, ok := e.interactiveStates[key]
+	if !ok || state == nil {
+		return nil
+	}
+	return state.agentSession
 }
 
 // lookupEffectiveWorkspaceBinding returns the effective binding for a channel

@@ -88,6 +88,8 @@ level=INFO msg="wecom-ws: subscribed successfully" bot_id=your-bot-id
 
 在企业微信中找到你的机器人，发送一条消息测试即可。
 
+引用文件时，下载成功的附件会在传给 AI 的引用上下文中标注文件名，例如 `[file: 合同.pdf]`。如果企微回调未提供文件对象或下载地址（例如群聊中引用机器人发送的文件），或下载失败，上下文会明确标注 `[file unavailable: quoted attachment could not be retrieved]`，表示本次没有取得该引用文件。此时可重新上传文件后再提问。文件名是附件的名称提示；实际落盘时可能因同名冲突而添加后缀。
+
 ### 技术细节
 
 - **连接地址**：默认 `wss://openws.work.weixin.qq.com`（公有云）；可通过 `ws_url` 覆盖为私有化部署地址（格式同 `wss://your-wecom-host:port/im_openws?bizid=<id>`）

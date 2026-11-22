@@ -24,7 +24,7 @@ func (p *Platform) SendRawCard(ctx context.Context, rctx any, card json.RawMessa
 	if rc.chatID == "" {
 		return "", fmt.Errorf("%s: chatID is empty, cannot send new message", p.tag())
 	}
-	return p.createMessageID(ctx, rc.chatID, larkim.MsgTypeInteractive, string(card), "send", uuid)
+	return p.createMessageIDWithReceiveID(ctx, rc.chatID, rc.receiveIDType, larkim.MsgTypeInteractive, string(card), "send", uuid)
 }
 
 // UpdateRawCard implements core.RawCardUpdater with the patch message API.

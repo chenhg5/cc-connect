@@ -160,3 +160,88 @@ func TestCallbackTranslatesPermissionPayloads(t *testing.T) {
 		}
 	}
 }
+
+// Regression test for #2278: only a private dialog may populate the callback
+// fallback. A group post used to overwrite it, so the next button press in the
+// DM (delivered with recipient.chat_id = 0) was answered in the group session
+// and the permission request in the dialog was never resolved.
+func TestGroupMessageKeepsDialogChatIDForCallbacks(t *testing.T) {
+	p := newTestPlatform(t, "http://127.0.0.1:0")
+
+	var mu sync.Mutex
+	var keys []string
+	p.handler = func(_ core.Platform, msg *core.Message) {
+		mu.Lock()
+		keys = append(keys, msg.SessionKey)
+		mu.Unlock()
+	}
+
+	const (
+		userID     = int64(999002)
+		dialogChat = int64(555001)
+		groupChat  = int64(555777)
+	)
+	now := time.Now().UnixMilli()
+
+	p.handleMessage(context.Background(), &maxMessage{
+		Sender:    maxUser{UserID: userID, Name: "Tester"},
+		Recipient: maxRecipient{ChatID: dialogChat, ChatType: "dialog"},
+		Timestamp: now,
+		Body:      maxBody{Mid: "mid.dm1", Text: "hello from the dm"},
+	})
+	p.handleMessage(context.Background(), &maxMessage{
+		Sender:    maxUser{UserID: userID, Name: "Tester"},
+		Recipient: maxRecipient{ChatID: groupChat, ChatType: "chat"},
+		Timestamp: now,
+		Body:      maxBody{Mid: "mid.group1", Text: "hello from the group"},
+	})
+	p.handleCallback(context.Background(), &maxCallback{
+		CallbackID: "cb.dm1",
+		Payload:    "perm:allow",
+		User:       maxUser{UserID: userID, Name: "Tester"},
+		Message:    maxMessage{Body: maxBody{Mid: "mid.card1"}}, // recipient.chat_id = 0
+	})
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(keys) != 3 {
+		t.Fatalf("expected 3 routed messages, got %d: %v", len(keys), keys)
+	}
+	if want := "max:555001:999002"; keys[2] != want {
+		t.Fatalf("DM callback landed in %q, want %q", keys[2], want)
+	}
+}
+
+// A group author who never wrote in the DM has no dialog chat to fall back to;
+// caching the group chat would send the button reply there.
+func TestGroupOnlyMessageIsNotCachedForCallbacks(t *testing.T) {
+	p := newTestPlatform(t, "http://127.0.0.1:0")
+
+	p.handleMessage(context.Background(), &maxMessage{
+		Sender:    maxUser{UserID: 999003},
+		Recipient: maxRecipient{ChatID: 555888, ChatType: "channel"},
+		Timestamp: time.Now().UnixMilli(),
+		Body:      maxBody{Mid: "mid.channel1", Text: "hi"},
+	})
+
+	if _, ok := p.chatOfUser.Load("999003"); ok {
+		t.Fatal("group/channel chat_id must not be cached for callbacks")
+	}
+}
+
+func TestIsGroupChatType(t *testing.T) {
+	cases := map[string]bool{
+		"dialog":  false,
+		"":        false, // payload without the field keeps the old fallback
+		"unknown": false,
+		"chat":    true,
+		"group":   true,
+		"channel": true,
+		"CHAT":    true,
+	}
+	for in, want := range cases {
+		if got := isGroupChatType(in); got != want {
+			t.Errorf("isGroupChatType(%q) = %v, want %v", in, got, want)
+		}
+	}
+}
