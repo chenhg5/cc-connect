@@ -646,7 +646,7 @@ func (cs *claudeSession) finishReadLoop(waitErrCh <-chan error, stderrBuf *bytes
 		}
 		if stderrMsg != "" {
 			slog.Error("claudeSession: process failed", "error", err, "stderr_bytes", len(stderrMsg))
-			evt := core.Event{Type: core.EventError, Error: fmt.Errorf("Claude CLI process failed")}
+			evt := core.Event{Type: core.EventError, Error: fmt.Errorf("claude CLI process failed")}
 			select {
 			case cs.events <- evt:
 			case <-cs.ctx.Done():
