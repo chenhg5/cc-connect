@@ -72,6 +72,10 @@ type turnStartResponse struct {
 	} `json:"turn"`
 }
 
+type turnSteerResponse struct {
+	TurnID string `json:"turnId"`
+}
+
 type turnNotification struct {
 	ThreadID string `json:"threadId"`
 	Turn     struct {
@@ -164,6 +168,10 @@ type appServerSession struct {
 	codexHome         string
 	promptPreamble    string
 
+	// requestUserInputTimeout bounds the wait for an AskUserQuestion answer;
+	// <= 0 means defaultRequestUserInputTimeout.
+	requestUserInputTimeout time.Duration
+
 	events       chan core.Event
 	eventsMu     sync.RWMutex // publishers share the lock; Close owns channel closure
 	eventsClosed bool
@@ -205,31 +213,44 @@ type appServerSession struct {
 const (
 	appServerRequestTimeout      = 120 * time.Second
 	appServerUsageRefreshTimeout = 1500 * time.Millisecond
+
+	// defaultRequestUserInputTimeout is how long an item/tool/requestUserInput
+	// (AskUserQuestion) waits for the user's answer before declining.
+	defaultRequestUserInputTimeout = 5 * time.Minute
 )
 
+// userInputTimeout returns the configured AskUserQuestion wait, or the default.
+func (s *appServerSession) userInputTimeout() time.Duration {
+	if s.requestUserInputTimeout > 0 {
+		return s.requestUserInputTimeout
+	}
+	return defaultRequestUserInputTimeout
+}
+
 // newAppServerSession connects to Codex and verifies the requested permissions before returning a usable session.
-func newAppServerSession(ctx context.Context, cliBin string, cliExtraArgs []string, url, workDir, model, effort, mode, resumeID, baseURL, modelProvider string, extraEnv []string, codexHome string, systemPrompt string, appendPrompt string, permissionProfile string) (*appServerSession, error) {
+func newAppServerSession(ctx context.Context, cliBin string, cliExtraArgs []string, url, workDir, model, effort, mode, resumeID, baseURL, modelProvider string, extraEnv []string, codexHome string, systemPrompt string, appendPrompt string, permissionProfile string, requestUserInputTimeout time.Duration) (*appServerSession, error) {
 	sessionCtx, cancel := context.WithCancel(ctx)
 	s := &appServerSession{
-		cliBin:            cliBin,
-		cliExtraArgs:      append([]string(nil), cliExtraArgs...),
-		url:               url,
-		workDir:           workDir,
-		model:             model,
-		effort:            effort,
-		mode:              mode,
-		permissionProfile: permissionProfile,
-		baseURL:           baseURL,
-		modelProvider:     modelProvider,
-		extraEnv:          append([]string(nil), extraEnv...),
-		codexHome:         strings.TrimSpace(codexHome),
-		promptPreamble:    buildCodexPromptPreamble(systemPrompt, appendPrompt),
-		events:            make(chan core.Event, 128),
-		ctx:               sessionCtx,
-		cancel:            cancel,
-		pending:           make(map[int64]chan rpcResponseEnvelope),
-		pendingApprovals:  make(map[string]chan core.PermissionResult),
-		preambleSent:      resumeID != "" && resumeID != core.ContinueSession,
+		cliBin:                  cliBin,
+		cliExtraArgs:            append([]string(nil), cliExtraArgs...),
+		url:                     url,
+		workDir:                 workDir,
+		model:                   model,
+		effort:                  effort,
+		mode:                    mode,
+		permissionProfile:       permissionProfile,
+		baseURL:                 baseURL,
+		modelProvider:           modelProvider,
+		extraEnv:                append([]string(nil), extraEnv...),
+		codexHome:               strings.TrimSpace(codexHome),
+		promptPreamble:          buildCodexPromptPreamble(systemPrompt, appendPrompt),
+		requestUserInputTimeout: requestUserInputTimeout,
+		events:                  make(chan core.Event, 128),
+		ctx:                     sessionCtx,
+		cancel:                  cancel,
+		pending:                 make(map[int64]chan rpcResponseEnvelope),
+		pendingApprovals:        make(map[string]chan core.PermissionResult),
+		preambleSent:            resumeID != "" && resumeID != core.ContinueSession,
 	}
 	s.alive.Store(true)
 
@@ -528,7 +549,8 @@ func (s *appServerSession) Send(prompt string, messageID string, images []core.I
 
 	s.stateMu.Lock()
 	turnRevision := s.turnRevision
-	if !s.preambleSent {
+	activeTurn := s.currentTurn
+	if activeTurn == "" && !s.preambleSent {
 		prompt = prependCodexPromptPreamble(prompt, s.promptPreamble)
 		s.preambleSent = true
 	}
@@ -552,6 +574,13 @@ func (s *appServerSession) Send(prompt string, messageID string, images []core.I
 		})
 	}
 
+	if activeTurn != "" {
+		return s.steerTurn(threadID, activeTurn, input)
+	}
+	return s.startTurn(threadID, input, turnRevision)
+}
+
+func (s *appServerSession) startTurn(threadID string, input []map[string]any, turnRevision uint64) error {
 	params := map[string]any{
 		"threadId": threadID,
 		"input":    input,
@@ -588,6 +617,35 @@ func (s *appServerSession) Send(prompt string, messageID string, images []core.I
 	s.pendingMsgs = s.pendingMsgs[:0]
 	s.stateMu.Unlock()
 
+	return nil
+}
+
+func (s *appServerSession) steerTurn(threadID, expectedTurnID string, input []map[string]any) error {
+	params := map[string]any{
+		"threadId":       threadID,
+		"expectedTurnId": expectedTurnID,
+		"input":          input,
+	}
+
+	var resp turnSteerResponse
+	if err := s.request("turn/steer", params, &resp); err != nil {
+		s.stateMu.Lock()
+		if s.currentTurn == expectedTurnID {
+			// A turn can finish before its delayed turn/start response is
+			// installed. Do not strand every later message on a stale ID;
+			// the next user message gets a normal turn/start instead.
+			s.currentTurn = ""
+			s.turnRevision++
+		}
+		s.stateMu.Unlock()
+		return fmt.Errorf("codex app-server turn/steer: %w", err)
+	}
+	if resp.TurnID == "" {
+		return fmt.Errorf("codex app-server turn/steer returned empty turn id")
+	}
+	if resp.TurnID != expectedTurnID {
+		return fmt.Errorf("codex app-server turn/steer returned turn id %q, want %q", resp.TurnID, expectedTurnID)
+	}
 	return nil
 }
 
@@ -849,7 +907,7 @@ func (s *appServerSession) handleRequestUserInput(rawID json.RawMessage, paramsR
 	})
 
 	go func() {
-		timer := time.NewTimer(5 * time.Minute)
+		timer := time.NewTimer(s.userInputTimeout())
 		defer timer.Stop()
 		var result core.PermissionResult
 		select {

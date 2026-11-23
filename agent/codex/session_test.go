@@ -1265,3 +1265,21 @@ func TestGoalContinuationResultAllowsImmediateNextSend(t *testing.T) {
 		t.Fatalf("immediate continuation: %v", err)
 	}
 }
+
+func TestGoalRolloutReadsPastLineLargerThanTwoMiB(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "rollout.jsonl")
+	active := `{"type":"event_msg","payload":{"type":"thread_goal_updated","goal":{"status":"active"}}}`
+	large := `{"type":"response_item","payload":{"type":"message","text":"` + strings.Repeat("x", 3*1024*1024) + `"}}`
+	for _, status := range []string{"active", "complete"} {
+		t.Run(status, func(t *testing.T) {
+			latest := `{"type":"event_msg","payload":{"type":"thread_goal_updated","goal":{"status":"` + status + `"}}}`
+			if err := os.WriteFile(path, []byte(active+"\n"+large+"\n"+latest+"\n"), 0600); err != nil {
+				t.Fatal(err)
+			}
+			got, known, err := readGoalStatusFromRollout(path)
+			if err != nil || !known || got != status {
+				t.Fatalf("got %q %v %v, want %q", got, known, err, status)
+			}
+		})
+	}
+}

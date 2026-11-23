@@ -5,12 +5,15 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"math"
 	"net/http"
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/BurntSushi/toml"
 
@@ -39,12 +42,13 @@ type Agent struct {
 	mode                   string // "suggest" | "auto-edit" | "full-auto" | "yolo"
 	backend                string // "exec" | "app_server"
 	appServerURL           string
+	permissionProfile      string
 	codexHome              string
 	systemPrompt           string
-	appendPrompt           string
 	goalAutoContinue       bool
 	goalContinuationPrompt string
 	goalContinuationLimit  int
+	appendPrompt           string
 	cmd                    string   // explicit CLI command; empty enables discovery
 	cliExtraArgs           []string // extra args parsed from cmd after the binary
 	providers              []core.ProviderConfig
@@ -52,7 +56,10 @@ type Agent struct {
 	configEnv              []string // env vars from [projects.agent.options.env] — persists across SetSessionEnv calls
 	sessionEnv             []string
 	mu                     sync.RWMutex
-	permissionProfile      string
+
+	// requestUserInputTimeout is the app_server AskUserQuestion wait
+	// (request_user_input_timeout_mins); always > 0 after New.
+	requestUserInputTimeout time.Duration
 }
 
 // New validates the Codex adapter options and resolves its CLI.
@@ -96,6 +103,8 @@ func New(opts map[string]any) (core.Agent, error) {
 		}
 	}
 
+	requestUserInputTimeout := parseRequestUserInputTimeoutMins(opts["request_user_input_timeout_mins"])
+
 	cmd, cliExtraArgs := core.ParseCmdOpts(opts, "")
 
 	if cmd == "" {
@@ -123,24 +132,55 @@ func New(opts map[string]any) (core.Agent, error) {
 	}
 
 	return &Agent{
-		workDir:                workDir,
-		model:                  model,
-		reasoningEffort:        normalizeReasoningEffort(reasoningEffort),
-		mode:                   mode,
-		backend:                backend,
-		appServerURL:           appServerURL,
-		codexHome:              strings.TrimSpace(codexHome),
-		systemPrompt:           strings.TrimSpace(systemPrompt),
-		appendPrompt:           strings.TrimSpace(appendPrompt),
-		goalAutoContinue:       goalAutoContinue,
-		goalContinuationPrompt: strings.TrimSpace(goalContinuationPrompt),
-		goalContinuationLimit:  goalContinuationLimit,
-		cmd:                    cmd,
-		cliExtraArgs:           cliExtraArgs,
-		configEnv:              configEnv,
-		activeIdx:              -1,
-		permissionProfile:      permissionProfile,
+		goalAutoContinue:        goalAutoContinue,
+		goalContinuationPrompt:  strings.TrimSpace(goalContinuationPrompt),
+		goalContinuationLimit:   goalContinuationLimit,
+		workDir:                 workDir,
+		model:                   model,
+		reasoningEffort:         normalizeReasoningEffort(reasoningEffort),
+		mode:                    mode,
+		backend:                 backend,
+		appServerURL:            appServerURL,
+		permissionProfile:       permissionProfile,
+		codexHome:               strings.TrimSpace(codexHome),
+		systemPrompt:            strings.TrimSpace(systemPrompt),
+		appendPrompt:            strings.TrimSpace(appendPrompt),
+		requestUserInputTimeout: requestUserInputTimeout,
+		cmd:                     cmd,
+		cliExtraArgs:            cliExtraArgs,
+		configEnv:               configEnv,
+		activeIdx:               -1,
 	}, nil
+}
+
+// parseRequestUserInputTimeoutMins converts request_user_input_timeout_mins
+// into a duration. Unset, non-positive, or unparseable values fall back to
+// defaultRequestUserInputTimeout so existing configs keep the 5-minute wait.
+func parseRequestUserInputTimeoutMins(raw any) time.Duration {
+	if raw == nil {
+		return defaultRequestUserInputTimeout
+	}
+	var mins int64
+	ok := true
+	switch v := raw.(type) {
+	case int:
+		mins = int64(v)
+	case int64:
+		mins = v
+	case float64:
+		mins = int64(v)
+	case string:
+		n, err := strconv.ParseInt(strings.TrimSpace(v), 10, 64)
+		mins, ok = n, err == nil
+	default:
+		ok = false
+	}
+	if !ok || mins <= 0 || mins > int64(math.MaxInt64/time.Minute) {
+		slog.Warn("codex: invalid request_user_input_timeout_mins, using default",
+			"value", raw, "default_mins", int64(defaultRequestUserInputTimeout/time.Minute))
+		return defaultRequestUserInputTimeout
+	}
+	return time.Duration(mins) * time.Minute
 }
 
 func parseGoalContinuationLimit(value any) (int, error) {
@@ -288,10 +328,15 @@ func (a *Agent) AvailableModels(ctx context.Context) []core.ModelOption {
 	if len(minimaxModels) > 0 {
 		return minimaxModels
 	}
-	if models := readCodexModelCatalog(); len(models) > 0 {
+	if models := a.configuredModels(); len(models) > 0 {
 		return models
 	}
-	if models := a.configuredModels(); len(models) > 0 {
+	if models, err := a.loadModelsFromCLI(ctx); err == nil && len(models) > 0 {
+		return models
+	} else if err != nil {
+		slog.Debug("codex: native model discovery failed; using fallback", "error", err)
+	}
+	if models := readCodexModelCatalog(); len(models) > 0 {
 		return models
 	}
 	if models := a.fetchModelsFromAPI(ctx); len(models) > 0 {
@@ -566,6 +611,7 @@ func (a *Agent) StartSession(ctx context.Context, sessionID string) (core.AgentS
 	systemPrompt := a.systemPrompt
 	appendPrompt := a.appendPrompt
 	goalAutoContinue, goalPrompt, goalLimit := a.goalAutoContinue, a.goalContinuationPrompt, a.goalContinuationLimit
+	requestUserInputTimeout := a.requestUserInputTimeout
 	cliBin := a.cmd
 	cliExtraArgs := a.cliExtraArgs
 	workDir := a.workDir
@@ -596,7 +642,7 @@ func (a *Agent) StartSession(ctx context.Context, sessionID string) (core.AgentS
 	}
 
 	if backend == "app_server" {
-		return newAppServerSession(ctx, cliBin, cliExtraArgs, appServerURL, workDir, model, reasoningEffort, mode, sessionID, baseURL, provName, extraEnv, codexHome, systemPrompt, appendPrompt, permissionProfile)
+		return newAppServerSession(ctx, cliBin, cliExtraArgs, appServerURL, workDir, model, reasoningEffort, mode, sessionID, baseURL, provName, extraEnv, codexHome, systemPrompt, appendPrompt, permissionProfile, requestUserInputTimeout)
 	}
 	if codexHome != "" {
 		extraEnv = append(extraEnv, "CODEX_HOME="+codexHome)
@@ -682,6 +728,9 @@ func (a *Agent) WorkspaceAgentOptions() map[string]any {
 	}
 	if a.goalContinuationLimit > 0 {
 		opts["goal_max_continuations"] = a.goalContinuationLimit
+	}
+	if a.requestUserInputTimeout > 0 && a.requestUserInputTimeout != defaultRequestUserInputTimeout {
+		opts["request_user_input_timeout_mins"] = int64(a.requestUserInputTimeout / time.Minute)
 	}
 	return opts
 }

@@ -70,7 +70,7 @@ func readGoalStatusFromRollout(path string) (string, bool, error) {
 	var status string
 	var known bool
 	scanner := bufio.NewScanner(f)
-	scanner.Buffer(make([]byte, 64*1024), 2*1024*1024)
+	scanner.Buffer(make([]byte, 64*1024), 4*1024*1024)
 	for scanner.Scan() {
 		var entry struct {
 			Type    string          `json:"type"`

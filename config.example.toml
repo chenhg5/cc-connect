@@ -174,6 +174,25 @@ level = "info" # debug, info, warn, error
 # 推荐值：30–60。默认 0（禁用）。
 # max_turn_time_mins = 0  # default: disabled / 默认禁用
 
+# Which hook event fires when the user stops an agent turn with /stop.
+# /stop 用到的 hook 事件名。
+#
+#   "session.ended"  (default) — the historical name. /stop used to tear the
+#                      agent session down, so it always fired "session.ended".
+#                      Kept as the default so existing hook rules keep firing.
+#   "turn.cancelled" — the precise event for a gracefully cancelled turn: the
+#                      agent session stays alive and is reused by the next
+#                      message, so the turn ended but the session did not.
+#
+# Set this to "turn.cancelled" only if your hook rules were written for the
+# new behavior. Existing rules listening for "session.ended" keep working
+# either way — with the default they fire on /stop, with "turn.cancelled"
+# they fire when the session is actually torn down.
+# 只有当你的 hook 规则是按新行为写的，才需要设为 "turn.cancelled"。
+# 监听 "session.ended" 的旧规则在两种模式下都不会失效：默认模式下 /stop 触发它，
+# "turn.cancelled" 模式下则在会话真正被销毁时触发。
+# stop_hook_event = "session.ended"  # default / 默认值
+
 # Auto-reset the active session after the user has been inactive for a while.
 # Unlike idle_timeout_mins, this does not detect stuck agent execution. It
 # rotates to a fresh cc-connect session when the user comes back after being idle.
@@ -458,6 +477,10 @@ level = "info" # debug, info, warn, error
 #   message.sent       — agent reply sent / Agent 回复发送完成
 #   session.started    — agent session spawned / Agent 会话启动
 #   session.ended      — agent session stopped / Agent 会话结束
+#   turn.cancelled     — an agent turn was cancelled by /stop / 一轮对话被 /stop 取消
+#                        (only fired when stop_hook_event = "turn.cancelled";
+#                         see the stop_hook_event setting above / 仅当
+#                         stop_hook_event = "turn.cancelled" 时触发，见上文)
 #   cron.triggered     — cron job fires / 定时任务触发
 #   permission.requested — agent asks for permission / Agent 请求权限
 #   error              — an error occurs / 发生错误
@@ -1076,6 +1099,11 @@ app_secret = "your-feishu-app-secret"
 # domain = "https://open.feishu.cn"  # Optional runtime API/WebSocket base URL override / 可选：运行时 API/WebSocket 域名覆盖
 # enable_feishu_card = true  # Enable Feishu interactive cards (default: true); set false to force plain-text replies
 #                              # 启用飞书交互式卡片（默认 true）；设为 false 时强制回退纯文本回复
+# print_frequency_ms = 50  # Typewriter interval: 20–1000 ms; lower = faster / 打字间隔，越小越快
+#                           # Example only; omit to retain Feishu defaults / 仅为示例；不配置则沿用飞书默认值
+# print_step = 2           # Characters per tick: 1–1000 / 每次上屏字符数
+# print_strategy = "fast"  # fast flushes pending text; delay queues it / fast 快速上屏，delay 排队
+#                         # Omitted values use Feishu defaults / 未配置沿用飞书默认
 # allow_from = "*"          # Allowed user open_ids, comma-separated; "*" = all (default). Use /whoami to get your open_id.
 #                              # 允许的用户 open_id，逗号分隔；"*" 表示所有（默认）。发送 /whoami 获取你的 open_id。
 # allow_chat = "*"          # Allowed group chat_ids, comma-separated; "*" = all (default). Find chat_id in group settings.
@@ -1090,8 +1118,14 @@ app_secret = "your-feishu-app-secret"
 #                           # Agent 完成回复后添加的表情回复（如 "Done"）；设为 "none" 可禁用
 # group_reply_all = false   # If true, respond to ALL group messages without requiring @mention
 #                           # 设为 true 时，群聊中无需 @机器人 也会响应所有消息（默认 false）
-# skip_when_mention_others = false # If true, with group_reply_all enabled, ignore messages that @ others but not this bot
-#                                  # 设为 true 且开启 group_reply_all 时，@其他人但未 @本机器人 的消息不会触发
+# skip_when_mention_others = false # If true, with group_reply_all or group_reply_all_chats enabled, ignore messages that @ others but not this bot
+#                                  # 设为 true 且开启 group_reply_all 或 group_reply_all_chats 时，@其他人但未 @本机器人 的消息不会触发
+# group_reply_all_chats = "oc_group_a,oc_group_b" # Only these groups bypass @mention; a non-empty list overrides group_reply_all / require_mention
+#                           # 仅指定群免 @；非空列表优先于 group_reply_all / require_mention，其他群保留原有提及和话题规则
+#                           # Also accepts ["oc_group_a", "oc_group_b"]; omitted/empty keeps existing defaults
+#                           # 也支持字符串数组；未配置或为空时保留默认行为。allow_from / allow_chat 仍然生效
+#                           # Receiving unmentioned messages requires the published im:message.group_msg permission
+#                           # 接收未 @ 的群消息需要申请并发布 im:message.group_msg 权限
 # share_session_in_channel = false  # If true, all users in a group share one agent session
 #                                   # 设为 true 时，群聊内所有用户共享同一个 Agent 会话
 # thread_isolation = false  # If true, group messages use Feishu reply threads as session boundaries (one thread/root = one agent session and, in multi-workspace mode, one workspace binding)
@@ -1123,6 +1157,21 @@ app_secret = "your-feishu-app-secret"
 #                              # 都是独立事件，cc-connect 会在窗口内将它们合并成一条多图消息再分发；如果你的
 #                              # 网络或设备发送间隔超过 500ms 且仍被拆成多轮，可调高（如 800–1200ms）；如果
 #                              # 只是单图发送，希望响应更快，也可以适当调低。
+# inbound_coalesce_window_ms = 0 # Optional quiet window for plain text/image bursts (0 disables; maximum 60000ms).
+#                               # Commands, permission replies and quoted messages remain immediate. Plain text also waits when enabled.
+#                               # Applies after image batching; include image_batch_window_ms when considering total delay.
+#                               # 普通文字和图片的可选合批窗口，默认关闭；开启后普通文字也会等待，图片另计上面的合批延迟。
+#                               # 命令、权限回复及引用消息不等待此窗口。
+# attachment_wait = "off"   # With thread_isolation, how unmentioned attachments (image/file/video) in an
+#                           # active topic are handled. "off" (default): dispatch at once, as today.
+#                           # "mention": hold them per topic and sender; the same sender's next @bot message
+#                           # in that topic is dispatched with them attached. Unmentioned text never releases them.
+#                           # 开启 thread_isolation 时，已活跃话题里未 @ 的附件（图片/文件/视频）怎么处理。
+#                           # "off"（默认）：立即分发，与现在一致；"mention"：按话题 + 发送人暂存，等同一发送人
+#                           # 在该话题下一次 @机器人 时一起分发。未 @ 的文字不会放行。
+# attachment_wait_secs = 1800 # "mention" only: staged attachments are dropped after this many seconds (1–86400),
+#                             # and a topic stops counting as active after this long without an @bot message.
+#                             # 仅 "mention" 生效：暂存超过该秒数即丢弃；话题超过该时长没有 @机器人 也不再算活跃。
 
 # Lark (International Version) / Lark 国际版
 # Lark now supports WebSocket long-connection too; webhook mode is only needed
@@ -1146,6 +1195,11 @@ app_secret = "your-feishu-app-secret"
 # callback_path = "/feishu/webhook"  # Webhook callback path / Webhook 回调路径
 # encrypt_key = ""               # Event encrypt key (optional) / 事件加密密钥（可选）
 # enable_feishu_card = true
+# print_frequency_ms = 50  # Typewriter interval: 20–1000 ms; lower = faster / 打字间隔，越小越快
+#                           # Example only; omit to retain Feishu defaults / 仅为示例；不配置则沿用飞书默认值
+# print_step = 2           # Characters per tick: 1–1000 / 每次上屏字符数
+# print_strategy = "fast"  # fast flushes pending text; delay queues it / fast 快速上屏，delay 排队
+#                         # Omitted values use Feishu defaults / 未配置沿用飞书默认
 # allow_from = "*"
 # reaction_emoji = "OnIt"
 # done_emoji = "none"
@@ -1172,6 +1226,8 @@ app_secret = "your-feishu-app-secret"
 #                                 # Agent 完成回复后添加的表情回复（如 "🥳Done"）；设为 "none" 可禁用
 # card_final_preview_message = false # After an AI Card turn, send a separate Markdown summary
 #                                    # AI 卡片完成后额外发送一条普通 Markdown 摘要，用于刷新会话列表预览
+# at_mention_groups = false # Use text msgtype for group replies so @userId mentions are clickable (DingTalk only highlights @ in text); default false keeps markdown/card behavior
+#                           # 群回复改用 text 消息类型以携带可点击的 @ 提及（DingTalk 仅在 text msgtype 中高亮 @），默认 false 保持原有 markdown/卡片行为
 
 # WPS Xiezuo / WPS 协作 (uncomment to enable / 取消注释以启用)
 # 1. Create a WPS Open Platform app and enable event WebSocket delivery
@@ -1319,9 +1375,12 @@ app_secret = "your-feishu-app-secret"
 # share_session_in_channel = false  # If true, all users in a channel share one agent session / 频道共享会话
 # session_scope = "user"  # Session granularity: "user" (default, per channel+user) |
 #                         # "channel" (one session per channel, same as share_session_in_channel) |
-#                         # "thread" (one session per Slack thread — a new top-level message starts
-#                         #  a fresh session, replies in the same thread continue it).
-#                         # 会话粒度："user"(默认) | "channel"(整个频道一个会话) | "thread"(每个 Slack 话题串一个会话)
+#                         # "thread" (one session per Slack thread — a new top-level channel message
+#                         #  starts a fresh session, replies in the same thread continue it; top-level
+#                         #  DMs are not split: they stay one continuous per-user session; only
+#                         #  replies inside a DM thread get a per-thread session).
+#                         # 会话粒度："user"(默认) | "channel"(整个频道一个会话) | "thread"(每个 Slack 话题串一个会话；
+#                         #  私信里的顶层消息不拆分，仍是同一个连续会话，只有在私信的话题串里回复才单独成会话)
 
 # Google Chat (uncomment to enable / 取消注释以启用)
 # Uses a registered Google Chat app whose Cloud Pub/Sub connection publishes
@@ -1625,6 +1684,8 @@ app_secret = "your-feishu-app-secret"
 #
 # Optional: prepend a UTF-8 instructions file to every turn, reloading changes each time.
 # instructions_file = "/path/to/AGENTS.md"
+# /memory and /cron setup write <work_dir>/AGENTS.md, which Cursor loads on its own.
+# /memory 与 /cron setup 写入 <work_dir>/AGENTS.md，Cursor 会自行加载。
 #
 # Mode options / 模式说明:
 # - "default": Trust workspace, ask before tool use / 信任工作区，工具调用前询问
@@ -1736,11 +1797,35 @@ app_secret = "your-feishu-app-secret"
 # Requires a Codex version that confirms activePermissionProfile; see docs/usage.md.
 # 需要支持 activePermissionProfile 的 Codex 版本；详见 docs/usage.zh-CN.md。
 #
+# Optional (app_server only): minutes to wait for an AskUserQuestion answer
+# before declining it. Default 5; values <= 0 or invalid fall back to 5.
+# 可选（仅 app_server）：等待 AskUserQuestion 回答的分钟数，超时后拒绝。
+# 默认 5；<= 0 或无效值回退为 5。
+# request_user_input_timeout_mins = 5
+#
 # Mode options / 模式说明:
 # - "suggest":   read-only; app_server requests approval when needed, exec cannot prompt / 只读；app_server 按需请求审批，exec 无交互审批
 # - "auto-edit": workspace-write with no approval prompts (same as full-auto) / 工作区可写，无审批提示（等同 full-auto）
 # - "full-auto": auto-approve everything with workspace sandbox / 全部自动通过，工作区沙箱保护
 # - "yolo":      bypass all approvals and sandbox (dangerous) / 跳过所有审批和沙箱（危险）
+#
+# Optional: isolated Codex home / 可选：独立的 Codex home
+# Exported as CODEX_HOME for this project, so it does not share threads and
+# writer locks with the Codex desktop app. The path must be absolute and must
+# already exist; it is not ~-expanded and cc-connect does not create it for a
+# subscription login. Create it and copy the login files before the first
+# message, then set the absolute path:
+#   mkdir -p /path/to/codex-home
+#   cp ~/.codex/auth.json ~/.codex/config.toml /path/to/codex-home/
+# / 作为本项目的 CODEX_HOME 导出，避免与 Codex 桌面应用共享线程和写锁。路径必须
+# 是已存在的绝对路径，不会展开 ~，订阅登录时 cc-connect 也不会创建它。请先创建
+# 目录并复制登录文件，再填写绝对路径：
+#   mkdir -p /path/to/codex-home
+#   cp ~/.codex/auth.json ~/.codex/config.toml /path/to/codex-home/
+# Trade-off: sessions in this home are not visible in the Codex desktop app,
+# and its threads cannot be resumed here.
+# 取舍：该 home 中的会话不会出现在 Codex 桌面应用，桌面应用的会话也无法在这里恢复。
+# codex_home = "/path/to/codex-home"
 #
 # Optional: specify a model / 可选：指定模型
 # model = "gpt-6.1-sol"
@@ -1836,6 +1921,9 @@ app_secret = "your-feishu-app-secret"
 # http_url = ""                    # optional: OneBot HTTP API URL for file operations, e.g. "http://127.0.0.1:3000"
 #                                  # Required for SendFile. Useful when OneBot runs in WSL/Docker.
 #                                  # 可选：OneBot HTTP API 地址，用于文件发送。OneBot 在 WSL/Docker 中时必须配置。
+# send_via_http = false            # optional: send text replies via http_url instead of WebSocket (requires http_url).
+#                                  # Enable if long replies fail with "qq: API send_group_msg timeout" (WS has a 15s limit).
+#                                  # 可选：文本回复改走 HTTP API（需配置 http_url）。长回复出现 WS 15 秒超时时开启。
 # allow_from = "*"                 # allowed QQ user IDs, e.g. "12345,67890" or "*" for all
 #                                  # 允许的 QQ 号，如 "12345,67890"，"*" 表示所有
 # share_session_in_channel = false  # If true, all users in a group share one agent session / 群聊共享会话
@@ -2344,6 +2432,18 @@ app_secret = "your-feishu-app-secret"
 # 需要安装：本地已安装 agy 命令 (参考 https://antigravity.google/docs/cli-overview)
 # Antigravity CLI uses `agy -p` under the hood.
 # Antigravity CLI 底层使用 `agy -p` 命令。
+# Headless mode cannot interactively approve tools that require confirmation.
+# Tools may be auto-denied with a stderr notice even when agy exits 0.
+# Prefer scoped permissions.allow rules in ~/.gemini/antigravity-cli/settings.json.
+# For trusted unattended workloads, explicitly set mode = "yolo" below to avoid
+# approval blocking. This approves ALL tools, including shell commands and file
+# writes; use only with trusted prompts and an appropriately isolated workspace.
+# The default is not changed automatically, and chat approval buttons cannot be
+# assumed to override the current official CLI's headless permission policy.
+# 无头模式无法交互确认权限；工具可能被拒绝但 agy 仍退出 0。优先配置精确 allow-list。
+# 可信的无人值守任务可显式设置 mode = "yolo"，但它会批准所有命令和文件写入。
+# 不会自动修改默认权限；当前官方 CLI 的无头权限策略不能保证由聊天按钮覆盖。
+# Official reference: https://antigravity.google/docs/cli/headless/
 #
 # [[projects]]
 # name = "my-antigravity-project"
@@ -2358,7 +2458,7 @@ app_secret = "your-feishu-app-secret"
 # timeout_mins = 30  # Timeout per conversation turn (minutes) / 每次对话超时时间（分钟）
 #
 # Mode options / 模式说明:
-# - "default":   Prompt for approval on each tool use / 每次工具调用都需要确认
+# - "default":   Respect CLI permissions; headless confirmation may be denied / 遵循 CLI 权限，无头确认可能被拒绝
 # - "yolo":      Auto-approve all tool calls (--dangerously-skip-permissions) / 自动批准所有工具调用
 # - "plan":      Read-only plan mode with terminal sandbox constraints (--sandbox) / 只读沙箱规划模式
 #

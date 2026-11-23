@@ -1,8 +1,10 @@
 package wecom
 
 import (
+	"crypto/rand"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/chenhg5/cc-connect/core"
 )
@@ -81,6 +83,17 @@ func buildWeComTemplateCard(card *core.Card) (map[string]any, error) {
 	if len(buttons) > 0 {
 		payload["card_type"] = "button_interaction"
 		payload["button_list"] = buttons
+		// WeCom marks task_id required for button_interaction and rejects the
+		// message without it (errcode non-zero). On the WebSocket ReplyCard path
+		// the frame is fire-and-forget, so the permission prompt simply never
+		// reaches the user.
+		payload["task_id"] = newCardTaskID()
+		// main_title.title is required for button_interaction as well. Cards
+		// normally carry a header; this keeps a header-less button card
+		// deliverable instead of dropping its prompt.
+		if payload["main_title"] == nil {
+			payload["main_title"] = map[string]string{"title": defaultButtonCardTitle}
+		}
 	} else {
 		payload["card_type"] = "text_notice"
 		// text_notice requires sub_title_text or main_title
@@ -90,6 +103,22 @@ func buildWeComTemplateCard(card *core.Card) (map[string]any, error) {
 	}
 
 	return payload, nil
+}
+
+// defaultButtonCardTitle is the main_title used for button cards that arrive
+// without a header; WeCom requires the field for card_type=button_interaction.
+const defaultButtonCardTitle = "CC-Connect"
+
+// newCardTaskID builds a template_card.task_id. WeCom requires one per
+// button_interaction card, allows only digits, letters and "_-@", caps it at
+// 128 bytes, and requires each task id to be unique per app, so a timestamp is
+// combined with random bytes.
+func newCardTaskID() string {
+	var b [8]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		return fmt.Sprintf("cc_%d", time.Now().UnixNano())
+	}
+	return fmt.Sprintf("cc_%d_%x", time.Now().UnixNano(), b)
 }
 
 // parseWeComPermissionResponse converts WeCom button event_key (e.g. perm:allow, perm:deny)
