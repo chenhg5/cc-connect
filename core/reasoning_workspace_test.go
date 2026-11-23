@@ -74,15 +74,15 @@ func TestReasoningCards_MultiWorkspaceIsolation(t *testing.T) {
 			if a.GetReasoningEffort() != level {
 				t.Errorf("workspace effort not updated")
 			}
-			if s.GetAgentSessionID() != "" {
-				t.Errorf("workspace session not reset")
+			if s.GetAgentSessionID() != "workspace-session" {
+				t.Errorf("workspace session not preserved")
 			}
-			if len(s.GetHistory(10)) != 0 {
-				t.Error("workspace history not cleared")
+			if len(s.GetHistory(10)) != 1 {
+				t.Error("workspace history not preserved")
 			}
 			saved := NewSessionManager(ws.sessions.storePath).GetOrCreateActive(key)
-			if saved.GetAgentSessionID() != "" || len(saved.GetHistory(10)) != 0 {
-				t.Error("workspace reset not saved")
+			if saved.GetAgentSessionID() != "workspace-session" || len(saved.GetHistory(10)) != 1 {
+				t.Error("workspace session changed on disk")
 			}
 			if len(gs.GetHistory(10)) != 1 {
 				t.Error("global history changed")
@@ -125,5 +125,48 @@ func TestReasoning_EmptyEfforts(t *testing.T) {
 	}
 	if a.GetReasoningEffort() != "unchanged" {
 		t.Fatal("empty list action changed agent")
+	}
+}
+
+func TestReasoningPreservesLongSessionAndSupportsClear(t *testing.T) {
+	for _, target := range []string{"high", "off", "default", "clear"} {
+		t.Run(target, func(t *testing.T) {
+			a := &workspaceEffortAgent{effort: "low", levels: []string{"low", "high"}}
+			p := &stubPlatformEngine{n: "test"}
+			e := NewEngine("test", a, []Platform{p}, "", LangEnglish)
+			key := "test:long-context"
+			s := e.sessions.GetOrCreateActive(key)
+			s.SetAgentSessionID("original-id", "test")
+			s.AddHistory("user", "remember this")
+			e.cmdReasoning(p, &Message{SessionKey: key, ReplyCtx: "ctx"}, []string{target})
+			want := ""
+			if target == "high" {
+				want = "high"
+			}
+			if a.GetReasoningEffort() != want {
+				t.Errorf("effort = %q, want %q", a.GetReasoningEffort(), want)
+			}
+			if s.GetAgentSessionID() != "original-id" || len(s.GetHistory(10)) != 1 {
+				t.Fatal("reasoning severed the long session")
+			}
+		})
+	}
+}
+
+func TestReasoningSaveFailurePreservesSelectionAndSession(t *testing.T) {
+	a := &workspaceEffortAgent{levels: []string{"low", "high"}, effort: "low"}
+	p := &stubPlatformEngine{n: "test"}
+	e := NewEngine("test", a, []Platform{p}, "", LangEnglish)
+	e.SetReasoningSaveFunc(func(string) error { return fmt.Errorf("read-only config") })
+	key := "test:save-failure"
+	s := e.sessions.GetOrCreateActive(key)
+	s.SetAgentSessionID("original", "test")
+	s.AddHistory("user", "keep")
+	e.cmdReasoning(p, &Message{SessionKey: key, ReplyCtx: "ctx"}, []string{"high"})
+	if a.GetReasoningEffort() != "low" || s.GetAgentSessionID() != "original" || len(s.GetHistory(10)) != 1 {
+		t.Fatal("failed save changed state")
+	}
+	if !strings.Contains(strings.Join(p.getSent(), "\n"), "read-only config") {
+		t.Fatal("save error was hidden")
 	}
 }

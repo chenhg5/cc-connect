@@ -203,6 +203,9 @@ func (as *antigravitySession) buildAntigravityArgs(chatID string, isResume bool,
 	// Prepend extra args from cmd so wrappers like "timeout 3600 agy" work.
 	// Keep "-p <prompt>" at the very end because agy consumes the immediate next arg.
 	args := append([]string{}, as.extraArgs...)
+	if as.model != "" {
+		args = append(args, "--model", as.model)
+	}
 	if agyConfigDir != "" {
 		// Antigravity currently names this compatibility flag --gemini_dir.
 		args = append(args, "--gemini_dir="+agyConfigDir, "--print-timeout=24h")

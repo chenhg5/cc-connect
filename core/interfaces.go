@@ -478,6 +478,11 @@ type ModelSwitcher interface {
 	AvailableModels(ctx context.Context) []ModelOption
 }
 
+// ModelValidator rejects invalid selections before configuration or sessions change.
+type ModelValidator interface {
+	ValidateModel(ctx context.Context, model string) error
+}
+
 // ReasoningEffortSwitcher is an optional interface for agents that support
 // runtime switching of reasoning effort.
 type ReasoningEffortSwitcher interface {

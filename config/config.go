@@ -1381,6 +1381,13 @@ func SaveAgentModel(projectName, model string) error {
 	return patchProjectAgentOption(projectName, "model", model)
 }
 
+// SaveAgentReasoningEffort persists the selection; an empty value uses CLI defaults.
+func SaveAgentReasoningEffort(projectName, effort string) error {
+	configMu.Lock()
+	defer configMu.Unlock()
+	return patchProjectAgentOption(projectName, "reasoning_effort", effort)
+}
+
 // AddProviderToConfig adds a provider to a project's agent config and saves.
 func AddProviderToConfig(projectName string, provider ProviderConfig) error {
 	configMu.Lock()
@@ -3031,6 +3038,10 @@ func patchProjectAgentOption(projectName, key, value string) error {
 	}
 	if projectIdx < 0 {
 		return fmt.Errorf("project %q not found in config", projectName)
+	}
+
+	if key == "reasoning_effort" && cfg.Projects[projectIdx].Agent.Type == "pi" {
+		key = "thinking"
 	}
 
 	lines, hadTrailing := splitConfigLines(raw)

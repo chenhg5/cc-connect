@@ -5549,7 +5549,7 @@ func TestCmdReasoning_UsageListsAgentEfforts(t *testing.T) {
 	})
 }
 
-func TestCmdReasoning_SwitchesEffortAndResetsSession(t *testing.T) {
+func TestCmdReasoning_SwitchesEffortAndPreservesSession(t *testing.T) {
 	p := &stubPlatformEngine{n: "plain"}
 	agent := &stubModelModeAgent{}
 	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
@@ -5564,11 +5564,11 @@ func TestCmdReasoning_SwitchesEffortAndResetsSession(t *testing.T) {
 	if agent.reasoningEffort != "high" {
 		t.Fatalf("reasoning effort = %q, want high", agent.reasoningEffort)
 	}
-	if s.GetAgentSessionID() != "" {
-		t.Fatalf("AgentSessionID = %q, want cleared", s.GetAgentSessionID())
+	if s.GetAgentSessionID() != "existing-session" {
+		t.Fatalf("AgentSessionID = %q, want preserved", s.GetAgentSessionID())
 	}
-	if len(s.History) != 0 {
-		t.Fatalf("history length = %d, want 0", len(s.History))
+	if len(s.History) != 1 {
+		t.Fatalf("history length = %d, want 1", len(s.History))
 	}
 	if len(p.sent) != 1 || !strings.Contains(p.sent[0], "Reasoning effort switched to `high`") {
 		t.Fatalf("sent = %v, want reasoning changed message", p.sent)
@@ -5699,8 +5699,8 @@ func TestCmdReasoning_MultiWorkspaceSavesToWorkspaceSessions(t *testing.T) {
 	if wsAgent.reasoningEffort != "high" {
 		t.Fatalf("workspace agent reasoning effort = %q, want high", wsAgent.reasoningEffort)
 	}
-	if got := wsSession.GetAgentSessionID(); got != "" {
-		t.Fatalf("workspace session id = %q, want cleared", got)
+	if got := wsSession.GetAgentSessionID(); got != "ws-session-id" {
+		t.Fatalf("workspace session id = %q, want preserved", got)
 	}
 	if got := globalSession.GetAgentSessionID(); got != "global-session-id" {
 		t.Fatalf("global session id = %q, want untouched", got)

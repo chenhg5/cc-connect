@@ -2796,3 +2796,20 @@ type reasoningJourneyPlatform struct {
 func (p *reasoningJourneyPlatform) SetCardNavigationHandler(h CardNavigationHandler) {
 	p.navigation = h
 }
+
+func TestCUJ_R2_ReasoningSwitchAndClearKeepLongContext(t *testing.T) {
+	p := &stubPlatformEngine{n: "test"}
+	a := &workspaceEffortAgent{levels: []string{"low", "high"}, effort: "low"}
+	e := NewEngine("test", a, []Platform{p}, "", LangEnglish)
+	key := "test:long-context"
+	session := e.sessions.GetOrCreateActive(key)
+	session.SetAgentSessionID("native-long-session", "test")
+	session.AddHistory("user", "LONG_CONTEXT_STILL_AVAILABLE")
+	for _, content := range []string{"/reasoning high", "/reasoning clear", "/history"} {
+		e.ReceiveMessage(p, &Message{SessionKey: key, Content: content, ReplyCtx: "ctx", UserID: "u1"})
+	}
+	sent := strings.Join(p.getSent(), "\n")
+	if !strings.Contains(sent, "Reasoning effort switched to `high`") || !strings.Contains(sent, "not set, using default") || !strings.Contains(sent, "LONG_CONTEXT_STILL_AVAILABLE") {
+		t.Fatalf("user lost context after switching: %s", sent)
+	}
+}

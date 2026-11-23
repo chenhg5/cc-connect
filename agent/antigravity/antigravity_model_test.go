@@ -1,6 +1,10 @@
 package antigravity
 
 import (
+	"context"
+	"encoding/json"
+	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/chenhg5/cc-connect/core"
@@ -54,4 +58,64 @@ func TestGetModel_PrefersActiveProviderModel(t *testing.T) {
 	if got := a.GetModel(); got != "gemini-2.5-pro" {
 		t.Fatalf("GetModel() = %q, want gemini-2.5-pro", got)
 	}
+}
+
+func TestAvailableModelsUsesAgySubscriptionCatalog(t *testing.T) {
+	t.Setenv("GEMINI_API_KEY", "")
+	t.Setenv("GOOGLE_API_KEY", "")
+	cmd := filepath.Join(t.TempDir(), "agy")
+	if err := os.WriteFile(cmd, []byte("#!/bin/sh\nprintf 'gemini-pro-orchestrator-neon\tOrchestrator (Neon)\n'\n"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	a := &Agent{cmd: cmd, activeIdx: -1, workDir: t.TempDir()}
+	got := a.AvailableModels(context.Background())
+	if len(got) != 1 || got[0].Name != "gemini-pro-orchestrator-neon" {
+		t.Fatalf("subscription catalog = %+v", got)
+	}
+}
+
+func TestValidateModelRejectsInvalidAndAllowsEffortBaseIDs(t *testing.T) {
+	a := &Agent{activeIdx: 0, providers: []core.ProviderConfig{{Models: []core.ModelOption{{Name: "gemini-4-neon-high", Desc: "Gemini 4 Neon (High)"}, {Name: "gemini-pro-orchestrator-neon", Desc: "Orchestrator (Neon)"}}}}}
+	for _, id := range []string{"gemini-4-neon", "Gemini 4 Neon (High)", "gemini-pro-orchestrator-neon"} {
+		if err := a.ValidateModel(context.Background(), id); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := a.ValidateModel(context.Background(), "nonexistent-model"); err == nil {
+		t.Fatal("accepted invalid model")
+	}
+	a.effort = "high"
+	a.SetModel("gemini-pro-orchestrator-neon")
+	if a.GetReasoningEffort() != "" || len(a.AvailableReasoningEfforts()) != 0 {
+		t.Fatal("orchestrator kept effort")
+	}
+}
+
+func TestOrchestratorSettingsAndStaleEffortReachTheSession(t *testing.T) {
+	a := &Agent{cmd: "echo", workDir: t.TempDir(), model: "gemini-pro-orchestrator-neon", effort: "high", planner: "Gemini 4 Neon (High)", executor: "Gemini 4 Hydrogen (High)", mode: "yolo", activeIdx: -1}
+	session, err := a.StartSession(context.Background(), "long-native-session")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer session.Close()
+	s := session.(*antigravitySession)
+	args := s.buildAntigravityArgs("long-native-session", true, "yolo", "", "continue")
+	for _, arg := range args {
+		if arg == "--effort" {
+			t.Fatal("orchestrator got stale effort")
+		}
+	}
+	for i, arg := range args {
+		if arg == "--settings" && i+1 < len(args) {
+			var settings map[string]map[string]string
+			if err := json.Unmarshal([]byte(args[i+1]), &settings); err != nil {
+				t.Fatal(err)
+			}
+			if settings["orchestrator"]["planner"] != "Gemini 4 Neon (High)" || settings["orchestrator"]["executor"] != "Gemini 4 Hydrogen (High)" {
+				t.Fatalf("settings=%v", settings)
+			}
+			return
+		}
+	}
+	t.Fatal("missing orchestrator settings")
 }

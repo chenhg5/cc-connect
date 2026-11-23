@@ -1,6 +1,11 @@
 package core
 
-import "testing"
+import (
+	"context"
+	"fmt"
+	"strings"
+	"testing"
+)
 
 func TestResolveModelAlias_CaseInsensitive(t *testing.T) {
 	models := []ModelOption{{Name: "gpt-5.3-codex", Alias: "Codex"}}
@@ -43,5 +48,32 @@ func TestParseModelSwitchArgs(t *testing.T) {
 				t.Fatalf("parseModelSwitchArgs() = %q, want %q", got, tt.want)
 			}
 		})
+	}
+}
+
+type validatingModelAgent struct{ stubModelModeAgent }
+
+func (a *validatingModelAgent) ValidateModel(_ context.Context, model string) error {
+	if model != "valid" {
+		return fmt.Errorf("unknown model")
+	}
+	return nil
+}
+func TestModelValidationRunsBeforeSavingAndPreservesSession(t *testing.T) {
+	a := &validatingModelAgent{stubModelModeAgent: stubModelModeAgent{model: "original"}}
+	p := &stubPlatformEngine{n: "test"}
+	e := NewEngine("test", a, []Platform{p}, "", LangEnglish)
+	saves := 0
+	e.SetModelSaveFunc(func(string) error { saves++; return nil })
+	key := "test:invalid-model"
+	s := e.sessions.GetOrCreateActive(key)
+	s.SetAgentSessionID("long-native-session", "test")
+	s.AddHistory("user", "keep")
+	e.cmdModel(p, &Message{SessionKey: key, ReplyCtx: "ctx"}, []string{"invalid"})
+	if saves != 0 || a.GetModel() != "original" || s.GetAgentSessionID() != "long-native-session" || len(s.GetHistory(10)) != 1 {
+		t.Fatal("rejected model changed config or session")
+	}
+	if !strings.Contains(strings.Join(p.getSent(), "\n"), "unknown model") {
+		t.Fatal("missing validation error")
 	}
 }
