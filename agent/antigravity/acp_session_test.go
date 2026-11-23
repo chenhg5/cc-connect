@@ -123,15 +123,18 @@ func TestAgyACPMultipleSupplementsHaveOneResult(t *testing.T) {
 	if !ok {
 		t.Fatal("missing mid-turn input capability")
 	}
-	if err := sender.SendMidTurn("second", "", nil, nil); err != nil {
-		t.Fatal(err)
-	}
+	second := make(chan error, 1)
+	go func() { second <- sender.SendMidTurn("second", "", nil, nil) }()
+	nextAgyACPEvent(t, s, core.EventToolUse)
 	select {
 	case event := <-s.Events():
 		t.Fatalf("handover ended early: %+v", event)
 	case <-time.After(30 * time.Millisecond):
 	}
 	if err := sender.SendMidTurn("last", "", nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := <-second; err != nil {
 		t.Fatal(err)
 	}
 	if got := nextAgyACPEvent(t, s, core.EventText).Content; got != "THIRD8767" {
@@ -164,14 +167,17 @@ func TestAgyACPCancelAfterHandoverKeepsSessionUsable(t *testing.T) {
 		t.Fatal(err)
 	}
 	nextAgyACPEvent(t, s, core.EventToolUse)
-	if err := s.Send("second", "", nil, nil); err != nil {
-		t.Fatal(err)
-	}
+	second := make(chan error, 1)
+	go func() { second <- s.Send("second", "", nil, nil) }()
+	nextAgyACPEvent(t, s, core.EventToolUse)
 	canceller, ok := s.(interface{ CancelTurn() error })
 	if !ok {
 		t.Fatal("missing cancellation")
 	}
 	if err := canceller.CancelTurn(); err != nil {
+		t.Fatal(err)
+	}
+	if err := <-second; err != nil {
 		t.Fatal(err)
 	}
 	nextAgyACPEvent(t, s, core.EventResult)
@@ -297,6 +303,123 @@ func TestAgyACPRejectedPromptReturnsToQueueWithoutFailingOriginal(t *testing.T) 
 	nextAgyACPEvent(t, s, core.EventResult)
 }
 
+func TestAgyACPOptionalStartupCompatibility(t *testing.T) {
+	for _, tc := range []struct {
+		name, mode, model, effort, reply string
+		succeeds                         bool
+	}{
+		{"unsupported defaults", "default", "fixture-model", "high", "unsupported", true},
+		{"authorization is fatal", "default", "fixture-model", "high", "authorization", false},
+		{"sandbox mode is required", "plan", "", "", "unsupported", false},
+		{"transport error is fatal", "default", "fixture-model", "high", "disconnect", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			s, err := newAgyACPSession(ctx, os.Args[0], []string{"-test.run=^TestAgyACPHelperProcess$", "--"}, t.TempDir(), tc.model, tc.effort, tc.mode, "", []string{"CC_AGY_ACP_FIXTURE=1", "CC_AGY_OPTION_REPLY=" + tc.reply}, 0, 0)
+			if s != nil {
+				defer func() { _ = s.Close() }()
+			}
+			if (err == nil) != tc.succeeds {
+				t.Fatalf("unexpected start result: %v", err)
+			}
+		})
+	}
+}
+
+func TestAgyACPRejectAfterOriginalResponse(t *testing.T) {
+	s := startAgyACPFixture(t)
+	if err := s.Send("first", "", nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	nextAgyACPEvent(t, s, core.EventToolUse)
+	if err := s.Send("refuse-late", "", nil, nil); err == nil || !strings.Contains(err.Error(), "input rejected") {
+		t.Fatalf("missing definite rejection: %v", err)
+	}
+	if got := nextAgyACPEvent(t, s, core.EventText).Content; got != "FIRST8767" {
+		t.Fatal(got)
+	}
+	if got := nextAgyACPEvent(t, s, core.EventResult); !got.Done || got.InputTokens != 100 {
+		t.Fatalf("original result: %+v", got)
+	}
+}
+
+func TestAgyACPNumericStringResponse(t *testing.T) {
+	s := startAgyACPFixture(t)
+	if err := s.Send("quoted", "", nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	if got := nextAgyACPEvent(t, s, core.EventResult); !got.Done || got.InputTokens != 1 {
+		t.Fatalf("response was not correlated: %+v", got)
+	}
+}
+
+func TestAgyACPStalledSupplementHasBoundedResult(t *testing.T) {
+	s := startAgyACPFixture(t)
+	if err := s.Send("first", "", nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	nextAgyACPEvent(t, s, core.EventToolUse)
+	result := make(chan error, 1)
+	go func() { result <- s.Send("stall-late", "", nil, nil) }()
+	acp := s.(*agyACPSession)
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		acp.stateMu.Lock()
+		settled := acp.usage.InputTokens == 100
+		if settled {
+			if remaining := time.Until(acp.turnDeadline); remaining <= 0 || remaining > agyACPSettlementTimeout {
+				acp.stateMu.Unlock()
+				t.Fatalf("settled predecessor left unbounded turn: %v", remaining)
+			}
+			acp.armACPTurnTimeout(time.Millisecond)
+		}
+		acp.stateMu.Unlock()
+		if settled {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("original did not settle")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	select {
+	case err := <-result:
+		if err == nil || !strings.Contains(err.Error(), "timed out") {
+			t.Fatalf("unexpected send response: %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("send stayed blocked")
+	}
+	next := func() core.Event {
+		t.Helper()
+		select {
+		case got := <-s.Events():
+			return got
+		case <-time.After(time.Second):
+			t.Fatal("missing terminal sequence")
+			return core.Event{}
+		}
+	}
+	if got := next(); got.Type != core.EventText || got.Content != "FIRST8767" {
+		t.Fatalf("original text lost: %+v", got)
+	}
+	if got := next(); got.Type != core.EventError {
+		t.Fatalf("missing timeout error: %+v", got)
+	}
+	if got := next(); got.Type != core.EventResult || !got.Done || got.InputTokens != 100 {
+		t.Fatalf("original result lost: %+v", got)
+	}
+	if s.Alive() {
+		t.Fatal("timed-out process could emit into another turn")
+	}
+	select {
+	case got := <-s.Events():
+		t.Fatalf("unexpected extra event: %+v", got)
+	case <-time.After(50 * time.Millisecond):
+	}
+}
+
 // The helper models agy's measured prompt handover, including an old
 // end_turn response followed by continued output on the new prompt.
 func TestAgyACPHelperProcess(t *testing.T) {
@@ -347,10 +470,28 @@ func TestAgyACPHelperProcess(t *testing.T) {
 		case "session/new", "session/resume":
 			respond(request.ID, map[string]any{"sessionId": "fixture-session"})
 		case "session/set_model", "session/set_config_option", "session/set_mode":
-			respond(request.ID, map[string]any{})
+			switch os.Getenv("CC_AGY_OPTION_REPLY") {
+			case "unsupported":
+				write(map[string]any{"jsonrpc": "2.0", "id": request.ID, "error": map[string]any{"code": -32603, "message": "method not supported by this agent"}})
+			case "authorization":
+				write(map[string]any{"jsonrpc": "2.0", "id": request.ID, "error": map[string]any{"code": -32603, "message": "authorization denied"}})
+			case "disconnect":
+				os.Exit(2)
+			default:
+				respond(request.ID, map[string]any{})
+			}
 		case "session/prompt":
 			text := request.Params.Prompt[0].Text
-			if text == "refuse" {
+			if text == "refuse-late" || text == "stall-late" {
+				update(map[string]any{"sessionUpdate": "agent_message_chunk", "content": map[string]any{"type": "text", "text": "FIRST8767"}})
+				end(first, 100, 200, 10)
+				if text == "refuse-late" {
+					write(map[string]any{"jsonrpc": "2.0", "id": request.ID, "error": map[string]any{"code": -32603, "message": "input rejected"}})
+				}
+			} else if text == "quoted" {
+				id, _ := json.Marshal(string(request.ID))
+				end(id, 1, 2, 3)
+			} else if text == "refuse" {
 				write(map[string]any{"jsonrpc": "2.0", "id": request.ID, "error": map[string]any{"code": -32603, "message": "running prompt is waiting for a question answer"}})
 				update(map[string]any{"sessionUpdate": "agent_message_chunk", "content": map[string]any{"type": "text", "text": "FIRST8767"}})
 				end(first, 100, 200, 10)
@@ -380,6 +521,7 @@ func TestAgyACPHelperProcess(t *testing.T) {
 				}
 				if many && text != "last" {
 					first = current
+					update(map[string]any{"sessionUpdate": "tool_call", "toolCallId": "accepted", "name": "run_command", "status": "in_progress"})
 					continue
 				}
 				if !waitPermission {

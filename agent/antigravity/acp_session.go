@@ -5,8 +5,10 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -45,10 +47,23 @@ type agyACPReply struct {
 }
 
 type agyACPPrompt struct {
-	// A prior prompt's response acknowledges the native handover. A
-	// rejection before that point is returned to the engine for queuing.
+	// Resolve the send only from this prompt's own reply, never from a predecessor.
 	handover chan error
 }
+
+type agyACPRPCError struct {
+	Code    int    `json:"code"`
+	Message string `json:"message"`
+}
+
+func (e *agyACPRPCError) Error() string {
+	return fmt.Sprintf("%d: %s", e.Code, e.Message)
+}
+
+const (
+	agyACPDefaultTurnTimeout = 15 * time.Minute
+	agyACPSettlementTimeout  = 45 * time.Second
+)
 
 type agyACPPermission struct {
 	id      json.RawMessage
@@ -77,6 +92,7 @@ type agyACPSession struct {
 	turnError         error
 	turnTimer         *time.Timer
 	turnSequence      uint64
+	turnDeadline      time.Time
 	usageIncomplete   bool
 	contextPrompt     int64
 }
@@ -155,21 +171,51 @@ func (s *agyACPSession) initializeACP(resumeID string) error {
 	}
 	s.chatID.Store(created.SessionID)
 	if s.model != "" {
-		if _, err := s.callACP("session/set_model", map[string]any{"sessionId": created.SessionID, "modelId": s.model}); err != nil {
+		if err := s.setACPOption("session/set_model", map[string]any{"sessionId": created.SessionID, "modelId": s.model}, true); err != nil {
 			return err
 		}
 	}
 	if s.effort != "" {
-		if _, err := s.callACP("session/set_config_option", map[string]any{"sessionId": created.SessionID, "configId": "thought_level", "value": s.effort}); err != nil {
+		if err := s.setACPOption("session/set_config_option", map[string]any{"sessionId": created.SessionID, "configId": "thought_level", "value": s.effort}, true); err != nil {
 			return err
 		}
 	}
 	if s.mode != "yolo" {
-		if _, err := s.callACP("session/set_mode", map[string]any{"sessionId": created.SessionID, "modeId": s.mode}); err != nil {
+		if err := s.setACPOption("session/set_mode", map[string]any{"sessionId": created.SessionID, "modeId": s.mode}, s.mode == "" || s.mode == "default"); err != nil {
 			return err
 		}
 	}
 	return nil
+}
+
+func (s *agyACPSession) setACPOption(method string, params map[string]any, optional bool) error {
+	_, err := s.callACP(method, params)
+	if ctxErr := s.ctx.Err(); ctxErr != nil {
+		return ctxErr
+	}
+	var rpcErr *agyACPRPCError
+	if optional && errors.As(err, &rpcErr) &&
+		(rpcErr.Code == -32601 || rpcErr.Code == -32603 &&
+			strings.EqualFold(strings.TrimSpace(rpcErr.Message), "method not supported by this agent")) {
+		slog.Warn("antigravity ACP option unsupported, using agent default", "method", method)
+		return nil
+	}
+	return err
+}
+
+// ACP agents may echo a numeric request ID as a JSON string.
+func agyACPResponseID(raw json.RawMessage) string {
+	value := string(raw)
+	if len(raw) > 0 && raw[0] == '"' {
+		if json.Unmarshal(raw, &value) != nil {
+			return ""
+		}
+	}
+	id, err := strconv.ParseInt(value, 10, 64)
+	if err != nil || id <= 0 {
+		return ""
+	}
+	return strconv.FormatInt(id, 10)
 }
 
 func (s *agyACPSession) writeACP(value any) error {
@@ -258,16 +304,11 @@ func (s *agyACPSession) sendACPPrompt(prompt, messageID string, images []core.Im
 	}
 	if !midTurn {
 		s.turnSequence++
-		sequence := s.turnSequence
-		if s.timeout > 0 {
-			s.turnTimer = time.AfterFunc(s.timeout, func() {
-				s.stateMu.Lock()
-				defer s.stateMu.Unlock()
-				if sequence == s.turnSequence && len(s.prompts) > 0 {
-					_ = s.CancelTurn()
-				}
-			})
+		timeout := s.timeout
+		if timeout <= 0 {
+			timeout = agyACPDefaultTurnTimeout
 		}
+		s.armACPTurnTimeout(timeout)
 	}
 	s.stateMu.Unlock()
 	if handover != nil {
@@ -275,10 +316,51 @@ func (s *agyACPSession) sendACPPrompt(prompt, messageID string, images []core.Im
 		case err := <-handover:
 			return err
 		case <-s.ctx.Done():
-			return s.ctx.Err()
+			// Timeout may have delivered the definitive outcome before
+			// stopping the process; prefer that result over context cancellation.
+			select {
+			case err := <-handover:
+				return err
+			default:
+				return s.ctx.Err()
+			}
 		}
 	}
 	return nil
+}
+
+// Called with stateMu held. Tightening a deadline never extends the turn.
+func (s *agyACPSession) armACPTurnTimeout(timeout time.Duration) {
+	deadline := time.Now().Add(timeout)
+	if s.turnTimer != nil {
+		if !deadline.Before(s.turnDeadline) {
+			return
+		}
+		s.turnTimer.Stop()
+	}
+	s.turnDeadline = deadline
+	sequence := s.turnSequence
+	s.turnTimer = time.AfterFunc(time.Until(deadline), func() {
+		s.stateMu.Lock()
+		defer s.stateMu.Unlock()
+		if sequence != s.turnSequence || s.turnDeadline != deadline || len(s.prompts) == 0 || s.ctx.Err() != nil {
+			return
+		}
+		err := errors.New("antigravity ACP prompt timed out before a terminal response")
+		// Fence the process: late responses or updates must not contaminate
+		// the next turn. Flush buffered text and counters before stopping it.
+		s.alive.Store(false)
+		for _, pending := range s.prompts {
+			if pending.handover != nil {
+				pending.handover <- err
+			}
+		}
+		clear(s.prompts)
+		s.turnError = err
+		s.usageIncomplete = true
+		s.finishACPTurn()
+		s.cancel()
+	})
 }
 
 func (s *agyACPSession) emitACP(event core.Event) {
@@ -333,32 +415,35 @@ func (s *agyACPSession) dispatchACP(line []byte) {
 		Method string          `json:"method"`
 		Params json.RawMessage `json:"params"`
 		Result json.RawMessage `json:"result"`
-		Error  *struct {
-			Code    int    `json:"code"`
-			Message string `json:"message"`
-		} `json:"error"`
+		Error  *agyACPRPCError `json:"error"`
 	}
 	if json.Unmarshal(line, &message) != nil {
 		return
 	}
 	s.stateMu.Lock()
 	defer s.stateMu.Unlock()
+	if s.ctx.Err() != nil {
+		return
+	}
 	if message.Method != "" {
-		if message.Method == "session/update" && s.ready {
+		if message.Method == "session/update" && s.ready && len(s.prompts) > 0 {
 			s.updateACP(message.Params)
 		}
 		if message.Method == "session/request_permission" {
 			s.permissionACP(message.ID, message.Params)
 		}
-		if message.Method != "session/request_permission" && len(message.ID) > 0 {
+		if message.Method != "session/request_permission" && len(message.ID) > 0 && string(message.ID) != "null" {
 			_ = s.writeACP(map[string]any{"jsonrpc": "2.0", "id": message.ID, "error": map[string]any{"code": -32601, "message": "Method not supported"}})
 		}
 		return
 	}
-	id := string(message.ID)
+	id := agyACPResponseID(message.ID)
+	if id == "" {
+		return
+	}
 	var rpcErr error
 	if message.Error != nil {
-		rpcErr = fmt.Errorf("%d: %s", message.Error.Code, message.Error.Message)
+		rpcErr = message.Error
 	}
 	if ch, ok := s.waiters[id]; ok {
 		delete(s.waiters, id)
@@ -386,17 +471,12 @@ func (s *agyACPSession) dispatchACP(line []byte) {
 	if pending.handover != nil {
 		pending.handover <- rpcErr
 		if rpcErr != nil {
-			// agy can reject an input while a question/permission is pending.
-			// Keep the original turn alive and let the engine queue the input.
+			// No prior completion can acknowledge this send. A rejected supplement
+			// never replaces the original turn's result, regardless of reply order.
+			if len(s.prompts) == 0 {
+				s.finishACPTurn()
+			}
 			return
-		}
-	}
-	for nextID, next := range s.prompts {
-		previous, _ := strconv.ParseInt(id, 10, 64)
-		newer, _ := strconv.ParseInt(nextID, 10, 64)
-		if newer > previous && next.handover != nil {
-			next.handover <- nil
-			next.handover = nil
 		}
 	}
 	if rpcErr != nil {
@@ -419,6 +499,8 @@ func (s *agyACPSession) dispatchACP(line []byte) {
 	// finish the engine turn, cancel its permissions, or drain queued input.
 	if len(s.prompts) == 0 {
 		s.finishACPTurn()
+	} else {
+		s.armACPTurnTimeout(agyACPSettlementTimeout)
 	}
 }
 
@@ -529,6 +611,11 @@ func (s *agyACPSession) RespondPermission(id string, result core.PermissionResul
 }
 
 func (s *agyACPSession) CancelTurn() error {
+	s.stateMu.Lock()
+	if len(s.prompts) > 0 && s.ctx.Err() == nil {
+		s.armACPTurnTimeout(agyACPSettlementTimeout)
+	}
+	s.stateMu.Unlock()
 	return s.writeACP(map[string]any{"jsonrpc": "2.0", "method": "session/cancel", "params": map[string]any{"sessionId": s.CurrentSessionID()}})
 }
 
