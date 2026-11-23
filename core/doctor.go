@@ -72,8 +72,9 @@ type PlatformHealth interface {
 	PlatformHealth() PlatformHealthInfo
 }
 
-// RunDoctorChecks performs all diagnostic checks.
-func RunDoctorChecks(ctx context.Context, agent Agent, platforms []Platform) []DoctorCheckResult {
+// RunDoctorChecks performs all diagnostic checks. dataDir is the configured
+// data directory; empty means the default ~/.cc-connect.
+func RunDoctorChecks(ctx context.Context, agent Agent, platforms []Platform, dataDir string) []DoctorCheckResult {
 	var results []DoctorCheckResult
 
 	results = append(results, checkAgentBinary(ctx, agent)...)
@@ -82,6 +83,7 @@ func RunDoctorChecks(ctx context.Context, agent Agent, platforms []Platform) []D
 	results = append(results, checkSystem(ctx)...)
 	results = append(results, checkDependencies()...)
 	results = append(results, checkNetwork(ctx)...)
+	results = append(results, checkDataDir(dataDir)...)
 
 	if dc, ok := agent.(DoctorChecker); ok {
 		results = append(results, dc.DoctorChecks(ctx)...)
@@ -426,31 +428,25 @@ func checkNetwork(ctx context.Context) []DoctorCheckResult {
 		}
 	}
 
-	// Check data directory
-	if home, err := os.UserHomeDir(); err == nil {
-		dataDir := filepath.Join(home, ".cc-connect")
-		if info, err := os.Stat(dataDir); err != nil {
-			results = append(results, DoctorCheckResult{
-				Name:   "Data Directory",
-				Status: DoctorWarn,
-				Detail: dataDir + " does not exist",
-			})
-		} else if !info.IsDir() {
-			results = append(results, DoctorCheckResult{
-				Name:   "Data Directory",
-				Status: DoctorFail,
-				Detail: dataDir + " is not a directory",
-			})
-		} else {
-			results = append(results, DoctorCheckResult{
-				Name:   "Data Directory",
-				Status: DoctorPass,
-				Detail: dataDir,
-			})
-		}
-	}
-
 	return results
+}
+
+// checkDataDir reports on the effective data directory: the configured
+// data_dir, or ~/.cc-connect when none is configured.
+func checkDataDir(dataDir string) []DoctorCheckResult {
+	if dataDir == "" {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return nil
+		}
+		dataDir = filepath.Join(home, ".cc-connect")
+	}
+	if info, err := os.Stat(dataDir); err != nil {
+		return []DoctorCheckResult{{Name: "Data Directory", Status: DoctorWarn, Detail: dataDir + " does not exist"}}
+	} else if !info.IsDir() {
+		return []DoctorCheckResult{{Name: "Data Directory", Status: DoctorFail, Detail: dataDir + " is not a directory"}}
+	}
+	return []DoctorCheckResult{{Name: "Data Directory", Status: DoctorPass, Detail: dataDir}}
 }
 
 // checkNameZh provides Chinese translations for common check names.

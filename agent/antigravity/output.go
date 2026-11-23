@@ -94,8 +94,11 @@ func (p *agyOutputParser) parseLine(line []byte) (recognized bool, events []core
 		step := envelope.StepUpdate
 		switch step.StepType {
 		case "agent_response":
-			if strings.TrimSpace(step.TextDelta) != "" {
-				p.hasText = true
+			if step.TextDelta != "" {
+				// Whitespace belongs in the stream but does not replace a terminal response.
+				if strings.TrimSpace(step.TextDelta) != "" {
+					p.hasText = true
+				}
 				events = append(events, core.Event{Type: core.EventText, Content: step.TextDelta})
 			}
 		case "tool":

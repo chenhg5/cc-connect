@@ -252,7 +252,18 @@ func TestStreamJSONResult(t *testing.T) {
 		{
 			name:     "whitespace_delta_does_not_hide_terminal_response",
 			output:   `{"event":"step_update","step_update":{"step_type":"agent_response","text_delta":" \t"}}` + "\n" + `{"event":"result","result":{"status":"ERROR","response":"done","error":"historical error"}}`,
-			wantText: "done",
+			wantText: " \tdone",
+		},
+		{
+			name: "whitespace_delta_preserves_streamed_markdown",
+			output: strings.Join([]string{
+				`{"event":"step_update","step_update":{"step_type":"agent_response","text_delta":"- item one"}}`,
+				`{"event":"step_update","step_update":{"step_type":"agent_response","text_delta":"\n"}}`,
+				`{"event":"step_update","step_update":{"step_type":"agent_response","text_delta":"- item two"}}`,
+				`{"event":"result","result":{"conversation_id":"conv-whitespace","status":"ERROR","response":"- item one\n- item two","error":"historical error"}}`,
+			}, "\n"),
+			wantText:    "- item one\n- item two",
+			wantSession: "conv-whitespace",
 		},
 		{
 			name:        "streamed_response_survives_historical_result_error_without_duplication",
@@ -569,9 +580,10 @@ func TestAntigravitySession_ReportsHeadlessExitFailures(t *testing.T) {
 }
 
 func TestRedactAgyStderr_RemovesEnvironmentSecrets(t *testing.T) {
-	got := redactAgyStderr("  denied token=secret-value-123 path=/tmp/project  ", []string{"API_TOKEN=secret-value-123", "PATH=/tmp/project"})
-	if strings.Contains(got, "secret-value-123") || !strings.Contains(got, "/tmp/project") || strings.TrimSpace(got) != got {
-		t.Fatalf("redacted stderr = %q", got)
+	const marker = "stderr redaction marker"
+	got := redactAgyStderr("  denied value="+marker+" path=/tmp/project  ", []string{"API_TOKEN=" + marker, "PATH=/tmp/project"})
+	if want := "denied value=[REDACTED] path=/tmp/project"; got != want {
+		t.Fatal("stderr should redact the sensitive environment value, retain the path, and trim outer whitespace")
 	}
 }
 
