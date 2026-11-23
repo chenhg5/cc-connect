@@ -97,7 +97,11 @@ func TestOrchestratorSettingsAndStaleEffortReachTheSession(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer session.Close()
+	t.Cleanup(func() {
+		if err := session.Close(); err != nil {
+			t.Errorf("close test session: %v", err)
+		}
+	})
 	s := session.(*antigravitySession)
 	args := s.buildAntigravityArgs("long-native-session", true, "yolo", "", "continue")
 	for _, arg := range args {
