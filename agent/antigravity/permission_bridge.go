@@ -100,8 +100,14 @@ func createAgyConfigOverlay(rootDir string) (string, error) {
 		return "", fmt.Errorf("resolve home directory for Agy permission bridge: %w", err)
 	}
 	// Antigravity currently stores its CLI state under .gemini and exposes it
-	// through the --gemini_dir compatibility flag.
+	// through the --gemini_dir compatibility flag. Ensure antigravity-cli exists
+	// in the real config root before mirroring so conversations created under the
+	// overlay are persisted in ~/.gemini/antigravity-cli rather than removed when
+	// the temporary permission overlay directory is cleaned up.
 	realConfigRoot := filepath.Join(homeDir, ".gemini")
+	if err := os.MkdirAll(filepath.Join(realConfigRoot, "antigravity-cli"), 0o700); err != nil {
+		return "", fmt.Errorf("create Agy CLI state directory: %w", err)
+	}
 	overlayConfigRoot := filepath.Join(rootDir, "agy-config")
 	overlayConfigDir := filepath.Join(overlayConfigRoot, "config")
 	if err := os.MkdirAll(overlayConfigDir, 0o700); err != nil {
