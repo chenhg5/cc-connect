@@ -15,12 +15,35 @@ import (
 	"github.com/chenhg5/cc-connect/core"
 )
 
+// Kinds of outbound message a SentMessage can record.
+const (
+	KindReply   = "reply"
+	KindCard    = "card"
+	KindButtons = "buttons"
+	KindPreview = "preview"
+	KindImage   = "image"
+	KindFile    = "file"
+)
+
 // SentMessage captures a single outbound call from cc-connect to the platform.
+//
+// Records are immutable once stored: a preview that cc-connect later edits is
+// replaced in the log by a new SentMessage with the updated Content, so a test
+// holding an older pointer never races with the update.
 type SentMessage struct {
+	Kind     string
 	Content  string
-	Card     *core.Card // non-nil when SendCard/ReplyCard was called
+	Card     *core.Card // non-nil when SendCard/ReplyCard was called in-process
+	CardJSON map[string]any
+	Buttons  [][]core.ButtonOption
 	ReplyCtx any
 	At       time.Time
+
+	// Preview fields: set for KindPreview. Handle identifies the preview,
+	// Updates counts UpdateMessage calls and Deleted marks a removed preview.
+	Handle  string
+	Updates int
+	Deleted bool
 }
 
 // Text returns the displayable text of the message (card fallback if needed).
@@ -32,6 +55,33 @@ func (m *SentMessage) Text() string {
 		return m.Card.RenderText()
 	}
 	return ""
+}
+
+// ButtonValues returns the callback values of every button on the message,
+// whether they came from SendWithButtons or from card action elements.
+func (m *SentMessage) ButtonValues() []string {
+	var out []string
+	for _, row := range m.Buttons {
+		for _, b := range row {
+			out = append(out, b.Data)
+		}
+	}
+	if m.Card != nil {
+		for _, elem := range m.Card.Elements {
+			switch e := elem.(type) {
+			case core.CardActions:
+				for _, b := range e.Buttons {
+					out = append(out, b.Value)
+				}
+			case core.CardListItem:
+				if e.BtnValue != "" {
+					out = append(out, e.BtnValue)
+				}
+			}
+		}
+	}
+	out = append(out, cardJSONButtonValues(m.CardJSON)...)
+	return out
 }
 
 // MockReplyCtx is a simple reply context stored in injected messages.
@@ -50,6 +100,19 @@ type MockPlatform struct {
 	handler core.MessageHandler
 	sent    []*SentMessage
 	notify  chan struct{}
+
+	// self is the core.Platform value the engine was started with. It is the
+	// MockPlatform itself for the legacy profile, or a capability wrapper (see
+	// profile.go). Injected messages are delivered with self so the engine
+	// sees exactly the capabilities of the chosen profile.
+	self core.Platform
+
+	navHandler core.CardNavigationHandler
+	previewSeq int
+
+	// remote, when set, sends injected messages to a cc-connect process over
+	// the bridge instead of calling an in-process handler (see bridge.go).
+	remote Remote
 }
 
 // New creates a named MockPlatform ready for use in tests.
@@ -65,6 +128,13 @@ func New(name string) *MockPlatform {
 func (p *MockPlatform) Name() string { return p.name }
 
 func (p *MockPlatform) Start(handler core.MessageHandler) error {
+	return p.startAs(p, handler)
+}
+
+func (p *MockPlatform) startAs(self core.Platform, handler core.MessageHandler) error {
+	p.mu.Lock()
+	p.self = self
+	p.mu.Unlock()
 	p.handler = handler
 	return nil
 }
@@ -72,7 +142,7 @@ func (p *MockPlatform) Start(handler core.MessageHandler) error {
 func (p *MockPlatform) Stop() error { return nil }
 
 func (p *MockPlatform) Reply(ctx context.Context, replyCtx any, content string) error {
-	p.record(&SentMessage{Content: content, ReplyCtx: replyCtx, At: time.Now()})
+	p.record(&SentMessage{Kind: KindReply, Content: content, ReplyCtx: replyCtx, At: time.Now()})
 	return nil
 }
 
@@ -83,7 +153,7 @@ func (p *MockPlatform) Send(ctx context.Context, replyCtx any, content string) e
 // ── Optional platform interfaces ─────────────────────────────────────────────
 
 func (p *MockPlatform) SendCard(ctx context.Context, replyCtx any, card *core.Card) error {
-	p.record(&SentMessage{Content: card.RenderText(), Card: card, ReplyCtx: replyCtx, At: time.Now()})
+	p.record(&SentMessage{Kind: KindCard, Content: card.RenderText(), Card: card, ReplyCtx: replyCtx, At: time.Now()})
 	return nil
 }
 
@@ -92,16 +162,17 @@ func (p *MockPlatform) ReplyCard(ctx context.Context, replyCtx any, card *core.C
 }
 
 func (p *MockPlatform) SendWithButtons(ctx context.Context, replyCtx any, content string, buttons [][]core.ButtonOption) error {
-	return p.Reply(ctx, replyCtx, content)
+	p.record(&SentMessage{Kind: KindButtons, Content: content, Buttons: buttons, ReplyCtx: replyCtx, At: time.Now()})
+	return nil
 }
 
 func (p *MockPlatform) SendImage(ctx context.Context, replyCtx any, img core.ImageAttachment) error {
-	p.record(&SentMessage{Content: "[image]", ReplyCtx: replyCtx, At: time.Now()})
+	p.record(&SentMessage{Kind: KindImage, Content: "[image]", ReplyCtx: replyCtx, At: time.Now()})
 	return nil
 }
 
 func (p *MockPlatform) SendFile(ctx context.Context, replyCtx any, file core.FileAttachment) error {
-	p.record(&SentMessage{Content: fmt.Sprintf("[file: %s]", file.FileName), ReplyCtx: replyCtx, At: time.Now()})
+	p.record(&SentMessage{Kind: KindFile, Content: fmt.Sprintf("[file: %s]", file.FileName), ReplyCtx: replyCtx, At: time.Now()})
 	return nil
 }
 
@@ -120,9 +191,22 @@ func (p *MockPlatform) InjectMessageWithAttachments(
 	images []core.ImageAttachment,
 	files []core.FileAttachment,
 ) {
+	if r := p.getRemote(); r != nil {
+		if err := r.SendMessage(RemoteMessage{
+			SessionKey: p.SessionKeyFor(userID, chatID),
+			UserID:     userID,
+			UserName:   "test-user-" + userID,
+			Content:    content,
+			Images:     images,
+			Files:      files,
+		}); err != nil {
+			p.record(&SentMessage{Kind: KindReply, Content: "[blackbox: bridge send failed: " + err.Error() + "]", At: time.Now()})
+		}
+		return
+	}
 	msg := &core.Message{
 		Platform:   p.name,
-		SessionKey: fmt.Sprintf("%s:%s:%s", p.name, chatID, userID),
+		SessionKey: p.SessionKeyFor(userID, chatID),
 		MessageID:  fmt.Sprintf("msg_%d_%s", time.Now().UnixNano(), userID),
 		UserID:     userID,
 		UserName:   "test-user-" + userID,
@@ -133,7 +217,7 @@ func (p *MockPlatform) InjectMessageWithAttachments(
 		ReplyCtx:   &MockReplyCtx{Platform: p.name, ChatID: chatID, UserID: userID},
 	}
 	// Run in goroutine, matching how real platforms deliver messages.
-	go p.handler(p, msg)
+	go p.handler(p.selfPlatform(), msg)
 }
 
 // ── Assertion helpers ────────────────────────────────────────────────────────

@@ -56,7 +56,7 @@ type dshSession struct {
 	turnUncertain     bool   // an unsuccessful receipt cannot prove whether its prompt ran
 	lastUsage         *tokenUsage
 	toolNames         map[string]string   // callId → tool name (for tool/result)
-	seenCalls         map[string]struct{} // callIds already surfaced as EventToolUse
+	seenCalls         map[string]struct{} // durable tool/call ids already surfaced as EventToolUse
 	turnDone          chan struct{}       // closed on completion/cancellation; fresh per Send()
 
 	// delta aggregation: dsh streams token-level chunks; coalesce them into
@@ -673,19 +673,22 @@ func (s *dshSession) handleSessionEvent(raw json.RawMessage) {
 
 	case "tool/call":
 		s.turnMu.Lock()
-		s.toolNames[data.CallID] = data.Name
 		_, dup := s.seenCalls[data.CallID]
-		s.seenCalls[data.CallID] = struct{}{}
+		if !dup {
+			s.toolNames[data.CallID] = data.Name
+			s.seenCalls[data.CallID] = struct{}{}
+		}
 		s.turnMu.Unlock()
 		s.textAgg.Flush()
 		s.thinkAgg.Flush()
 		if dup {
-			return // already surfaced from tool-call-delta
+			return // replay of an already surfaced durable tool/call
 		}
 		s.emit(core.Event{
-			Type:      core.EventToolUse,
-			ToolName:  data.Name,
-			ToolInput: prettyToolArgs(data.Args),
+			Type:       core.EventToolUse,
+			Metadata:   map[string]any{"tool_use_id": data.CallID},
+			ToolName:   data.Name,
+			ToolInput:  prettyToolArgs(data.Args),
 		})
 
 	case "tool/result":
@@ -705,6 +708,7 @@ func (s *dshSession) handleSessionEvent(raw json.RawMessage) {
 		}
 		s.emit(core.Event{
 			Type:       core.EventToolResult,
+			Metadata:   map[string]any{"tool_use_id": data.CallID},
 			ToolName:   name,
 			Content:    truncate(text, 500),
 			ToolStatus: status,
@@ -732,19 +736,21 @@ func (s *dshSession) handleChunk(chunk *streamChunk) {
 			s.thinkAgg.Append(chunk.Text)
 		}
 	case "tool-call-delta":
-		if chunk.Name == "" {
-			return
+		// Argument fragments are provisional. Only tool/call carries the
+		// complete input, and the engine appends a step for every ToolUse.
+		// Do not claim its id or emit a partial step that would hide the
+		// durable call (or require a second, duplicate step to correct it).
+		if chunk.Name != "" {
+			s.turnMu.Lock()
+			if _, surfaced := s.seenCalls[chunk.ID]; !surfaced {
+				s.toolNames[chunk.ID] = chunk.Name
+			}
+			s.turnMu.Unlock()
 		}
-		s.turnMu.Lock()
-		_, dup := s.seenCalls[chunk.ID]
-		s.seenCalls[chunk.ID] = struct{}{}
-		s.toolNames[chunk.ID] = chunk.Name
-		s.turnMu.Unlock()
+		// Keep preceding text/thinking responsive at the tool boundary,
+		// including continuation chunks that omit the tool name.
 		s.textAgg.Flush()
 		s.thinkAgg.Flush()
-		if !dup {
-			s.emit(core.Event{Type: core.EventToolUse, ToolName: chunk.Name, ToolInput: chunk.ArgsDelt})
-		}
 	case "usage":
 		if chunk.Usage != nil {
 			s.turnMu.Lock()

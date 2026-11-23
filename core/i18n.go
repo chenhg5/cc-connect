@@ -216,6 +216,8 @@ const (
 	MsgToolAllowFailed           MsgKey = "tool_allow_failed"
 	MsgToolAllowedNew            MsgKey = "tool_allowed_new"
 	MsgError                     MsgKey = "error"
+	MsgAttachmentUnavailable     MsgKey = "attachment_unavailable"
+	MsgCardRequesterOnly         MsgKey = "card_requester_only"
 	MsgSessionNotFound           MsgKey = "session_not_found"
 	MsgFailedToStartAgentSession MsgKey = "failed_to_start_agent_session"
 	MsgFailedToDeleteSession     MsgKey = "failed_to_delete_session"
@@ -225,8 +227,6 @@ const (
 	MsgPermissionApproveAll      MsgKey = "permission_approve_all"
 	MsgPermissionDenied          MsgKey = "permission_denied_msg"
 	MsgPermissionHint            MsgKey = "permission_hint"
-	MsgPermissionStale           MsgKey = "permission_stale"
-	MsgPermissionSubmitting      MsgKey = "permission_submitting"
 	MsgQuietOn                   MsgKey = "quiet_on"
 	MsgQuietOff                  MsgKey = "quiet_off"
 	MsgDisplayModeCompact        MsgKey = "display_mode_compact"
@@ -339,6 +339,7 @@ const (
 	MsgModelCurrent          MsgKey = "model_current"
 	MsgModelChanged          MsgKey = "model_changed"
 	MsgModelChangeFailed     MsgKey = "model_change_failed"
+	MsgModelChangeQueued     MsgKey = "model_change_queued"
 	MsgModelCardSwitching    MsgKey = "model_card_switching"
 	MsgModelCardSwitched     MsgKey = "model_card_switched"
 	MsgModelCardSwitchFailed MsgKey = "model_card_switch_failed"
@@ -861,6 +862,20 @@ var messages = map[MsgKey]map[Language]string{
 		LangJapanese:           "✅ ツール `%s` を事前許可しました。次のセッションから有効になります。",
 		LangSpanish:            "✅ Herramienta `%s` pre-autorizada. Se aplicará en la próxima sesión.",
 	},
+	MsgCardRequesterOnly: {
+		LangEnglish:            "Only the requester can operate this card",
+		LangChinese:            "此卡片仅提问者本人可操作",
+		LangTraditionalChinese: "此卡片僅提問者本人可操作",
+		LangJapanese:           "このカードは質問者本人のみ操作できます",
+		LangSpanish:            "Solo quien hizo la solicitud puede usar esta tarjeta",
+	},
+	MsgAttachmentUnavailable: {
+		LangEnglish:            "Attachment unavailable: %s. The attachment was sent but could not be read.",
+		LangChinese:            "附件无法读取：%s。消息确实带有附件，但本次未能取得文件内容。",
+		LangTraditionalChinese: "附件無法讀取：%s。訊息確實帶有附件，但本次未能取得檔案內容。",
+		LangJapanese:           "添付ファイルを読み取れません：%s。添付ファイルは送信されましたが、内容を取得できませんでした。",
+		LangSpanish:            "Archivo adjunto no disponible: %s. Se envió el archivo, pero no se pudo leer su contenido.",
+	},
 	MsgError: {
 		LangEnglish:            "❌ Error: %v",
 		LangChinese:            "❌ 错误: %v",
@@ -930,20 +945,6 @@ var messages = map[MsgKey]map[Language]string{
 		LangTraditionalChinese: "❌ 已拒絕。Agent 將停止此工具使用。",
 		LangJapanese:           "❌ 拒否しました。エージェントはこのツールの使用を中止します。",
 		LangSpanish:            "❌ Denegado. El agente detendrá el uso de esta herramienta.",
-	},
-	MsgPermissionStale: {
-		LangEnglish:            "⚠️ This request is no longer active.",
-		LangChinese:            "⚠️ 这个请求已失效。",
-		LangTraditionalChinese: "⚠️ 這個請求已失效。",
-		LangJapanese:           "⚠️ このリクエストは無効になっています。",
-		LangSpanish:            "⚠️ Esta solicitud ya no está activa.",
-	},
-	MsgPermissionSubmitting: {
-		LangEnglish:            "⏳ A response to this request is already being sent. Please wait for its result.",
-		LangChinese:            "⏳ 正在发送这个请求的回复，请等待结果。",
-		LangTraditionalChinese: "⏳ 正在傳送這個請求的回覆，請等待結果。",
-		LangJapanese:           "⏳ このリクエストへの回答を送信中です。結果をお待ちください。",
-		LangSpanish:            "⏳ Ya se está enviando una respuesta a esta solicitud. Espera el resultado.",
 	},
 	MsgPermissionHint: {
 		LangEnglish:            "⚠️ Waiting for permission response. Reply **allow** / **deny** / **allow all**.",
@@ -2303,6 +2304,13 @@ var messages = map[MsgKey]map[Language]string{
 		LangTraditionalChinese: "模型已切換為 `%s`，當前會話與後續會話均使用此模型。",
 		LangJapanese:           "モデルを `%s` に切り替えました。このセッションと今後のセッションで使用されます。",
 		LangSpanish:            "Modelo cambiado a `%s`. Esta sesión y las futuras usarán este modelo.",
+	},
+	MsgModelChangeQueued: {
+		LangEnglish:            "Model switched to `%s`. A reply is still in progress; the new model takes effect once it finishes.",
+		LangChinese:            "模型已切换为 `%s`。当前回复仍在进行中，新模型将在其完成后生效。",
+		LangTraditionalChinese: "模型已切換為 `%s`。目前回覆仍在進行中，新模型將在其完成後生效。",
+		LangJapanese:           "モデルを `%s` に切り替えました。現在の応答が進行中のため、完了後に新しいモデルが適用されます。",
+		LangSpanish:            "Modelo cambiado a `%s`. Hay una respuesta en curso; el nuevo modelo se aplicará cuando termine.",
 	},
 	MsgModelChangeFailed: {
 		LangEnglish:            "❌ Failed to change model: %v",

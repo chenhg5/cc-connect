@@ -5,8 +5,8 @@
 # 复制此文件为 config.toml，填入你的凭证信息。
 #
 # String values support ${VAR_NAME} environment variable substitution.
-# Example: token = "${TELEGRAM_BOT_TOKEN}" / 所有字符串值都支持 ${VAR_NAME} 环境变量替换。
-# 例如：token = "${TELEGRAM_BOT_TOKEN}"
+# Example: token = "" / 所有字符串值都支持 ${VAR_NAME} 环境变量替换。
+# 例如：token = ""
 #
 # Each [[projects]] entry binds one code directory to its own agent + platforms.
 # A single cc-connect process can manage multiple projects simultaneously.
@@ -91,26 +91,26 @@ level = "info" # debug, info, warn, error
 
 # [[providers]]
 # name = "anthropic"
-# api_key = "${ANTHROPIC_API_KEY}"
+# api_key = ""
 # agent_types = ["claudecode"]   # only for Claude Code projects
 
 # [[providers]]
 # name = "minimaxi-claude"
-# api_key = "${MINIMAXI_API_KEY}"
+# api_key = ""
 # base_url = "https://api.minimaxi.chat/v1"
 # agent_types = ["claudecode"]
 # model = "claude-sonnet-4-20250514"
 
 # [[providers]]
 # name = "minimaxi-codex"
-# api_key = "${MINIMAXI_API_KEY}"
+# api_key = ""
 # base_url = "https://api.minimaxi.chat/v1"
 # agent_types = ["codex"]
 # model = "MiniMax-M2.7"
 
 # [[providers]]
 # name = "dashscope"
-# api_key = "${DASHSCOPE_API_KEY}"
+# api_key = ""
 # base_url = "https://dashscope.aliyuncs.com/compatible-mode/v1"
 # model = "glm-5.1"
 # thinking = "disabled"
@@ -173,6 +173,25 @@ level = "info" # debug, info, warn, error
 # 工具调用事件而重置，可防止长时间运行的 bash 命令永久占用会话（#1091）。
 # 推荐值：30–60。默认 0（禁用）。
 # max_turn_time_mins = 0  # default: disabled / 默认禁用
+
+# Which hook event fires when the user stops an agent turn with /stop.
+# /stop 用到的 hook 事件名。
+#
+#   "session.ended"  (default) — the historical name. /stop used to tear the
+#                      agent session down, so it always fired "session.ended".
+#                      Kept as the default so existing hook rules keep firing.
+#   "turn.cancelled" — the precise event for a gracefully cancelled turn: the
+#                      agent session stays alive and is reused by the next
+#                      message, so the turn ended but the session did not.
+#
+# Set this to "turn.cancelled" only if your hook rules were written for the
+# new behavior. Existing rules listening for "session.ended" keep working
+# either way — with the default they fire on /stop, with "turn.cancelled"
+# they fire when the session is actually torn down.
+# 只有当你的 hook 规则是按新行为写的，才需要设为 "turn.cancelled"。
+# 监听 "session.ended" 的旧规则在两种模式下都不会失效：默认模式下 /stop 触发它，
+# "turn.cancelled" 模式下则在会话真正被销毁时触发。
+# stop_hook_event = "session.ended"  # default / 默认值
 
 # Auto-reset the active session after the user has been inactive for a while.
 # Unlike idle_timeout_mins, this does not detect stuck agent execution. It
@@ -392,20 +411,20 @@ level = "info" # debug, info, warn, error
 # [webhook]
 # enabled = true
 # port = 9111                  # Listen port (default: 9111) / 监听端口（默认 9111）
-# token = "your-secret-token"  # Shared secret for auth; empty = no auth / 认证密钥；为空则不验证
+# token = ""  # Shared secret for auth; empty = no auth / 认证密钥；为空则不验证
 # path = "/hook"               # URL path (default: "/hook") / URL 路径（默认 "/hook"）
 #
 # Usage / 使用方式:
 #
 #   # Trigger an agent prompt / 触发 agent 执行
 #   curl -X POST http://localhost:9111/hook \
-#     -H "Authorization: Bearer your-secret-token" \
+#     -H "Authorization: Bearer $CC_CONNECT_WEBHOOK_TOKEN" \
 #     -H "Content-Type: application/json" \
 #     -d '{"session_key":"telegram:123:123","prompt":"review latest commit","event":"git:commit"}'
 #
 #   # Execute a shell command / 执行 shell 命令
 #   curl -X POST http://localhost:9111/hook \
-#     -H "Authorization: Bearer your-secret-token" \
+#     -H "Authorization: Bearer $CC_CONNECT_WEBHOOK_TOKEN" \
 #     -H "Content-Type: application/json" \
 #     -d '{"session_key":"telegram:123:123","exec":"git log -3 --oneline","event":"git:push"}'
 #
@@ -413,7 +432,7 @@ level = "info" # debug, info, warn, error
 #   # #!/bin/sh
 #   # MSG=$(git log -1 --pretty=format:"%s")
 #   # curl -sX POST http://localhost:9111/hook \
-#   #   -H "Authorization: Bearer your-secret-token" \
+#   #   -H "Authorization: Bearer $CC_CONNECT_WEBHOOK_TOKEN" \
 #   #   -H "Content-Type: application/json" \
 #   #   -d "{\"session_key\":\"telegram:123:123\",\"event\":\"git:commit\",\"prompt\":\"New commit: $MSG. Review it briefly.\"}"
 
@@ -429,7 +448,7 @@ level = "info" # debug, info, warn, error
 # [bridge]
 # enabled = true
 # port = 9810                         # WebSocket listen port (default: 9810) / 监听端口
-# token = "your-bridge-secret"        # Auth token (required) / 认证密钥（必填）
+# token = ""        # Auth token (required) / 认证密钥（必填）
 # path = "/bridge/ws"                 # URL path (default: "/bridge/ws") / URL 路径
 
 # =============================================================================
@@ -444,7 +463,7 @@ level = "info" # debug, info, warn, error
 # [management]
 # enabled = true
 # port = 9820                           # HTTP listen port (default: 9820) / 监听端口
-# token = "your-mgmt-secret"            # Auth token (required) / 认证密钥（必填）
+# token = ""            # Auth token (required) / 认证密钥（必填）
 # cors_origins = ["http://localhost:3000"]  # Allowed CORS origins / 允许的 CORS 来源
 
 # =============================================================================
@@ -458,6 +477,10 @@ level = "info" # debug, info, warn, error
 #   message.sent       — agent reply sent / Agent 回复发送完成
 #   session.started    — agent session spawned / Agent 会话启动
 #   session.ended      — agent session stopped / Agent 会话结束
+#   turn.cancelled     — an agent turn was cancelled by /stop / 一轮对话被 /stop 取消
+#                        (only fired when stop_hook_event = "turn.cancelled";
+#                         see the stop_hook_event setting above / 仅当
+#                         stop_hook_event = "turn.cancelled" 时触发，见上文)
 #   cron.triggered     — cron job fires / 定时任务触发
 #   permission.requested — agent asks for permission / Agent 请求权限
 #   error              — an error occurs / 发生错误
@@ -501,14 +524,14 @@ level = "info" # debug, info, warn, error
 # language = ""          # e.g. "zh", "en"; empty = auto-detect / 如 "zh"、"en"；留空自动检测
 #
 # [speech.openai]
-# api_key = "sk-xxx"     # OpenAI API key
+# api_key = ""     # OpenAI API key
 # base_url = ""          # optional: custom endpoint (OpenAI-compatible) / 可选：自定义端点（兼容 OpenAI 接口）
 # model = "whisper-1"    # default model / 默认模型
 #
 # # Alternative: Groq (faster, free tier available)
 # # 备选：Groq（更快，有免费额度）
 # [speech.groq]
-# api_key = "gsk_xxx"
+# api_key = ""
 # model = "whisper-large-v3-turbo"
 
 # =============================================================================
@@ -545,14 +568,14 @@ level = "info" # debug, info, warn, error
 #
 # # Qwen TTS (Alibaba DashScope / 阿里百炼)
 # [tts.qwen]
-# api_key  = "sk-xxx"        # DashScope API key / 阿里百炼 API Key
+# api_key  = ""        # DashScope API key / 阿里百炼 API Key
 # base_url = ""              # optional: leave empty for default endpoint / 留空使用默认地址
 # model    = "qwen3-tts-flash"   # "qwen3-tts-flash" | "qwen3-tts-instruct-flash"
 #
 # # Alternative: OpenAI TTS (OpenAI-compatible)
 # # 备选：OpenAI TTS（兼容 OpenAI 接口）
 # [tts.openai]
-# api_key  = "sk-xxx"
+# api_key  = ""
 # base_url = ""              # optional: custom endpoint / 可选：自定义端点
 # model    = "tts-1"         # "tts-1" | "tts-1-hd"
 #
@@ -560,7 +583,7 @@ level = "info" # debug, info, warn, error
 # # 备选：MiniMax TTS（T2A v2 流式 API）
 # # Docs: https://platform.minimaxi.com/document/T2A%20V2
 # [tts.minimax]
-# api_key  = "your-minimax-api-key" # optional: if empty, cc-connect reads ~/.cc-connect/config/minimax.json
+# api_key  = "" # optional: if empty, cc-connect reads ~/.cc-connect/config/minimax.json
 # base_url = ""              # optional: default "https://api.minimaxi.com" / 留空使用默认地址
 # model    = "speech-2.8-hd" # "speech-2.8-hd" | "speech-2.8"
 # config_file = ""           # optional MiniMax JSON config path; default data_dir/config/minimax.json
@@ -581,7 +604,7 @@ level = "info" # debug, info, warn, error
 # # 备选：小米 MiMo-V2.5-TTS（OpenAI 兼容的 chat completions 风格）
 # # Docs: https://platform.xiaomimimo.com/#/docs/usage-guide/speech-synthesis
 # [tts.mimo]
-# api_key  = "your-mimo-api-key"
+# api_key  = ""
 # base_url = ""              # optional: default "https://api.xiaomimimo.com/v1" / 留空使用默认地址
 #                            # Token Plan 国内地址：https://token-plan-cn.xiaomimimo.com/v1
 # model    = "mimo-v2.5-tts" # "mimo-v2.5-tts" | "mimo-v2.5-tts-voicedesign" | "mimo-v2.5-tts-voiceclone"
@@ -750,8 +773,8 @@ level = "info" # debug, info, warn, error
 # [[projects.platforms]]
 # type = "slack"
 # [projects.platforms.options]
-# bot_token = "xoxb-..."
-# app_token = "xapp-..."
+# bot_token = ""
+# app_token = ""
 
 # =============================================================================
 # Project 1 / 项目 1
@@ -921,7 +944,7 @@ mode = "default" # "default" | "acceptEdits" (edit) | "plan" | "auto" | "bypassP
 #
 # [projects.agent.options.env]
 # ANTHROPIC_BASE_URL = "https://api.kimi.com/coding"
-# ANTHROPIC_AUTH_TOKEN = "sk-kimi-xxx"
+# ANTHROPIC_AUTH_TOKEN = ""
 # ANTHROPIC_MODEL = "K2.6"
 # ANTHROPIC_REASONING_MODEL = "K2.6"
 # ANTHROPIC_DEFAULT_HAIKU_MODEL = "K2.6"
@@ -934,7 +957,7 @@ mode = "default" # "default" | "acceptEdits" (edit) | "plan" | "auto" | "bypassP
 # See: https://github.com/musistudio/claude-code-router
 #
 # router_url = "http://127.0.0.1:3456"  # Claude Code Router URL (default: http://127.0.0.1:3456)
-# router_api_key = "your-router-api-key" # Optional: API key if router requires authentication / 可选：如果 router 需要认证
+# router_api_key = "" # Optional: API key if router requires authentication / 可选：如果 router 需要认证
 #
 # When router_url is set, cc-connect will automatically:
 # 设置 router_url 后，cc-connect 会自动：
@@ -954,16 +977,16 @@ mode = "default" # "default" | "acceptEdits" (edit) | "plan" | "auto" | "bypassP
 # provider_refs = ["minimaxi", "dashscope"]
 
 # API Providers — switch between them via /provider command in chat
-# or via CLI: cc-connect provider add --project my-backend --name relay --api-key sk-xxx
+# or via CLI: cc-connect provider add --project my-backend --name relay --api-key "$CC_CONNECT_RELAY_API_KEY"
 # API Provider 管理 — 可通过聊天命令 /provider 或 CLI 命令切换
 #
 # [[projects.agent.providers]]
 # name = "anthropic"
-# api_key = "sk-ant-xxx"
+# api_key = ""
 #
 # [[projects.agent.providers]]
 # name = "relay"
-# api_key = "sk-xxx"
+# api_key = ""
 # base_url = "https://api.relay-service.com"
 # model = "claude-sonnet-4-20250514"
 # # Optional: pre-configure available models shown by /model command (alias - model)
@@ -987,22 +1010,28 @@ mode = "default" # "default" | "acceptEdits" (edit) | "plan" | "auto" | "bypassP
 # # 设置 thinking = "disabled" 后 cc-connect 会通过本地代理自动改写请求。
 # [[projects.agent.providers]]
 # name = "siliconflow"
-# api_key = "sk-xxx"
+# api_key = ""
 # base_url = "https://api.siliconflow.cn"
 # model = "deepseek-ai/DeepSeek-V3"
 # thinking = "disabled"
 #
 # # MiniMax — OpenAI-compatible agent provider with 1M context window
 # # MiniMax — 兼容 OpenAI 接口的大模型 Agent provider，支持 1M 超长上下文
-# # Models: MiniMax-M2.7 (flagship, 1M context), MiniMax-M2.7-highspeed, MiniMax-M2.5, MiniMax-M2.5-highspeed
+# # Models: MiniMax-M3.1-Flash (default), MiniMax-M3
 # # Docs: https://platform.minimaxi.com
 # # China-region accounts may use https://api.minimaxi.com/v1 / 中国区账号可使用 https://api.minimaxi.com/v1
 # [[projects.agent.providers]]
 # name = "minimax"
-# api_key = "your-minimax-api-key"
+# api_key = ""
 # base_url = "https://api.minimax.io/v1"
-# model = "MiniMax-M2.7"
-# thinking = "disabled"
+# model = "MiniMax-M3.1-Flash"
+# [[projects.agent.providers.models]]
+# model = "MiniMax-M3.1-Flash"
+# alias = "m31flash"
+# [[projects.agent.providers.models]]
+# model = "MiniMax-M3"
+# alias = "m3"
+# # Optional legacy aliases for explicitly selected models / 显式选择旧模型时可添加的别名
 # [[projects.agent.providers.models]]
 # model = "MiniMax-M2.7"
 # alias = "m27"
@@ -1066,10 +1095,15 @@ type = "feishu"
 
 [projects.platforms.options]
 app_id = "your-feishu-app-id"
-app_secret = "your-feishu-app-secret"
+app_secret = ""  # Fill in your Feishu app secret / 填入你的飞书应用密钥
 # domain = "https://open.feishu.cn"  # Optional runtime API/WebSocket base URL override / 可选：运行时 API/WebSocket 域名覆盖
 # enable_feishu_card = true  # Enable Feishu interactive cards (default: true); set false to force plain-text replies
 #                              # 启用飞书交互式卡片（默认 true）；设为 false 时强制回退纯文本回复
+# print_frequency_ms = 50  # Typewriter interval: 20–1000 ms; lower = faster / 打字间隔，越小越快
+#                           # Example only; omit to retain Feishu defaults / 仅为示例；不配置则沿用飞书默认值
+# print_step = 2           # Characters per tick: 1–1000 / 每次上屏字符数
+# print_strategy = "fast"  # fast flushes pending text; delay queues it / fast 快速上屏，delay 排队
+#                         # Omitted values use Feishu defaults / 未配置沿用飞书默认
 # allow_from = "*"          # Allowed user open_ids, comma-separated; "*" = all (default). Use /whoami to get your open_id.
 #                              # 允许的用户 open_id，逗号分隔；"*" 表示所有（默认）。发送 /whoami 获取你的 open_id。
 # allow_chat = "*"          # Allowed group chat_ids, comma-separated; "*" = all (default). Find chat_id in group settings.
@@ -1084,6 +1118,14 @@ app_secret = "your-feishu-app-secret"
 #                           # Agent 完成回复后添加的表情回复（如 "Done"）；设为 "none" 可禁用
 # group_reply_all = false   # If true, respond to ALL group messages without requiring @mention
 #                           # 设为 true 时，群聊中无需 @机器人 也会响应所有消息（默认 false）
+# skip_when_mention_others = false # If true, with group_reply_all or group_reply_all_chats enabled, ignore messages that @ others but not this bot
+#                                  # 设为 true 且开启 group_reply_all 或 group_reply_all_chats 时，@其他人但未 @本机器人 的消息不会触发
+# group_reply_all_chats = "oc_group_a,oc_group_b" # Only these groups bypass @mention; a non-empty list overrides group_reply_all / require_mention
+#                           # 仅指定群免 @；非空列表优先于 group_reply_all / require_mention，其他群保留原有提及和话题规则
+#                           # Also accepts ["oc_group_a", "oc_group_b"]; omitted/empty keeps existing defaults
+#                           # 也支持字符串数组；未配置或为空时保留默认行为。allow_from / allow_chat 仍然生效
+#                           # Receiving unmentioned messages requires the published im:message.group_msg permission
+#                           # 接收未 @ 的群消息需要申请并发布 im:message.group_msg 权限
 # share_session_in_channel = false  # If true, all users in a group share one agent session
 #                                   # 设为 true 时，群聊内所有用户共享同一个 Agent 会话
 # thread_isolation = false  # If true, group messages use Feishu reply threads as session boundaries (one thread/root = one agent session and, in multi-workspace mode, one workspace binding)
@@ -1115,6 +1157,21 @@ app_secret = "your-feishu-app-secret"
 #                              # 都是独立事件，cc-connect 会在窗口内将它们合并成一条多图消息再分发；如果你的
 #                              # 网络或设备发送间隔超过 500ms 且仍被拆成多轮，可调高（如 800–1200ms）；如果
 #                              # 只是单图发送，希望响应更快，也可以适当调低。
+# inbound_coalesce_window_ms = 0 # Optional quiet window for plain text/image bursts (0 disables; maximum 60000ms).
+#                               # Commands, permission replies and quoted messages remain immediate. Plain text also waits when enabled.
+#                               # Applies after image batching; include image_batch_window_ms when considering total delay.
+#                               # 普通文字和图片的可选合批窗口，默认关闭；开启后普通文字也会等待，图片另计上面的合批延迟。
+#                               # 命令、权限回复及引用消息不等待此窗口。
+# attachment_wait = "off"   # With thread_isolation, how unmentioned attachments (image/file/video) in an
+#                           # active topic are handled. "off" (default): dispatch at once, as today.
+#                           # "mention": hold them per topic and sender; the same sender's next @bot message
+#                           # in that topic is dispatched with them attached. Unmentioned text never releases them.
+#                           # 开启 thread_isolation 时，已活跃话题里未 @ 的附件（图片/文件/视频）怎么处理。
+#                           # "off"（默认）：立即分发，与现在一致；"mention"：按话题 + 发送人暂存，等同一发送人
+#                           # 在该话题下一次 @机器人 时一起分发。未 @ 的文字不会放行。
+# attachment_wait_secs = 1800 # "mention" only: staged attachments are dropped after this many seconds (1–86400),
+#                             # and a topic stops counting as active after this long without an @bot message.
+#                             # 仅 "mention" 生效：暂存超过该秒数即丢弃；话题超过该时长没有 @机器人 也不再算活跃。
 
 # Lark (International Version) / Lark 国际版
 # Lark now supports WebSocket long-connection too; webhook mode is only needed
@@ -1132,12 +1189,17 @@ app_secret = "your-feishu-app-secret"
 #
 # [projects.platforms.options]
 # app_id = "your-lark-app-id"
-# app_secret = "your-lark-app-secret"
+# app_secret = ""
 # domain = "https://open.larksuite.com"  # Optional runtime API base URL override / 可选：运行时 API 域名覆盖
 # port = "8080"                  # Webhook server port / Webhook 服务器端口
 # callback_path = "/feishu/webhook"  # Webhook callback path / Webhook 回调路径
 # encrypt_key = ""               # Event encrypt key (optional) / 事件加密密钥（可选）
 # enable_feishu_card = true
+# print_frequency_ms = 50  # Typewriter interval: 20–1000 ms; lower = faster / 打字间隔，越小越快
+#                           # Example only; omit to retain Feishu defaults / 仅为示例；不配置则沿用飞书默认值
+# print_step = 2           # Characters per tick: 1–1000 / 每次上屏字符数
+# print_strategy = "fast"  # fast flushes pending text; delay queues it / fast 快速上屏，delay 排队
+#                         # Omitted values use Feishu defaults / 未配置沿用飞书默认
 # allow_from = "*"
 # reaction_emoji = "OnIt"
 # done_emoji = "none"
@@ -1155,7 +1217,7 @@ app_secret = "your-feishu-app-secret"
 #
 # [projects.platforms.options]
 # client_id = "your-dingtalk-client-id"
-# client_secret = "your-dingtalk-client-secret"
+# client_secret = ""
 # allow_from = "*"  # Allowed staff IDs / 允许的员工 ID
 # share_session_in_channel = false  # If true, all users in a group share one agent session / 群聊共享会话
 # reaction_emoji = "🤔Thinking"  # Emotion on incoming messages (default: "🤔Thinking"); set to "none" to disable
@@ -1164,6 +1226,8 @@ app_secret = "your-feishu-app-secret"
 #                                 # Agent 完成回复后添加的表情回复（如 "🥳Done"）；设为 "none" 可禁用
 # card_final_preview_message = false # After an AI Card turn, send a separate Markdown summary
 #                                    # AI 卡片完成后额外发送一条普通 Markdown 摘要，用于刷新会话列表预览
+# at_mention_groups = false # Use text msgtype for group replies so @userId mentions are clickable (DingTalk only highlights @ in text); default false keeps markdown/card behavior
+#                           # 群回复改用 text 消息类型以携带可点击的 @ 提及（DingTalk 仅在 text msgtype 中高亮 @），默认 false 保持原有 markdown/卡片行为
 
 # WPS Xiezuo / WPS 协作 (uncomment to enable / 取消注释以启用)
 # 1. Create a WPS Open Platform app and enable event WebSocket delivery
@@ -1183,7 +1247,7 @@ app_secret = "your-feishu-app-secret"
 #
 # [projects.platforms.options]
 # app_id = "your-wps-xiezuo-app-id"
-# app_secret = "your-wps-xiezuo-app-secret"
+# app_secret = ""
 # allow_from = "*"             # Allowed WPS user IDs / 允许的 WPS 用户 ID
 # clean_reply = false          # Strip thinking/tool progress lines from replies / 过滤思考和工具进度行
 # max_attachment_bytes = 2147483648 # Per-file WPS limit, default 2 GiB, max 5 GiB / 单文件限制，默认 2 GiB，最大 5 GiB
@@ -1199,7 +1263,7 @@ app_secret = "your-feishu-app-secret"
 # type = "telegram"
 #
 # [projects.platforms.options]
-# token = "123456:ABC-DEF1234ghIkl-zyx57W2v1u123ew11"
+# token = ""
 # allow_from = "*"  # Allowed Telegram user IDs, e.g. "123456789,987654321"; "*" = all
 #                   # 允许的 Telegram 用户 ID，如 "123456789,987654321"；"*" 表示所有
 # proxy = "http://127.0.0.1:7890"  # Optional HTTP/SOCKS5 proxy for Telegram Bot API / 可选 HTTP/SOCKS5 代理
@@ -1219,11 +1283,13 @@ app_secret = "your-feishu-app-secret"
 # 2. Get an access token via curl (recommended, ensures E2EE works):
 #    curl -XPOST "https://matrix.org/_matrix/client/v3/login" \
 #      -H "Content-Type: application/json" \
-#      -d '{"type":"m.login.password","user":"YOUR_USER","password":"YOUR_PASS","device_id":"CC-CONNECT"}'
+#      # Fill in the password field before using this example.
+#      -d '{"type":"m.login.password","user":"YOUR_USER","password":"","device_id":"CC-CONNECT"}'
 #    通过 curl 获取 access token（推荐，确保 E2EE 正常工作）：
 #    curl -XPOST "https://matrix.org/_matrix/client/v3/login" \
 #      -H "Content-Type: application/json" \
-#      -d '{"type":"m.login.password","user":"你的用户名","password":"你的密码","device_id":"CC-CONNECT"}'
+#      # Fill in the password field before using this example.
+#      -d '{"type":"m.login.password","user":"你的用户名","password":"","device_id":"CC-CONNECT"}'
 # Connection: Long polling via /sync (no public URL needed) / 长轮询，无需公网 IP
 
 # [[projects.platforms]]
@@ -1231,7 +1297,7 @@ app_secret = "your-feishu-app-secret"
 #
 # [projects.platforms.options]
 # homeserver = "https://matrix.org"
-# access_token = "syt_xxx_xxx"
+# access_token = ""
 # user_id = "@bot:matrix.org"            # optional, auto-detected via /whoami / 可选，自动检测
 # allow_from = "*"                        # Matrix user IDs, e.g. "@user:matrix.org,@other:example.com"
 # auto_join = true                        # auto-join room invites (default true) / 自动加入被邀请的房间（默认 true）
@@ -1252,7 +1318,7 @@ app_secret = "your-feishu-app-secret"
 # type = "webex"
 #
 # [projects.platforms.options]
-# token = "YOUR_WEBEX_BOT_ACCESS_TOKEN"   # from developer.webex.com (Bot)
+# token = ""   # from developer.webex.com (Bot)
 # allow_from = "you@cisco.com"            # comma-separated email allowlist / 逗号分隔的邮箱白名单
 
 # MAX messenger (uncomment to enable / 取消注释以启用)
@@ -1266,7 +1332,7 @@ app_secret = "your-feishu-app-secret"
 # type = "max"
 #
 # [projects.platforms.options]
-# token = "your-max-bot-token"
+# token = ""
 # allow_from = "*"    # Allowed MAX user IDs, e.g. "66624886,12345678"; "*" = all
 #                     # 允许的 MAX 用户 ID，如 "66624886,12345678"；"*" 表示所有
 # api_base = "https://platform-api.max.ru"   # optional override / 可选覆盖默认 API
@@ -1284,14 +1350,14 @@ app_secret = "your-feishu-app-secret"
 # webhook_url    = "https://bot.example.com/webhook"
 # webhook_listen = "127.0.0.1:8090"   # bot binds here; reverse proxy in front
 # webhook_path   = "/webhook"          # default; must match the path in webhook_url
-# webhook_secret = "long-random-string"  # optional; checked via X-Webhook-Secret header or ?s= query
+# webhook_secret = ""  # optional; checked via X-Webhook-Secret header or ?s= query
 
 # Slack (uncomment to enable / 取消注释以启用)
 # 1. Create an app at https://api.slack.com/apps / 创建应用
 # 2. Enable Socket Mode (Settings > Socket Mode) / 开启 Socket Mode
 # 3. Subscribe to bot events: message.channels, message.im
 #    订阅事件：message.channels, message.im
-# 4. Install app to workspace, copy Bot Token (xoxb-...) and App Token (xapp-...)
+# 4. Install app to workspace, copy Bot Token and App Token
 #    安装应用到工作区，复制 Bot Token 和 App Token
 # Connection: Socket Mode WebSocket (no public URL needed) / 无需公网 IP
 
@@ -1299,15 +1365,24 @@ app_secret = "your-feishu-app-secret"
 # type = "slack"
 #
 # [projects.platforms.options]
-# bot_token = "xoxb-your-bot-token"
-# app_token = "xapp-your-app-level-token"
+# bot_token = ""
+# app_token = ""
+# base_url = "https://slack-gov.com/api/"  # Optional Web API root (default https://slack.com/api/), e.g. GovSlack
+#                                          # or a Slack-compatible relay; Socket Mode follows it too. A bare host gets
+#                                          # /api/ appended; any other path must end in /api/. Tokens are sent there,
+#                                          # so use https; a host outside slack.com / slack-gov.com logs a warning.
+#                                          # 可选：Slack Web API 地址（GovSlack、兼容中转等），Socket Mode 同样走这里；
+#                                          # 只写域名会自动补 /api/，其他路径必须以 /api/ 结尾；非 Slack 域名会在启动时警告
 # allow_from = "*"  # Allowed Slack user IDs / 允许的 Slack 用户 ID
 # share_session_in_channel = false  # If true, all users in a channel share one agent session / 频道共享会话
 # session_scope = "user"  # Session granularity: "user" (default, per channel+user) |
 #                         # "channel" (one session per channel, same as share_session_in_channel) |
-#                         # "thread" (one session per Slack thread — a new top-level message starts
-#                         #  a fresh session, replies in the same thread continue it).
-#                         # 会话粒度："user"(默认) | "channel"(整个频道一个会话) | "thread"(每个 Slack 话题串一个会话)
+#                         # "thread" (one session per Slack thread — a new top-level channel message
+#                         #  starts a fresh session, replies in the same thread continue it; top-level
+#                         #  DMs are not split: they stay one continuous per-user session; only
+#                         #  replies inside a DM thread get a per-thread session).
+#                         # 会话粒度："user"(默认) | "channel"(整个频道一个会话) | "thread"(每个 Slack 话题串一个会话；
+#                         #  私信里的顶层消息不拆分，仍是同一个连续会话，只有在私信的话题串里回复才单独成会话)
 
 # Google Chat (uncomment to enable / 取消注释以启用)
 # Uses a registered Google Chat app whose Cloud Pub/Sub connection publishes
@@ -1367,7 +1442,7 @@ app_secret = "your-feishu-app-secret"
 # type = "discord"
 #
 # [projects.platforms.options]
-# token = "your-discord-bot-token"
+# token = ""
 # allow_from = "*"  # Allowed Discord user IDs / 允许的 Discord 用户 ID
 # guild_id = ""     # Optional: set for instant slash command registration (per-guild)
 #                   # 可选：设置后 slash 命令秒级生效（仅该服务器）
@@ -1402,8 +1477,8 @@ app_secret = "your-feishu-app-secret"
 # type = "line"
 #
 # [projects.platforms.options]
-# channel_secret = "your-line-channel-secret"
-# channel_token = "your-line-channel-access-token"
+# channel_secret = ""
+# channel_token = ""
 # port = "8080"
 # callback_path = "/callback"
 # allow_from = "*"  # Allowed LINE user IDs / 允许的 LINE 用户 ID
@@ -1420,7 +1495,7 @@ app_secret = "your-feishu-app-secret"
 #
 # [projects.platforms.options]
 # app_id = "your-weibo-app-id"
-# app_secret = "your-weibo-app-secret"
+# app_secret = ""
 # allow_from = "*"                 # Allowed Weibo user IDs / 允许的微博用户 ID
 # token_endpoint = ""              # Optional: override token endpoint / 可选：自定义 token 接口地址
 # ws_endpoint = ""                 # Optional: override WebSocket endpoint / 可选：自定义 WebSocket 地址
@@ -1435,7 +1510,7 @@ app_secret = "your-feishu-app-secret"
 #
 # [projects.platforms.options]
 # transport = "websocket"
-# token = "your-shared-secret"
+# token = ""
 # base_url = "https://gateway.example.com"
 # allow_from = "*"
 # share_session_in_channel = false
@@ -1480,10 +1555,10 @@ app_secret = "your-feishu-app-secret"
 #
 # [projects.platforms.options]
 # corp_id = "your-corp-id"
-# corp_secret = "your-app-secret"
+# corp_secret = ""
 # agent_id = "1000002"
-# callback_token = "your-callback-token"
-# callback_aes_key = "your-43-char-encoding-aes-key"
+# callback_token = ""
+# callback_aes_key = ""
 # port = "8081"
 # callback_path = "/wecom/callback"
 # api_base_url = "https://qyapi.weixin.qq.com"  # optional: WeCom API base URL override / 可选：企业微信 API 基础地址覆盖
@@ -1516,7 +1591,7 @@ app_secret = "your-feishu-app-secret"
 # [projects.platforms.options]
 # mode = "websocket"
 # bot_id = "your-bot-id"
-# bot_secret = "your-bot-secret"
+# bot_secret = ""
 # ws_url = "wss://your-wecom-host:port/im_openws?bizid=10001"  # optional / 可选：私有化部署 WebSocket 地址，留空默认公有云 wss://openws.work.weixin.qq.com
 # allow_from = "*"  # Allowed user IDs / 允许的用户 ID
 
@@ -1539,7 +1614,7 @@ app_secret = "your-feishu-app-secret"
 # type = "weixin"
 #
 # [projects.platforms.options]
-# token = "your-ilink-bot-bearer-token"
+# token = ""
 # base_url = "https://ilinkai.weixin.qq.com"   # optional / 可选
 # cdn_base_url = "https://novac2c.cdn.weixin.qq.com/c2c"   # optional; CDN download/upload / 可选 CDN 根路径
 # allow_from = "*"                             # or "user1@im.wechat,user2@im.wechat"
@@ -1584,7 +1659,7 @@ app_secret = "your-feishu-app-secret"
 # type = "yuanbao"
 #
 # [projects.platforms.options]
-# bot_token  = "your-app-key:your-app-secret"
+# bot_token  = ""
 # api_domain = "https://bot.yuanbao.tencent.com"                          # optional / 可选
 # ws_url     = "wss://bot-wss.yuanbao.tencent.com/wss/connection"         # optional / 可选
 # route_env  = "prod"                                                    # optional X-Route-Env / 可选路由头
@@ -1609,6 +1684,11 @@ app_secret = "your-feishu-app-secret"
 # mode = "force"  # "default" | "force" (yolo) | "plan" | "ask"
 # cmd = "agent"   # CLI binary name (default: "agent") / CLI 二进制名称（默认 "agent"）
 #
+# Optional: prepend a UTF-8 instructions file to every turn, reloading changes each time.
+# instructions_file = "/path/to/AGENTS.md"
+# /memory and /cron setup write <work_dir>/AGENTS.md, which Cursor loads on its own.
+# /memory 与 /cron setup 写入 <work_dir>/AGENTS.md，Cursor 会自行加载。
+#
 # Mode options / 模式说明:
 # - "default": Trust workspace, ask before tool use / 信任工作区，工具调用前询问
 #              Note: Shell tool is restricted to safe commands (e.g. ls) in this mode
@@ -1626,7 +1706,7 @@ app_secret = "your-feishu-app-secret"
 #
 # [projects.platforms.options]
 # app_id = "your-feishu-app-id"
-# app_secret = "your-feishu-app-secret"
+# app_secret = ""
 
 # =============================================================================
 # Project 3: Using Gemini CLI / 项目 3：使用 Gemini CLI (uncomment to enable / 取消注释以启用)
@@ -1665,19 +1745,19 @@ app_secret = "your-feishu-app-secret"
 # # Provider with API key / 使用 API Key 的 Provider
 # [[projects.agent.providers]]
 # name = "google"
-# api_key = "your-gemini-api-key"    # GEMINI_API_KEY
+# api_key = ""    # GEMINI_API_KEY
 #
 # # Vertex AI provider / Vertex AI 提供商
 # [[projects.agent.providers]]
 # name = "vertex"
-# env = { GOOGLE_API_KEY = "your-key", GOOGLE_GENAI_USE_VERTEXAI = "true" }
+# env = { GOOGLE_API_KEY = "", GOOGLE_GENAI_USE_VERTEXAI = "true" }
 #
 # [[projects.platforms]]
 # type = "feishu"
 #
 # [projects.platforms.options]
 # app_id = "your-feishu-app-id"
-# app_secret = "your-feishu-app-secret"
+# app_secret = ""
 
 # =============================================================================
 # Project 4: Using Codex agent / 项目 4：使用 Codex agent (uncomment to enable / 取消注释以启用)
@@ -1704,12 +1784,43 @@ app_secret = "your-feishu-app-secret"
 # [projects.agent.options]
 # work_dir = "/path/to/project"
 # mode = "suggest"  # "suggest" | "auto-edit" | "full-auto" | "yolo"
+# Optional: app_server supports interactive approvals and named permissions.
+# 可选：app_server 支持交互审批及命名权限配置。
+# backend = "app_server"
+# permission_profile = "chat-workspace" # Defined in Codex config; replaces the legacy sandbox, not the approval policy.
+#                                      # 在 Codex 配置中定义；替代旧式沙箱选项，不改变审批策略。
+# Requires a Codex version that confirms activePermissionProfile; see docs/usage.md.
+# 需要支持 activePermissionProfile 的 Codex 版本；详见 docs/usage.zh-CN.md。
+#
+# Optional (app_server only): minutes to wait for an AskUserQuestion answer
+# before declining it. Default 5; values <= 0 or invalid fall back to 5.
+# 可选（仅 app_server）：等待 AskUserQuestion 回答的分钟数，超时后拒绝。
+# 默认 5；<= 0 或无效值回退为 5。
+# request_user_input_timeout_mins = 5
 #
 # Mode options / 模式说明:
-# - "suggest":   ask permission for every tool call (default, safest) / 每次调用都需确认（默认，最安全）
-# - "auto-edit": auto-approve file edits, ask for shell commands / 文件编辑自动通过，Shell 命令仍需确认
+# - "suggest":   read-only; app_server requests approval when needed, exec cannot prompt / 只读；app_server 按需请求审批，exec 无交互审批
+# - "auto-edit": workspace-write with no approval prompts (same as full-auto) / 工作区可写，无审批提示（等同 full-auto）
 # - "full-auto": auto-approve everything with workspace sandbox / 全部自动通过，工作区沙箱保护
 # - "yolo":      bypass all approvals and sandbox (dangerous) / 跳过所有审批和沙箱（危险）
+#
+# Optional: isolated Codex home / 可选：独立的 Codex home
+# Exported as CODEX_HOME for this project, so it does not share threads and
+# writer locks with the Codex desktop app. The path must be absolute and must
+# already exist; it is not ~-expanded and cc-connect does not create it for a
+# subscription login. Create it and copy the login files before the first
+# message, then set the absolute path:
+#   mkdir -p /path/to/codex-home
+#   cp ~/.codex/auth.json ~/.codex/config.toml /path/to/codex-home/
+# / 作为本项目的 CODEX_HOME 导出，避免与 Codex 桌面应用共享线程和写锁。路径必须
+# 是已存在的绝对路径，不会展开 ~，订阅登录时 cc-connect 也不会创建它。请先创建
+# 目录并复制登录文件，再填写绝对路径：
+#   mkdir -p /path/to/codex-home
+#   cp ~/.codex/auth.json ~/.codex/config.toml /path/to/codex-home/
+# Trade-off: sessions in this home are not visible in the Codex desktop app,
+# and its threads cannot be resumed here.
+# 取舍：该 home 中的会话不会出现在 Codex 桌面应用，桌面应用的会话也无法在这里恢复。
+# codex_home = "/path/to/codex-home"
 #
 # Optional: specify a model / 可选：指定模型
 # model = "gpt-6.1-sol"
@@ -1737,11 +1848,11 @@ app_secret = "your-feishu-app-secret"
 #
 # [[projects.agent.providers]]
 # name = "openai"
-# api_key = "sk-xxx"
+# api_key = ""
 #
 # [[projects.agent.providers]]
 # name = "custom"
-# api_key = "sk-xxx"
+# api_key = ""
 # base_url = "https://custom-api.com/v1"
 # model = "gpt-4o"
 #
@@ -1749,15 +1860,15 @@ app_secret = "your-feishu-app-secret"
 # # MiniMax — 兼容 OpenAI 接口，可直接用于 Codex
 # [[projects.agent.providers]]
 # name = "minimax"
-# api_key = "your-minimax-api-key"
+# api_key = ""
 # base_url = "https://api.minimax.io/v1"
-# model = "MiniMax-M2.7"
+# model = "MiniMax-M3.1-Flash"
 #
 # [[projects.platforms]]
 # type = "telegram"
 #
 # [projects.platforms.options]
-# token = "your-telegram-bot-token"
+# token = ""
 
 # =============================================================================
 # TuiTui Platform / 推推平台
@@ -1771,7 +1882,7 @@ app_secret = "your-feishu-app-secret"
 #
 # [projects.platforms.options]
 # app_id = "${TUITUI_APP_ID}"
-# app_secret = "${TUITUI_APP_SECRET}"
+# app_secret = ""
 # allow_from = "*"                         # Direct-message users / 单聊用户
 # group_allow_from = "7652669649132694"   # Group, team, or channel IDs / 群、团队或频道 ID
 # group_policy = "allowlist"               # allowlist | open | disabled
@@ -1805,6 +1916,9 @@ app_secret = "your-feishu-app-secret"
 # http_url = ""                    # optional: OneBot HTTP API URL for file operations, e.g. "http://127.0.0.1:3000"
 #                                  # Required for SendFile. Useful when OneBot runs in WSL/Docker.
 #                                  # 可选：OneBot HTTP API 地址，用于文件发送。OneBot 在 WSL/Docker 中时必须配置。
+# send_via_http = false            # optional: send text replies via http_url instead of WebSocket (requires http_url).
+#                                  # Enable if long replies fail with "qq: API send_group_msg timeout" (WS has a 15s limit).
+#                                  # 可选：文本回复改走 HTTP API（需配置 http_url）。长回复出现 WS 15 秒超时时开启。
 # allow_from = "*"                 # allowed QQ user IDs, e.g. "12345,67890" or "*" for all
 #                                  # 允许的 QQ 号，如 "12345,67890"，"*" 表示所有
 # share_session_in_channel = false  # If true, all users in a group share one agent session / 群聊共享会话
@@ -1875,7 +1989,7 @@ app_secret = "your-feishu-app-secret"
 # type = "telegram"
 #
 # [projects.platforms.options]
-# token = "your-telegram-bot-token"
+# token = ""
 
 # =============================================================================
 # Project: Using tmux / 使用 tmux (uncomment to enable / 取消注释以启用)
@@ -1921,7 +2035,7 @@ app_secret = "your-feishu-app-secret"
 # type = "telegram"
 #
 # [projects.platforms.options]
-# token = "your-telegram-bot-token"
+# token = ""
 
 # =============================================================================
 # Project 6: Using OpenCode / 项目 6：使用 OpenCode (uncomment to enable / 取消注释以启用)
@@ -1955,7 +2069,7 @@ app_secret = "your-feishu-app-secret"
 # type = "telegram"
 #
 # [projects.platforms.options]
-# token = "your-telegram-bot-token"
+# token = ""
 
 # =============================================================================
 # Project: Using Pi / 项目：使用 Pi (uncomment to enable / 取消注释以启用)
@@ -2013,7 +2127,7 @@ app_secret = "your-feishu-app-secret"
 # type = "telegram"
 #
 # [projects.platforms.options]
-# token = "your-telegram-bot-token"
+# token = ""
 
 # =============================================================================
 # Project: Devin CLI (Cognition, https://cli.devin.ai/) / 使用 Devin CLI
@@ -2056,13 +2170,13 @@ app_secret = "your-feishu-app-secret"
 # # Optional: Windsurf Enterprise API key (overrides `devin auth login`).
 # # 可选：Windsurf 企业版 API Key（优先级高于 `devin auth login` 的本地凭证）。
 # # [projects.agent.options.env]
-# # WINDSURF_API_KEY = "wk_xxx"
+# # WINDSURF_API_KEY = ""
 
 # [[projects.platforms]]
 # type = "telegram"
 #
 # [projects.platforms.options]
-# token = "your-telegram-bot-token"
+# token = ""
 
 # =============================================================================
 # Project: ACP (Agent Client Protocol) agent / 使用 ACP 子进程
@@ -2121,7 +2235,7 @@ app_secret = "your-feishu-app-secret"
 # # Optional: bind to an existing session key
 # # args = ["acp", "--session", "agent:main:main"]
 # display_name = "OpenClaw ACP"
-# # env = { OPENCLAW_GATEWAY_TOKEN = "..." }
+# # env = { OPENCLAW_GATEWAY_TOKEN = "" }
 
 # --- Example: Trae CLI ACP (https://www.trae.ai/) ---
 # [[projects]]
@@ -2169,7 +2283,7 @@ app_secret = "your-feishu-app-secret"
 # type = "telegram"
 #
 # [projects.platforms.options]
-# token = "your-telegram-bot-token"
+# token = ""
 
 # =============================================================================
 # Project 7: Using iFlow CLI / 项目 7：使用 iFlow CLI (uncomment to enable / 取消注释以启用)
@@ -2204,7 +2318,7 @@ app_secret = "your-feishu-app-secret"
 #
 # [[projects.agent.providers]]
 # name = "iflow-openai-compatible"
-# api_key = "sk-xxx"
+# api_key = ""
 # base_url = "https://api.example.com/v1"
 # model = "Qwen3-Coder"
 # env = { IFLOW_selectedAuthType = "openai-compatible" }
@@ -2213,7 +2327,7 @@ app_secret = "your-feishu-app-secret"
 # type = "telegram"
 #
 # [projects.platforms.options]
-# token = "your-telegram-bot-token"
+# token = ""
 
 # =============================================================================
 # Project: Using DeepSeek Harness (dsh) / 项目：使用 DeepSeek Harness (dsh)
@@ -2225,6 +2339,7 @@ app_secret = "your-feishu-app-secret"
 # 需要先在本机启动 dsh web 服务（默认 http://127.0.0.1:3080）。会话以项目的
 # work_dir 为工作目录创建，每个 cc-connect 项目对应一个 dsh 会话，自动续聊。
 #
+# Details / 详细说明: agent/dsh/README.md
 # Optional options / 可选参数:
 #   base_url      dsh web server URL (default "http://127.0.0.1:3080")
 #                  dsh web 服务地址（默认 "http://127.0.0.1:3080"）
@@ -2269,7 +2384,8 @@ app_secret = "your-feishu-app-secret"
 # [projects.agent.options]
 # work_dir = "/path/to/your/project"
 # base_url = "http://127.0.0.1:3080"
-# token = "<launch token>"
+# # Set DSH_TOKEN in the environment, or fill in the empty option below.
+# # token = ""
 # # Remote handshake tokens may appear in server/proxy access logs.
 # # Use HTTPS outside loopback; plain HTTP exposes the token on the network.
 # # agent_preset = "standard"
@@ -2313,7 +2429,7 @@ app_secret = "your-feishu-app-secret"
 # type = "telegram"
 #
 # [projects.platforms.options]
-# token = "your-telegram-bot-token"
+# token = ""
 
 # =============================================================================
 # Project: Using GitHub Copilot / 项目：使用 GitHub Copilot (uncomment to enable / 取消注释以启用)
@@ -2344,7 +2460,7 @@ app_secret = "your-feishu-app-secret"
 # type = "telegram"
 #
 # [projects.platforms.options]
-# token = "your-telegram-bot-token"
+# token = ""
 
 # =============================================================================
 # Project 8: Another example / 项目 8：更多示例 (uncomment to enable / 取消注释以启用)
@@ -2365,7 +2481,7 @@ app_secret = "your-feishu-app-secret"
 # type = "discord"
 #
 # [projects.platforms.options]
-# token = "your-discord-bot-token"
+# token = ""
 
 # =============================================================================
 # Project 9: Using Antigravity CLI / 项目 9：使用 Antigravity CLI (uncomment to enable / 取消注释以启用)
@@ -2374,6 +2490,18 @@ app_secret = "your-feishu-app-secret"
 # 需要安装：本地已安装 agy 命令 (参考 https://antigravity.google/docs/cli-overview)
 # Antigravity CLI uses `agy -p` under the hood.
 # Antigravity CLI 底层使用 `agy -p` 命令。
+# Headless mode cannot interactively approve tools that require confirmation.
+# Tools may be auto-denied with a stderr notice even when agy exits 0.
+# Prefer scoped permissions.allow rules in ~/.gemini/antigravity-cli/settings.json.
+# For trusted unattended workloads, explicitly set mode = "yolo" below to avoid
+# approval blocking. This approves ALL tools, including shell commands and file
+# writes; use only with trusted prompts and an appropriately isolated workspace.
+# The default is not changed automatically, and chat approval buttons cannot be
+# assumed to override the current official CLI's headless permission policy.
+# 无头模式无法交互确认权限；工具可能被拒绝但 agy 仍退出 0。优先配置精确 allow-list。
+# 可信的无人值守任务可显式设置 mode = "yolo"，但它会批准所有命令和文件写入。
+# 不会自动修改默认权限；当前官方 CLI 的无头权限策略不能保证由聊天按钮覆盖。
+# Official reference: https://antigravity.google/docs/cli/headless/
 #
 # [[projects]]
 # name = "my-antigravity-project"
@@ -2388,7 +2516,7 @@ app_secret = "your-feishu-app-secret"
 # timeout_mins = 30  # Timeout per conversation turn (minutes) / 每次对话超时时间（分钟）
 #
 # Mode options / 模式说明:
-# - "default":   Prompt for approval on each tool use / 每次工具调用都需要确认
+# - "default":   Respect CLI permissions; headless confirmation may be denied / 遵循 CLI 权限，无头确认可能被拒绝
 # - "yolo":      Auto-approve all tool calls (--dangerously-skip-permissions) / 自动批准所有工具调用
 # - "plan":      Read-only plan mode with terminal sandbox constraints (--sandbox) / 只读沙箱规划模式
 #
@@ -2398,7 +2526,7 @@ app_secret = "your-feishu-app-secret"
 # # Provider with API key / 使用 API Key 的 Provider
 # [[projects.agent.providers]]
 # name = "google"
-# api_key = "your-gemini-api-key"    # GEMINI_API_KEY
+# api_key = ""    # GEMINI_API_KEY
 
 # =============================================================================
 # Project 10: WPS Agentspace / 项目 10：WPS 数字员工 (uncomment to enable / 取消注释以启用)

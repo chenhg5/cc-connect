@@ -456,6 +456,9 @@ type CronScheduler struct {
 	stop    chan struct{}
 	done    chan struct{}
 	running bool
+	// quit is closed by Stop so a job that is still running stops being
+	// waited on; shutdown must not block until the job finishes (#2313).
+	quit chan struct{}
 }
 
 func NewCronScheduler(store *CronStore) *CronScheduler {
@@ -511,6 +514,7 @@ func (cs *CronScheduler) Start() error {
 	cs.wakeUp = make(chan struct{}, 1)
 	cs.stop = make(chan struct{}, 1)
 	cs.done = make(chan struct{})
+	cs.quit = make(chan struct{})
 	cs.mu.Unlock()
 
 	jobs := cs.store.List()
@@ -537,6 +541,7 @@ func (cs *CronScheduler) Stop() {
 	cs.running = false
 	stopCh := cs.stop
 	doneCh := cs.done
+	close(cs.quit)
 	cs.mu.Unlock()
 
 	select {
@@ -544,6 +549,22 @@ func (cs *CronScheduler) Stop() {
 	default:
 	}
 	<-doneCh
+}
+
+// stopping reports whether Stop has been called since the last Start.
+func (cs *CronScheduler) stopping() bool {
+	cs.mu.RLock()
+	quit := cs.quit
+	cs.mu.RUnlock()
+	if quit == nil {
+		return false
+	}
+	select {
+	case <-quit:
+		return true
+	default:
+		return false
+	}
 }
 
 // signalWakeUp nudges the runLoop to re-evaluate the next firing time.
@@ -639,6 +660,9 @@ func (cs *CronScheduler) fireDueJobs() {
 	cs.mu.RUnlock()
 
 	for _, e := range due {
+		if cs.stopping() {
+			return
+		}
 		job := cs.store.Get(e.jobID)
 		if job != nil {
 			cs.runJob(job, false)
@@ -868,16 +892,27 @@ func (cs *CronScheduler) runJob(job *CronJob, manual bool) {
 		done <- engine.ExecuteCronJob(job)
 	}()
 
-	var err error
+	cs.mu.RLock()
+	quit := cs.quit
+	cs.mu.RUnlock()
+
+	// A nil timeout channel blocks forever, so a job without a timeout
+	// waits only for completion or shutdown.
+	var timeoutCh <-chan time.Time
 	timeout := job.ExecutionTimeout()
 	if timeout > 0 {
-		select {
-		case err = <-done:
-		case <-time.After(timeout):
-			err = fmt.Errorf("job timed out after %v", timeout)
-		}
-	} else {
-		err = <-done
+		timer := time.NewTimer(timeout)
+		defer timer.Stop()
+		timeoutCh = timer.C
+	}
+
+	var err error
+	select {
+	case err = <-done:
+	case <-timeoutCh:
+		err = fmt.Errorf("job timed out after %v", timeout)
+	case <-quit:
+		err = errors.New("job interrupted by shutdown")
 	}
 
 	cs.store.MarkRun(job.ID, err)
