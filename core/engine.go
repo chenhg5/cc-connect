@@ -3489,6 +3489,7 @@ func (e *Engine) injectMessageIntoBusyTurn(p Platform, msg *Message, interactive
 	agentSession := state.agentSession
 	queued := len(state.pendingMessages)
 	stale := e.isStaleUserMessageLocked(state, msg.UserMessageTimeMs)
+	targetMessageID := state.currentMessageID
 	state.mu.Unlock()
 	// A voice message keeps the queue, as in upstream #523: its turn is the
 	// one that answers by voice (state.fromVoice), which an injection is not.
@@ -3523,6 +3524,11 @@ func (e *Engine) injectMessageIntoBusyTurn(p Platform, msg *Message, interactive
 	session.AddHistory("user", msg.Content)
 	sessions.Save()
 	runMessageAccepted(msg)
+	if reporter, ok := p.(interface {
+		ReportInjected(context.Context, any, string)
+	}); ok {
+		reporter.ReportInjected(e.ctx, msg.ReplyCtx, targetMessageID)
+	}
 	slog.Info("message injected into busy session",
 		"session", msg.SessionKey,
 		"user", msg.UserName,
