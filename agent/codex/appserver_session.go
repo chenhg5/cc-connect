@@ -83,7 +83,8 @@ type turnNotification struct {
 		ID     string `json:"id"`
 		Status string `json:"status"`
 		Error  *struct {
-			Message string `json:"message"`
+			Message        string          `json:"message"`
+			CodexErrorInfo json.RawMessage `json:"codexErrorInfo"`
 		} `json:"error"`
 	} `json:"turn"`
 }
@@ -1329,6 +1330,14 @@ func (s *appServerSession) handleNotification(method string, paramsRaw json.RawM
 				if errMsg == "" {
 					errMsg = "turn failed (no details)"
 				}
+				if notif.Turn.Error != nil {
+					var code string
+					_ = json.Unmarshal(notif.Turn.Error.CodexErrorInfo, &code)
+					if code == "usageLimitExceeded" {
+						s.failTurn(quotaError{})
+						break
+					}
+				}
 				s.failTurn(fmt.Errorf("%s", errMsg))
 			} else {
 				s.completeTurn()
@@ -1825,11 +1834,21 @@ func (s *appServerSession) emit(event core.Event) {
 	slog.Warn("codex appserver: event channel full, dropping event", "type", event.Type)
 }
 
+// A structured, terminal quota refusal; raw provider messages are not retained.
+type quotaError struct{}
+
+func (quotaError) Error() string { return "quota exhausted" }
+
 func (s *appServerSession) emitError(err error) {
 	if err == nil {
 		return
 	}
-	s.emit(core.Event{Type: core.EventError, Error: err})
+	event := core.Event{Type: core.EventError, Error: err}
+	var quota quotaError
+	if errors.As(err, &quota) {
+		event.Metadata = map[string]any{"quota_exhausted": true}
+	}
+	s.emit(event)
 }
 
 func (s *appServerSession) rejectPending(err error) {

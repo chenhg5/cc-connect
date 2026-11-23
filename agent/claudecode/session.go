@@ -28,6 +28,8 @@ import (
 // In "auto" mode, permission requests are auto-approved internally
 // (avoiding --dangerously-skip-permissions which fails under root).
 type claudeSession struct {
+	quotaReset       int64 // read-loop only; consumed by a terminal result
+	quotaCredits     bool
 	cmd              *exec.Cmd
 	stdin            io.WriteCloser
 	stdinMu          sync.Mutex
@@ -643,8 +645,8 @@ func (cs *claudeSession) finishReadLoop(waitErrCh <-chan error, stderrBuf *bytes
 			stderrMsg = strings.TrimSpace(stderrBuf.String())
 		}
 		if stderrMsg != "" {
-			slog.Error("claudeSession: process failed", "error", err, "stderr", stderrMsg)
-			evt := core.Event{Type: core.EventError, Error: fmt.Errorf("%s", stderrMsg)}
+			slog.Error("claudeSession: process failed", "error", err, "stderr_bytes", len(stderrMsg))
+			evt := core.Event{Type: core.EventError, Error: fmt.Errorf("Claude CLI process failed")}
 			select {
 			case cs.events <- evt:
 			case <-cs.ctx.Done():
@@ -695,6 +697,20 @@ func (cs *claudeSession) handleReadLoopLine(line string) {
 	slog.Debug("claudeSession: event", "type", eventType)
 
 	switch eventType {
+	case "rate_limit_event":
+		info, _ := raw["rate_limit_info"].(map[string]any)
+		status, _ := info["status"].(string)
+		switch status {
+		case "allowed", "allowed_warning":
+			cs.quotaReset = 0
+			cs.quotaCredits = false
+		case "rejected":
+			if reset, ok := info["resetsAt"].(float64); ok && reset > 0 && reset < 1e12 {
+				cs.quotaReset = int64(reset)
+			}
+			code, _ := info["errorCode"].(string)
+			cs.quotaCredits = code == "credits_required"
+		}
 	case "system":
 		cs.handleSystem(raw)
 	case "assistant":
@@ -1413,6 +1429,19 @@ func (cs *claudeSession) handleResult(raw map[string]any) {
 		OutputTokens:             outputTokens,
 		CacheCreationInputTokens: cacheCreationTokens,
 		CacheReadInputTokens:     cacheReadTokens,
+	}
+	if !isCompaction {
+		isError, _ := raw["is_error"].(bool)
+		code, _ := raw["api_error"].(string)
+		status, hasStatus := raw["api_error_status"].(float64)
+		if isError && code == "usage_limit_reached" && (!hasStatus || status == 429 || status == 402) {
+			evt.Type = core.EventError
+			evt.Content = ""
+			evt.Error = fmt.Errorf("quota exhausted")
+			evt.Metadata = map[string]any{"quota_exhausted": true, "quota_resets_at": cs.quotaReset, "quota_credits_required": cs.quotaCredits}
+		}
+		cs.quotaReset = 0
+		cs.quotaCredits = false
 	}
 	select {
 	case cs.events <- evt:

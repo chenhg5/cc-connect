@@ -229,6 +229,7 @@ func (as *antigravitySession) buildAntigravityArgs(chatID string, isResume bool,
 func (as *antigravitySession) readLoop(ctx context.Context, cmd *exec.Cmd, stdout io.ReadCloser, stderrBuf *bytes.Buffer, tempFiles []string, preEntries map[string]bool, sendStartedAt time.Time) {
 	defer as.wg.Done()
 	hasResponse := false
+	parser := newAgyOutputParser()
 	defer func() {
 		for _, f := range tempFiles {
 			_ = os.Remove(f)
@@ -264,19 +265,19 @@ func (as *antigravitySession) readLoop(ctx context.Context, cmd *exec.Cmd, stdou
 		var processErr error
 		if err != nil {
 			if stderrMsg != "" {
-				processErr = fmt.Errorf("agy process failed (%w): %s", err, stderrMsg)
+				processErr = fmt.Errorf("agy process failed: %w", err)
 			} else {
 				processErr = fmt.Errorf("agy process failed: %w", err)
 			}
 		} else if !hasResponse {
 			if stderrMsg != "" {
-				processErr = fmt.Errorf("agy returned no response: %s", stderrMsg)
+				processErr = fmt.Errorf("agy returned no response")
 			} else {
 				processErr = fmt.Errorf("agy exited successfully without producing a response")
 			}
 		}
 		if processErr != nil {
-			slog.Error("antigravitySession: process failed", "error", processErr)
+			slog.Error("antigravitySession: process failed", "error", processErr, "stderr_bytes", len(stderrMsg))
 			select {
 			case as.events <- core.Event{Type: core.EventError, Error: processErr}:
 			case <-as.ctx.Done():
@@ -284,8 +285,16 @@ func (as *antigravitySession) readLoop(ctx context.Context, cmd *exec.Cmd, stdou
 		}
 
 		// Finalize turn.
+		done := core.Event{Type: core.EventResult, SessionID: sid, Done: true}
+		if parser.terminal != nil {
+			status := parser.terminal.terminalStatus()
+			done.Metadata = map[string]any{"result_status": status}
+			if status == "error" {
+				done.Error = fmt.Errorf("agy: current turn failed")
+			}
+		}
 		select {
-		case as.events <- core.Event{Type: core.EventResult, SessionID: sid, Done: true}:
+		case as.events <- done:
 		case <-as.ctx.Done():
 		}
 	}()
@@ -297,7 +306,6 @@ func (as *antigravitySession) readLoop(ctx context.Context, cmd *exec.Cmd, stdou
 
 	scanner := bufio.NewScanner(stdout)
 	scanner.Buffer(make([]byte, 64*1024), 32*1024*1024)
-	parser := newAgyOutputParser()
 	streamFormatDetected := false
 	for scanner.Scan() {
 		line := scanner.Bytes()
