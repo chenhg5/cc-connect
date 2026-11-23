@@ -132,6 +132,43 @@ func TestParseClaudeUsageReport_UpgradeRequired(t *testing.T) {
 	}
 }
 
+// When Claude Code cannot load usage data, its /usage panel shows an error
+// instead of the usage bars. The probe used to keep waiting for bars that never
+// appear and failed with a generic timeout; it must report the error right away.
+func TestDetectClaudeUsageOutputError_FailedToLoadUsageData(t *testing.T) {
+	// The panel as rendered by Claude Code 2.1.318 when its usage request fails.
+	screen := strings.TrimSpace(`
+Settings Status Config Usage Stats
+
+Session
+
+Total cost: $0.0000
+Total duration (API): 0s
+Total duration (wall): 5s
+Total code changes: 0 lines added, 0 lines removed
+Usage: 0 input, 0 output, 0 cache read, 0 cache write
+
+Error: Failed to load usage data
+
+r to retry · Esc to cancel
+`)
+
+	err := detectClaudeUsageOutputError(screen, "")
+	if err == nil || !strings.Contains(err.Error(), "Failed to load usage data") {
+		t.Fatalf("err = %v, want the failed-to-load error", err)
+	}
+	if _, err := parseClaudeUsageReport(screen, time.Now()); err == nil || !strings.Contains(err.Error(), "could not load usage data") {
+		t.Fatalf("parseClaudeUsageReport err = %v, want the failed-to-load error", err)
+	}
+
+	// If the usage bars did render, an error elsewhere on the panel must not
+	// hide them.
+	withBars := screen + "\n\nCurrent session\n19% used\nResets 7:20pm (UTC)\n\nCurrent week (all models)\n16% used\nResets Nov 21, 11am (UTC)"
+	if err := detectClaudeUsageOutputError(withBars, ""); err != nil {
+		t.Fatalf("err = %v, want nil when usage bars are present", err)
+	}
+}
+
 func TestParseClaudeUsageReport_LoginRequired(t *testing.T) {
 	text := "Please run `claude auth login` to continue."
 	_, err := parseClaudeUsageReport(text, time.Now())

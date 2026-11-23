@@ -49,6 +49,69 @@ func TestProviderPresetsIncludesAtlasCloud(t *testing.T) {
 	}
 }
 
+func TestProviderPresetsIncludesUberLLM(t *testing.T) {
+	body, err := os.ReadFile("../provider-presets.json")
+	if err != nil {
+		t.Fatalf("read provider-presets.json: %v", err)
+	}
+
+	var presets ProviderPresetsResponse
+	if err := json.Unmarshal(body, &presets); err != nil {
+		t.Fatalf("parse provider-presets.json: %v", err)
+	}
+
+	var uber *ProviderPreset
+	for i := range presets.Providers {
+		if presets.Providers[i].Name == "uberllm" {
+			uber = &presets.Providers[i]
+			break
+		}
+	}
+	if uber == nil {
+		t.Fatal("uberllm preset not found")
+	}
+	if uber.InviteURL != "" {
+		t.Fatalf("uberllm invite_url = %q, want empty", uber.InviteURL)
+	}
+
+	claude := uber.AgentConfig("claudecode")
+	if claude == nil {
+		t.Fatal("uberllm claudecode config missing")
+	}
+	// Claude Code appends /v1/messages itself, so the base URL has no /v1.
+	if claude.BaseURL != "https://api.uberllm.dev" {
+		t.Fatalf("claudecode base_url = %q", claude.BaseURL)
+	}
+	if claude.Model != "anthropic/claude-sonnet-4.6" {
+		t.Fatalf("claudecode model = %q", claude.Model)
+	}
+
+	codex := uber.AgentConfig("codex")
+	if codex == nil {
+		t.Fatal("uberllm codex config missing")
+	}
+	if codex.BaseURL != "https://api.uberllm.dev/v1" {
+		t.Fatalf("codex base_url = %q", codex.BaseURL)
+	}
+	if codex.Model != "openai/gpt-5.4" {
+		t.Fatalf("codex model = %q", codex.Model)
+	}
+	if codex.CodexConfig == nil || codex.CodexConfig.WireAPI != "responses" {
+		t.Fatalf("codex_config = %#v", codex.CodexConfig)
+	}
+
+	opencode := uber.AgentConfig("opencode")
+	if opencode == nil {
+		t.Fatal("uberllm opencode config missing")
+	}
+	if opencode.BaseURL != "https://api.uberllm.dev/v1" {
+		t.Fatalf("opencode base_url = %q", opencode.BaseURL)
+	}
+	if opencode.Model != "deepseek/deepseek-v4-flash" {
+		t.Fatalf("opencode model = %q", opencode.Model)
+	}
+}
+
 func TestProviderPresetsIncludesCloudGPU(t *testing.T) {
 	body, err := os.ReadFile("../provider-presets.json")
 	if err != nil {
@@ -289,6 +352,166 @@ func TestProviderPresetsIncludesTrustedRouter(t *testing.T) {
 		t.Fatal("trustedrouter opencode config missing")
 	}
 	if opencode.BaseURL != "https://api.trustedrouter.com/v1" {
+		t.Fatalf("opencode base_url = %q", opencode.BaseURL)
+	}
+}
+
+func TestProviderPresetsIncludesAIGROW(t *testing.T) {
+	body, err := os.ReadFile("../provider-presets.json")
+	if err != nil {
+		t.Fatalf("read provider-presets.json: %v", err)
+	}
+
+	var presets ProviderPresetsResponse
+	if err := json.Unmarshal(body, &presets); err != nil {
+		t.Fatalf("parse provider-presets.json: %v", err)
+	}
+
+	var aigrow *ProviderPreset
+	for i := range presets.Providers {
+		if presets.Providers[i].Name == "aigrow" {
+			aigrow = &presets.Providers[i]
+			break
+		}
+	}
+	if aigrow == nil {
+		t.Fatal("aigrow preset not found")
+	}
+	if aigrow.InviteURL != "" {
+		t.Fatalf("aigrow invite_url = %q, want empty", aigrow.InviteURL)
+	}
+
+	claude := aigrow.AgentConfig("claudecode")
+	if claude == nil {
+		t.Fatal("aigrow claudecode config missing")
+	}
+	if claude.BaseURL != "https://aigrow.gg" {
+		t.Fatalf("claudecode base_url = %q", claude.BaseURL)
+	}
+	if claude.Model != "claude-opus-5.5" {
+		t.Fatalf("claudecode model = %q", claude.Model)
+	}
+
+	opencode := aigrow.AgentConfig("opencode")
+	if opencode == nil {
+		t.Fatal("aigrow opencode config missing")
+	}
+	if opencode.BaseURL != "https://aigrow.gg/v1" {
+		t.Fatalf("opencode base_url = %q", opencode.BaseURL)
+	}
+}
+
+func TestProviderPresetsIncludesWorldRouter(t *testing.T) {
+	body, err := os.ReadFile("../provider-presets.json")
+	if err != nil {
+		t.Fatalf("read provider-presets.json: %v", err)
+	}
+
+	var presets ProviderPresetsResponse
+	if err := json.Unmarshal(body, &presets); err != nil {
+		t.Fatalf("parse provider-presets.json: %v", err)
+	}
+
+	var worldrouter *ProviderPreset
+	for i := range presets.Providers {
+		if presets.Providers[i].Name == "worldrouter" {
+			worldrouter = &presets.Providers[i]
+			break
+		}
+	}
+	if worldrouter == nil {
+		t.Fatal("worldrouter preset not found")
+	}
+	if worldrouter.InviteURL != "" {
+		t.Fatalf("worldrouter invite_url = %q, want empty", worldrouter.InviteURL)
+	}
+
+	claude := worldrouter.AgentConfig("claudecode")
+	if claude == nil {
+		t.Fatal("worldrouter claudecode config missing")
+	}
+	if claude.BaseURL != "https://inference-api.worldrouter.ai" {
+		t.Fatalf("claudecode base_url = %q", claude.BaseURL)
+	}
+	if claude.Model != "claude-sonnet-5-5" {
+		t.Fatalf("claudecode model = %q", claude.Model)
+	}
+
+	codex := worldrouter.AgentConfig("codex")
+	if codex == nil {
+		t.Fatal("worldrouter codex config missing")
+	}
+	if codex.BaseURL != "https://inference-api.worldrouter.ai/v1" {
+		t.Fatalf("codex base_url = %q", codex.BaseURL)
+	}
+	if codex.CodexConfig == nil || codex.CodexConfig.WireAPI != "responses" {
+		t.Fatalf("codex wire_api = %+v, want responses", codex.CodexConfig)
+	}
+
+	opencode := worldrouter.AgentConfig("opencode")
+	if opencode == nil {
+		t.Fatal("worldrouter opencode config missing")
+	}
+	if opencode.BaseURL != "https://inference-api.worldrouter.ai/v1" {
+		t.Fatalf("opencode base_url = %q", opencode.BaseURL)
+	}
+}
+
+func TestProviderPresetsIncludesLazu(t *testing.T) {
+	body, err := os.ReadFile("../provider-presets.json")
+	if err != nil {
+		t.Fatalf("read provider-presets.json: %v", err)
+	}
+
+	var presets ProviderPresetsResponse
+	if err := json.Unmarshal(body, &presets); err != nil {
+		t.Fatalf("parse provider-presets.json: %v", err)
+	}
+
+	var lazu *ProviderPreset
+	for i := range presets.Providers {
+		if presets.Providers[i].Name == "lazu" {
+			lazu = &presets.Providers[i]
+			break
+		}
+	}
+	if lazu == nil {
+		t.Fatal("lazu preset not found")
+	}
+	if lazu.InviteURL != "" {
+		t.Fatalf("lazu invite_url = %q, want empty", lazu.InviteURL)
+	}
+
+	claude := lazu.AgentConfig("claudecode")
+	if claude == nil {
+		t.Fatal("lazu claudecode config missing")
+	}
+	if claude.BaseURL != "https://api.lazu.ai" {
+		t.Fatalf("claudecode base_url = %q", claude.BaseURL)
+	}
+	if claude.Model != "claude-sonnet-5-5" {
+		t.Fatalf("claudecode model = %q", claude.Model)
+	}
+
+	codex := lazu.AgentConfig("codex")
+	if codex == nil {
+		t.Fatal("lazu codex config missing")
+	}
+	if codex.BaseURL != "https://api.lazu.ai/v1" {
+		t.Fatalf("codex base_url = %q", codex.BaseURL)
+	}
+	if codex.Model != "gpt-6.2-astra" {
+		t.Fatalf("codex model = %q", codex.Model)
+	}
+	if codex.CodexConfig == nil || codex.CodexConfig.WireAPI != "responses" {
+		t.Fatalf("codex_config = %#v", codex.CodexConfig)
+	}
+
+	opencode := lazu.AgentConfig("opencode")
+	if opencode == nil {
+		t.Fatal("lazu opencode config missing")
+	}
+	if opencode.BaseURL != "https://api.lazu.ai/v1" {
 		t.Fatalf("opencode base_url = %q", opencode.BaseURL)
 	}
 }

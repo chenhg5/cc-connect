@@ -436,8 +436,10 @@ type SessionManager struct {
 	// Tombstones reject activation from a session list or agent event obtained
 	// before deletion. They need only live as long as this manager: stale work
 	// cannot survive a process restart. Protected by mu.
-	deletedAgentSessionIDs map[string]struct{}
-	deletingAgentSessions  map[string]chan struct{}
+	deletedAgentSessionIDs  map[string]struct{}
+	deletingAgentSessions   map[string]chan struct{}
+	uncertainAgentDeletions map[string]error
+	deletionWaitTimeout     time.Duration // immutable after construction; tests may shorten before use
 
 	// legacyData is true when sessions were loaded from a snapshot that
 	// predates PastAgentSessionIDs tracking. In this state, many sessions
@@ -448,14 +450,16 @@ type SessionManager struct {
 
 func NewSessionManager(storePath string) *SessionManager {
 	sm := &SessionManager{
-		sessions:               make(map[string]*Session),
-		activeSession:          make(map[string]string),
-		userSessions:           make(map[string][]string),
-		sessionNames:           make(map[string]string),
-		userMeta:               make(map[string]*UserMeta),
-		storePath:              storePath,
-		deletedAgentSessionIDs: make(map[string]struct{}),
-		deletingAgentSessions:  make(map[string]chan struct{}),
+		sessions:                make(map[string]*Session),
+		activeSession:           make(map[string]string),
+		userSessions:            make(map[string][]string),
+		sessionNames:            make(map[string]string),
+		userMeta:                make(map[string]*UserMeta),
+		storePath:               storePath,
+		deletedAgentSessionIDs:  make(map[string]struct{}),
+		deletingAgentSessions:   make(map[string]chan struct{}),
+		uncertainAgentDeletions: make(map[string]error),
+		deletionWaitTimeout:     30 * time.Second,
 	}
 	if storePath != "" {
 		sm.load()
@@ -533,6 +537,7 @@ func (sm *SessionManager) createLocked(userKey, name string) *Session {
 }
 
 func (sm *SessionManager) SwitchSession(userKey, target string) (*Session, error) {
+	deadline := sm.deletionDeadline()
 	for {
 		sm.mu.Lock()
 		var deleting <-chan struct{}
@@ -540,6 +545,10 @@ func (sm *SessionManager) SwitchSession(userKey, target string) (*Session, error
 			s := sm.sessions[sid]
 			if s == nil || (s.ID != target && s.GetName() != target) {
 				continue
+			}
+			if err := sm.uncertainAgentDeletions[s.GetAgentSessionID()]; err != nil {
+				sm.mu.Unlock()
+				return nil, err
 			}
 			deleting = sm.deletingAgentSessions[s.GetAgentSessionID()]
 			if deleting != nil {
@@ -557,7 +566,44 @@ func (sm *SessionManager) SwitchSession(userKey, target string) (*Session, error
 		}
 		// Deletion may remove this local session. Resolve it again after the
 		// reservation ends instead of activating a pointer obtained earlier.
-		<-deleting
+		if !waitSessionDeletion(deleting, deadline) {
+			return nil, ErrAgentSessionDeletionPending
+		}
+	}
+}
+
+var ErrAgentSessionDeletionPending = errors.New("session deletion is still running; try again after it finishes")
+
+// AgentSessionDeletionError reports why activation must remain blocked.
+// It never releases a reservation or clears an uncertain deletion outcome.
+func (sm *SessionManager) AgentSessionDeletionError(id string) error {
+	sm.mu.RLock()
+	defer sm.mu.RUnlock()
+	if err := sm.uncertainAgentDeletions[id]; err != nil {
+		return err
+	}
+	if sm.deletingAgentSessions[id] != nil {
+		return ErrAgentSessionDeletionPending
+	}
+	return nil
+}
+
+func (sm *SessionManager) deletionDeadline() time.Time {
+	d := sm.deletionWaitTimeout
+	if d <= 0 {
+		d = 30 * time.Second
+	}
+	return time.Now().Add(d)
+}
+
+func waitSessionDeletion(done <-chan struct{}, deadline time.Time) bool {
+	timer := time.NewTimer(time.Until(deadline))
+	defer timer.Stop()
+	select {
+	case <-done:
+		return true
+	case <-timer.C:
+		return false
 	}
 }
 
@@ -565,18 +611,30 @@ func (sm *SessionManager) SwitchSession(userKey, target string) (*Session, error
 // of the reserved ID waits; unrelated chats can read and update their sessions
 // while an agent's deletion performs filesystem, RPC, or subprocess I/O.
 func (sm *SessionManager) lockAgentSessionActivation(agentSID string) bool {
+	ok, _ := sm.lockAgentSessionActivationResult(agentSID)
+	return ok
+}
+
+func (sm *SessionManager) lockAgentSessionActivationResult(agentSID string) (bool, error) {
+	deadline := sm.deletionDeadline()
 	for {
 		sm.mu.Lock()
+		if err := sm.uncertainAgentDeletions[agentSID]; err != nil {
+			sm.mu.Unlock()
+			return false, err
+		}
 		if _, deleted := sm.deletedAgentSessionIDs[agentSID]; deleted {
 			sm.mu.Unlock()
-			return false
+			return false, nil
 		}
 		if deleting := sm.deletingAgentSessions[agentSID]; deleting != nil {
 			sm.mu.Unlock()
-			<-deleting
+			if !waitSessionDeletion(deleting, deadline) {
+				return false, ErrAgentSessionDeletionPending
+			}
 			continue
 		}
-		return true
+		return true, nil
 	}
 }
 
@@ -642,8 +700,8 @@ func (sm *SessionManager) DeleteAgentSessionIfInactive(agentSessionID, userKey s
 	if agentSessionID == "" {
 		return errors.New("agent session ID is empty")
 	}
-	if !sm.lockAgentSessionActivation(agentSessionID) {
-		return nil // A concurrent deletion already completed successfully.
+	if ok, err := sm.lockAgentSessionActivationResult(agentSessionID); !ok {
+		return err // nil only when a concurrent deletion completed successfully.
 	}
 	if s := sm.sessions[sm.activeSession[userKey]]; s != nil && s.GetAgentSessionID() == agentSessionID {
 		sm.mu.Unlock()
@@ -666,6 +724,14 @@ func (sm *SessionManager) DeleteAgentSessionIfInactive(agentSessionID, userKey s
 
 	sm.mu.Lock()
 	defer sm.mu.Unlock()
+	if errors.Is(err, ErrSessionDeletionUncertain) {
+		// Wake waiters, but retain a fail-closed quarantine. A timeout is not
+		// evidence that a detached deletion worker stopped or rolled back.
+		if sm.uncertainAgentDeletions == nil {
+			sm.uncertainAgentDeletions = make(map[string]error)
+		}
+		sm.uncertainAgentDeletions[agentSessionID] = err
+	}
 	if err == nil {
 		sm.deletedAgentSessionIDs[agentSessionID] = struct{}{}
 		sm.deleteByAgentSessionIDLocked(agentSessionID)
@@ -1130,8 +1196,14 @@ type PruneResult struct {
 // to the kept session (sorted by timestamp). When false, only empty sessions
 // are removed.
 func (sm *SessionManager) PruneDuplicateSessions(mergeHistory bool) PruneResult {
+	deadline := sm.deletionDeadline()
 	for {
 		sm.mu.Lock()
+		if len(sm.uncertainAgentDeletions) != 0 {
+			sm.mu.Unlock()
+			slog.Warn("session pruning deferred until uncertain deletion is reconciled")
+			return PruneResult{}
+		}
 		var deleting <-chan struct{}
 		for _, done := range sm.deletingAgentSessions {
 			deleting = done
@@ -1141,7 +1213,10 @@ func (sm *SessionManager) PruneDuplicateSessions(mergeHistory bool) PruneResult 
 			break
 		}
 		sm.mu.Unlock()
-		<-deleting
+		if !waitSessionDeletion(deleting, deadline) {
+			slog.Warn("session pruning deferred while deletion is still running")
+			return PruneResult{}
+		}
 	}
 	defer sm.mu.Unlock()
 

@@ -615,6 +615,12 @@ type interactiveState struct {
 	// currentTurnUserMessageTimeMs is the UserMessageTimeMs for the in-flight
 	// foreground turn (including a queued turn after EventResult).
 	currentTurnUserMessageTimeMs int64
+
+	// restartAfterTurn is set by /model when it arrives while a turn is in
+	// flight: instead of killing the running agent process (and losing its
+	// reply), drainPendingMessages restarts the session once the session
+	// goes idle so the next turn picks up the new model.
+	restartAfterTurn bool
 }
 
 // latestUserMessageWatermarkLocked returns the highest UserMessageTimeMs among
@@ -1974,12 +1980,7 @@ func (e *Engine) executeTimerShell(p Platform, replyCtx any, job *TimerJob) erro
 	ctx, cancel := context.WithTimeout(e.ctx, timeout)
 	defer cancel()
 
-	var shellCmd *exec.Cmd
-	if runtime.GOOS == "windows" {
-		shellCmd = exec.CommandContext(ctx, "powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", job.Exec)
-	} else {
-		shellCmd = exec.CommandContext(ctx, "sh", "-c", job.Exec)
-	}
+	shellCmd := shellExecCommand(ctx, e.shell, e.shellFlag, e.shellProfile, job.Exec)
 	shellCmd.Dir = workDir
 
 	stdout, err := shellCmd.StdoutPipe()
@@ -2566,6 +2567,12 @@ func (e *Engine) initPlatformCapabilities(p Platform) {
 
 	if nav, ok := p.(CardNavigable); ok {
 		nav.SetCardNavigationHandler(e.handleCardNav)
+	}
+	if la, ok := p.(LocalizerAware); ok {
+		la.SetLocalizer(e.i18n.T)
+	}
+	if aq, ok := p.(AskQuestionStateAware); ok {
+		aq.SetAskQuestionLiveCheck(e.askQuestionCallbackLive)
 	}
 }
 
@@ -3827,6 +3834,39 @@ func parseAskQuestionCallback(content string) (qIdx int, hasQIdx bool, ok bool) 
 		return qIdx, true, true
 	}
 	return 0, false, false
+}
+
+// askQuestionCallbackLive reports whether an AskUserQuestion option click
+// would answer the question that is waiting now. It applies the same rules
+// as handlePendingPermission, so a platform can avoid rendering an answer
+// that the engine is about to drop. Content that is not an option click is
+// reported live.
+func (e *Engine) askQuestionCallbackLive(sessionKey, content string) bool {
+	qIdx, hasQIdx, ok := parseAskQuestionCallback(content)
+	if !ok {
+		return true
+	}
+	iKey := e.interactiveKeyForSessionKey(sessionKey)
+	_, pending := e.lookupPending(iKey)
+	if pending == nil {
+		e.interactiveMu.Lock()
+		var cronKeys []string
+		for k := range e.interactiveStates {
+			if strings.HasPrefix(k, iKey+"#cron:") {
+				cronKeys = append(cronKeys, k)
+			}
+		}
+		e.interactiveMu.Unlock()
+		for _, k := range cronKeys {
+			if _, pending = e.lookupPending(k); pending != nil {
+				break
+			}
+		}
+	}
+	if pending == nil || len(pending.Questions) == 0 {
+		return false
+	}
+	return !hasQIdx || qIdx == pending.CurrentQuestion
 }
 
 // dropStaleAskQuestionCallback tells the user that an option click arrived
@@ -7018,6 +7058,16 @@ func (e *Engine) notifyDroppedQueuedMessages(state *interactiveState, reason err
 func (e *Engine) drainPendingMessages(state *interactiveState, session *Session, sessions *SessionManager, sessionKey string, lockGen uint64) bool {
 	for {
 		state.mu.Lock()
+		if len(state.pendingMessages) == 0 && state.restartAfterTurn {
+			// A /model switch was deferred while the turn ran. Its reply has
+			// been delivered, so restart the agent session now, while the
+			// session lock still keeps new turns off the old process.
+			state.restartAfterTurn = false
+			state.mu.Unlock()
+			slog.Info("applying model switch deferred until turn completion", "session", sessionKey)
+			e.cleanupInteractiveState(sessionKey, state)
+			continue
+		}
 		if len(state.pendingMessages) == 0 {
 			session.Unlock(lockGen)
 			state.mu.Unlock()
@@ -7035,9 +7085,9 @@ func (e *Engine) drainPendingMessages(state *interactiveState, session *Session,
 			)
 		}
 		if len(state.pendingMessages) == 0 {
-			session.Unlock(lockGen)
+			// Re-check from the top so a deferred restart is not skipped.
 			state.mu.Unlock()
-			return true
+			continue
 		}
 		queued := state.pendingMessages[0]
 		state.pendingMessages = state.pendingMessages[1:]
@@ -7873,10 +7923,6 @@ func (e *Engine) cmdSwitch(p Platform, msg *Message, args []string) {
 		return
 	}
 
-	slog.Info("cmdSwitch: cleaning up old session", "session_key", msg.SessionKey)
-	e.cleanupInteractiveState(interactiveKey)
-	slog.Info("cmdSwitch: cleanup done", "session_key", msg.SessionKey)
-
 	// NOTE: Do NOT call session.ClearHistory() on the returned Session.
 	// When switching back to a known agent_session_id, SwitchToAgentSession
 	// returns the *existing* Session object whose History reflects the
@@ -7884,9 +7930,12 @@ func (e *Engine) cmdSwitch(p Platform, msg *Message, args []string) {
 	// /switch round-trip. When SwitchToAgentSession creates a fresh Session
 	// (no prior match), History is already nil, so preserving is a no-op.
 	if sessions.SwitchToAgentSession(msg.SessionKey, matched.ID, agent.Name(), matched.Summary) == nil {
-		e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgSwitchNoMatch, query))
+		e.reply(p, msg.ReplyCtx, e.switchFailureText(sessions, matched.ID, query))
 		return
 	}
+	// Resolve the live interaction after the switch commits, not before a
+	// potentially blocking deletion wait. Preserve replacements during Close.
+	e.cleanupInteractiveStateAfterSwitch(interactiveKey)
 
 	shortID := matched.ID
 	if len(shortID) > 12 {
@@ -10518,14 +10567,45 @@ func (e *Engine) cmdModel(p Platform, msg *Message, args []string) {
 		return
 	}
 	e.persistWorkspaceModelOverride(interactiveKey, msg.SessionKey, agent, target)
-	e.cleanupInteractiveState(interactiveKey)
+	deferred := e.deferRestartIfTurnInFlight(interactiveKey)
+	if !deferred {
+		e.cleanupInteractiveState(interactiveKey)
+	}
 
 	// Keep the existing agent session ID so the next StartSession uses
 	// --resume <id> --model <new>, which lets the CLI agent restore context
 	// natively without replaying history (no extra token cost).
 	sessions.Save()
 
+	if deferred {
+		e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgModelChangeQueued, target))
+		return
+	}
 	e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgModelChanged, target))
+}
+
+// deferRestartIfTurnInFlight reports whether a turn is running on the live
+// agent session for interactiveKey and, if so, marks the state so that
+// drainPendingMessages restarts the session once the turn (and any queued
+// messages) finish. Closing the session mid-turn would drop the reply.
+// The busy check and the flag are both made under state.mu, which
+// drainPendingMessages also holds when it releases the session lock, so a
+// flag set here is always seen by the drain loop.
+func (e *Engine) deferRestartIfTurnInFlight(interactiveKey string) bool {
+	e.interactiveMu.Lock()
+	state := e.interactiveStates[interactiveKey]
+	e.interactiveMu.Unlock()
+	if state == nil {
+		return false
+	}
+	state.mu.Lock()
+	defer state.mu.Unlock()
+	if state.stopped || state.agentSession == nil || !state.agentSession.Alive() ||
+		state.busySession == nil || !state.busySession.Busy() {
+		return false
+	}
+	state.restartAfterTurn = true
+	return true
 }
 
 // resolveModelAlias resolves a user-supplied string to a model name.
@@ -11576,7 +11656,7 @@ func (e *Engine) cmdProviderAdd(p Platform, msg *Message, switcher ProviderSwitc
 	raw = strings.TrimSpace(raw)
 
 	if strings.HasPrefix(raw, "{") {
-		// JSON format: /provider add {"name":"relay","api_key":"sk-xxx",...}
+		// The JSON form accepts provider fields including api_key.
 		var jp struct {
 			Name    string            `json:"name"`
 			APIKey  string            `json:"api_key"`
@@ -13076,6 +13156,32 @@ func workspaceFromInteractiveKey(interactiveKey, sessionKey string) string {
 
 // executeCardAction performs the side-effect for act: prefixed actions
 // (e.g. switching model/mode/lang) before the card is re-rendered.
+// cleanupInteractiveStateAfterSwitch snapshots the current state only after
+// activation succeeds, and does not remove a replacement installed during Close.
+func (e *Engine) cleanupInteractiveStateAfterSwitch(key string) {
+	e.interactiveMu.Lock()
+	state := e.interactiveStates[key]
+	e.interactiveMu.Unlock()
+	if state != nil {
+		e.cleanupInteractiveState(key, state)
+	}
+}
+
+func (e *Engine) switchFailureText(sessions *SessionManager, id, query string) string {
+	if err := sessions.AgentSessionDeletionError(id); err != nil {
+		return e.i18n.Tf(MsgError, err)
+	}
+	return e.i18n.Tf(MsgSwitchNoMatch, query)
+}
+
+// Card actions have no direct reply argument. Route a failed switch back to
+// the existing chat without tearing down its running interactive session.
+func (e *Engine) notifyCardSwitchFailure(sessionKey, text string) {
+	if err := e.SendToSession(sessionKey, text); err != nil {
+		slog.Warn("card switch feedback failed", "session_key", sessionKey, "error", err)
+	}
+}
+
 func (e *Engine) executeCardAction(cmd, args, sessionKey string) {
 	interactiveKey := e.interactiveKeyForSessionKey(sessionKey)
 
@@ -13267,21 +13373,26 @@ func (e *Engine) executeCardAction(cmd, args, sessionKey string) {
 		}
 		agent, sessions := e.sessionContextForKey(sessionKey)
 		agentSessions, err := agent.ListSessions(e.ctx)
-		if err != nil || len(agentSessions) == 0 {
+		if err != nil {
+			e.notifyCardSwitchFailure(sessionKey, e.i18n.Tf(MsgError, err))
 			return
 		}
 		agentSessions = e.applySessionFilter(agentSessions, sessions, sessionKey)
 		matched := e.matchSession(agentSessions, sessions, args)
 		if matched == nil {
+			e.notifyCardSwitchFailure(sessionKey, e.i18n.Tf(MsgSwitchNoMatch, args))
 			return
 		}
-		e.cleanupInteractiveState(interactiveKey)
 		// Same constraint as cmdSwitch: switching to a known agent session
 		// returns the existing Session, whose History still reflects the
 		// original conversation. Clearing it makes /status and /history report
 		// zero messages right after a successful card switch. A fresh Session
 		// already has nil History, so leaving it alone is a no-op there.
-		sessions.SwitchToAgentSession(sessionKey, matched.ID, agent.Name(), matched.Summary)
+		if sessions.SwitchToAgentSession(sessionKey, matched.ID, agent.Name(), matched.Summary) == nil {
+			e.notifyCardSwitchFailure(sessionKey, e.switchFailureText(sessions, matched.ID, args))
+			return
+		}
+		e.cleanupInteractiveStateAfterSwitch(interactiveKey)
 
 	case "/dir":
 		fields := strings.Fields(args)
@@ -14701,7 +14812,7 @@ func (e *Engine) renderSkillsCard(registry *SkillRegistry) *Card {
 }
 
 func (e *Engine) renderDoctorCard() *Card {
-	results := RunDoctorChecks(e.ctx, e.agent, e.platforms)
+	results := RunDoctorChecks(e.ctx, e.agent, e.platforms, e.dataDir)
 	report := FormatDoctorResults(results, e.i18n)
 	return NewCard().
 		Title(e.i18n.T(MsgCardTitleDoctor), "orange").
@@ -16153,7 +16264,7 @@ func (e *Engine) renderWhoamiCard(msg *Message) *Card {
 // ── /doctor command ─────────────────────────────────────────
 
 func (e *Engine) cmdDoctor(p Platform, msg *Message) {
-	results := RunDoctorChecks(e.ctx, e.agent, e.platforms)
+	results := RunDoctorChecks(e.ctx, e.agent, e.platforms, e.dataDir)
 	report := FormatDoctorResults(results, e.i18n)
 	e.reply(p, msg.ReplyCtx, report)
 }
