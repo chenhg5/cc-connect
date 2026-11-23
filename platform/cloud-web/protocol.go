@@ -187,7 +187,7 @@ func buildRegisterPayload(name, project, transport string) wireRegister {
 		Transport: transport,
 		Metadata: map[string]any{
 			"protocol_version":  protocolVersion,
-			"input_injected_v1": true,
+			"input_receipts_v1": true,
 		},
 	}
 }

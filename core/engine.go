@@ -3505,8 +3505,10 @@ func (e *Engine) injectMessageIntoBusyTurn(p Platform, msg *Message, interactive
 		if hasAttachments {
 			return false
 		}
+		reportQueuedInput(e.ctx, p, msg.ReplyCtx)
 		delivered, err = steerer.SteerUserInput(prompt)
 	} else if sender, ok := agentSession.(MidTurnInputSender); ok {
+		reportQueuedInput(e.ctx, p, msg.ReplyCtx)
 		err = sender.SendMidTurn(prompt, msg.MessageID, msg.Images, msg.Files)
 		delivered = err == nil
 	}
@@ -3570,13 +3572,16 @@ func (e *Engine) queueMessageForBusySession(p Platform, msg *Message, interactiv
 	if e.isStaleUserMessageLocked(state, msg.UserMessageTimeMs) {
 		snap := userMessageWatermarkSnapshotLocked(state)
 		e.logStaleUserMessageDropped("reject_before_queue", msg, interactiveKey, snap)
+		reportDroppedInput(e.ctx, p, msg.ReplyCtx, "stale")
 		return true
 	}
 	if len(state.pendingMessages) >= e.maxQueuedMessages {
 		depth := len(state.pendingMessages)
+		reportDroppedInput(e.ctx, p, msg.ReplyCtx, "rejected")
 		e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgQueueFull), depth))
 		return true // handled: queue-full reply sent
 	}
+	reportQueuedInput(e.ctx, p, msg.ReplyCtx)
 	state.pendingMessages = append(state.pendingMessages, queuedMessage{
 		messageID:         msg.MessageID,
 		platform:          p,
@@ -4289,6 +4294,7 @@ func (e *Engine) processInteractiveMessageWith(p Platform, msg *Message, session
 			sendDone <- fmt.Errorf("agent session became nil")
 			return
 		}
+		reportStartedInput(e.ctx, p, msg.ReplyCtx)
 		sendDone <- as.Send(promptContent, msg.MessageID, msg.Images, msg.Files)
 	}()
 
@@ -6836,6 +6842,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 						nextSend <- fmt.Errorf("agent session became nil")
 						return
 					}
+					reportStartedInput(e.ctx, queued.platform, queued.replyCtx)
 					nextSend <- as.Send(queuedPrompt, queued.messageID, queued.images, queued.files)
 				}()
 				pendingSend = nextSend
@@ -7114,6 +7121,7 @@ func (e *Engine) notifyDroppedQueuedMessages(state *interactiveState, reason err
 	state.pendingMessages = nil
 	state.mu.Unlock()
 	for _, q := range remaining {
+		reportDroppedInput(e.ctx, q.platform, q.replyCtx, "failed")
 		e.send(q.platform, q.replyCtx, fmt.Sprintf(e.i18n.T(MsgError), reason))
 	}
 }
@@ -7177,6 +7185,7 @@ func (e *Engine) drainPendingMessages(state *interactiveState, session *Session,
 				sendDone <- fmt.Errorf("agent session became nil")
 				return
 			}
+			reportStartedInput(e.ctx, queued.platform, queued.replyCtx)
 			sendDone <- as.Send(prompt, queued.messageID, queued.images, queued.files)
 		}()
 
@@ -11170,9 +11179,7 @@ func (e *Engine) stopInteractiveSessionWithOptions(sessionKey string, notifyQueu
 		if notifyQueued {
 			e.notifyDroppedQueuedMessages(state, fmt.Errorf("session cancelled"))
 		} else {
-			state.mu.Lock()
-			state.pendingMessages = nil
-			state.mu.Unlock()
+			e.discardQueuedInputs(state, "cancelled")
 		}
 
 		// Mark eventsNeedResync so the next turn drains stale events from
@@ -11230,9 +11237,7 @@ normalCleanup:
 	if notifyQueued {
 		e.notifyDroppedQueuedMessages(state, fmt.Errorf("session reset"))
 	} else {
-		state.mu.Lock()
-		state.pendingMessages = nil
-		state.mu.Unlock()
+		e.discardQueuedInputs(state, "cancelled")
 	}
 	e.closeAgentSessionAsync(sessionKey, agentSession, closePlatform, closeReplyCtx)
 
