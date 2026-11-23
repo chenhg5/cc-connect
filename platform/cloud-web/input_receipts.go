@@ -46,7 +46,7 @@ func openInputReceipts(path string) (*inputReceipts, error) {
 		"UPDATE receipts SET pending=0 WHERE pending=1",
 	} {
 		if _, err := db.Exec(statement); err != nil {
-			db.Close()
+			_ = db.Close() // Preserve the initialization error.
 			return nil, err
 		}
 	}
@@ -94,15 +94,18 @@ func (p *Platform) flushInputReceipts(ctx context.Context) error {
 	for rows.Next() {
 		var r receipt
 		if err := rows.Scan(&r.session, &r.message, &r.wire); err != nil {
-			rows.Close()
+			_ = rows.Close() // Preserve the scan error.
 			return err
 		}
 		pending = append(pending, r)
 	}
 	err = rows.Err()
-	rows.Close()
+	closeErr := rows.Close()
 	if err != nil {
 		return err
+	}
+	if closeErr != nil {
+		return closeErr
 	}
 	var failure error
 	for _, r := range pending {

@@ -198,7 +198,7 @@ func (p *Platform) Start(handler core.MessageHandler) error {
 	if err := p.tp.Start(ctx, p.handleWire); err != nil {
 		cancel()
 		if p.inputReceipts != nil {
-			p.inputReceipts.db.Close()
+			_ = p.inputReceipts.db.Close() // Preserve the transport startup error.
 			p.inputReceipts = nil
 		}
 		return err

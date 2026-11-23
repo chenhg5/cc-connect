@@ -12,25 +12,25 @@ import (
 )
 
 func TestInjectedInputReceiptNegotiatesAndRetriesTheSameTarget(t *testing.T) {
-	calls := 0
+	var calls atomic.Int32
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var wire map[string]any
 		if err := json.NewDecoder(r.Body).Decode(&wire); err != nil {
 			t.Error(err)
 			return
 		}
-		calls++
+		attempt := calls.Add(1)
 		if wire["type"] != "input_injected" || wire["reply_ctx"] != "supplement" || wire["target_message_id"] != "original" || wire["session_key"] != "session" {
 			t.Errorf("incorrect receipt: %+v", wire)
 		}
-		if calls <= 3 {
+		if attempt <= 3 {
 			w.WriteHeader(http.StatusServiceUnavailable)
 			return
 		}
 		_, _ = w.Write([]byte(`{"ok":true}`))
 	}))
 	defer srv.Close()
-	tp := newPollTransport(srv.URL, "token", "cloud_web", "project", "", "", 1000)
+	tp := newPollTransport(srv.URL, "", "cloud_web", "project", "", "", 1000)
 	path := filepath.Join(t.TempDir(), "receipts.sqlite")
 	q, err := openInputReceipts(path)
 	if err != nil {
@@ -53,18 +53,24 @@ func TestInjectedInputReceiptNegotiatesAndRetriesTheSameTarget(t *testing.T) {
 			t.Fatal("expected transient error")
 		}
 	}
-	q.db.Close()
+	if err := q.db.Close(); err != nil {
+		t.Fatal(err)
+	}
 	q, err = openInputReceipts(path)
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer q.db.Close()
+	defer func() {
+		if err := q.db.Close(); err != nil {
+			t.Error(err)
+		}
+	}()
 	p.inputReceipts = q
 	if err := p.flushInputReceipts(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	if calls != 4 {
-		t.Fatalf("attempts=%d, want 4 after restart", calls)
+	if got := calls.Load(); got != 4 {
+		t.Fatalf("attempts=%d, want 4 after restart", got)
 	}
 	if err := q.db.QueryRow("SELECT count(*) FROM receipts").Scan(&count); err != nil {
 		t.Fatal(err)
@@ -78,12 +84,18 @@ func TestQueuedInputMarkersRecoverUncertainWithoutReinjecting(t *testing.T) {
 	wires := make(chan map[string]any, 4)
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var wire map[string]any
-		json.NewDecoder(r.Body).Decode(&wire)
+		if err := json.NewDecoder(r.Body).Decode(&wire); err != nil {
+			t.Error(err)
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
 		wires <- wire
-		w.Write([]byte(`{"ok":true}`))
+		if _, err := w.Write([]byte(`{"ok":true}`)); err != nil {
+			t.Error(err)
+		}
 	}))
 	defer srv.Close()
-	tp := newPollTransport(srv.URL, "token", "cloud_web", "project", "", "", 1000)
+	tp := newPollTransport(srv.URL, "", "cloud_web", "project", "", "", 1000)
 	tp.setCaps(capabilitySet([]string{"input_receipts_v1"}))
 	path := filepath.Join(t.TempDir(), "receipts.sqlite")
 	q, err := openInputReceipts(path)
@@ -101,12 +113,18 @@ func TestQueuedInputMarkersRecoverUncertainWithoutReinjecting(t *testing.T) {
 	}
 	p.ReportInputQueued(context.Background(), replyContext{SessionKey: "session", ReplyCtx: "started"})
 	p.ReportInputStarted(context.Background(), replyContext{SessionKey: "session", ReplyCtx: "started"})
-	q.db.Close()
+	if err := q.db.Close(); err != nil {
+		t.Fatal(err)
+	}
 	q, err = openInputReceipts(path)
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer q.db.Close()
+	defer func() {
+		if err := q.db.Close(); err != nil {
+			t.Error(err)
+		}
+	}()
 	p.inputReceipts = q
 	if err := p.flushInputReceipts(context.Background()); err != nil {
 		t.Fatal(err)
@@ -132,13 +150,17 @@ func TestInputReceiptBackgroundRetriesAfterOutage(t *testing.T) {
 		}
 	}))
 	defer srv.Close()
-	tp := newPollTransport(srv.URL, "token", "cloud_web", "project", "", "", 1000)
+	tp := newPollTransport(srv.URL, "", "cloud_web", "project", "", "", 1000)
 	tp.setCaps(capabilitySet([]string{"input_receipts_v1"}))
 	q, err := openInputReceipts(filepath.Join(t.TempDir(), "receipts.sqlite"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer q.db.Close()
+	defer func() {
+		if err := q.db.Close(); err != nil {
+			t.Error(err)
+		}
+	}()
 	p := &Platform{tp: tp, inputReceipts: q}
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
