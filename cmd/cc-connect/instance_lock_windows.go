@@ -3,6 +3,7 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -14,6 +15,7 @@ const killWaitTimeout = 5 * time.Second
 const killWaitInterval = 25 * time.Millisecond
 
 const processQueryLimitedInformation = 0x1000
+const errorSharingViolation syscall.Errno = 32 // Win32 ERROR_SHARING_VIOLATION.
 
 type InstanceLock struct {
 	handle   syscall.Handle
@@ -47,11 +49,14 @@ func AcquireInstanceLock(configPath string) (*InstanceLock, error) {
 	)
 
 	if createErr != nil {
+		if !errors.Is(createErr, errorSharingViolation) {
+			return nil, fmt.Errorf("cannot open instance lock file: %w", createErr)
+		}
 		pid := readPIDFromLockFile(lockPath)
 		if pid > 0 {
-			return nil, fmt.Errorf("another cc-connect instance is already running (PID %d) with config %s", pid, configPath)
+			return nil, fmt.Errorf("%w (PID %d) with config %s", errInstanceLockHeld, pid, configPath)
 		}
-		return nil, fmt.Errorf("another cc-connect instance is already running with config %s", configPath)
+		return nil, fmt.Errorf("%w with config %s", errInstanceLockHeld, configPath)
 	}
 
 	pid := os.Getpid()

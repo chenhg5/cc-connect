@@ -3,6 +3,7 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -26,8 +27,8 @@ const killWaitInterval = 25 * time.Millisecond
 // InstanceLock provides a file-based exclusive lock to prevent multiple
 // cc-connect instances with the same config from running simultaneously.
 type InstanceLock struct {
-	file    *os.File
-	path    string
+	file     *os.File
+	path     string
 	acquired bool
 }
 
@@ -60,15 +61,17 @@ func AcquireInstanceLock(configPath string) (*InstanceLock, error) {
 	// Try to acquire exclusive lock (non-blocking)
 	err = syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB)
 	if err != nil {
-		// Lock is held by another process
-		f.Close()
+		_ = f.Close()
+		if !errors.Is(err, syscall.EWOULDBLOCK) {
+			return nil, fmt.Errorf("cannot acquire file lock: %w", err)
+		}
 
 		// Try to read PID from lock file for better error message
 		pid := readPIDFromLockFile(lockPath)
 		if pid > 0 {
-			return nil, fmt.Errorf("another cc-connect instance is already running (PID %d) with config %s", pid, configPath)
+			return nil, fmt.Errorf("%w (PID %d) with config %s", errInstanceLockHeld, pid, configPath)
 		}
-		return nil, fmt.Errorf("another cc-connect instance is already running with config %s", configPath)
+		return nil, fmt.Errorf("%w with config %s", errInstanceLockHeld, configPath)
 	}
 
 	// Write our PID to the lock file for diagnostics

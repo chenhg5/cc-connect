@@ -17,10 +17,12 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/BurntSushi/toml"
 	ccconnect "github.com/chenhg5/cc-connect"
 	"github.com/chenhg5/cc-connect/config"
 	"github.com/chenhg5/cc-connect/core"
 	"github.com/chenhg5/cc-connect/daemon"
+	"golang.org/x/term"
 	// Agent and platform imports are in separate plugin_*.go files
 	// controlled by build tags. See Makefile for selective compilation.
 )
@@ -238,16 +240,20 @@ func main() {
 		return
 	}
 
-	setupLogger("info", os.Stderr)
+	logFile := os.Getenv("CC_LOG_FILE")
+	// A console is eligible for detailed diagnostics only when it is the
+	// actual terminal sink and no managed log file was requested.
+	consoleDetails := logFile == "" && term.IsTerminal(int(os.Stderr.Fd()))
+	var logWriter io.Writer = os.Stderr
+	setupLogger("info", logWriter, consoleDetails)
 	checkUpdateAsync()
 	// When started as a daemon (CC_LOG_FILE set), redirect logs to a rotating file.
 	// Log file setup happens before flag.Parse() so the rotating writer is in
 	// place before any slog output. To still honour --log-max-size, we
 	// pre-scan os.Args here for the flag value; this is a small, deliberate
 	// duplication of flag parsing for one well-known key.
-	var logWriter io.Writer
 	var logCloser io.Closer
-	if logFile := os.Getenv("CC_LOG_FILE"); logFile != "" {
+	if logFile != "" {
 		maxSize, maxSizeSrc := resolveLogMaxSize(preScanLogMaxSizeFlag(os.Args[1:]))
 		maxBackups, maxBackupsSrc := resolveLogMaxBackups(preScanLogMaxBackupsFlag(os.Args[1:]))
 		fmt.Fprintf(os.Stderr, "log: redirecting output with max_size=%d bytes (source: %s), max_backups=%d (source: %s)\n", maxSize, maxSizeSrc, maxBackups, maxBackupsSrc)
@@ -258,7 +264,7 @@ func main() {
 		}
 		logWriter = w
 		logCloser = w
-		slog.SetDefault(slog.New(slog.NewTextHandler(w, &slog.HandlerOptions{Level: slog.LevelInfo, AddSource: true, ReplaceAttr: core.OperationalLogAttr})))
+		setupLogger("info", logWriter, false)
 	}
 
 	rootOpts, err := parseRootCLIOptions(os.Args[1:])
@@ -313,8 +319,10 @@ func main() {
 	// Acquire instance lock to prevent duplicate processes
 	instanceLock, err := AcquireInstanceLock(configPath)
 	if err != nil {
-		slog.Error("cannot acquire instance lock", "error", err)
-		fmt.Fprintf(os.Stderr, "Use --force to kill the existing instance.\n")
+		slog.Error("cannot acquire instance lock", "startup_cause", instanceLockCause(err), "error", err)
+		if errors.Is(err, errInstanceLockHeld) {
+			fmt.Fprintln(os.Stderr, "Use --force to kill the existing instance.")
+		}
 		os.Exit(1)
 	}
 	slog.Info("acquired instance lock", "path", instanceLock.Path())
@@ -331,7 +339,7 @@ func main() {
 
 	cfg, err := config.Load(configPath)
 	if err != nil {
-		slog.Error("cannot load configuration", "error", err)
+		slog.Error("cannot load configuration", "startup_cause", configLoadCause(err), "path", configPath, "error", err)
 		os.Exit(1)
 	}
 
@@ -345,7 +353,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	setupLogger(cfg.Log.Level, logWriter)
+	setupLogger(cfg.Log.Level, logWriter, consoleDetails)
 
 	// run_as_user preflight + isolation audit. MUST run before any engine
 	// or agent is constructed. If any project fails, abort startup
@@ -1655,7 +1663,7 @@ type = "feishu"
 
 [projects.platforms.options]
 app_id = "your-feishu-app-id"
-app_secret = "your-feishu-app-secret"
+app_secret = "" # set your Feishu app secret before starting
 
 # For more platforms (DingTalk, Telegram, Slack, Discord, LINE, WeChat Work)
 # see: https://github.com/chenhg5/cc-connect/blob/main/config.example.toml
@@ -1772,7 +1780,41 @@ Examples:
 `, v, updateHint)
 }
 
-func setupLogger(level string, w io.Writer) {
+var errInstanceLockHeld = errors.New("another cc-connect instance is already running")
+
+func instanceLockCause(err error) string {
+	switch {
+	case errors.Is(err, errInstanceLockHeld):
+		return "lock_held"
+	case errors.Is(err, os.ErrPermission):
+		return "lock_permission_denied"
+	default:
+		return "lock_unavailable"
+	}
+}
+
+func configLoadCause(err error) string {
+	var parseErr toml.ParseError
+	var pathErr *os.PathError
+	switch {
+	case errors.Is(err, os.ErrNotExist):
+		return "config_not_found"
+	case errors.Is(err, os.ErrPermission):
+		return "config_permission_denied"
+	case errors.As(err, &parseErr):
+		return "config_parse_error"
+	case errors.As(err, &pathErr):
+		return "config_read_error"
+	default:
+		return "config_invalid"
+	}
+}
+
+func setupLogger(level string, w io.Writer, consoleDetails bool) {
+	slog.SetDefault(newOperationalLogger(level, w, consoleDetails))
+}
+
+func newOperationalLogger(level string, w io.Writer, consoleDetails bool) *slog.Logger {
 	var logLevel slog.Level
 	switch level {
 	case "debug":
@@ -1784,14 +1826,11 @@ func setupLogger(level string, w io.Writer) {
 	default:
 		logLevel = slog.LevelInfo
 	}
-	if w == nil {
-		w = os.Stdout
+	options := &slog.HandlerOptions{Level: logLevel, AddSource: true}
+	if !consoleDetails {
+		options.ReplaceAttr = core.OperationalLogAttr
 	}
-	slog.SetDefault(slog.New(slog.NewTextHandler(w, &slog.HandlerOptions{
-		Level:       logLevel,
-		AddSource:   true,
-		ReplaceAttr: core.OperationalLogAttr,
-	})))
+	return slog.New(slog.NewTextHandler(w, options))
 }
 
 // reloadConfig re-reads config.toml and applies hot-reloadable settings
