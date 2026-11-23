@@ -872,6 +872,33 @@
           "models": ["claude-opus-5.5", "claude-sonnet-5.5", "gpt-6.2-sol", "gemini-4-neon"]
         }
       }
+    },
+    {
+      "name": "lazu",
+      "display_name": "Lazu",
+      "description": "AI gateway built for coding agents, routing Claude, GPT, Gemini, and DeepSeek models through Anthropic Messages, OpenAI Responses, and Chat Completions APIs.",
+      "description_zh": "面向编程智能体的 AI 网关，通过 Anthropic Messages、OpenAI Responses 和 Chat Completions 接口接入 Claude、GPT、Gemini、DeepSeek 等模型。",
+      "features": ["OpenAI Compatible", "Anthropic Compatible", "Responses API", "1M Context"],
+      "tier": 3,
+      "website": "https://lazu.ai",
+      "agents": {
+        "claudecode": {
+          "base_url": "https://api.lazu.ai",
+          "model": "claude-sonnet-5-5",
+          "models": ["claude-sonnet-5-5", "claude-opus-5-5", "claude-haiku-5-5"]
+        },
+        "codex": {
+          "base_url": "https://api.lazu.ai/v1",
+          "model": "gpt-6.2-astra",
+          "models": ["gpt-6.2-astra", "gpt-6.2-sol", "gpt-6.1-terra"],
+          "codex_config": { "wire_api": "responses" }
+        },
+        "opencode": {
+          "base_url": "https://api.lazu.ai/v1",
+          "model": "claude-sonnet-5-5",
+          "models": ["claude-sonnet-5-5", "gpt-6.2-astra", "gemini-4-hydrogen", "deepseek-v4-pro"]
+        }
+      }
     }
   ]
 }

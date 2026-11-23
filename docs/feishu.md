@@ -2,8 +2,6 @@
 
 本文档介绍如何将 **cc-connect** 接入飞书，让你可以通过飞书机器人远程调用 Claude Code。
 
-启用单人群免 @： [简体中文](feishu-solo-chat.md) · [English](feishu-solo-chat.en.md) · [Русский](feishu-solo-chat.ru.md)
-
 ## 前置要求
 
 - 飞书账号（个人或企业均可）
@@ -19,13 +17,13 @@
 如果你已经装好 `cc-connect`，可以直接用内置命令完成“新建机器人/关联已有机器人”，并自动写回 `config.toml`：
 
 ```bash
-# 推荐：统一入口（绑定已有应用时，从安全环境提供对应变量）
+# 推荐：统一入口
 cc-connect feishu setup --project my-project
-cc-connect feishu setup --project my-project --app "$FEISHU_APP_ID:$FEISHU_APP_SECRET"
+cc-connect feishu setup --project my-project --app cli_xxx:sec_xxx
 
 # 强制模式（一般不需要）
 cc-connect feishu new --project my-project
-cc-connect feishu bind --project my-project --app "$FEISHU_APP_ID:$FEISHU_APP_SECRET"
+cc-connect feishu bind --project my-project --app cli_xxx:sec_xxx
 ```
 
 三者区别：
@@ -82,8 +80,8 @@ cc-connect feishu bind --project my-project --app "$FEISHU_APP_ID:$FEISHU_APP_SE
 你会看到以下信息：
 
 ```
-App ID:     <APP_ID_FROM_FEISHU>
-App Secret: <APP_SECRET_FROM_FEISHU>
+App ID:     cli_axxxxxxxxxxxx
+App Secret: QhkMpxxxxxxxxxxxxxxxxxxxx
 ```
 
 > ⚠️ **重要**：请妥善保存这两个凭证，后续配置 cc-connect 时需要用到。App Secret 只会显示一次，如果忘记了需要重置。
@@ -107,8 +105,8 @@ mode = "default"
 type = "feishu"
 
 [projects.platforms.options]
-app_id = "<APP_ID_FROM_FEISHU>"
-app_secret = "<APP_SECRET_FROM_FEISHU>"
+app_id = "cli_axxxxxxxxxxxx"
+app_secret = "QhkMpxxxxxxxxxxxxxxxxxxxx"
 # domain = "https://open.feishu.cn" # 可选：覆盖运行时 API/WebSocket 域名
 # enable_feishu_card = true  # 可选：关闭后统一回退纯文本回复
 # thread_isolation = true    # 可选：按飞书 thread/root 隔离群聊会话
@@ -126,8 +124,6 @@ app_secret = "<APP_SECRET_FROM_FEISHU>"
 > 如果应用没有交互卡片权限，或后台未配置卡片回调，可将 `enable_feishu_card = false`，让所有命令统一走纯文本回复，避免卡片发送失败后用户看不到内容。
 > `group_reply_all_chats` 可使用逗号分隔字符串（如 `"oc_group_a,oc_group_b"`）或字符串数组。非空列表仅让指定群绕过 @ 过滤，并优先于全局 `group_reply_all` 和 `require_mention`；其他群保留原有提及、@all 和已参与话题的附件规则。未配置或为空时沿用原有默认行为。此设置不放宽 `allow_from`、`allow_chat` 或 `group_only`，私聊行为不变。
 > 如果开启 `thread_isolation = true`，群聊里每个根消息 / reply thread 会对应一个独立 agent session；私聊行为保持原样。
-> `solo_chat_reply_all = true`（默认 `false`）只让恰好一人和一个机器人的群免 @。该选项不放宽访问限制；需要 `im:chat:readonly`，并需发布 `im:message.group_msg` 才能接收未 @ 的群消息。详见[单人群免 @](feishu-solo-chat.md)，包括 30 秒缓存、查询失败时的行为和附件暂存规则。
-
 > `group_chat_history_share = true` 时，cc-connect 只在内存中保留当前进程观察到的、允许访问的群聊 text/post 消息，并在下一次明确 @ 机器人且真正进入 agent turn 时注入；未 @ 的消息不会触发回复。`/status` 等由 cc-connect 处理的命令不会消费这段待处理上下文，`/new` 会清空对应主频道或话题的上下文。
 > 在 multi-workspace 模式下，`thread_isolation = true` 也会让每个话题独立绑定 workspace；在话题内执行 `/workspace bind <name>` 不会影响同群的其他话题。已有的群级 binding 会保留为默认值，由尚未显式绑定的话题继承，因此回退到旧版本时仍可使用。
 > `progress_style = "compact"` 会把思考/工具进度合并到一条可更新消息里，减少刷屏；`legacy` 保持原有逐条发送；`card` 会使用结构化卡片（标题 + 进度块）持续更新同一条消息，观感比纯文本更清晰。
@@ -182,7 +178,7 @@ app_secret = "<APP_SECRET_FROM_FEISHU>"
 
 配置完权限后，点击「申请发布」使权限生效。
 
-如果启用了 `group_reply_all`、`group_reply_all_chats`、`solo_chat_reply_all` 或 `group_chat_history_share`，必须为应用申请并发布 `im:message.group_msg`，否则飞书只会向机器人推送被 @ 的群消息，免 @ 回复及未提及消息的共享上下文无法生效。本地配置不会自动授予权限或补齐飞书未推送的事件。群上下文共享不会回溯 cc-connect 启动前的历史，也不会持久化待处理消息。
+如果启用了 `group_reply_all`、`group_reply_all_chats` 或 `group_chat_history_share`，必须为应用申请并发布 `im:message.group_msg`，否则飞书只会向机器人推送被 @ 的群消息，免 @ 回复及未提及消息的共享上下文无法生效。本地配置不会自动授予权限或补齐飞书未推送的事件。群上下文共享不会回溯 cc-connect 启动前的历史，也不会持久化待处理消息。
 
 ---
 
@@ -469,7 +465,7 @@ BOT-B 机器人会收到飞书 @ 事件并被触发。
 2. **调用「获取机器人信息」API（`/open-apis/bot/v3/info`）**
    用任意有效 `tenant_access_token` 发起请求：
    ```bash
-   curl -H "Authorization: Bearer $FEISHU_TENANT_ACCESS_TOKEN" https://open.feishu.cn/open-apis/bot/v3/info
+   curl -H "Authorization: Bearer t-xxxx" https://open.feishu.cn/open-apis/bot/v3/info
    # 响应：{ "code": 0, "bot": { "open_id": "ou_xxx", ... } }
    ```
 
