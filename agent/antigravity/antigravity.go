@@ -230,7 +230,9 @@ func (a *Agent) ValidateModel(ctx context.Context, model string) error {
 
 func supportsEffort(model string) bool {
 	model = strings.ToLower(strings.TrimSpace(model))
-	return !strings.HasPrefix(model, "gemini-pro-orchestrator-") && !strings.HasPrefix(model, "orchestrator (")
+	return model != "gemini-pro-orchestrator" &&
+		!strings.HasPrefix(model, "gemini-pro-orchestrator-") &&
+		!strings.HasPrefix(model, "orchestrator (")
 }
 
 func (a *Agent) fetchModelsFromAPI(ctx context.Context) []core.ModelOption {

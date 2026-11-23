@@ -123,3 +123,46 @@ func TestOrchestratorSettingsAndStaleEffortReachTheSession(t *testing.T) {
 	}
 	t.Fatal("missing orchestrator settings")
 }
+
+func TestSessionEffortForEffectiveModel(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		model  string
+		effort string
+	}{
+		{name: "bare Orchestrator", model: "gemini-pro-orchestrator"},
+		{name: "suffixed Orchestrator", model: "gemini-pro-orchestrator-neon"},
+		{name: "Orchestrator display label", model: "Orchestrator (Carbon)"},
+		{name: "ordinary model", model: "gemini-4-neon", effort: "high"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			a := &Agent{cmd: "echo", workDir: t.TempDir(), model: tc.model, effort: "high", activeIdx: -1}
+			if got := len(a.AvailableReasoningEfforts()) > 0; got != (tc.effort != "") {
+				t.Errorf("offers effort = %t, want %t", got, tc.effort != "")
+			}
+			session, err := a.StartSession(context.Background(), "")
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() {
+				if err := session.Close(); err != nil {
+					t.Errorf("close test session: %v", err)
+				}
+			})
+			args := session.(*antigravitySession).buildAntigravityArgs("", true, "yolo", "", "continue")
+			got := ""
+			for i, arg := range args {
+				if arg == "--effort" {
+					if i+1 == len(args) {
+						t.Fatal("--effort has no value")
+					}
+					got = args[i+1]
+					break
+				}
+			}
+			if got != tc.effort {
+				t.Errorf("CLI effort = %q, want %q", got, tc.effort)
+			}
+		})
+	}
+}
