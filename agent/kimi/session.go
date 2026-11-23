@@ -79,9 +79,11 @@ func newKimiSession(ctx context.Context, cmd string, extraArgs []string, workDir
 // Dialect notes (#1561):
 //   - Session resume: legacy kimi-cli takes `--resume <id>`; the Kimi Code
 //     CLI dialect uses `-r <id>` (the command its own resume hint prints).
-//   - Quiet mode: passed through only when the binary advertises `--quiet`;
-//     otherwise intermediate events are suppressed locally (see
-//     suppressIntermediateEvents).
+//   - Quiet mode: never passed as `--quiet`. Legacy kimi-cli documents it as
+//     an alias for `--print --output-format text` and rejects it next to
+//     `--output-format stream-json` ("Quiet mode implies --output-format
+//     text", #806); the Kimi Code CLI dropped it entirely. Quiet mode is
+//     emulated locally on both flavors (see suppressIntermediateEvents).
 //   - Permission flags: never pass `--yolo`/`--auto`. Bare `--prompt` mode
 //     auto-approves tools on both CLI flavors, and Kimi Code CLI rejects
 //     `--prompt` combined with `--yolo`/`--auto`.
@@ -95,10 +97,6 @@ func (ks *kimiSession) buildArgs(prompt string) []string {
 	switch ks.mode {
 	case "plan":
 		args = append(args, "--plan")
-	case "quiet":
-		if ks.flagSupport.Quiet {
-			args = append(args, "--quiet")
-		}
 	}
 
 	if sid := ks.CurrentSessionID(); sid != "" {
@@ -373,11 +371,12 @@ func (ks *kimiSession) handleMeta(raw map[string]any) {
 }
 
 // suppressIntermediateEvents reports whether quiet mode must be emulated
-// locally: the Kimi Code CLI dropped --quiet, so thinking/tool events are
-// filtered here and only the final text reaches the platform. When the
-// binary does advertise --quiet the CLI itself does the filtering.
+// locally. cc-connect always requests stream-json output, which `--quiet`
+// cannot be combined with on legacy kimi-cli (#806) and which the Kimi Code
+// CLI does not offer at all, so thinking/tool events are filtered here and
+// only the final text reaches the platform on both flavors.
 func (ks *kimiSession) suppressIntermediateEvents() bool {
-	return ks.mode == "quiet" && !ks.flagSupport.Quiet
+	return ks.mode == "quiet"
 }
 
 func (ks *kimiSession) handleAssistant(raw map[string]any) {

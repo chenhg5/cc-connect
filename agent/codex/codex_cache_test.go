@@ -31,7 +31,7 @@ func TestAvailableModels_FallbackToModelsCache(t *testing.T) {
 	t.Setenv("OPENAI_API_KEY", "test-key")
 	t.Setenv("OPENAI_BASE_URL", srv.URL)
 
-	a := &Agent{activeIdx: -1}
+	a := &Agent{activeIdx: -1, cmd: "missing-codex-cli-for-fallback-test"}
 	models := a.AvailableModels(context.Background())
 	if len(models) != 2 {
 		t.Fatalf("models length = %d, want 2, models=%v", len(models), models)
@@ -43,7 +43,7 @@ func TestAvailableModels_FallbackToModelsCache(t *testing.T) {
 
 // TestAvailableModels_UsesModelCatalog tests that when CODEX_HOME/config.toml
 // contains model_catalog_json, readCodexModelCatalog reads and parses that file
-// as the highest-priority model source.
+// as an offline fallback when the native model/list RPC is unavailable.
 func TestAvailableModels_UsesModelCatalog(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "forbidden", http.StatusForbidden)
@@ -77,7 +77,7 @@ func TestAvailableModels_UsesModelCatalog(t *testing.T) {
 	t.Setenv("OPENAI_API_KEY", "test-key")
 	t.Setenv("OPENAI_BASE_URL", srv.URL)
 
-	a := &Agent{activeIdx: -1}
+	a := &Agent{activeIdx: -1, cmd: "missing-codex-cli-for-fallback-test"}
 	models := a.AvailableModels(context.Background())
 
 	// 3 visible+supported: gpt-5.4, gpt-5.3-codex, MissingSlug (slug empty → display_name fallback)
@@ -102,7 +102,7 @@ func TestAvailableModels_NoCatalogFallsBackToGPT61Sol(t *testing.T) {
 	t.Setenv("CODEX_HOME", tmp)
 	t.Setenv("OPENAI_API_KEY", "")
 
-	a := &Agent{activeIdx: -1}
+	a := &Agent{activeIdx: -1, cmd: "missing-codex-cli-for-fallback-test"}
 	models := a.AvailableModels(context.Background())
 
 	// No config.toml → no model_catalog.json → no models_cache.json

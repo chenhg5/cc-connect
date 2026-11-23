@@ -20,6 +20,7 @@ Beta since v1.5.0 stable — 16 merged PRs focused on Feishu/Weixin reliability,
 ## Unreleased
 
 ### Fixed
+- **Feishu/Lark**: Restart the WebSocket client with bounded backoff after a temporary outage exhausts the SDK's reconnect attempts, so message reception can recover without restarting the daemon. Stop cancels recovery; permanent SDK client errors are not retried.
 - **OpenCode**: `opencode run` now gets `PWD` set to the project's `work_dir`. opencode takes its project directory from `$PWD`, so it used to work in cc-connect's own directory whenever that differed from `work_dir` (#2264).
 - **Feishu**: With `inbound_coalesce_window_ms` enabled, card callbacks (AskUserQuestion option clicks, permission and command buttons) are no longer merged with text sent inside the window, so an option click is answered as that option instead of as free text or being dropped. Text already buffered for the session is delivered before the callback.
 - **Feishu**: Replies to bot menu clicks now send `receive_id_type=open_id` instead of `chat_id`, so menu items no longer fail every reply with `invalid receive_id` (code 230001); the reply context rebuilt after a restart infers the same type from the session key (#2259).
