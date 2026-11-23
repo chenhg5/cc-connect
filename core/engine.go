@@ -11172,7 +11172,9 @@ func (e *Engine) processCompressEvents(state *interactiveState, session *Session
 		)
 	}
 
-	var textParts []string
+	var output strings.Builder
+	var budget compressOutputBudget
+	toolResults := 0
 	events := state.agentSession.Events()
 	stopCh := state.stopSignal()
 
@@ -11197,10 +11199,10 @@ func (e *Engine) processCompressEvents(state *interactiveState, session *Session
 				logCompletion("eof")
 				e.cleanupInteractiveState(sessionKey, state)
 				if !auto {
-					if len(textParts) > 0 {
-						e.send(p, replyCtx, strings.Join(textParts, ""))
+					if output.Len() > 0 {
+						e.sendCompressOutput(p, replyCtx, output.String(), false)
 					} else {
-						e.reply(p, replyCtx, e.i18n.T(MsgCompressDone))
+						e.sendCompressOutput(p, replyCtx, e.i18n.T(MsgCompressDone), true)
 					}
 				}
 				e.notifyDroppedQueuedMessages(state, fmt.Errorf("agent process exited during compress"))
@@ -11209,7 +11211,7 @@ func (e *Engine) processCompressEvents(state *interactiveState, session *Session
 		case <-idleCh:
 			logCompletion("idle_timeout")
 			if !auto {
-				e.send(p, replyCtx, fmt.Sprintf(e.i18n.T(MsgError), "compress timed out"))
+				e.sendCompressOutput(p, replyCtx, fmt.Sprintf(e.i18n.T(MsgError), "compress timed out"), false)
 			}
 			e.cleanupInteractiveState(sessionKey, state)
 			e.notifyDroppedQueuedMessages(state, fmt.Errorf("compress timed out"))
@@ -11236,36 +11238,39 @@ func (e *Engine) processCompressEvents(state *interactiveState, session *Session
 
 		switch event.Type {
 		case EventText:
-			if !auto && event.Content != "" {
-				textParts = append(textParts, event.Content)
+			if !auto && !budget.omitted && event.Content != "" {
+				output.WriteString(budget.take(boundedCompressText(event.Content)))
 			}
 		case EventToolResult:
-			if !auto {
-				out := strings.TrimSpace(event.Content)
+			if !auto && !budget.omitted && toolResults < maxCompressToolResults {
+				toolResults++
+				out := boundedCompressText(event.Content)
 				if out == "" {
-					out = strings.TrimSpace(event.ToolResult)
+					out = boundedCompressText(event.ToolResult)
 				}
 				if out == "" {
 					break
 				}
-				tn := strings.TrimSpace(event.ToolName)
+				out = TruncateToolOutput(out, e.display.ToolMaxLen)
+				tn := TruncateToolOutput(boundedCompressText(event.ToolName), 128)
 				if tn == "" {
 					tn = "tool"
 				}
-				textParts = append(textParts, fmt.Sprintf(e.i18n.T(MsgToolResult), tn, out)+"\n")
+				output.WriteString(budget.take(fmt.Sprintf(e.i18n.T(MsgToolResult), tn, out) + "\n"))
 			}
 		case EventResult:
 			// Finish compression before draining queued turns, which may run for minutes.
 			logCompletion("result")
-			result := event.Content
-			if result == "" && len(textParts) > 0 {
-				result = strings.Join(textParts, "")
+			// A final answer has its own budget: tool chatter cannot crowd it out.
+			result := boundedCompressText(event.Content)
+			if result == "" && output.Len() > 0 {
+				result = output.String()
 			}
 			if !auto {
 				if result != "" {
-					e.send(p, replyCtx, result)
+					e.sendCompressOutput(p, replyCtx, result, false)
 				} else {
-					e.reply(p, replyCtx, e.i18n.T(MsgCompressDone))
+					e.sendCompressOutput(p, replyCtx, e.i18n.T(MsgCompressDone), true)
 				}
 			}
 
@@ -11275,7 +11280,7 @@ func (e *Engine) processCompressEvents(state *interactiveState, session *Session
 		case EventError:
 			logCompletion("error")
 			if !auto && event.Error != nil {
-				e.reply(p, replyCtx, fmt.Sprintf(e.i18n.T(MsgError), event.Error))
+				e.sendCompressOutput(p, replyCtx, fmt.Sprintf(e.i18n.T(MsgError), boundedCompressText(event.Error.Error())), true)
 			}
 			// Only drop queued messages if the agent is dead; some agents
 			// emit per-turn EventError while staying alive.
@@ -11494,7 +11499,7 @@ func (e *Engine) cmdProviderAdd(p Platform, msg *Message, switcher ProviderSwitc
 	raw = strings.TrimSpace(raw)
 
 	if strings.HasPrefix(raw, "{") {
-		// JSON format: /provider add {"name":"relay","api_key":"sk-xxx",...}
+		// JSON format: /provider add {"name":"relay",...} with the api_key field supplied separately in the object.
 		var jp struct {
 			Name    string            `json:"name"`
 			APIKey  string            `json:"api_key"`
