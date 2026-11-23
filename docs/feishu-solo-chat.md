@@ -1,5 +1,7 @@
 # 飞书单人群免 @
 
+[飞书接入指南](feishu.md) · [English](feishu-solo-chat.en.md) · [Русский](feishu-solo-chat.ru.md)
+
 在对应飞书平台的 `[projects.platforms.options]` 里启用：
 
 ```toml
