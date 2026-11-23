@@ -237,11 +237,11 @@ provider = "anthropic"
 
 [[projects.agent.providers]]
 name = "anthropic"
-api_key = "sk-ant-xxx"
+api_key = "<provider-api-key>"
 
 [[projects.agent.providers]]
 name = "relay"
-api_key = "sk-xxx"
+api_key = "<provider-api-key>"
 base_url = "https://api.relay-service.com"
 model = "claude-sonnet-4-20250514"
 
@@ -260,7 +260,7 @@ alias = "haiku"
 # MiniMax — 兼容 OpenAI 接口的 Agent provider，1M 超长上下文
 [[projects.agent.providers]]
 name = "minimax"
-api_key = "your-minimax-api-key"
+api_key = "<provider-api-key>"
 # 中国区账号可使用 https://api.minimaxi.com/v1
 base_url = "https://api.minimax.io/v1"
 model = "MiniMax-M3.1-Flash"
@@ -274,7 +274,7 @@ env = { CLAUDE_CODE_USE_BEDROCK = "1", AWS_PROFILE = "bedrock" }
 ### CLI 命令
 
 ```bash
-cc-connect provider add --project my-backend --name relay --api-key sk-xxx --base-url https://api.relay.com
+cc-connect provider add --project my-backend --name relay --api-key "$CC_CONNECT_PROVIDER_API_KEY" --base-url https://api.relay.com
 cc-connect provider list --project my-backend
 cc-connect provider remove --project my-backend --name relay
 cc-connect provider import --project my-backend  # 从 cc-switch 导入
@@ -312,7 +312,7 @@ cc-connect provider import --project my-backend  # 从 cc-switch 导入
 ```toml
 [[projects.agent.providers]]
 name = "openai"
-api_key = "sk-xxx"
+api_key = "<provider-api-key>"
 
 [[projects.agent.providers.models]]
 model = "gpt-5.3-codex"
@@ -605,12 +605,12 @@ cc-connect weixin new --project my-project
 2. 配置 `~/.claude-code-router/config.json`：
 ```json
 {
-  "APIKEY": "your-secret-key",
+  "APIKEY": "<router-api-key>",
   "Providers": [
     {
       "name": "deepseek",
       "api_base_url": "https://api.deepseek.com/chat/completions",
-      "api_key": "sk-xxx",
+      "api_key": "<provider-api-key>",
       "models": ["deepseek-chat", "deepseek-reasoner"],
       "transformer": { "use": ["deepseek"] }
     }
@@ -628,7 +628,7 @@ cc-connect weixin new --project my-project
 ```toml
 [projects.agent.options]
 router_url = "http://127.0.0.1:3456"
-router_api_key = "your-secret-key"
+router_api_key = "<router-api-key>"
 ```
 
 ---
@@ -679,10 +679,10 @@ provider = "openai"    # 或 "groq"
 language = ""          # "zh"、"en" 或留空自动检测
 
 [speech.openai]
-api_key = "sk-xxx"
+api_key = "<provider-api-key>"
 
 # [speech.groq]
-# api_key = "gsk_xxx"
+# api_key = "<provider-api-key>"
 # model = "whisper-large-v3-turbo"
 ```
 
@@ -1049,11 +1049,11 @@ type = "claudecode"
 [management]
 enabled = true
 port = 9820                     # 管理后台监听端口
-token = "your-secret-token"     # 登录 token；/web setup 会自动生成
+token = "${CC_CONNECT_MANAGEMENT_TOKEN}"     # 登录 token；/web setup 会自动生成
 cors_origins = ["*"]            # 允许的 CORS 来源；留空则不设置 CORS 头
 ```
 
-然后重启 cc-connect。
+将配置引用的环境变量设为高强度随机 token 后，再重启 cc-connect。
 
 ### 构建选项
 
@@ -1108,27 +1108,29 @@ Bridge 提供 WebSocket + REST 服务，让外部适配器（自定义 UI、机�
 [bridge]
 enabled = true
 port = 9810                     # Bridge 监听端口（与管理后台分开）
-token = "your-bridge-secret"    # WebSocket 和 REST 的认证 token
+token = "${CC_CONNECT_BRIDGE_TOKEN}"    # WebSocket 和 REST 的认证 token
 path = "/bridge/ws"             # WebSocket 端点路径
 cors_origins = ["*"]            # 允许的 CORS 来源；留空则不设置 CORS
 ```
 
-然后重启 cc-connect。
+将配置引用的环境变量设为高强度随机 token 后，再重启 cc-connect。
 
 ### 认证方式
 
 所有 Bridge 连接需要 token 认证，支持三种方式：
 
-- URL 参数：`?token=<bridge-token>`
+- 浏览器 WebSocket 子协议：`cc-connect` 和 `cc-connect-token.<base64url token>`（使用无填充的 base64url 编码 UTF-8 token）。
 - 请求头：`Authorization: Bearer <bridge-token>`
 - 请求头：`X-Bridge-Token: <bridge-token>`
 
+REST 请求请使用上述请求头之一。URL 中的凭据会被拒绝，即使同时提供了有效的请求头也一样。
+
 ### WebSocket 接入
 
-连接地址：
+连接到以下地址，通过请求头或浏览器子协议传入凭据：
 
 ```
-ws://<host>:<bridge-port>/bridge/ws?token=<bridge-token>
+ws://<host>:<bridge-port>/bridge/ws
 ```
 
 WebSocket 支持双向通信 —— 向 Agent 发送消息，并实时接收 Agent 的文本回复、工具调用、权限请求等事件。

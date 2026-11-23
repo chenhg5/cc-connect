@@ -45,7 +45,7 @@ API управления cc-connect — это REST API на основе HTTP, 
 - **RESTful:** URL, ориентированные на ресурсы, стандартные методы HTTP
 - **JSON:** Все тела запросов и ответов используют `application/json`
 - **Единая структура ответов:** Каждый ответ имеет вид `{"ok": true|false, "data"|"error": ...}`
-- **Аутентификация по токену:** Токен Bearer или параметр строки запроса для всех конечных точек
+- **Аутентификация по токену:** Токен Bearer в заголовке для всех конечных точек
 
 ---
 
@@ -59,7 +59,7 @@ API управления cc-connect — это REST API на основе HTTP, 
 [management]
 enabled = true
 port = 9820
-token = "mgmt-secret"
+token = "${CC_CONNECT_MANAGEMENT_TOKEN}"
 ```
 
 | Поле | Тип | По умолчанию | Описание |
@@ -68,7 +68,7 @@ token = "mgmt-secret"
 | `port` | integer | `9820` | TCP-порт, на котором сервер принимает соединения |
 | `token` | string | (обязательно) | Общий секрет для аутентификации |
 
-Если `enabled` имеет значение `false`, API управления не запускается. Токен должен быть стойкой случайной строкой (например, длиной не менее 32 символов).
+Если `enabled` имеет значение `false`, API управления не запускается. Задайте переменной окружения `CC_CONNECT_MANAGEMENT_TOKEN` стойкую случайную строку (например, длиной не менее 32 символов).
 
 ### 2.2 Базовый URL
 
@@ -84,9 +84,9 @@ http://<host>:<port>/api/v1
 
 ## 3. Аутентификация
 
-Каждый запрос должен содержать действительный токен. Поддерживаются два способа:
+Если включена аутентификация, каждый запрос должен содержать действительный токен в заголовке.
 
-### 3.1 Токен Bearer (рекомендуется)
+### 3.1 Токен Bearer
 
 ```
 Authorization: Bearer <token>
@@ -95,18 +95,12 @@ Authorization: Bearer <token>
 Пример:
 
 ```bash
-curl -H "Authorization: Bearer mgmt-secret" http://localhost:9820/api/v1/status
+curl -H "Authorization: Bearer $CC_CONNECT_MANAGEMENT_TOKEN" http://localhost:9820/api/v1/status
 ```
 
-### 3.2 Параметр строки запроса
+Учётные данные в URL отклоняются даже при наличии действительного заголовка.
 
-```
-GET /api/v1/status?token=mgmt-secret
-```
-
-> **Примечание:** Аутентификация через параметр строки запроса предусмотрена для сред, в которых сложно задавать заголовки HTTP. Из соображений безопасности предпочтителен токен Bearer (токены в URL могут попасть в журналы).
-
-### 3.3 Ответ при ошибке аутентификации
+### 3.2 Ответ при ошибке аутентификации
 
 Если токен отсутствует или недействителен:
 
@@ -712,7 +706,7 @@ GET /api/v1/status?token=mgmt-secret
 ```json
 {
   "name": "relay",
-  "api_key": "sk-xxx",
+  "api_key": "<provider-api-key>",
   "base_url": "https://api.relay.example.com",
   "model": "claude-sonnet-4-20250514",
   "thinking": "disabled",
@@ -1180,7 +1174,7 @@ GET /api/v1/status?token=mgmt-secret
 [management]
 enabled = true
 port = 9820
-token = "mgmt-secret"
+token = "${CC_CONNECT_MANAGEMENT_TOKEN}"
 cors_origins = ["http://localhost:3000", "https://dashboard.example.com"]
 ```
 

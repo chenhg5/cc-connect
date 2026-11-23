@@ -1350,16 +1350,20 @@ func (bs *BridgeServer) authenticate(r *http.Request) bool {
 	}
 	if auth := r.Header.Get("Authorization"); auth != "" {
 		if strings.HasPrefix(auth, "Bearer ") {
-			return subtle.ConstantTimeCompare([]byte(auth[7:]), []byte(bs.token)) == 1
+			if subtle.ConstantTimeCompare([]byte(auth[7:]), []byte(bs.token)) == 1 {
+				return true
+			}
 		}
 	}
-	if tok := r.Header.Get("X-Bridge-Token"); tok != "" {
-		return subtle.ConstantTimeCompare([]byte(tok), []byte(bs.token)) == 1
+	if tok := r.Header.Get("X-Bridge-Token"); tok != "" && subtle.ConstantTimeCompare([]byte(tok), []byte(bs.token)) == 1 {
+		return true
 	}
 	for _, protocol := range websocket.Subprotocols(r) {
 		if encoded, ok := strings.CutPrefix(protocol, "cc-connect-token."); ok {
 			token, err := base64.RawURLEncoding.DecodeString(encoded)
-			return err == nil && subtle.ConstantTimeCompare(token, []byte(bs.token)) == 1
+			if err == nil && subtle.ConstantTimeCompare(token, []byte(bs.token)) == 1 {
+				return true
+			}
 		}
 	}
 	return false

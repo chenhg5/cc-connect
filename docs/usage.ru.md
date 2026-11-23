@@ -206,11 +206,11 @@ provider = "anthropic"   # active provider
 
 [[projects.agent.providers]]
 name = "anthropic"
-api_key = "sk-ant-xxx"
+api_key = "<provider-api-key>"
 
 [[projects.agent.providers]]
 name = "relay"
-api_key = "sk-xxx"
+api_key = "<provider-api-key>"
 base_url = "https://api.relay-service.com"
 model = "claude-sonnet-4-20250514"
 
@@ -229,7 +229,7 @@ alias = "haiku"
 # MiniMax — OpenAI-compatible agent provider, 1M context
 [[projects.agent.providers]]
 name = "minimax"
-api_key = "your-minimax-api-key"
+api_key = "<provider-api-key>"
 # Use https://api.minimaxi.com/v1 for China-region accounts.
 base_url = "https://api.minimax.io/v1"
 model = "MiniMax-M2.7"
@@ -243,7 +243,7 @@ env = { CLAUDE_CODE_USE_BEDROCK = "1", AWS_PROFILE = "bedrock" }
 ### Команды CLI
 
 ```bash
-cc-connect provider add --project my-backend --name relay --api-key sk-xxx --base-url https://api.relay.com
+cc-connect provider add --project my-backend --name relay --api-key "$CC_CONNECT_PROVIDER_API_KEY" --base-url https://api.relay.com
 cc-connect provider list --project my-backend
 cc-connect provider remove --project my-backend --name relay
 cc-connect provider import --project my-backend  # from cc-switch
@@ -281,7 +281,7 @@ cc-connect provider import --project my-backend  # from cc-switch
 ```toml
 [[projects.agent.providers]]
 name = "openai"
-api_key = "sk-xxx"
+api_key = "<provider-api-key>"
 
 [[projects.agent.providers.models]]
 model = "gpt-5.3-codex"
@@ -619,12 +619,12 @@ cc-connect weixin new --project my-project
 2. Настройте `~/.claude-code-router/config.json`:
 ```json
 {
-  "APIKEY": "your-secret-key",
+  "APIKEY": "<router-api-key>",
   "Providers": [
     {
       "name": "deepseek",
       "api_base_url": "https://api.deepseek.com/chat/completions",
-      "api_key": "sk-xxx",
+      "api_key": "<provider-api-key>",
       "models": ["deepseek-chat", "deepseek-reasoner"],
       "transformer": { "use": ["deepseek"] }
     }
@@ -642,7 +642,7 @@ cc-connect weixin new --project my-project
 ```toml
 [projects.agent.options]
 router_url = "http://127.0.0.1:3456"
-router_api_key = "your-secret-key"  # optional
+router_api_key = "<router-api-key>"  # optional
 ```
 
 ---
@@ -693,12 +693,12 @@ provider = "openai"    # or "groq"
 language = ""          # "zh", "en", or auto-detect
 
 [speech.openai]
-api_key = "sk-xxx"
+api_key = "<provider-api-key>"
 # base_url = ""
 # model = "whisper-1"
 
 # [speech.groq]
-# api_key = "gsk_xxx"
+# api_key = "<provider-api-key>"
 # model = "whisper-large-v3-turbo"
 ```
 
@@ -1045,11 +1045,11 @@ type = "claudecode"
 [management]
 enabled = true
 port = 9820                     # Management UI & API listen port
-token = "your-secret-token"     # Login token; /web setup generates one automatically
+token = "${CC_CONNECT_MANAGEMENT_TOKEN}"     # Login token; /web setup generates one automatically
 cors_origins = ["*"]            # Allowed CORS origins; empty = no CORS headers
 ```
 
-Затем перезапустите cc-connect.
+Перед перезапуском cc-connect задайте упомянутой переменной окружения стойкий случайный токен.
 
 ### Параметры сборки
 
@@ -1104,27 +1104,29 @@ Bridge предоставляет сервер WebSocket + REST, через ко
 [bridge]
 enabled = true
 port = 9810                     # Bridge listen port (separate from management)
-token = "your-bridge-secret"    # Auth token for WebSocket and REST
+token = "${CC_CONNECT_BRIDGE_TOKEN}"    # Auth token for WebSocket and REST
 path = "/bridge/ws"             # WebSocket endpoint path
 cors_origins = ["*"]            # Allowed CORS origins; empty = no CORS
 ```
 
-Затем перезапустите cc-connect.
+Перед перезапуском cc-connect задайте упомянутой переменной окружения стойкий случайный токен.
 
 ### Аутентификация
 
 Для всех подключений к Bridge необходим токен. Поддерживаемые способы передачи:
 
-- Параметр запроса: `?token=<bridge-token>`
+- Подпротоколы WebSocket для браузера: `cc-connect` и `cc-connect-token.<base64url token>` (токен в UTF-8, закодированный в base64url без заполнения).
 - Заголовок: `Authorization: Bearer <bridge-token>`
 - Заголовок: `X-Bridge-Token: <bridge-token>`
 
+Для REST используйте один из заголовков выше. Учётные данные в URL отклоняются даже при наличии действительного заголовка.
+
 ### WebSocket
 
-Подключитесь к:
+Подключитесь по указанному ниже адресу и передайте токен в заголовке или подпротоколе браузера:
 
 ```
-ws://<host>:<bridge-port>/bridge/ws?token=<bridge-token>
+ws://<host>:<bridge-port>/bridge/ws
 ```
 
 WebSocket поддерживает двусторонний обмен сообщениями: отправляйте сообщения пользователя ИИ-агенту и получайте его события (текст, вызовы инструментов, запросы разрешений и т. д.) в реальном времени.
