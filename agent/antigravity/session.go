@@ -143,9 +143,6 @@ func (as *antigravitySession) Send(prompt string, messageID string, images []cor
 		agyConfigDir = as.permissionBridge.AgyConfigDir()
 	}
 	args := as.buildAntigravityArgs(chatID, isResume, as.mode, agyConfigDir, fullPrompt)
-	if strings.TrimSpace(as.model) != "" {
-		slog.Warn("antigravitySession: model is configured but ignored because agy does not support --model yet", "model", as.model)
-	}
 
 	var ctx context.Context
 	var cancel context.CancelFunc

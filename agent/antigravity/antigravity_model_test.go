@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/chenhg5/cc-connect/core"
 )
@@ -164,5 +165,57 @@ func TestSessionEffortForEffectiveModel(t *testing.T) {
 				t.Errorf("CLI effort = %q, want %q", got, tc.effort)
 			}
 		})
+	}
+}
+
+func TestValidateModelWithoutCatalogDefersToCLI(t *testing.T) {
+	t.Setenv("GEMINI_API_KEY", "")
+	t.Setenv("GOOGLE_API_KEY", "")
+	for _, tc := range []struct {
+		name, script string
+	}{
+		{name: "older CLI shows labels only", script: "printf 'Gemini 4 Neon (High)\n'"},
+		{name: "CLI unavailable", script: "exit 1"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			cmd := filepath.Join(dir, "agy")
+			if err := os.WriteFile(cmd, []byte("#!/bin/sh\n"+tc.script+"\n"), 0700); err != nil {
+				t.Fatal(err)
+			}
+			a := &Agent{cmd: cmd, activeIdx: -1, workDir: dir}
+			if err := a.ValidateModel(context.Background(), "Gemini 4 Neon (High)"); err != nil {
+				t.Fatalf("cannot accept a manual model without a catalog: %v", err)
+			}
+			for _, unsafe := range []string{"--help", "model\nname"} {
+				if err := a.ValidateModel(context.Background(), unsafe); err == nil {
+					t.Errorf("accepted malformed model %q", unsafe)
+				}
+			}
+			ctx, cancel := context.WithCancel(context.Background())
+			cancel()
+			if err := a.ValidateModel(ctx, "Gemini 4 Neon (High)"); err != context.Canceled {
+				t.Errorf("canceled validation = %v, want context.Canceled", err)
+			}
+		})
+	}
+}
+
+func TestValidateModelSlowCatalogDoesNotConsumeSwitchDeadline(t *testing.T) {
+	t.Setenv("GEMINI_API_KEY", "")
+	t.Setenv("GOOGLE_API_KEY", "")
+	dir := t.TempDir()
+	cmd := filepath.Join(dir, "agy")
+	if err := os.WriteFile(cmd, []byte("#!/bin/sh\nexec sleep 20\n"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	a := &Agent{cmd: cmd, activeIdx: -1, workDir: dir}
+	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+	defer cancel()
+	if err := a.ValidateModel(ctx, "Gemini 4 Neon (High)"); err != nil {
+		t.Fatalf("slow catalog blocked manual model switch: %v", err)
+	}
+	if err := ctx.Err(); err != nil {
+		t.Fatalf("catalog consumed caller's deadline: %v", err)
 	}
 }

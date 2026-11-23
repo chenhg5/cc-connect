@@ -14,6 +14,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode"
 	"unicode/utf8"
 
 	"github.com/chenhg5/cc-connect/core"
@@ -196,6 +197,8 @@ func (a *Agent) AvailableModels(ctx context.Context) []core.ModelOption {
 		slog.Warn("antigravity: list models", "error", err)
 		return a.fetchModelsFromAPI(ctx)
 	}
+	// Recent agy versions print one id<TAB>label pair per line. Older
+	// versions may only print display labels, which cannot identify an ID.
 	var models []core.ModelOption
 	for _, line := range strings.Split(string(output), "\n") {
 		id, label, ok := strings.Cut(strings.TrimSpace(line), "\t")
@@ -204,6 +207,7 @@ func (a *Agent) AvailableModels(ctx context.Context) []core.ModelOption {
 		}
 	}
 	if len(models) == 0 {
+		slog.Debug("antigravity: agy models returned no ID and label pairs; trying the API catalog")
 		return a.fetchModelsFromAPI(ctx)
 	}
 	return models
@@ -211,9 +215,23 @@ func (a *Agent) AvailableModels(ctx context.Context) []core.ModelOption {
 
 // ValidateModel runs before the engine persists or applies a model change.
 func (a *Agent) ValidateModel(ctx context.Context, model string) error {
-	models := a.AvailableModels(ctx)
+	model = strings.TrimSpace(model)
+	if model == "" || strings.HasPrefix(model, "-") || strings.ContainsFunc(model, unicode.IsControl) {
+		return fmt.Errorf("antigravity: invalid model name")
+	}
+	// Keep enough of the caller's budget for a manual switch if the
+	// catalog command or API is slow rather than immediately unavailable.
+	catalogCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
+	defer cancel()
+	models := a.AvailableModels(catalogCtx)
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	if len(models) == 0 {
-		return fmt.Errorf("antigravity: cannot validate model: agy models returned no models")
+		// Older CLIs and offline sessions may not provide a catalog. Do
+		// not block every switch: let agy validate the literal model value.
+		slog.Warn("antigravity: model catalog unavailable; deferring model validation to agy")
+		return nil
 	}
 	for _, option := range models {
 		if strings.EqualFold(model, option.Name) || strings.EqualFold(model, option.Desc) {
@@ -252,7 +270,8 @@ func (a *Agent) fetchModelsFromAPI(ctx context.Context) []core.ModelOption {
 
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
-		slog.Debug("antigravity: failed to fetch models", "error", err)
+		// Request errors can include the API key in the URL.
+		slog.Debug("antigravity: failed to fetch models")
 		return nil
 	}
 	defer func() {
