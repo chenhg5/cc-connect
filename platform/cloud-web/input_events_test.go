@@ -111,6 +111,27 @@ func TestQueuedInputMarkersRecoverUncertainWithoutReinjecting(t *testing.T) {
 	if len(wires) != 0 {
 		t.Fatal("live worker queue was prematurely terminated")
 	}
+	stale := replyContext{SessionKey: "session", ReplyCtx: "stale"}
+	p.ReportInputQueued(context.Background(), stale)
+	p.ReportDropped(context.Background(), stale, "stale")
+	if err := p.flushInputReceipts(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case wire := <-wires:
+		if wire["type"] != "input_dropped" || wire["reply_ctx"] != "stale" || wire["reason"] != "stale" {
+			t.Fatalf("incorrect stale receipt: %+v", wire)
+		}
+	default:
+		t.Fatal("stale drop did not resolve the pending marker before restart")
+	}
+	if err := p.flushInputReceipts(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if len(wires) != 0 {
+		t.Fatal("acknowledged stale receipt was sent again")
+	}
+
 	p.ReportInputQueued(context.Background(), replyContext{SessionKey: "session", ReplyCtx: "started"})
 	p.ReportInputStarted(context.Background(), replyContext{SessionKey: "session", ReplyCtx: "started"})
 	if err := q.db.Close(); err != nil {

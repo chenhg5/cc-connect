@@ -3,6 +3,7 @@ package core
 import (
 	"context"
 	"testing"
+	"time"
 )
 
 type injectionReportingPlatform struct {
@@ -67,5 +68,88 @@ func TestStopAndOverflowAccountForQueuedInputs(t *testing.T) {
 	status := e.stopInteractiveSessionWithOptions("test:user1", false)
 	if !status || pendingCount(state) != 0 || p.dropped["supplement"] != "cancelled" {
 		t.Fatalf("stop=%v queue=%d receipts=%v", status, pendingCount(state), p.dropped)
+	}
+}
+
+type staleDrainReportingPlatform struct {
+	*stubPlatformEngine
+	t     *testing.T
+	state *interactiveState
+	drops map[any][]string
+}
+
+func (p *staleDrainReportingPlatform) ReportDropped(_ context.Context, reply any, reason string) {
+	if !p.state.mu.TryLock() {
+		p.t.Error("drop receipt must run outside the interactive-state lock")
+	} else {
+		p.state.mu.Unlock()
+	}
+	p.drops[reply] = append(p.drops[reply], reason)
+}
+
+func TestQueuedStaleInputReceiptsOnDrain(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		completed  bool
+		freshInput bool
+	}{
+		{name: "pending drain"},
+		{name: "completed turn", completed: true},
+		{name: "pending drain with fresh input", freshInput: true},
+		{name: "completed turn with fresh input", completed: true, freshInput: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			const key = "test:user1"
+			as := newResultAgentSession("fresh input complete")
+			e, base, state, session := setupBusySession(t, as)
+			p := &staleDrainReportingPlatform{
+				stubPlatformEngine: base, t: t, state: state, drops: make(map[any][]string),
+			}
+			for i, id := range []string{"old-first", "old-second"} {
+				msg := busyMessage("queued")
+				msg.MessageID, msg.ReplyCtx, msg.UserMessageTimeMs = id, id, int64(1_000+i)
+				if !e.queueMessageForBusySession(p, msg, key) {
+					t.Fatalf("queue %s failed", id)
+				}
+			}
+			if len(p.drops) != 0 || pendingCount(state) != 2 {
+				t.Fatal("inputs must first be accepted into the queue")
+			}
+			if tc.freshInput {
+				msg := busyMessage("fresh")
+				msg.MessageID, msg.ReplyCtx, msg.UserMessageTimeMs = "fresh", "fresh", 3_000
+				if !e.queueMessageForBusySession(p, msg, key) {
+					t.Fatal("fresh input could not be queued")
+				}
+			}
+			state.mu.Lock()
+			state.currentTurnUserMessageTimeMs = 2_000
+			state.mu.Unlock()
+			if tc.completed {
+				as.events <- Event{Type: EventResult, Done: true, Content: "turn complete"}
+				e.processInteractiveEvents(state, session, e.sessions, key, "current", time.Now(), nil, nil, nil, 0)
+			}
+			// In the completed-turn case, the explicit drain has no items left
+			// and must not report another receipt.
+			if !e.drainPendingMessages(state, session, e.sessions, key, 0) {
+				t.Fatal("drain must release the empty session")
+			}
+			for _, id := range []string{"old-first", "old-second"} {
+				got := p.drops[id]
+				if len(got) != 1 || got[0] != "stale" {
+					t.Errorf("receipts for %s = %v, want [stale]", id, got)
+				}
+			}
+			if len(p.drops) != 2 || pendingCount(state) != 0 {
+				t.Fatalf("unexpected receipts or pending input: receipts=%v pending=%d", p.drops, pendingCount(state))
+			}
+			wantSends := 0
+			if tc.freshInput {
+				wantSends = 1
+			}
+			if len(as.sentPrompts) != wantSends || (tc.freshInput && as.sentPrompts[0] != "fresh") {
+				t.Fatalf("sent prompts = %v, want %d fresh sends", as.sentPrompts, wantSends)
+			}
+		})
 	}
 }
