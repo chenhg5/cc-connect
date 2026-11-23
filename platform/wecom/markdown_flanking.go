@@ -21,7 +21,7 @@ var reWSCodeSpan = regexp.MustCompile("`[^`\n]+`")
 // wsPairedOpeners maps a closing bracket/quote rune to its opening partner.
 // If the opener lives inside the bold span, the closer must stay inside too.
 var wsPairedOpeners = map[rune]rune{
-	（': '（', '】': '【', '》': '《', '」': '「', '』': '『.', '”': '“', '’': '‘',
+	'）': '（', '】': '【', '》': '《', '」': '「', '』': '『', '”': '“', '’': '‘',
 	')': '(', ']': '[',
 }
 
