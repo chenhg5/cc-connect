@@ -383,6 +383,28 @@ type acpConfigOption struct {
 	} `json:"options"`
 }
 
+// UnmarshalJSON accepts non-string currentValue (CodeBuddy sends a boolean
+// "multitask" option) by coercing it to string form.
+func (o *acpConfigOption) UnmarshalJSON(data []byte) error {
+	type plain acpConfigOption
+	var raw struct {
+		plain
+		CurrentValue any `json:"currentValue"`
+	}
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return err
+	}
+	*o = acpConfigOption(raw.plain)
+	switch v := raw.CurrentValue.(type) {
+	case nil:
+	case string:
+		o.CurrentValue = v
+	default:
+		o.CurrentValue = fmt.Sprint(v)
+	}
+	return nil
+}
+
 func (s *acpSession) absorbConfigOptions(options []acpConfigOption) {
 	for _, opt := range options {
 		if opt.ID == "model" {
