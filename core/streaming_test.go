@@ -204,10 +204,7 @@ func TestProcessInteractiveEvents_StopPreviewBehavior(t *testing.T) {
 			}()
 			sess.events <- Event{Type: EventText, Content: "partial answer"}
 			deadline := time.After(2 * time.Second)
-			for {
-				if len(p.getMessages()) > 0 {
-					break
-				}
+			for len(p.getMessages()) == 0 {
 				select {
 				case <-deadline:
 					t.Fatal("preview was not sent")
