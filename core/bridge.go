@@ -26,21 +26,27 @@ import (
 // A single instance is created globally; each project engine receives a
 // lightweight BridgePlatform handle that delegates to this server.
 type BridgeServer struct {
-	port              int
-	token             string
-	path              string
-	corsOrigins       []string
-	insecure          bool // allow running without token (local dev only)
-	server            *http.Server
-	activeConnections atomic.Int32
-	connections       map[*websocket.Conn]struct{}
-	stopping          bool
+	port        int
+	token       string
+	path        string
+	corsOrigins []string
+	insecure    bool // allow running without token (local dev only)
+	stateMu     sync.RWMutex
+	server      *http.Server
+	listening   bool
+	lastError   string
 
 	mu       sync.RWMutex
 	adapters map[string]*bridgeAdapter // platform name → adapter
 
 	enginesMu sync.RWMutex
 	engines   map[string]*bridgeEngineRef // project name → engine ref
+
+	lifecycleMu       sync.Mutex // serializes binding and shutdown
+	activeConnections atomic.Int32
+	connections       map[*websocket.Conn]struct{}
+	stopping          bool
+	serveDone         <-chan struct{} // guarded by lifecycleMu
 }
 
 type bridgeEngineRef struct {
@@ -217,27 +223,62 @@ func (bs *BridgeServer) RegisterEngine(projectName string, engine *Engine, bp *B
 	bs.engines[projectName] = &bridgeEngineRef{engine: engine, platform: bp}
 }
 
-// Start launches the HTTP/WebSocket server.
-func (bs *BridgeServer) Start() {
-	bs.mu.Lock()
-	bs.stopping = false
-	bs.mu.Unlock()
+// Start binds the HTTP/WebSocket endpoint before reporting success.
+func (bs *BridgeServer) Start() error {
 	mux := http.NewServeMux()
 	mux.HandleFunc(bs.path, bs.handleWS)
+	finishStart, serveDone := bs.startAdmission()
+	defer finishStart()
 
 	// Session management REST endpoints (with CORS support)
 	mux.HandleFunc("/bridge/sessions", bs.corsHTTP(bs.authHTTP(bs.handleSessions)))
 	mux.HandleFunc("/bridge/sessions/", bs.corsHTTP(bs.authHTTP(bs.handleSessionRoutes)))
 
 	addr := fmt.Sprintf(":%d", bs.port)
-	bs.server = &http.Server{Addr: addr, Handler: mux}
+	ln, err := net.Listen("tcp", addr)
+	if err != nil {
+		bs.stateMu.Lock()
+		bs.listening = false
+		bs.lastError = err.Error()
+		bs.stateMu.Unlock()
+		return fmt.Errorf("bridge: listen on %s: %w", addr, err)
+	}
+	server := &http.Server{Addr: addr, Handler: mux}
+	bs.stateMu.Lock()
+	bs.server = server
+	bs.listening = true
+	bs.lastError = ""
+	bs.stateMu.Unlock()
 
 	go func() {
+		defer close(serveDone)
 		slog.Info("bridge: server started", "addr", addr, "path", bs.path)
-		if err := bs.server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			slog.Error("bridge: server error", "error", err)
+		serveErr := server.Serve(ln)
+		bs.stateMu.Lock()
+		bs.listening = false
+		if serveErr != nil && serveErr != http.ErrServerClosed {
+			bs.lastError = serveErr.Error()
+		}
+		bs.stateMu.Unlock()
+		if serveErr != nil && serveErr != http.ErrServerClosed {
+			slog.Error("bridge: server error", "error", serveErr)
 		}
 	}()
+	return nil
+}
+
+// Listening reports whether the bridge endpoint is accepting connections.
+func (bs *BridgeServer) Listening() bool {
+	bs.stateMu.RLock()
+	defer bs.stateMu.RUnlock()
+	return bs.listening
+}
+
+// LastError reports the latest bind or serve failure, if any.
+func (bs *BridgeServer) LastError() string {
+	bs.stateMu.RLock()
+	defer bs.stateMu.RUnlock()
+	return bs.lastError
 }
 
 // corsHTTP wraps a handler with CORS headers. OPTIONS preflight is handled directly.
@@ -271,20 +312,37 @@ func (bs *BridgeServer) setCORS(w http.ResponseWriter, r *http.Request) {
 
 // Stop shuts down the server and closes all adapter connections.
 func (bs *BridgeServer) Stop() {
+	bs.lifecycleMu.Lock()
+	defer bs.lifecycleMu.Unlock()
+	// Serve publishes its final state before signaling completion.
+	defer func() {
+		if bs.serveDone != nil {
+			<-bs.serveDone
+			bs.serveDone = nil
+		}
+	}()
+
 	bs.mu.Lock()
 	bs.stopping = true
 	for conn := range bs.connections {
 		_ = conn.Close()
 	}
+	clear(bs.connections)
 	bs.adapters = make(map[string]*bridgeAdapter)
 	bs.mu.Unlock()
 
-	if bs.server != nil {
+	bs.stateMu.RLock()
+	server := bs.server
+	bs.stateMu.RUnlock()
+	if server != nil {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
-		if err := bs.server.Shutdown(ctx); err != nil && err != http.ErrServerClosed {
+		if err := server.Shutdown(ctx); err != nil && err != http.ErrServerClosed {
 			slog.Debug("bridge: server shutdown failed", "error", err)
 		}
+		bs.stateMu.Lock()
+		bs.listening = false
+		bs.stateMu.Unlock()
 	}
 }
 
@@ -842,26 +900,16 @@ func (bs *BridgeServer) handleConnection(conn *websocket.Conn) {
 	}
 
 	bs.mu.Lock()
+	if _, active := bs.connections[conn]; bs.stopping || !active {
+		bs.mu.Unlock()
+		return
+	}
 	if old, exists := bs.adapters[reg.Platform]; exists {
 		old.conn.Close()
 		slog.Info("bridge: replaced existing adapter", "platform", reg.Platform)
 	}
 	bs.adapters[reg.Platform] = adapter
 	bs.mu.Unlock()
-
-	if err := writeJSON(conn, &adapter.writeMu, map[string]any{"type": "register_ack", "ok": true}); err != nil {
-		slog.Debug("bridge: write register ack failed", "error", err)
-		return
-	}
-
-	if bridgeMetadataStringListContains(reg.Metadata, "control_plane", bridgeCapabilitiesSnapshotProto) {
-		if err := writeJSON(conn, &adapter.writeMu, bs.buildCapabilitiesSnapshot()); err != nil {
-			slog.Debug("bridge: write capabilities snapshot failed", "platform", reg.Platform, "error", err)
-			return
-		}
-	}
-
-	slog.Info("bridge: adapter registered", "platform", reg.Platform, "capabilities", reg.Capabilities)
 
 	defer func() {
 		bs.mu.Lock()
@@ -871,6 +919,20 @@ func (bs *BridgeServer) handleConnection(conn *websocket.Conn) {
 		bs.mu.Unlock()
 		slog.Info("bridge: adapter disconnected", "platform", reg.Platform)
 	}()
+
+	if err := writeJSON(conn, &adapter.writeMu, map[string]any{"type": "register_ack", "ok": true}); err != nil {
+		slog.Debug("bridge: write register ack failed", "error", err)
+		return
+	}
+
+	if bridgeMetadataStringListContains(reg.Metadata, "control_plane", bridgeCapabilitiesSnapshotProto) {
+		if err := adapter.sendBoundedJSON(bs.buildCapabilitiesSnapshot()); err != nil {
+			slog.Debug("bridge: write capabilities snapshot failed", "platform", reg.Platform, "error", err)
+			return
+		}
+	}
+
+	slog.Info("bridge: adapter registered", "platform", reg.Platform, "capabilities", reg.Capabilities)
 
 	for {
 		if err := conn.SetReadDeadline(time.Now().Add(90 * time.Second)); err != nil {
@@ -1382,6 +1444,10 @@ func (bs *BridgeServer) sendToAdapter(platform string, msg map[string]any) error
 	if !ok {
 		return fmt.Errorf("bridge: adapter %q not connected", platform)
 	}
+	return a.sendBoundedJSON(msg)
+}
+
+func (a *bridgeAdapter) sendBoundedJSON(msg any) error {
 	encoded, err := json.Marshal(msg)
 	if err != nil {
 		return fmt.Errorf("bridge: encode message: %w", err)
@@ -1528,4 +1594,29 @@ func serializeCard(c *Card) map[string]any {
 	}
 	result["elements"] = elements
 	return result
+}
+
+// startAdmission serializes the lifecycle and reopens admission only after a new
+// server reports a successful bind. A failed restart leaves the stopped state intact.
+func (bs *BridgeServer) startAdmission() (func(), chan struct{}) {
+	bs.lifecycleMu.Lock()
+	bs.stateMu.RLock()
+	previous := bs.server
+	bs.stateMu.RUnlock()
+	serveDone := make(chan struct{})
+	return func() {
+		defer bs.lifecycleMu.Unlock()
+		bs.stateMu.RLock()
+		bound := bs.server != previous
+		started := bound && bs.listening
+		bs.stateMu.RUnlock()
+		if bound {
+			bs.serveDone = serveDone
+		}
+		if started {
+			bs.mu.Lock()
+			bs.stopping = false
+			bs.mu.Unlock()
+		}
+	}, serveDone
 }
