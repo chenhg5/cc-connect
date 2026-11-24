@@ -190,12 +190,39 @@ func (m *ManagementServer) SetListCCSwitchProviders(fn func() ([]CCSwitchProvide
 
 // CCSwitchProviderInfo represents a provider read from the cc-switch database.
 type CCSwitchProviderInfo struct {
-	Name      string `json:"name"`
-	AppType   string `json:"app_type"`
-	APIKey    string `json:"api_key,omitempty"`
-	BaseURL   string `json:"base_url,omitempty"`
-	Model     string `json:"model,omitempty"`
-	IsCurrent bool   `json:"is_current"`
+	ID         string `json:"id,omitempty"`
+	Name       string `json:"name"`
+	ImportName string `json:"import_name,omitempty"`
+	AppType    string `json:"app_type"`
+	APIKey     string `json:"api_key,omitempty"`
+	BaseURL    string `json:"base_url,omitempty"`
+	Model      string `json:"model,omitempty"`
+	IsCurrent  bool   `json:"is_current"`
+}
+
+// nameCCSwitchImports gives same-named source providers stable distinct
+// destination names while leaving unique names unchanged.
+func nameCCSwitchImports(providers []CCSwitchProviderInfo) []CCSwitchProviderInfo {
+	nameCounts := make(map[string]int, len(providers))
+	for _, p := range providers {
+		nameCounts[p.Name]++
+	}
+	result := make([]CCSwitchProviderInfo, len(providers))
+	copy(result, providers)
+	baseCounts := make(map[string]int, len(result))
+	for i := range result {
+		result[i].ImportName = result[i].Name
+		if nameCounts[result[i].Name] > 1 {
+			result[i].ImportName = fmt.Sprintf("%s (%s)", result[i].Name, result[i].AppType)
+		}
+		baseCounts[result[i].ImportName]++
+	}
+	for i := range result {
+		if baseCounts[result[i].ImportName] > 1 {
+			result[i].ImportName += " [" + result[i].ID + "]"
+		}
+	}
+	return result
 }
 
 func (m *ManagementServer) Start() {
@@ -2073,7 +2100,7 @@ func (m *ManagementServer) handleCCSwitchProviders(w http.ResponseWriter, r *htt
 			mgmtJSON(w, http.StatusOK, map[string]any{"providers": []any{}, "available": false, "error": err.Error()})
 			return
 		}
-		mgmtJSON(w, http.StatusOK, map[string]any{"providers": providers, "available": true})
+		mgmtJSON(w, http.StatusOK, map[string]any{"providers": nameCCSwitchImports(providers), "available": true})
 
 	case http.MethodPost:
 		if m.listCCSwitchProviders == nil || m.addGlobalProvider == nil {
@@ -2082,13 +2109,14 @@ func (m *ManagementServer) handleCCSwitchProviders(w http.ResponseWriter, r *htt
 		}
 		var body struct {
 			Names    []string `json:"names"`
+			IDs      []string `json:"ids"`
 			Language string   `json:"language,omitempty"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 			mgmtError(w, http.StatusBadRequest, "invalid JSON: "+err.Error())
 			return
 		}
-		if len(body.Names) == 0 {
+		if len(body.Names) == 0 && len(body.IDs) == 0 {
 			mgmtError(w, http.StatusBadRequest, "names is required")
 			return
 		}
@@ -2098,33 +2126,52 @@ func (m *ManagementServer) handleCCSwitchProviders(w http.ResponseWriter, r *htt
 			mgmtError(w, http.StatusInternalServerError, "read cc-switch: "+err.Error())
 			return
 		}
+		all = nameCCSwitchImports(all)
 		byName := make(map[string]CCSwitchProviderInfo, len(all))
+		byID := make(map[string]CCSwitchProviderInfo, len(all))
 		ambiguous := make(map[string]bool)
 		for _, p := range all {
 			if _, exists := byName[p.Name]; exists {
 				ambiguous[p.Name] = true
 			}
 			byName[p.Name] = p
+			if p.ID != "" {
+				byID[p.ID] = p
+			}
 		}
 
 		// Validate the entire selection before writing any providers. A name
 		// alone cannot identify which same-named source provider was selected.
-		for _, name := range body.Names {
-			if ambiguous[name] {
-				mgmtError(w, http.StatusBadRequest, NewI18n(NormalizeLanguageString(body.Language)).Tf(MsgCCSwitchAmbiguousProvider, name))
-				return
+		if len(body.IDs) == 0 {
+			for _, name := range body.Names {
+				if ambiguous[name] {
+					mgmtError(w, http.StatusBadRequest, NewI18n(NormalizeLanguageString(body.Language)).Tf(MsgCCSwitchAmbiguousProvider, name))
+					return
+				}
 			}
 		}
 
 		var imported, skipped []string
-		for _, name := range body.Names {
-			src, ok := byName[name]
+		selected := body.Names
+		useIDs := len(body.IDs) > 0
+		if useIDs {
+			selected = body.IDs
+		}
+		for _, selection := range selected {
+			src, ok := byName[selection]
+			if useIDs {
+				src, ok = byID[selection]
+			}
 			if !ok {
-				skipped = append(skipped, name)
+				skipped = append(skipped, selection)
 				continue
 			}
+			importName := src.Name
+			if useIDs {
+				importName = src.ImportName
+			}
 			gp := GlobalProviderInfo{
-				Name:    src.Name,
+				Name:    importName,
 				APIKey:  src.APIKey,
 				BaseURL: src.BaseURL,
 				Model:   src.Model,
@@ -2135,10 +2182,10 @@ func (m *ManagementServer) handleCCSwitchProviders(w http.ResponseWriter, r *htt
 				gp.AgentTypes = []string{"codex"}
 			}
 			if err := m.addGlobalProvider(gp); err != nil {
-				skipped = append(skipped, name)
+				skipped = append(skipped, importName)
 				continue
 			}
-			imported = append(imported, name)
+			imported = append(imported, importName)
 		}
 		mgmtJSON(w, http.StatusOK, map[string]any{
 			"imported": imported,
