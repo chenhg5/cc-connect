@@ -279,6 +279,11 @@ func promptActionForScreen(screen string) string {
 		return ""
 	}
 	if strings.Contains(lower, "quick safety check") || strings.Contains(lower, "yes, i trust this folder") {
+		for _, line := range strings.Split(lower, "\n") {
+			if strings.Contains(line, "❯") && strings.Contains(line, "no, exit") {
+				return "\x1b[B\r"
+			}
+		}
 		return "\r"
 	}
 	if (strings.Contains(lower, "telemetry") || strings.Contains(lower, "help improve") || strings.Contains(lower, "usage data")) &&
@@ -473,6 +478,10 @@ func detectClaudeUsageOutputError(screen, stderr string) error {
 		return fmt.Errorf("claudecode: Claude Code is not logged in for /usage; run `claude auth login`")
 	case strings.Contains(joined, "/usage") && (strings.Contains(joined, "not available") || strings.Contains(joined, "not supported") || strings.Contains(joined, "subscription")):
 		return fmt.Errorf("claudecode: current Claude account does not support /usage")
+	case strings.Contains(joined, "failed to load usage data") && !claudeUsagePercentRe.MatchString(joined):
+		// Claude Code's own usage request failed and the panel shows an error
+		// instead of the usage bars, which will not appear on this screen.
+		return fmt.Errorf("claudecode: Claude Code could not load usage data (its /usage panel shows \"Failed to load usage data\")")
 	default:
 		return nil
 	}

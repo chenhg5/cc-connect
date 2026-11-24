@@ -19,6 +19,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -137,6 +138,8 @@ type replyContext struct {
 
 type Platform struct {
 	mu                         sync.RWMutex
+	localizer                  atomic.Pointer[core.Localizer]
+	askqLiveCheck              atomic.Pointer[core.AskQuestionLiveCheck]
 	platformName               string
 	domain                     string
 	appID                      string
@@ -207,9 +210,19 @@ type Platform struct {
 	// accepted by the bot. In group chats with thread_isolation, once a thread
 	// has been engaged (the first @bot message), subsequent attachment-only
 	// messages (image/file/audio) inside the same thread are passed through
-	// without requiring another @bot mention. Value is the last-seen time so
-	// stale entries can be expired by a future TTL sweep if needed.
+	// without requiring another @bot mention. Value is the last @bot time; with
+	// attachment_wait = "mention" it doubles as the activity TTL.
 	activeThreadSessions sync.Map // sessionKey -> time.Time
+
+	// attachment_wait (issue #2186). In "mention" mode, unmentioned
+	// attachment-only messages in an active thread are staged per
+	// (thread, sender) and released with that sender's next @bot message;
+	// attachmentWaitTTL is also the activity TTL for the thread itself.
+	// See attachment_wait.go.
+	attachmentWait    string
+	attachmentWaitTTL time.Duration
+	attachmentStageMu sync.Mutex
+	attachmentStages  map[string]*attachmentStage
 
 	// pendingGroupHistory keeps text/post messages that were observed in an
 	// allowed group chat without an explicit bot trigger. It is deliberately
@@ -545,6 +558,14 @@ func newPlatform(name, domain string, opts map[string]any) (core.Platform, error
 		imageBatchWindow = time.Duration(ms) * time.Millisecond
 	}
 
+	attachmentWait, attachmentWaitTTL, err := parseAttachmentWaitOptions(name, opts)
+	if err != nil {
+		return nil, err
+	}
+	if attachmentWait != attachmentWaitOff && !threadIsolation {
+		slog.Warn(name + ": attachment_wait only applies with thread_isolation = true; ignoring")
+	}
+
 	inboundCoalesceWindow := time.Duration(0)
 	if raw, ok := opts["inbound_coalesce_window_ms"]; ok {
 		ms, err := coerceMilliseconds(raw)
@@ -625,6 +646,8 @@ func newPlatform(name, domain string, opts map[string]any) (core.Platform, error
 		imageBatch:                 make(map[string]*imageBatchEntry),
 		imageBatchWindow:           imageBatchWindow,
 		inboundCoalesceWindow:      inboundCoalesceWindow,
+		attachmentWait:             attachmentWait,
+		attachmentWaitTTL:          attachmentWaitTTL,
 		resourceDownloadHTTP:       &http.Client{Timeout: 60 * time.Second},
 		resourceChunkSize:          resourceChunkSize,
 		resourceMaxBytes:           defaultResourceMaxBytes,
@@ -643,6 +666,10 @@ func (p *Platform) Name() string { return p.platformName }
 func (p *Platform) ProgressStyle() string { return p.progressStyle }
 
 func (p *Platform) SupportsProgressCardPayload() bool { return true }
+
+// ProgressUpdateInterval limits card edits so a burst of tool events does not
+// exhaust Feishu PATCH capacity or turn a transient timeout into fallback spam.
+func (p *Platform) ProgressUpdateInterval() time.Duration { return 1500 * time.Millisecond }
 
 // groupReplyAllForChat reports whether an unmentioned message from chatID
 // should bypass the local @mention gate. A non-empty per-chat list takes
@@ -1130,7 +1157,7 @@ func (p *Platform) onCardAction(event *callback.CardActionTriggerEvent) (*callba
 	// dispatches into the requester's session and is consumed as their
 	// answer/approval.
 	if strings.HasPrefix(actionVal, "askq:") || strings.HasPrefix(actionVal, "perm:") {
-		if rejected := rejectNonRequester(sessionKey, userID); rejected != nil {
+		if rejected := rejectNonRequester(sessionKey, userID, p.localize(core.MsgCardRequesterOnly, requesterOnlyFallback)); rejected != nil {
 			return rejected, nil
 		}
 	}
@@ -1179,6 +1206,17 @@ func (p *Platform) onCardAction(event *callback.CardActionTriggerEvent) (*callba
 
 	// askq: — AskUserQuestion option selected, forward as user message
 	if strings.HasPrefix(actionVal, "askq:") {
+		// A click on a question that was already answered (e.g. by text) is
+		// dropped by the engine; do not render it as the chosen answer (#2302).
+		if c := p.askqLiveCheck.Load(); c != nil && *c != nil && !(*c)(sessionKey, actionVal) {
+			slog.Info(p.tag()+": stale ask-question click, card left unchanged", "session", sessionKey, "action", actionVal)
+			return &callback.CardActionTriggerResponse{
+				Toast: &callback.Toast{
+					Type:    "info",
+					Content: p.localize(core.MsgAskQuestionStale, askqStaleFallback),
+				},
+			}, nil
+		}
 		rctx := replyContext{messageID: messageID, chatID: chatID, sessionKey: sessionKey}
 		p.dispatchCardActionMessage(chatID, &core.Message{
 			SessionKey: sessionKey,
@@ -2082,6 +2120,7 @@ func (p *Platform) onMessage(ctx context.Context, event *larkim.P2MessageReceive
 	// rest of the process lifetime. We now consult both flags: when
 	// the filter is degraded we fail closed (drop the message) and
 	// emit a periodic warning, instead of failing open.
+	stageAttachmentOnly := false
 	if chatType == "group" && !groupReplyAllForChat && filterActive {
 		if !botMentioned {
 			switch {
@@ -2093,9 +2132,15 @@ func (p *Platform) onMessage(ctx context.Context, event *larkim.P2MessageReceive
 			// through without re-mentioning the bot. Plain text and rich-text
 			// posts still require an explicit @bot to avoid pulling in
 			// unrelated chatter.
+			//
+			// With attachment_wait = "mention" (#2186) the attachment is
+			// staged instead, and handed over with the sender's next @bot
+			// message in this thread.
 			case p.threadIsolation && isAttachmentMsgType(msgType) && p.isActiveThreadSession(sessionKey):
+				stageAttachmentOnly = p.attachmentWaitMentionEnabled() && canStageAttachment(msgType)
 				slog.Debug(p.tag()+": passing attachment through active thread without mention",
-					"chat_id", chatID, "session_key", sessionKey, "msg_type", msgType, "message_id", messageID)
+					"chat_id", chatID, "session_key", sessionKey, "msg_type", msgType, "message_id", messageID,
+					"staged", stageAttachmentOnly)
 			default:
 				if p.IsGroupFilterDegraded() && botOpenID == "" {
 					// Fail closed: drop the message. Use WARN (not
@@ -2154,6 +2199,21 @@ func (p *Platform) onMessage(ctx context.Context, event *larkim.P2MessageReceive
 	mentions := msg.Mentions
 	parentID := stringValue(msg.ParentId)
 
+	if stageAttachmentOnly {
+		p.stageAttachment(sessionKey, userID, stagedAttachment{messageID: messageID, msgType: msgType, content: content})
+		return nil
+	}
+	var staged []stagedAttachment
+	if p.attachmentWaitMentionEnabled() && chatType == "group" && botMentioned &&
+		p.threadIsolation && isThreadSessionKey(sessionKey) {
+		switch cmd := p.mentionedCommand(msgType, content, mentions); {
+		case cmd == "/new":
+			p.clearStagedAttachments(sessionKey, userID)
+		case cmd == "" && (msgType == "text" || msgType == "post"):
+			staged = p.takeStagedAttachments(sessionKey, userID)
+		}
+	}
+
 	rctx := replyContext{messageID: messageID, chatID: chatID, sessionKey: sessionKey}
 	var groupHistoryCtx groupHistoryContext
 	if p.groupChatHistoryShare && chatType == "group" && !groupReplyAllForChat && botOpenID != "" && (botMentioned || atEveryone) {
@@ -2183,7 +2243,7 @@ func (p *Platform) onMessage(ctx context.Context, event *larkim.P2MessageReceive
 	// blocked by IO-heavy operations (image/audio download, handler HTTP calls).
 	// The dedup and old-message checks above remain synchronous to guarantee
 	// correctness before spawning the goroutine.
-	go p.dispatchMessageWithHistory(ctx, msgType, content, mentions, messageID, sessionKey, userID, chatID, rctx, parentID, createTimeMs, groupHistoryCtx)
+	go p.dispatchMessageWithHistory(ctx, msgType, content, mentions, messageID, sessionKey, userID, chatID, rctx, parentID, createTimeMs, groupHistoryCtx, staged)
 
 	return nil
 }
@@ -2205,10 +2265,10 @@ func (p *Platform) replyUnauthorizedAccess(ctx context.Context, rctx replyContex
 // handler invocation. It runs in its own goroutine so that onMessage returns
 // quickly and does not block the SDK event loop.
 func (p *Platform) dispatchMessage(ctx context.Context, msgType, content string, mentions []*larkim.MentionEvent, messageID, sessionKey, userID, chatID string, rctx replyContext, parentID string, createTimeMs int64) {
-	p.dispatchMessageWithHistory(ctx, msgType, content, mentions, messageID, sessionKey, userID, chatID, rctx, parentID, createTimeMs, groupHistoryContext{})
+	p.dispatchMessageWithHistory(ctx, msgType, content, mentions, messageID, sessionKey, userID, chatID, rctx, parentID, createTimeMs, groupHistoryContext{}, nil)
 }
 
-func (p *Platform) dispatchMessageWithHistory(ctx context.Context, msgType, content string, mentions []*larkim.MentionEvent, messageID, sessionKey, userID, chatID string, rctx replyContext, parentID string, createTimeMs int64, groupHistoryCtx groupHistoryContext) {
+func (p *Platform) dispatchMessageWithHistory(ctx context.Context, msgType, content string, mentions []*larkim.MentionEvent, messageID, sessionKey, userID, chatID string, rctx replyContext, parentID string, createTimeMs int64, groupHistoryCtx groupHistoryContext, staged []stagedAttachment) {
 	if p.isMessageRecalled(messageID) {
 		slog.Debug(p.tag()+": recalled message ignored in async dispatch", "message_id", messageID)
 		return
@@ -2234,6 +2294,18 @@ func (p *Platform) dispatchMessageWithHistory(ctx context.Context, msgType, cont
 		quoted = p.fetchQuotedMessage(ctx, parentID)
 	}
 	historyText := p.formatGroupHistory(groupHistoryCtx)
+	// Attachments staged by attachment_wait = "mention" (#2186), released by
+	// this @bot message. Only text and post messages ever carry them.
+	stagedImages, stagedFiles, stagedNotes := p.downloadStagedAttachments(ctx, staged)
+	if len(staged) > 0 {
+		slog.Info(p.tag()+": releasing staged attachments with @bot message",
+			"session_key", sessionKey, "message_id", messageID,
+			"images", len(stagedImages), "files", len(stagedFiles))
+	}
+	quotedExtra := quoted.text
+	if len(stagedNotes) > 0 {
+		quotedExtra = joinFeishuExtraContent(quotedExtra, strings.Join(stagedNotes, "\n"))
+	}
 	dispatchCore := func(msg *core.Message) {
 		if historyText != "" {
 			msg.ExtraContent = joinFeishuExtraContent(historyText, msg.ExtraContent)
@@ -2260,7 +2332,8 @@ func (p *Platform) dispatchMessageWithHistory(ctx context.Context, msgType, cont
 		// zero file-resource API calls.
 		approvedFileMetas := p.filterQuotedFilesForUser(quoted.files, mentions, userID)
 		quotedFiles := p.downloadQuotedFiles(ctx, approvedFileMetas)
-		if text == "" && historyText == "" && quoted.text == "" && len(quoted.images) == 0 && len(quotedFiles) == 0 {
+		if text == "" && historyText == "" && quoted.text == "" && len(quoted.images) == 0 && len(quotedFiles) == 0 &&
+			len(stagedImages) == 0 && len(stagedFiles) == 0 {
 			slog.Debug(p.tag()+": dropping empty text after mention stripping",
 				"message_id", messageID,
 				"raw_text_len", len(textBody.Text),
@@ -2276,7 +2349,8 @@ func (p *Platform) dispatchMessageWithHistory(ctx context.Context, msgType, cont
 			SessionKey: sessionKey, Platform: p.platformName,
 			MessageID: messageID,
 			UserID:    userID, UserName: userName, ChatName: chatName,
-			Content: text, ExtraContent: quoted.text, Images: quoted.images, Files: quotedFiles, ReplyCtx: rctx,
+			Content: text, ExtraContent: quotedExtra,
+			Images: append(quoted.images, stagedImages...), Files: append(quotedFiles, stagedFiles...), ReplyCtx: rctx,
 			UserMessageTimeMs: createTimeMs,
 		})
 
@@ -2376,6 +2450,8 @@ func (p *Platform) dispatchMessageWithHistory(ctx context.Context, msgType, cont
 		textParts = append(textParts, notices...)
 		files = append(files, p.downloadQuotedFiles(ctx, p.filterQuotedFilesForUser(quoted.files, mentions, userID))...)
 		text := stripMentions(strings.Join(textParts, "\n"), mentions, p.getBotOpenID())
+		images = append(images, stagedImages...)
+		files = append(files, stagedFiles...)
 		if text == "" && historyText == "" && len(images) == 0 && len(files) == 0 && quoted.text == "" && len(quoted.images) == 0 {
 			return
 		}
@@ -2385,7 +2461,7 @@ func (p *Platform) dispatchMessageWithHistory(ctx context.Context, msgType, cont
 			SessionKey: sessionKey, Platform: p.platformName,
 			MessageID: messageID,
 			UserID:    userID, UserName: userName, ChatName: chatName,
-			Content: text, ExtraContent: quoted.text, Images: append(quoted.images, images...), Files: files,
+			Content: text, ExtraContent: quotedExtra, Images: append(quoted.images, images...), Files: files,
 			ReplyCtx:          rctx,
 			UserMessageTimeMs: createTimeMs,
 		})
@@ -4073,13 +4149,8 @@ func buildReplyContent(content string) (msgType string, body string) {
 		b, _ := json.Marshal(map[string]string{"text": content})
 		return larkim.MsgTypeText, string(b)
 	}
-	// Prefer card for all markdown content — card schema 2.0 has the best
-	// markdown rendering (headings, blockquotes, code blocks, tables, links,
-	// strikethrough, etc.). Only fall back to post md tag when the content
-	// exceeds the card table limit (Feishu API error 11310: max 5 tables).
-	if countMarkdownTables(content) > maxCardTables {
-		return larkim.MsgTypePost, buildPostMdJSON(content)
-	}
+	// Card 2.0 lays out ordinary Markdown tables as rows or native table
+	// components. Post md does not render overflow tables reliably.
 	return larkim.MsgTypeInteractive, buildCardJSON(sanitizeMarkdownURLs(preprocessFeishuMarkdown(content)))
 }
 
@@ -4098,44 +4169,9 @@ func hasComplexMarkdown(s string) bool {
 	return false
 }
 
-// maxCardTables is the Feishu interactive card limit for table components.
-// A single card supports at most 5 tables; exceeding this causes API error 11310.
+// maxCardTables is the Feishu interactive card limit for native table components.
+// Row-based tables do not consume these slots.
 const maxCardTables = 5
-
-// countMarkdownTables counts the number of distinct markdown tables in s.
-// A table is a group of consecutive lines where each line starts and ends with '|'.
-func countMarkdownTables(s string) int {
-	count := 0
-	inTable := false
-	for _, line := range strings.Split(s, "\n") {
-		trimmed := strings.TrimSpace(line)
-		isTableLine := len(trimmed) > 1 && trimmed[0] == '|' && trimmed[len(trimmed)-1] == '|'
-		if isTableLine && !inTable {
-			count++
-			inTable = true
-		} else if !isTableLine {
-			inTable = false
-		}
-	}
-	return count
-}
-
-// buildPostMdJSON builds a Feishu post message using the md tag,
-// which renders markdown at normal chat font size.
-func buildPostMdJSON(content string) string {
-	content = sanitizeMarkdownURLs(content)
-	post := map[string]any{
-		"zh_cn": map[string]any{
-			"content": [][]map[string]any{
-				{
-					{"tag": "md", "text": content},
-				},
-			},
-		},
-	}
-	b, _ := json.Marshal(post)
-	return string(b)
-}
 
 // preprocessFeishuMarkdown ensures code fences have a newline before them,
 // which prevents rendering issues in Feishu card markdown.
@@ -4551,13 +4587,23 @@ func (p *Platform) markThreadSessionActive(sessionKey string) bool {
 }
 
 // isActiveThreadSession reports whether the given sessionKey corresponds to a
-// thread that has previously been engaged by an @bot message.
+// thread that has previously been engaged by an @bot message. With
+// attachment_wait = "mention" the engagement expires after attachment_wait_secs
+// without an @bot message; otherwise it lasts for the process lifetime.
 func (p *Platform) isActiveThreadSession(sessionKey string) bool {
 	if !p.threadIsolation || !isThreadSessionKey(sessionKey) {
 		return false
 	}
-	_, ok := p.activeThreadSessions.Load(sessionKey)
-	return ok
+	v, ok := p.activeThreadSessions.Load(sessionKey)
+	if !ok {
+		return false
+	}
+	if p.attachmentWaitMentionEnabled() {
+		if last, isTime := v.(time.Time); isTime && time.Since(last) > p.attachmentWaitWindow() {
+			return false
+		}
+	}
+	return true
 }
 
 // stripMentions processes @mention placeholders (e.g. @_user_1) in text.
@@ -4643,7 +4689,7 @@ func requesterFromSessionKey(sessionKey string) (string, bool) {
 // rejectNonRequester returns a toast response when sessionKey belongs to a
 // single requester who is not the current clicker, and nil when the click is
 // allowed through (requester's own click, or a shared session).
-func rejectNonRequester(sessionKey, clickerOpenID string) *callback.CardActionTriggerResponse {
+func rejectNonRequester(sessionKey, clickerOpenID, toast string) *callback.CardActionTriggerResponse {
 	owner, ok := requesterFromSessionKey(sessionKey)
 	if !ok || owner == clickerOpenID {
 		return nil
@@ -4652,9 +4698,36 @@ func rejectNonRequester(sessionKey, clickerOpenID string) *callback.CardActionTr
 	return &callback.CardActionTriggerResponse{
 		Toast: &callback.Toast{
 			Type:    "info",
-			Content: "此卡片仅提问者本人可操作 / Only the requester can operate this card",
+			Content: toast,
 		},
 	}
+}
+
+// requesterOnlyFallback is used until the engine has provided a localizer.
+const requesterOnlyFallback = "此卡片仅提问者本人可操作 / Only the requester can operate this card"
+
+// askqStaleFallback is used until the engine has provided a localizer.
+const askqStaleFallback = "这个问题已经回答过了或已失效 / That question was already answered or is no longer active"
+
+// SetAskQuestionLiveCheck implements core.AskQuestionStateAware.
+func (p *Platform) SetAskQuestionLiveCheck(c core.AskQuestionLiveCheck) {
+	p.askqLiveCheck.Store(&c)
+}
+
+// SetLocalizer implements core.LocalizerAware.
+func (p *Platform) SetLocalizer(l core.Localizer) {
+	p.localizer.Store(&l)
+}
+
+// localize returns key in the engine's language, or fallback when no
+// localizer has been set.
+func (p *Platform) localize(key core.MsgKey, fallback string) string {
+	if l := p.localizer.Load(); l != nil && *l != nil {
+		if text := (*l)(key); text != "" {
+			return text
+		}
+	}
+	return fallback
 }
 
 func (p *Platform) shouldReplyInThread(rc replyContext) bool {
@@ -5214,7 +5287,7 @@ type feishuPreviewHandle struct {
 // Uses schema 2.0 which supports code blocks, tables, and inline formatting.
 // Card font is inherently smaller than Post/Text — this is a Feishu platform limitation.
 func buildCardJSON(content string) string {
-	content = sanitizeCardMarkdownForCard(content)
+	content = prepareCardMarkdown(content)
 	return marshalReplyCard(buildCardBodyElements(content), func(body []map[string]any) []map[string]any {
 		return body
 	}, content)
@@ -5235,7 +5308,7 @@ func marshalReplyCard(body []map[string]any, withTail func([]map[string]any) []m
 	b := marshal(body)
 	transformed := len(body) != 1 || body[0]["tag"] != "markdown"
 	if len(b) > maxRichCardJSONBytes && transformed {
-		b = marshal([]map[string]any{{"tag": "markdown", "content": content}})
+		b = marshal([]map[string]any{{"tag": "markdown", "content": sanitizeCardMarkdownForCard(content)}})
 	}
 	return string(b)
 }
@@ -5247,9 +5320,8 @@ func buildCardJSONWithStatusFooter(content, footer string) string {
 	if strings.TrimSpace(footer) == "" {
 		return buildCardJSON(content)
 	}
-	segments := sanitizeCardMarkdownSegmentsForCard([]string{content, footer})
-	content = segments[0]
-	footer = segments[1]
+	content = prepareCardMarkdown(content)
+	footer = sanitizeCardMarkdownForCard(footer)
 	return marshalReplyCard(buildCardBodyElements(content), func(body []map[string]any) []map[string]any {
 		return append(body,
 			map[string]any{"tag": "hr"},
@@ -6056,6 +6128,7 @@ func (p *Platform) Stop() error {
 	// Flush any pending image batches so buffered images aren't lost on shutdown.
 	p.flushImageBatches()
 	p.flushInboundCoalesced()
+	p.dropAllStagedAttachments()
 	return nil
 }
 
@@ -7127,8 +7200,6 @@ func pickThinkingVerb() string {
 	return thinkingVerbs[idx] + "..."
 }
 
-var markdownTablePattern = regexp.MustCompile(`(?m)^\|.+\|\s*\n\|[\s:|-]+\|\s*\n(?:\|.+\|\s*\n?)+`)
-
 type markdownTextMatch struct {
 	start int
 	end   int
@@ -7614,13 +7685,17 @@ func optimizeFeishuCardMarkdown(text string) string {
 	return restoreFencedCodeBlocks(protected, blocks)
 }
 
+func prepareCardMarkdown(text string) string {
+	prepared := sanitizeMarkdownURLs(preprocessFeishuMarkdown(text))
+	prepared = stripInvalidFeishuCardImages(prepared)
+	return optimizeFeishuCardMarkdown(prepared)
+}
+
 func sanitizeCardMarkdownSegmentsForCard(texts []string) []string {
 	out := make([]string, len(texts))
 	remainingBudget := feishuCardTableLimit
 	for i, text := range texts {
-		prepared := sanitizeMarkdownURLs(preprocessFeishuMarkdown(text))
-		prepared = stripInvalidFeishuCardImages(prepared)
-		prepared = optimizeFeishuCardMarkdown(prepared)
+		prepared := prepareCardMarkdown(text)
 		prepared, remainingBudget = sanitizeCardMarkdownTables(prepared, remainingBudget)
 		out[i] = prepared
 	}
@@ -8024,25 +8099,18 @@ func splitMarkdownByTables(md string, maxTables int) []string {
 	if maxTables <= 0 {
 		return []string{md}
 	}
-	matches := markdownTablePattern.FindAllStringIndex(md, -1)
+	matches := findMarkdownTablesOutsideCodeBlocks(md)
 	if len(matches) <= maxTables {
 		return []string{md}
 	}
-	parts := make([]string, 0, len(matches)-maxTables+1)
-	firstEnd := len(md)
-	if len(matches) > maxTables {
-		firstEnd = matches[maxTables][0]
+	parts := make([]string, 0, (len(matches)+maxTables-1)/maxTables)
+	start := 0
+	for i := maxTables; i < len(matches); i += maxTables {
+		end := matches[i-1].end
+		parts = append(parts, strings.TrimSpace(md[start:end]))
+		start = end
 	}
-	first := strings.TrimSpace(md[:firstEnd])
-	if first != "" {
-		parts = append(parts, first)
-	}
-	for _, match := range matches[maxTables:] {
-		block := strings.TrimSpace(md[match[0]:match[1]])
-		if block != "" {
-			parts = append(parts, block)
-		}
-	}
+	parts = append(parts, strings.TrimSpace(md[start:]))
 	return parts
 }
 
@@ -8054,8 +8122,8 @@ func (p *Platform) BuildRichCard(status core.CardStatus, title string, steps []c
 }
 
 // SplitMarkdownByTables implements core.MarkdownTableSplitter.
-func (p *Platform) SplitMarkdownByTables(md string, maxTables int) []string {
-	return splitMarkdownByTables(md, maxTables)
+func (p *Platform) SplitMarkdownByTables(md string) []string {
+	return splitMarkdownByTables(md, feishuCardTableLimit)
 }
 
 // SetPreviewStatus updates the card header color to reflect the agent's current state.

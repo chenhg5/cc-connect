@@ -217,6 +217,7 @@ const (
 	MsgToolAllowedNew            MsgKey = "tool_allowed_new"
 	MsgError                     MsgKey = "error"
 	MsgAttachmentUnavailable     MsgKey = "attachment_unavailable"
+	MsgCardRequesterOnly         MsgKey = "card_requester_only"
 	MsgSessionNotFound           MsgKey = "session_not_found"
 	MsgFailedToStartAgentSession MsgKey = "failed_to_start_agent_session"
 	MsgFailedToDeleteSession     MsgKey = "failed_to_delete_session"
@@ -338,6 +339,7 @@ const (
 	MsgModelCurrent          MsgKey = "model_current"
 	MsgModelChanged          MsgKey = "model_changed"
 	MsgModelChangeFailed     MsgKey = "model_change_failed"
+	MsgModelChangeQueued     MsgKey = "model_change_queued"
 	MsgModelCardSwitching    MsgKey = "model_card_switching"
 	MsgModelCardSwitched     MsgKey = "model_card_switched"
 	MsgModelCardSwitchFailed MsgKey = "model_card_switch_failed"
@@ -859,6 +861,13 @@ var messages = map[MsgKey]map[Language]string{
 		LangTraditionalChinese: "✅ 工具 `%s` 已預授權。將在下次會話生效。",
 		LangJapanese:           "✅ ツール `%s` を事前許可しました。次のセッションから有効になります。",
 		LangSpanish:            "✅ Herramienta `%s` pre-autorizada. Se aplicará en la próxima sesión.",
+	},
+	MsgCardRequesterOnly: {
+		LangEnglish:            "Only the requester can operate this card",
+		LangChinese:            "此卡片仅提问者本人可操作",
+		LangTraditionalChinese: "此卡片僅提問者本人可操作",
+		LangJapanese:           "このカードは質問者本人のみ操作できます",
+		LangSpanish:            "Solo quien hizo la solicitud puede usar esta tarjeta",
 	},
 	MsgAttachmentUnavailable: {
 		LangEnglish:            "Attachment unavailable: %s. The attachment was sent but could not be read.",
@@ -2295,6 +2304,13 @@ var messages = map[MsgKey]map[Language]string{
 		LangTraditionalChinese: "模型已切換為 `%s`，當前會話與後續會話均使用此模型。",
 		LangJapanese:           "モデルを `%s` に切り替えました。このセッションと今後のセッションで使用されます。",
 		LangSpanish:            "Modelo cambiado a `%s`. Esta sesión y las futuras usarán este modelo.",
+	},
+	MsgModelChangeQueued: {
+		LangEnglish:            "Model switched to `%s`. A reply is still in progress; the new model takes effect once it finishes.",
+		LangChinese:            "模型已切换为 `%s`。当前回复仍在进行中，新模型将在其完成后生效。",
+		LangTraditionalChinese: "模型已切換為 `%s`。目前回覆仍在進行中，新模型將在其完成後生效。",
+		LangJapanese:           "モデルを `%s` に切り替えました。現在の応答が進行中のため、完了後に新しいモデルが適用されます。",
+		LangSpanish:            "Modelo cambiado a `%s`. Hay una respuesta en curso; el nuevo modelo se aplicará cuando termine.",
 	},
 	MsgModelChangeFailed: {
 		LangEnglish:            "❌ Failed to change model: %v",

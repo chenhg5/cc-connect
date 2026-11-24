@@ -36,8 +36,8 @@ func init() {
 //   - "default": standard mode (non-interactive `--prompt` auto-approves tools)
 //   - "yolo":    auto-approve all tool calls
 //   - "plan":    read-only plan mode
-//   - "quiet":   final-message-only; uses --quiet on legacy kimi-cli, local
-//     event suppression on the Kimi Code CLI (which dropped --quiet, #1561)
+//   - "quiet":   final-message-only; emulated by local event suppression on
+//     both CLI flavors (--quiet conflicts with stream-json output, #806/#1561)
 type Agent struct {
 	workDir      string
 	model        string
