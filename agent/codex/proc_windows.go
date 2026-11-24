@@ -14,9 +14,10 @@ import (
 	"github.com/chenhg5/cc-connect/internal/taskkill"
 )
 
+// CREATE_NO_WINDOW creates a Windows console application without a console.
 const createNoWindow uint32 = 0x08000000
 
-func prepareCmdForKill(cmd *exec.Cmd) {
+func prepareAppServerCmd(cmd *exec.Cmd) {
 	if cmd == nil {
 		return
 	}
@@ -24,7 +25,15 @@ func prepareCmdForKill(cmd *exec.Cmd) {
 		cmd.SysProcAttr = &syscall.SysProcAttr{}
 	}
 	cmd.SysProcAttr.HideWindow = true
-	cmd.SysProcAttr.CreationFlags |= syscall.CREATE_NEW_PROCESS_GROUP | createNoWindow
+	cmd.SysProcAttr.CreationFlags |= createNoWindow
+}
+
+func prepareCmdForKill(cmd *exec.Cmd) {
+	if cmd == nil {
+		return
+	}
+	prepareAppServerCmd(cmd)
+	cmd.SysProcAttr.CreationFlags |= syscall.CREATE_NEW_PROCESS_GROUP
 }
 
 func forceKillCmd(cmd *exec.Cmd) error {

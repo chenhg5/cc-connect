@@ -9,6 +9,8 @@ import (
 	"syscall"
 )
 
+func prepareAppServerCmd(_ *exec.Cmd) {}
+
 func prepareCmdForKill(cmd *exec.Cmd) {
 	if cmd == nil {
 		return
