@@ -4106,36 +4106,42 @@ func EnableWebAdmin(mgmtToken, bridgeToken string) (*WebSetupResult, error) {
 	}
 
 	t := true
-	changed := false
+	var edits []documentEdit
 	if !mgmtEnabled {
 		cfg.Management.Enabled = &t
+		edits = append(edits, settingEdit("management", -1, -1, "enabled", true))
 		if cfg.Management.Port == 0 {
 			cfg.Management.Port = 9820
+			edits = append(edits, settingEdit("management", -1, -1, "port", cfg.Management.Port))
 		}
 		if cfg.Management.Token == "" {
 			cfg.Management.Token = mgmtToken
+			edits = append(edits, settingEdit("management", -1, -1, "token", cfg.Management.Token))
 		}
 		if len(cfg.Management.CORSOrigins) == 0 {
 			cfg.Management.CORSOrigins = []string{"*"}
+			edits = append(edits, settingEdit("management", -1, -1, "cors_origins", cfg.Management.CORSOrigins))
 		}
-		changed = true
 	}
 	if !bridgeEnabled {
 		cfg.Bridge.Enabled = &t
+		edits = append(edits, settingEdit("bridge", -1, -1, "enabled", true))
 		if cfg.Bridge.Port == 0 {
 			cfg.Bridge.Port = 9810
+			edits = append(edits, settingEdit("bridge", -1, -1, "port", cfg.Bridge.Port))
 		}
 		if cfg.Bridge.Token == "" {
 			cfg.Bridge.Token = bridgeToken
+			edits = append(edits, settingEdit("bridge", -1, -1, "token", cfg.Bridge.Token))
 		}
 		if len(cfg.Bridge.CORSOrigins) == 0 {
 			cfg.Bridge.CORSOrigins = []string{"*"}
+			edits = append(edits, settingEdit("bridge", -1, -1, "cors_origins", cfg.Bridge.CORSOrigins))
 		}
-		changed = true
 	}
 
-	if changed {
-		if err := saveConfig(cfg); err != nil {
+	if len(edits) > 0 {
+		if err := saveSettingsDocument(data, cfg, edits); err != nil {
 			return nil, fmt.Errorf("save config: %w", err)
 		}
 	}
