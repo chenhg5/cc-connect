@@ -12766,8 +12766,9 @@ func (e *Engine) sendAskQuestionPrompt(p Platform, replyCtx any, questions []Use
 		return
 	}
 
-	// Try inline buttons (Telegram)
-	if bs, ok := p.(InlineButtonSender); ok {
+	// A multi-select button would submit the first choice immediately. Show
+	// numbered text choices so the user can reply with several numbers.
+	if bs, ok := p.(InlineButtonSender); ok && !q.MultiSelect {
 		var textBuf strings.Builder
 		textBuf.WriteString("❓ *")
 		textBuf.WriteString(q.Question)
@@ -12825,7 +12826,12 @@ func (e *Engine) sendAskQuestionPrompt(p Platform, replyCtx any, questions []Use
 		}
 		sb.WriteString("\n")
 	}
-	sb.WriteString(fmt.Sprintf("\n%s", e.i18n.T(MsgAskQuestionNote)))
+	note := MsgAskQuestionNote
+	if q.MultiSelect {
+		note = MsgAskQuestionNoteMulti
+	}
+	sb.WriteString("\n")
+	sb.WriteString(e.i18n.T(note))
 	e.send(p, replyCtx, sb.String())
 }
 
