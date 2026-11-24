@@ -163,7 +163,7 @@ func TestAppliedEffort_UnsupportedCLIStillAnswers(t *testing.T) {
 					[]string{"-test.run=TestHelperProcess", "--", "claude-stdin-echo"},
 					wrapper, "", "medium", resume, "default", "", "", nil, nil, nil,
 					[]string{"GO_WANT_HELPER_PROCESS=1", "CC_CONNECT_TEST_SETTINGS_MODE=" + mode},
-					"", false, core.SpawnOptions{}, 0, 0, "", "")
+					"", core.SpawnOptions{}, 0, 0, "", "")
 				if err != nil {
 					t.Fatal(err)
 				}

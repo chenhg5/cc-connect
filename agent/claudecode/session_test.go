@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -1084,6 +1085,39 @@ func TestHelperProcess(t *testing.T) {
 	}
 }
 
+func TestRouterSessionKeepsVerboseForStreamJSON(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	cs, err := newClaudeSession(ctx, t.TempDir(), os.Args[0],
+		[]string{"-test.run=TestHelperProcess", "--", "sleep"}, "", "", "", "", "default", "", "", nil, nil, nil,
+		[]string{"GO_WANT_HELPER_PROCESS=1", "ANTHROPIC_BASE_URL=http://127.0.0.1:3456"}, "",
+		core.SpawnOptions{}, 0, 0, "", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = cs.Close() })
+	if !slices.Contains(cs.cmd.Args, "--verbose") {
+		t.Fatalf("router session omitted --verbose: %v", cs.cmd.Args)
+	}
+}
+
+func TestReadLoopSkipsVerboseTextBeforeJSON(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	cs := &claudeSession{events: make(chan core.Event, 2), ctx: ctx}
+	cs.alive.Store(true)
+	cs.handleReadLoopLine("verbose: connecting to router")
+	cs.handleReadLoopLine(`{"type":"result","subtype":"success","num_turns":1,"result":"router reply","session_id":"router-session"}`)
+	select {
+	case event := <-cs.events:
+		if event.Type != core.EventResult || event.Content != "router reply" {
+			t.Fatalf("event after verbose text = %+v", event)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("JSON result was lost after verbose text")
+	}
+}
+
 // TestNewClaudeSession_NoReplayFlagKeepsProcessAlive is the regression
 // test for issue #1736. Before the fix, newClaudeSession passed
 // --replay-user-messages to Claude Code, which drained stdin and exited
@@ -1155,7 +1189,6 @@ func TestNewClaudeSession_NoReplayFlagKeepsProcessAlive(t *testing.T) {
 		nil,                                  // pluginDirs
 		[]string{"GO_WANT_HELPER_PROCESS=1"}, // extraEnv: route child into helper branch
 		"",                                   // platformPrompt
-		false,                                // disableVerbose
 		spawnOpts,
 		0,  // maxContextTokens
 		0,  // ctxWindowTokens
