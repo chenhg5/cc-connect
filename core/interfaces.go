@@ -349,6 +349,14 @@ type TaskCardSender interface {
 	UpdateTaskCard(ctx context.Context, handle any, card *Card) error
 }
 
+// TaskCardTickerSender is an optional interface for platforms that can make a
+// single, non-retrying task-card update. The independent ticker uses it so a
+// rate-limited tick returns immediately and the card's own backoff controls the
+// cadence; terminal delivery still uses UpdateTaskCard with full retries.
+type TaskCardTickerSender interface {
+	UpdateTaskCardOnce(ctx context.Context, handle any, card *Card) error
+}
+
 // PermissionResult represents the user's decision on a permission request.
 type PermissionResult struct {
 	Behavior     string         `json:"behavior"`               // "allow" or "deny"

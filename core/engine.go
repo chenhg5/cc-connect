@@ -75,27 +75,7 @@ const (
 	// (e.g. an oversized image) makes every resume fail; dropping it is the
 	// only way back without waiting for the user to discover /new.
 	sessionFailureResetThreshold = 3
-	// turnProgressNoticeMax caps how many "still working" nudges one turn may
-	// send. The interval doubles after each nudge (base, 2×, 4×, … capped at
-	// turnProgressMaxDelay), so a >3-minute turn is never silent for long.
-	turnProgressNoticeMax = 8
-	turnProgressMaxDelay  = 15 * time.Minute
 )
-
-// nextTurnProgressDelay doubles the nudge interval, capped at max.
-func nextTurnProgressDelay(prev, base, max time.Duration) time.Duration {
-	if base <= 0 {
-		return 0
-	}
-	if prev <= 0 {
-		prev = base
-	}
-	next := prev * 2
-	if next > max {
-		next = max
-	}
-	return next
-}
 
 // VersionInfo is set by main at startup so that /version works.
 var VersionInfo string
@@ -277,9 +257,9 @@ type Engine struct {
 	failMu          sync.Mutex
 	sessionFailures map[string]int
 
-	// turnProgressInterval controls the "still working" nudge during a long
-	// turn; 0 disables it.
-	turnProgressInterval time.Duration
+	// cardTickInterval is the independent progress-card refresh interval;
+	// 0 disables the ticker.
+	cardTickInterval time.Duration
 
 	// Auto-compress settings
 	autoCompressEnabled   bool
@@ -517,6 +497,7 @@ func NewEngine(name string, ag Agent, platforms []Platform, sessionStorePath str
 		busyMode:              "steer",
 		stopWait:              interruptUnwindWaitTimeout,
 		showContextIndicator:  true,
+		cardTickInterval:      defaultCardTickInterval,
 	}
 
 	if ag != nil {
@@ -1063,11 +1044,11 @@ func (e *Engine) SetMaxQueuedMessages(n int) {
 	}
 }
 
-// SetTurnProgressInterval controls the "still working" nudge sent during a
-// long turn. Zero disables it.
-func (e *Engine) SetTurnProgressInterval(d time.Duration) {
+// SetCardTickInterval controls the independent progress-card refresh interval.
+// Zero disables the ticker.
+func (e *Engine) SetCardTickInterval(d time.Duration) {
 	if d >= 0 {
-		e.turnProgressInterval = d
+		e.cardTickInterval = d
 	}
 }
 
@@ -2269,16 +2250,20 @@ func (e *Engine) handleMessage(p Platform, msg *Message) {
 		quotedCount := len(msg.QuotedImages)
 		fromQuote := idx < quotedCount
 		displayIdx := idx + 1
+		totalOwn := len(msg.Images) - quotedCount
 		if !fromQuote {
 			displayIdx = idx - quotedCount + 1
 		}
 		slog.Warn("message rejected: image exceeds model dimension limit",
 			"session", msg.SessionKey, "image_index", displayIdx, "quoted", fromQuote,
-			"width", w, "height", h, "limit", MaxModelImageDimension)
-		if fromQuote {
+			"total_own", totalOwn, "width", w, "height", h, "limit", MaxModelImageDimension)
+		switch {
+		case fromQuote:
 			e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgQuotedImageTooLarge, w, h, MaxModelImageDimension))
-		} else {
-			e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgImageTooLarge, displayIdx, w, h, MaxModelImageDimension))
+		case totalOwn <= 1:
+			e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgImageTooLargeSingle, w, h, MaxModelImageDimension))
+		default:
+			e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgImageTooLargeMulti, displayIdx, totalOwn, w, h, MaxModelImageDimension))
 		}
 		return
 	}
@@ -2532,7 +2517,7 @@ func (e *Engine) steerBusySession(p Platform, msg *Message, interactiveKey strin
 	session.AddHistory("user", msg.Content)
 	sessions.Save()
 	if tc := stateTaskCard(state); tc != nil {
-		tc.SetStep(truncateStr(msg.Content, taskCardMaxStepLen))
+		tc.SetStep(e.i18n.T(MsgTaskCardNewInstruction))
 	}
 	// Both cues: emoji reaction on the message plus a short text so the user
 	// knows this went into the running task instead of starting a new one.
@@ -4189,26 +4174,6 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 		idleCh = idleTimer.C
 	}
 
-	// Long-turn progress nudge: tell the user we are still alive instead of
-	// leaving them to infer it from a spinning card. Scheduler runs (cron)
-	// already announce themselves and should not add chat noise.
-	state.mu.Lock()
-	proactiveTurn := state.turnProactive
-	state.mu.Unlock()
-	var progressTimer *time.Timer
-	var progressCh <-chan time.Time
-	nextProgressDelay := e.turnProgressInterval
-	if e.turnProgressInterval > 0 && !proactiveTurn {
-		progressTimer = time.NewTimer(nextProgressDelay)
-		defer progressTimer.Stop()
-		progressCh = progressTimer.C
-	}
-	progressNotices := 0
-	// lastVisibleEventAt suppresses the "still working" nudge while the agent
-	// is actively streaming text or tool steps — the user can already see
-	// progress, so a redundant text would just be noise.
-	lastVisibleEventAt := time.Now()
-
 	events := state.agentSession.Events()
 	stopCh := state.stopSignal()
 	for {
@@ -4256,49 +4221,6 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				return
 			}
 			continue
-		case <-progressCh:
-			if progressNotices < turnProgressNoticeMax {
-				// Only nudge when the turn has been quiet: if the agent is
-				// streaming text or tool steps the user already sees progress.
-				quietFor := time.Since(lastVisibleEventAt)
-				if quietFor >= nextProgressDelay/2 {
-					progressNotices++
-					step := ""
-					if tc := stateTaskCard(state); tc != nil {
-						step = tc.CurrentStep()
-					}
-					if step == "" {
-						step = e.i18n.T(MsgTurnWorkingStep)
-					}
-					notice := e.i18n.Tf(MsgTurnStillWorking, formatCardElapsed(time.Since(turnStart)), step)
-					state.mu.Lock()
-					pp := state.platform
-					prc := state.replyCtx
-					state.mu.Unlock()
-					e.outboxFor(sessionKey).push(func() {
-						e.sendForWorkspace(pp, prc, notice, workspaceDir)
-					})
-					slog.Info("long turn progress nudge sent",
-						"session", sessionKey, "elapsed", time.Since(turnStart),
-						"quiet_for", quietFor, "notice", progressNotices,
-						"next_delay", nextProgressDelay)
-					nextProgressDelay = nextTurnProgressDelay(nextProgressDelay, e.turnProgressInterval, turnProgressMaxDelay)
-				} else {
-					// Recent output is progress already; restart the cadence at
-					// the base interval instead of the escalated one.
-					nextProgressDelay = e.turnProgressInterval
-					slog.Debug("long turn progress nudge skipped: recent output",
-						"session", sessionKey, "quiet_for", quietFor)
-				}
-			}
-			if progressTimer != nil {
-				if progressNotices >= turnProgressNoticeMax {
-					progressTimer.Stop()
-					progressCh = nil
-				} else {
-					progressTimer.Reset(nextProgressDelay)
-				}
-			}
 		case <-idleCh:
 			if tc := stateTaskCard(state); tc != nil {
 				tc.Finish(taskCardFailed, "")
@@ -4364,9 +4286,13 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 		p := state.platform
 		state.mu.Unlock()
 
+		// Quiet the card ticker while the user is already seeing streamed text
+		// or tool steps; it resumes after two quiet tick intervals.
 		switch event.Type {
 		case EventText, EventToolUse, EventToolResult:
-			lastVisibleEventAt = time.Now()
+			if tc := stateTaskCard(state); tc != nil {
+				tc.NoteActivity()
+			}
 		}
 
 		// main codebase has no per-session quiet flag; pr309 referenced
@@ -4476,7 +4402,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			toolCount++
 			if tc := stateTaskCard(state); tc != nil {
 				tc.EnsureStarted()
-				tc.SetStep(taskCardStepText(event.ToolName, event.ToolInput))
+				tc.SetStep(e.taskCardStepText(event.ToolName))
 			}
 			if hasRichCard {
 				// When tool messages are suppressed, skip card updates on tool events.
@@ -4755,7 +4681,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			}
 
 			if tc := stateTaskCard(state); tc != nil {
-				tc.SetStep(taskCardStepText(event.ToolName, e.i18n.T(MsgTaskCardWaitingConfirm)))
+				tc.SetStep(e.i18n.T(MsgTaskCardWaitingConfirm))
 			}
 			slog.Info("permission request",
 				"request_id", event.RequestID,
@@ -5257,18 +5183,6 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 						}
 					}
 					idleTimer.Reset(e.eventIdleTimeout)
-				}
-				progressNotices = 0
-				nextProgressDelay = e.turnProgressInterval
-				if progressTimer != nil {
-					if !progressTimer.Stop() {
-						select {
-						case <-progressTimer.C:
-						default:
-						}
-					}
-					progressTimer.Reset(nextProgressDelay)
-					progressCh = progressTimer.C
 				}
 				// Each queued turn gets its own delivery-fallback once, so a
 				// failure in t1 does not silence the lost-answer notice for t2.
@@ -7695,11 +7609,7 @@ func (e *Engine) renderUsageCard(report *UsageReport) *Card {
 func formatUsageResetTime(lang Language, resetAfterSeconds int) string {
 	if resetAfterSeconds <= 0 {
 		switch lang {
-		case LangChinese, LangTraditionalChinese:
-			return "-"
-		case LangJapanese:
-			return "-"
-		case LangSpanish:
+		case LangChinese:
 			return "-"
 		default:
 			return "-"
@@ -7712,12 +7622,6 @@ func usageAccountLabel(lang Language) string {
 	switch lang {
 	case LangChinese:
 		return "账号："
-	case LangTraditionalChinese:
-		return "帳號："
-	case LangJapanese:
-		return "アカウント: "
-	case LangSpanish:
-		return "Cuenta: "
 	default:
 		return "Account: "
 	}
@@ -7729,12 +7633,6 @@ func usageWindowLabel(lang Language, seconds int) string {
 		switch lang {
 		case LangChinese:
 			return "5小时限额"
-		case LangTraditionalChinese:
-			return "5小時限額"
-		case LangJapanese:
-			return "5時間枠"
-		case LangSpanish:
-			return "Límite 5h"
 		default:
 			return "5h limit"
 		}
@@ -7742,23 +7640,13 @@ func usageWindowLabel(lang Language, seconds int) string {
 		switch lang {
 		case LangChinese:
 			return "7日限额"
-		case LangTraditionalChinese:
-			return "7日限額"
-		case LangJapanese:
-			return "7日枠"
-		case LangSpanish:
-			return "Límite 7d"
 		default:
 			return "7d limit"
 		}
 	default:
 		switch lang {
-		case LangChinese, LangTraditionalChinese:
+		case LangChinese:
 			return formatDurationI18n(time.Duration(seconds)*time.Second, lang) + "限额"
-		case LangJapanese:
-			return formatDurationI18n(time.Duration(seconds)*time.Second, lang) + "枠"
-		case LangSpanish:
-			return "Límite " + formatDurationI18n(time.Duration(seconds)*time.Second, lang)
 		default:
 			return formatDurationI18n(time.Duration(seconds)*time.Second, lang) + " limit"
 		}
@@ -7769,12 +7657,6 @@ func usageRemainingLabel(lang Language) string {
 	switch lang {
 	case LangChinese:
 		return "剩余"
-	case LangTraditionalChinese:
-		return "剩餘"
-	case LangJapanese:
-		return "残り"
-	case LangSpanish:
-		return "restante"
 	default:
 		return "Remaining"
 	}
@@ -7784,12 +7666,6 @@ func usageResetLabel(lang Language) string {
 	switch lang {
 	case LangChinese:
 		return "重置"
-	case LangTraditionalChinese:
-		return "重置"
-	case LangJapanese:
-		return "リセット"
-	case LangSpanish:
-		return "Reinicio"
 	default:
 		return "Resets"
 	}
@@ -7797,7 +7673,7 @@ func usageResetLabel(lang Language) string {
 
 func usageColon(lang Language) string {
 	switch lang {
-	case LangChinese, LangTraditionalChinese:
+	case LangChinese:
 		return "："
 	default:
 		return ": "
@@ -7808,12 +7684,6 @@ func usageCardTitle(lang Language) string {
 	switch lang {
 	case LangChinese:
 		return "Usage"
-	case LangTraditionalChinese:
-		return "Usage"
-	case LangJapanese:
-		return "Usage"
-	case LangSpanish:
-		return "Usage"
 	default:
 		return "Usage"
 	}
@@ -7823,12 +7693,6 @@ func usageUnavailableText(lang Language) string {
 	switch lang {
 	case LangChinese:
 		return "暂无 usage 信息。"
-	case LangTraditionalChinese:
-		return "暫無 usage 資訊。"
-	case LangJapanese:
-		return "usage 情報はありません。"
-	case LangSpanish:
-		return "No hay datos de usage."
 	default:
 		return "Usage unavailable."
 	}
@@ -7996,7 +7860,7 @@ func formatDurationI18n(d time.Duration, lang Language) string {
 	minutes := int(d.Minutes()) % 60
 
 	switch lang {
-	case LangChinese, LangTraditionalChinese:
+	case LangChinese:
 		if days > 0 {
 			return fmt.Sprintf("%d天 %d小时 %d分钟", days, hours, minutes)
 		}
@@ -8004,22 +7868,6 @@ func formatDurationI18n(d time.Duration, lang Language) string {
 			return fmt.Sprintf("%d小时 %d分钟", hours, minutes)
 		}
 		return fmt.Sprintf("%d分钟", minutes)
-	case LangJapanese:
-		if days > 0 {
-			return fmt.Sprintf("%d日 %d時間 %d分", days, hours, minutes)
-		}
-		if hours > 0 {
-			return fmt.Sprintf("%d時間 %d分", hours, minutes)
-		}
-		return fmt.Sprintf("%d分", minutes)
-	case LangSpanish:
-		if days > 0 {
-			return fmt.Sprintf("%d días %dh %dm", days, hours, minutes)
-		}
-		if hours > 0 {
-			return fmt.Sprintf("%dh %dm", hours, minutes)
-		}
-		return fmt.Sprintf("%dm", minutes)
 	default:
 		if days > 0 {
 			return fmt.Sprintf("%dd %dh %dm", days, hours, minutes)
@@ -8091,11 +7939,6 @@ func (e *Engine) cmdLang(p Platform, msg *Message, args []string) {
 			{
 				{Text: "English", Data: "cmd:/lang en"},
 				{Text: "中文", Data: "cmd:/lang zh"},
-				{Text: "繁體中文", Data: "cmd:/lang zh-TW"},
-			},
-			{
-				{Text: "日本語", Data: "cmd:/lang ja"},
-				{Text: "Español", Data: "cmd:/lang es"},
 				{Text: "Auto", Data: "cmd:/lang auto"},
 			},
 		}
@@ -8112,9 +7955,6 @@ func (e *Engine) cmdLang(p Platform, msg *Message, args []string) {
 		sb.WriteString("\n\n")
 		sb.WriteString("- English: `/lang en`\n")
 		sb.WriteString("- 中文: `/lang zh`\n")
-		sb.WriteString("- 繁體中文: `/lang zh-TW`\n")
-		sb.WriteString("- 日本語: `/lang ja`\n")
-		sb.WriteString("- Español: `/lang es`\n")
 		sb.WriteString("- Auto: `/lang auto`")
 		e.reply(p, msg.ReplyCtx, sb.String())
 		return
@@ -8127,12 +7967,6 @@ func (e *Engine) cmdLang(p Platform, msg *Message, args []string) {
 		lang = LangEnglish
 	case "zh", "cn", "chinese", "中文":
 		lang = LangChinese
-	case "zh-tw", "zh_tw", "zhtw", "繁體", "繁体":
-		lang = LangTraditionalChinese
-	case "ja", "jp", "japanese", "日本語":
-		lang = LangJapanese
-	case "es", "spanish", "español":
-		lang = LangSpanish
 	case "auto":
 		lang = LangAuto
 	default:
@@ -8151,12 +7985,6 @@ func langDisplayName(lang Language) string {
 		return "English"
 	case LangChinese:
 		return "中文"
-	case LangTraditionalChinese:
-		return "繁體中文"
-	case LangJapanese:
-		return "日本語"
-	case LangSpanish:
-		return "Español"
 	default:
 		return "Auto"
 	}
@@ -10614,16 +10442,7 @@ func (e *Engine) sendWithError(p Platform, replyCtx any, content string) error {
 func (e *Engine) sendAlreadyRenderedWithError(p Platform, replyCtx any, content string) error {
 	start := time.Now()
 	if err := p.Send(e.ctx, replyCtx, content); err != nil {
-		// Check for context_token missing error (common for Weixin platform)
-		if strings.Contains(err.Error(), "missing context_token") {
-			slog.Error("platform send failed: context_token missing",
-				"platform", p.Name(),
-				"error", err,
-				"content_len", len(content),
-				"hint", "user needs to send a new message to refresh context_token")
-		} else {
-			slog.Error("platform send failed", "platform", p.Name(), "error", err, "content_len", len(content))
-		}
+		slog.Error("platform send failed", "platform", p.Name(), "error", err, "content_len", len(content))
 		return err
 	}
 	if elapsed := time.Since(start); elapsed >= slowPlatformSend {
@@ -10993,12 +10812,6 @@ func (e *Engine) executeCardAction(cmd, args, sessionKey string) {
 			lang = LangEnglish
 		case "zh", "cn", "chinese":
 			lang = LangChinese
-		case "zh-tw", "zh_tw", "zhtw":
-			lang = LangTraditionalChinese
-		case "ja", "jp", "japanese":
-			lang = LangJapanese
-		case "es", "spanish":
-			lang = LangSpanish
 		case "auto":
 			lang = LangAuto
 		default:
@@ -11645,8 +11458,7 @@ func (e *Engine) renderLangCard() *Card {
 	name := langDisplayName(cur)
 
 	langs := []struct{ code, label string }{
-		{"en", "English"}, {"zh", "中文"}, {"zh-TW", "繁體中文"},
-		{"ja", "日本語"}, {"es", "Español"}, {"auto", "Auto"},
+		{"en", "English"}, {"zh", "中文"}, {"auto", "Auto"},
 	}
 	var opts []CardSelectOption
 	initVal := ""
@@ -12157,7 +11969,7 @@ func (e *Engine) renderProviderAddCard(sessionKey string) *Card {
 				continue
 			}
 			desc := preset.Description
-			if lang == LangChinese || lang == LangTraditionalChinese {
+			if lang == LangChinese {
 				if preset.DescriptionZh != "" {
 					desc = preset.DescriptionZh
 				}
@@ -12915,10 +12727,8 @@ func (e *Engine) cmdHeartbeatStatusText(p Platform, msg *Message, st *HeartbeatS
 	if !st.LastRun.IsZero() {
 		lang := e.i18n.CurrentLang()
 		switch lang {
-		case LangChinese, LangTraditionalChinese:
+		case LangChinese:
 			lastRunStr = "上次执行: " + st.LastRun.Format("01-02 15:04:05") + "\n"
-		case LangJapanese:
-			lastRunStr = "最終実行: " + st.LastRun.Format("01-02 15:04:05") + "\n"
 		default:
 			lastRunStr = "Last run: " + st.LastRun.Format("01-02 15:04:05") + "\n"
 		}
@@ -12942,7 +12752,7 @@ func (e *Engine) cmdHeartbeatStatusText(p Platform, msg *Message, st *HeartbeatS
 func (e *Engine) heartbeatLocalizedHelpers() (stateStr func(paused bool) string, yesNo func(bool) string) {
 	lang := e.i18n.CurrentLang()
 	switch lang {
-	case LangChinese, LangTraditionalChinese:
+	case LangChinese:
 		stateStr = func(paused bool) string {
 			if paused {
 				return "⏸ 已暂停"
@@ -12954,19 +12764,6 @@ func (e *Engine) heartbeatLocalizedHelpers() (stateStr func(paused bool) string,
 				return "是"
 			}
 			return "否"
-		}
-	case LangJapanese:
-		stateStr = func(paused bool) string {
-			if paused {
-				return "⏸ 一時停止"
-			}
-			return "▶️ 実行中"
-		}
-		yesNo = func(b bool) string {
-			if b {
-				return "はい"
-			}
-			return "いいえ"
 		}
 	default:
 		stateStr = func(paused bool) string {
@@ -13000,10 +12797,8 @@ func (e *Engine) renderHeartbeatCard() *Card {
 	lastRunStr := ""
 	if !st.LastRun.IsZero() {
 		switch lang {
-		case LangChinese, LangTraditionalChinese:
+		case LangChinese:
 			lastRunStr = "上次执行: " + st.LastRun.Format("01-02 15:04:05") + "\n"
-		case LangJapanese:
-			lastRunStr = "最終実行: " + st.LastRun.Format("01-02 15:04:05") + "\n"
 		default:
 			lastRunStr = "Last run: " + st.LastRun.Format("01-02 15:04:05") + "\n"
 		}

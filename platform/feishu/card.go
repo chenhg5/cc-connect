@@ -497,32 +497,55 @@ func (p *interactivePlatform) SendTaskCard(ctx context.Context, rctx any, card *
 	return &feishuTaskCardHandle{messageID: msgID, chatID: rc.chatID, sessionKey: rc.sessionKey}, nil
 }
 
-// UpdateTaskCard patches a previously sent task card in place.
-func (p *interactivePlatform) UpdateTaskCard(ctx context.Context, handle any, card *core.Card) error {
+// buildTaskCardPatch renders the card and builds the PATCH request.
+func (p *interactivePlatform) buildTaskCardPatch(handle any, card *core.Card) (*larkim.PatchMessageReq, error) {
 	h, ok := handle.(*feishuTaskCardHandle)
 	if !ok {
-		return fmt.Errorf("%s: invalid task card handle %T", p.tag(), handle)
+		return nil, fmt.Errorf("%s: invalid task card handle %T", p.tag(), handle)
 	}
-
 	cardJSON := renderCard(card, h.sessionKey)
-	req := larkim.NewPatchMessageReqBuilder().
+	return larkim.NewPatchMessageReqBuilder().
 		MessageId(h.messageID).
 		Body(larkim.NewPatchMessageReqBodyBuilder().
 			Content(cardJSON).
 			Build()).
-		Build()
-	return p.withTransientRetry(ctx, "update task card", func() error {
-		return p.withFreshTenantAccessTokenRetry(ctx, "update task card", func(client *lark.Client, options ...larkcore.RequestOptionFunc) error {
-			resp, err := client.Im.Message.Patch(ctx, req, options...)
-			if err != nil {
-				return fmt.Errorf("%s: update task card: %w", p.tag(), err)
-			}
-			if !resp.Success() {
-				return fmt.Errorf("%s: update task card code=%d msg=%s", p.tag(), resp.Code, resp.Msg)
-			}
-			return nil
-		})
+		Build(), nil
+}
+
+// patchTaskCard performs one PATCH attempt (plus a tenant-token refresh retry).
+func (p *interactivePlatform) patchTaskCard(ctx context.Context, req *larkim.PatchMessageReq) error {
+	return p.withFreshTenantAccessTokenRetry(ctx, "update task card", func(client *lark.Client, options ...larkcore.RequestOptionFunc) error {
+		resp, err := client.Im.Message.Patch(ctx, req, options...)
+		if err != nil {
+			return fmt.Errorf("%s: update task card: %w", p.tag(), err)
+		}
+		if !resp.Success() {
+			return fmt.Errorf("%s: update task card code=%d msg=%s", p.tag(), resp.Code, resp.Msg)
+		}
+		return nil
 	})
+}
+
+// UpdateTaskCard patches a previously sent task card in place (full retries,
+// used for terminal delivery).
+func (p *interactivePlatform) UpdateTaskCard(ctx context.Context, handle any, card *core.Card) error {
+	req, err := p.buildTaskCardPatch(handle, card)
+	if err != nil {
+		return err
+	}
+	return p.withTransientRetry(ctx, "update task card", func() error {
+		return p.patchTaskCard(ctx, req)
+	})
+}
+
+// UpdateTaskCardOnce is the ticker path: a single PATCH attempt so the card's
+// own 15s/30s backoff controls the cadence instead of being retried internally.
+func (p *interactivePlatform) UpdateTaskCardOnce(ctx context.Context, handle any, card *core.Card) error {
+	req, err := p.buildTaskCardPatch(handle, card)
+	if err != nil {
+		return err
+	}
+	return p.patchTaskCard(ctx, req)
 }
 
 // AddAckReaction marks an inbound message as acknowledged with an emoji

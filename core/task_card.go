@@ -4,22 +4,27 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
-	"os"
 	"strings"
 	"sync"
 	"time"
 )
 
+// taskCardMinRenderGap is a variable so tests can disable the throttle.
+var taskCardMinRenderGap = 1500 * time.Millisecond
+
 const (
-	taskCardHeartbeatInterval = 5 * time.Second
-	taskCardMinRenderGap      = 1500 * time.Millisecond
-	taskCardMaxQueueItems     = 5
-	taskCardMaxStepLen        = 80
-	taskCardMaxQueueItemLen   = 40
-	// taskCardMaxFailures tolerates transient platform errors before giving up.
-	taskCardMaxFailures = 5
+	defaultCardTickInterval = 5 * time.Second
+	taskCardMaxQueueItems   = 5
+	taskCardMaxStepLen      = 80
+	taskCardMaxQueueItemLen = 40
+	// taskCardDegradedThreshold is when the user is told the card is being
+	// throttled. The ticker keeps retrying; it is never permanently disabled
+	// mid-turn.
+	taskCardDegradedThreshold = 5
 	// taskCardRetryGap slows refreshes down while the platform is rejecting them.
 	taskCardRetryGap = 15 * time.Second
+	// taskCardDegradedGap is the slower cadence after sustained rejections.
+	taskCardDegradedGap = 30 * time.Second
 )
 
 // taskCardTerminalRetryDelays is a variable so tests can shorten the wait.
@@ -57,19 +62,23 @@ type turnCard struct {
 	// the initial message twice.
 	renderMu sync.Mutex
 
-	mu          sync.Mutex
-	handle      any
-	started     time.Time
-	status      taskCardStatus
-	step        string
-	queue       []string
-	lastRender  time.Time
-	finished    bool
-	disabled    bool
-	creating    bool
-	cardStarted bool
-	failCount   int
-	visible     bool // true once the card message exists
+	mu               sync.Mutex
+	handle           any
+	started          time.Time
+	status           taskCardStatus
+	step             string
+	queue            []string
+	lastRender       time.Time
+	lastActivityAt   time.Time // last agent text/tool event; quiets the ticker
+	finished         bool
+	degradedNotified bool
+	creating         bool
+	cardStarted      bool
+	rendering        bool // a card request is in flight
+	pendingRender    bool // a refresh was requested while rendering
+	failCount        int
+	visible          bool          // true once the card message exists
+	tickInterval     time.Duration // 0 = no independent ticker
 
 	done chan struct{}
 	once sync.Once
@@ -83,13 +92,14 @@ func newTurnCard(e *Engine, p Platform, replyCtx any, key string) *turnCard {
 		return nil
 	}
 	return &turnCard{
-		e:        e,
-		sender:   sender,
-		replyCtx: replyCtx,
-		key:      key,
-		started:  time.Now(),
-		status:   taskCardRunning,
-		done:     make(chan struct{}),
+		e:            e,
+		sender:       sender,
+		replyCtx:     replyCtx,
+		key:          key,
+		started:      time.Now(),
+		status:       taskCardRunning,
+		tickInterval: e.cardTickInterval,
+		done:         make(chan struct{}),
 	}
 }
 
@@ -109,13 +119,18 @@ func (tc *turnCard) EnsureStarted() {
 		return
 	}
 	tc.cardStarted = true
+	interval := tc.tickInterval
 	tc.mu.Unlock()
 	tc.render(true)
-	go tc.heartbeat()
+	if interval > 0 {
+		go tc.heartbeat(interval)
+	}
 }
 
-func (tc *turnCard) heartbeat() {
-	ticker := time.NewTicker(taskCardHeartbeatInterval)
+// heartbeat refreshes the card independently of agent events, so a long tool
+// call does not freeze the elapsed clock.
+func (tc *turnCard) heartbeat(interval time.Duration) {
+	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 	for {
 		select {
@@ -124,6 +139,19 @@ func (tc *turnCard) heartbeat() {
 		case <-tc.e.ctx.Done():
 			return
 		case <-ticker.C:
+			tc.mu.Lock()
+			lastActivity := tc.lastActivityAt
+			finished := tc.finished
+			tc.mu.Unlock()
+			if finished {
+				return
+			}
+			// While the agent is streaming text/tool steps the user already
+			// sees progress; don't burn quota on card PATCHes. Resume once the
+			// turn has been quiet for two tick intervals.
+			if !lastActivity.IsZero() && time.Since(lastActivity) < 2*interval {
+				continue
+			}
 			tc.render(false)
 		}
 	}
@@ -140,14 +168,15 @@ func (tc *turnCard) Visible() bool {
 	return tc.visible
 }
 
-// CurrentStep returns the latest step label for progress nudges.
-func (tc *turnCard) CurrentStep() string {
+// NoteActivity records agent output so the independent ticker can stay quiet
+// while the user is already seeing streamed text/tool steps.
+func (tc *turnCard) NoteActivity() {
 	if tc == nil {
-		return ""
+		return
 	}
 	tc.mu.Lock()
-	defer tc.mu.Unlock()
-	return tc.step
+	tc.lastActivityAt = time.Now()
+	tc.mu.Unlock()
 }
 
 // SetStep records what the agent is doing now and refreshes (throttled).
@@ -161,6 +190,7 @@ func (tc *turnCard) SetStep(step string) {
 		return
 	}
 	tc.step = truncateIf(strings.TrimSpace(step), taskCardMaxStepLen)
+	tc.lastActivityAt = time.Now()
 	tc.mu.Unlock()
 	tc.render(false)
 }
@@ -176,6 +206,7 @@ func (tc *turnCard) SetQueue(items []string) {
 		return
 	}
 	tc.queue = items
+	tc.lastActivityAt = time.Now()
 	tc.mu.Unlock()
 	tc.render(false)
 }
@@ -204,7 +235,6 @@ func (tc *turnCard) Finish(status taskCardStatus, note string) {
 	// below will run after it (FIFO outbox), so the card must not be treated as
 	// non-existent just because the create has not completed yet.
 	hasCard := tc.visible || tc.handle != nil || tc.creating
-	disabled := tc.disabled
 	tc.mu.Unlock()
 
 	tc.once.Do(func() { close(tc.done) })
@@ -223,13 +253,6 @@ func (tc *turnCard) Finish(status taskCardStatus, note string) {
 	// final reply. Backoff retries run out of band: a stale card must not delay
 	// the next turn's answer behind ~47s of sleeps.
 	tc.e.outboxFor(tc.key).push(func() {
-		if disabled {
-			// Updates were already failing repeatedly; go straight to the
-			// plain-text fallback instead of hammering the same endpoint.
-			go tc.deliverTerminalFallback(status,
-				fmt.Errorf("task card updates disabled after consecutive failures"))
-			return
-		}
 		err := tc.applyCard(card)
 		if err == nil {
 			slog.Info("task card terminal state delivered",
@@ -382,18 +405,22 @@ func (tc *turnCard) render(force bool) {
 	}
 
 	tc.mu.Lock()
-	if tc.disabled {
-		tc.mu.Unlock()
-		return
-	}
-	// Never surface a card for a turn that already ended before the first
-	// render: that would leave a pointless "✅ 已完成 · 0:00" message.
-	if tc.handle == nil && !tc.visible && tc.finished {
+	// Finish uses applyCard directly; a normal render after it must not enqueue.
+	if tc.finished {
 		tc.mu.Unlock()
 		return
 	}
 	// A create is already in flight; don't enqueue a second one.
 	if tc.handle == nil && tc.creating {
+		tc.pendingRender = true
+		tc.mu.Unlock()
+		return
+	}
+	// Single-flight: one card request at a time. Requests arriving while a
+	// slow (or rate-limited) PATCH is in flight are coalesced into one pending
+	// refresh instead of queueing unboundedly behind it.
+	if tc.rendering {
+		tc.pendingRender = true
 		tc.mu.Unlock()
 		return
 	}
@@ -401,8 +428,12 @@ func (tc *turnCard) render(force bool) {
 	minGap := taskCardMinRenderGap
 	if tc.failCount > 0 {
 		// Back off after a failure (usually a platform rate limit while the
-		// answer text is streaming through its own message).
+		// answer text is streaming through its own message). Sustained
+		// failures slow down further but never disable the ticker.
 		minGap = taskCardRetryGap
+	}
+	if tc.failCount >= taskCardDegradedThreshold {
+		minGap = taskCardDegradedGap
 	}
 	if !force && now.Sub(tc.lastRender) < minGap {
 		tc.mu.Unlock()
@@ -414,11 +445,24 @@ func (tc *turnCard) render(force bool) {
 	if handle == nil {
 		tc.creating = true
 	}
+	tc.rendering = true
 	tc.mu.Unlock()
 
 	// The network call runs on the session's outbox goroutine so the turn loop
 	// never waits for the platform.
 	tc.e.outboxFor(tc.key).push(func() {
+		defer func() {
+			tc.mu.Lock()
+			tc.rendering = false
+			pending := tc.pendingRender
+			tc.pendingRender = false
+			finished := tc.finished
+			tc.mu.Unlock()
+			// Flush one coalesced refresh now that the in-flight request is done.
+			if pending && !finished {
+				tc.render(false)
+			}
+		}()
 		// A heartbeat refresh queued before Finish may run after the terminal
 		// state was applied (e.g. the outbox was full and ran out of band).
 		// Never let a stale running-state card overwrite the final one.
@@ -446,20 +490,28 @@ func (tc *turnCard) render(force bool) {
 			}
 			tc.mu.Unlock()
 		} else {
-			err = tc.sender.UpdateTaskCard(ctx, handle, card)
+			// Ticker refreshes use a single attempt so the card's own backoff
+			// (15s/30s) controls the cadence; terminal delivery still uses the
+			// full-retry UpdateTaskCard path.
+			if ticker, ok := tc.sender.(TaskCardTickerSender); ok {
+				err = ticker.UpdateTaskCardOnce(ctx, handle, card)
+			} else {
+				err = tc.sender.UpdateTaskCard(ctx, handle, card)
+			}
 		}
 		tc.mu.Lock()
 		prevFails := tc.failCount
 		if err == nil {
 			tc.failCount = 0
+			tc.degradedNotified = false
 		} else {
 			tc.failCount++
 		}
 		fails := tc.failCount
-		disabled := false
-		if fails >= taskCardMaxFailures {
-			tc.disabled = true
-			disabled = true
+		degraded := fails >= taskCardDegradedThreshold
+		notify := degraded && !tc.degradedNotified
+		if notify {
+			tc.degradedNotified = true
 		}
 		finished := tc.finished
 		visible := tc.visible
@@ -477,13 +529,14 @@ func (tc *turnCard) render(force bool) {
 		// incident from cc-connect.log alone.
 		slog.Warn("task card refresh failed",
 			"platform", tc.senderName(), "op", op, "consecutive", fails,
-			"disabled", disabled, "finished", finished,
+			"degraded", degraded, "finished", finished,
 			"visible", visible, "error", err)
-		if disabled {
-			slog.Error("task card updates disabled after consecutive failures",
+		if notify {
+			slog.Error("task card updates degraded after consecutive failures",
 				"platform", tc.senderName(), "failures", fails, "error", err)
-			// Tell the user the card is no longer reliable instead of letting
-			// them infer a frozen card means a dead task.
+			// Tell the user the card is unreliable instead of letting a frozen
+			// card look like a dead task. The ticker keeps retrying at a slower
+			// cadence; it is not permanently disabled.
 			tc.sendPlainText(tc.e.i18n.T(MsgTaskCardDegraded), "degraded notice")
 		}
 	})
@@ -589,87 +642,30 @@ func (e *Engine) syncTaskCardQueue(state *interactiveState) {
 	tc.SetQueue(items)
 }
 
-// taskCardStepText turns a tool event into the one-line "current step" label.
-func taskCardStepText(tool, input string) string {
-	tool = strings.TrimSpace(tool)
-	input = compactCommand(input)
-	if tool == "" {
-		return truncateMiddle(input, taskCardMaxStepLen)
+// taskCardStepText turns a tool event into a human-readable action label.
+// Tool inputs (commands, paths, regex) are intentionally never shown to users;
+// they stay in the logs.
+func (e *Engine) taskCardStepText(tool string) string {
+	switch strings.ToLower(strings.TrimSpace(tool)) {
+	case "bash", "shell", "powershell", "terminal":
+		return e.i18n.T(MsgToolActionCommand)
+	case "read", "fileread":
+		return e.i18n.T(MsgToolActionRead)
+	case "write", "edit", "multiedit", "notebookedit":
+		return e.i18n.T(MsgToolActionWrite)
+	case "grep":
+		return e.i18n.T(MsgToolActionSearch)
+	case "glob":
+		return e.i18n.T(MsgToolActionFind)
+	case "webfetch", "websearch":
+		return e.i18n.T(MsgToolActionWeb)
+	case "task":
+		return e.i18n.T(MsgToolActionTask)
+	case "skill":
+		return e.i18n.T(MsgToolActionSkill)
+	default:
+		return e.i18n.T(MsgToolActionGeneric)
 	}
-	if input == "" {
-		return tool
-	}
-	return tool + " · " + truncateMiddle(input, 70)
-}
-
-// compactCommand keeps the informative part of a shell command: a leading
-// "cd <long path> &&" (or export prelude) is dropped, the home directory
-// becomes "~", over-long paths keep their tail, and long commands are
-// truncated in the middle so the script name and args stay readable.
-func compactCommand(input string) string {
-	s := strings.TrimSpace(strings.ReplaceAll(input, "\n", " "))
-	for _, prefix := range []string{"bash -lc \"", "bash -c \"", "sh -c \"", "zsh -c \""} {
-		if strings.HasPrefix(s, prefix) {
-			s = strings.TrimSuffix(strings.TrimPrefix(s, prefix), "\"")
-			break
-		}
-	}
-	for {
-		trimmed := strings.TrimSpace(s)
-		cut := -1
-		switch {
-		case strings.HasPrefix(trimmed, "cd "), strings.HasPrefix(trimmed, "export "):
-			if i := strings.Index(trimmed, "&&"); i >= 0 {
-				cut = i + 2
-			} else if i := strings.Index(trimmed, ";"); i >= 0 {
-				cut = i + 1
-			}
-		}
-		if cut < 0 {
-			break
-		}
-		s = trimmed[cut:]
-	}
-	s = strings.Join(strings.Fields(s), " ")
-	if home, err := os.UserHomeDir(); err == nil && home != "" {
-		s = strings.ReplaceAll(s, home, "~")
-	}
-	s = strings.ReplaceAll(s, "$HOME", "~")
-	return shortenPaths(s)
-}
-
-// shortenPaths turns "~/a/b/c/d/script.js" into "…/d/script.js" when a token
-// is too long to read in a card.
-func shortenPaths(s string) string {
-	parts := strings.Fields(s)
-	for i, tok := range parts {
-		if len(tok) <= 28 || !strings.Contains(tok, "/") {
-			continue
-		}
-		segs := strings.Split(tok, "/")
-		if len(segs) < 4 {
-			continue
-		}
-		parts[i] = "…/" + strings.Join(segs[len(segs)-2:], "/")
-	}
-	return strings.Join(parts, " ")
-}
-
-// truncateMiddle keeps both ends of a long string so the tail (usually the
-// script name or arguments) stays readable.
-func truncateMiddle(s string, max int) string {
-	// Slice by runes, not bytes: a Chinese character is 3 bytes and cutting
-	// mid-rune renders as garbage in the card.
-	runes := []rune(s)
-	if max <= 0 || len(runes) <= max {
-		return s
-	}
-	head := max * 2 / 5
-	tail := max - head - 1
-	if tail < 0 {
-		tail = 0
-	}
-	return string(runes[:head]) + "…" + string(runes[len(runes)-tail:])
 }
 
 // Finished reports whether the card already reached a terminal state.

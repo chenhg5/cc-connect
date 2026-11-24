@@ -1882,7 +1882,7 @@ func TestMgmt_ProjectPatch_AdminFrom(t *testing.T) {
 
 func TestMgmt_ProjectPatch_Language(t *testing.T) {
 	_, ts, e := testManagementServer(t, "tok")
-	for _, lang := range []string{"zh", "ja", "es", "zh-TW", "en"} {
+	for _, lang := range []string{"zh", "en"} {
 		r := mgmtPatch(t, ts.URL+"/api/v1/projects/test-project", "tok", map[string]any{
 			"language": lang,
 		})
@@ -2653,47 +2653,5 @@ func TestMgmt_CCSwitchProviders_MethodNotAllowed(t *testing.T) {
 	r := mgmtDelete(t, ts.URL+"/api/v1/providers/cc-switch", "tok")
 	if r.OK {
 		t.Fatal("expected DELETE on cc-switch to fail")
-	}
-}
-
-// TestMgmt_SetupWeixinPoll_RejectsMalformedAPIURL is a regression test for a
-// nil-pointer panic in handleSetupWeixinPoll. The handler did
-// `u, _ := url.Parse(apiBase + "/")` and then immediately called
-// `u.JoinPath(...)`. For inputs like "://" or "%zz", url.Parse returns a nil
-// URL plus an error; the discarded error meant the next line crashed the
-// management server with `runtime error: invalid memory address or nil
-// pointer dereference`. handleSetupWeixinBegin already validated this same
-// field; this test pins the symmetric handling here.
-func TestMgmt_SetupWeixinPoll_RejectsMalformedAPIURL(t *testing.T) {
-	mgmt := NewManagementServer(0, "", nil)
-
-	for _, bad := range []string{"://", "://malformed", "%zz"} {
-		body := map[string]any{
-			"qr_key":  "abc",
-			"api_url": bad,
-		}
-		buf := new(bytes.Buffer)
-		if err := json.NewEncoder(buf).Encode(body); err != nil {
-			t.Fatalf("encode body: %v", err)
-		}
-		req := httptest.NewRequest(http.MethodPost, "/api/v1/setup/weixin/poll", buf)
-		req.Header.Set("Content-Type", "application/json")
-		w := httptest.NewRecorder()
-
-		// Recover any panic so the test reports a meaningful failure rather
-		// than crashing the test binary, then assert the handler returned a
-		// 4xx (not 5xx and not a panic) for the bad input.
-		func() {
-			defer func() {
-				if r := recover(); r != nil {
-					t.Fatalf("handleSetupWeixinPoll panicked on api_url=%q: %v", bad, r)
-				}
-			}()
-			mgmt.handleSetupWeixinPoll(w, req)
-		}()
-
-		if w.Code != http.StatusBadRequest {
-			t.Errorf("api_url=%q: status=%d, want %d (body=%s)", bad, w.Code, http.StatusBadRequest, w.Body.String())
-		}
 	}
 }

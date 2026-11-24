@@ -3,12 +3,10 @@ package core
 import (
 	"context"
 	"errors"
-	"os"
 	"strings"
 	"sync"
 	"testing"
 	"time"
-	"unicode/utf8"
 )
 
 type taskCardStubPlatform struct {
@@ -237,37 +235,28 @@ func TestTurnCardAppearsOnFirstToolUse(t *testing.T) {
 	tc.Finish(taskCardDone, "")
 }
 
-func TestCompactCommand(t *testing.T) {
-	home, _ := os.UserHomeDir()
-	cases := []struct{ in, want string }{
-		{"cd /Users/qitmac001665/Documents/ObsidianNotes/AgentSync/scripts && node agent.js --dry-run", "node agent.js --dry-run"},
-		{"cd /tmp && cd /var && ls -la", "ls -la"},
-		{"bash -lc \"cd /a/b/c && node x.js\"", "node x.js"},
-		{home + "/Documents/ObsidianNotes/AgentSync/scripts/x.sh", "…/scripts/x.sh"},
+// Card steps must be human-readable actions, never raw commands/paths/regex.
+func TestTaskCardStepTextHumanized(t *testing.T) {
+	e := NewEngine("test", &resultAgent{session: newResultAgentSession("ok")}, []Platform{&stubPlatformEngine{n: "test"}}, "", LangChinese)
+	t.Cleanup(e.cancel)
+
+	cases := []struct{ tool, want string }{
+		{"Bash", "执行命令"},
+		{"Read", "读取文件"},
+		{"Edit", "修改文件"},
+		{"Grep", "检索内容"},
+		{"Glob", "查找文件"},
+		{"WebSearch", "查询资料"},
+		{"mcp__jinkela__query", "调用工具"},
 	}
 	for _, c := range cases {
-		if got := compactCommand(c.in); got != c.want {
-			t.Errorf("compactCommand(%q) = %q, want %q", c.in, got, c.want)
+		got := e.taskCardStepText(c.tool)
+		if !strings.Contains(got, c.want) {
+			t.Errorf("taskCardStepText(%q) = %q, want %q", c.tool, got, c.want)
 		}
-	}
-}
-
-func TestTruncateMiddleKeepsTail(t *testing.T) {
-	got := truncateMiddle("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaagent.js --flag", 20)
-	if !strings.HasSuffix(got, "--flag") || !strings.Contains(got, "…") {
-		t.Fatalf("truncateMiddle lost the tail: %q", got)
-	}
-}
-
-// Chinese steps must never be cut mid-rune (that shows up as garbage).
-func TestTruncateMiddleChinese(t *testing.T) {
-	in := "当前步骤：正在查询金克拉日志并统计近三十分钟的报价失败率用于对比昨日同时段数据"
-	got := truncateMiddle(in, 20)
-	if !utf8.ValidString(got) {
-		t.Fatalf("invalid UTF-8 after truncation: %q", got)
-	}
-	if n := utf8.RuneCountInString(got); n > 21 {
-		t.Fatalf("too long: %d runes", n)
+		if strings.Contains(got, "``") || strings.Contains(got, "/") {
+			t.Errorf("taskCardStepText(%q) leaked internal detail: %q", c.tool, got)
+		}
 	}
 }
 
@@ -333,7 +322,7 @@ func TestTurnCard_FinishFallsBackToTextWhenUpdatesFail(t *testing.T) {
 	}
 }
 
-func TestTurnCard_DisableSendsDegradedNotice(t *testing.T) {
+func TestTurnCard_DegradedNoticeKeepsRetrying(t *testing.T) {
 	e := NewEngine("test", &resultAgent{session: newResultAgentSession("ok")}, []Platform{&stubPlatformEngine{n: "test"}}, "", LangChinese)
 	t.Cleanup(e.cancel)
 	p := &taskCardStubPlatform{stubPlatformEngine: stubPlatformEngine{n: "feishu"}, failUpdates: 100}
@@ -341,13 +330,19 @@ func TestTurnCard_DisableSendsDegradedNotice(t *testing.T) {
 	tc := newTurnCard(e, p, "ctx", "k")
 	tc.Start()
 	tc.render(true) // create the card (succeeds)
-	for i := 0; i < taskCardMaxFailures; i++ {
-		tc.render(true) // updates are rejected -> card gets disabled
+	for i := 0; i < taskCardDegradedThreshold; i++ {
+		tc.render(true) // updates are rejected -> degraded notice, but not disabled
 	}
 
 	sent := p.getSent()
-	if len(sent) == 0 || !strings.Contains(sent[len(sent)-1], "限流") {
-		t.Fatalf("sent = %v, want a card-throttled notice for the user", sent)
+	if len(sent) == 0 || !strings.Contains(sent[len(sent)-1], "任务仍在继续") {
+		t.Fatalf("sent = %v, want a degraded-card notice for the user", sent)
+	}
+
+	before := p.updateCount()
+	tc.render(true) // force another attempt
+	if got := p.updateCount(); got <= before {
+		t.Fatalf("UpdateTaskCard calls = %d, want > %d (card must keep retrying)", got, before)
 	}
 }
 
@@ -370,5 +365,146 @@ func TestTurnCard_FinishWhileCreateInFlight(t *testing.T) {
 	final := p.last()
 	if final == nil || final.Header == nil || !strings.Contains(final.Header.Title, "已完成") {
 		t.Fatalf("final card = %+v, want a done terminal card", final)
+	}
+}
+
+func withFastCardThrottle(t *testing.T) {
+	t.Helper()
+	old := taskCardMinRenderGap
+	taskCardMinRenderGap = 0
+	t.Cleanup(func() { taskCardMinRenderGap = old })
+}
+
+// The card must keep ticking during a long tool call with no agent events.
+func TestTurnCard_TickerRefreshesWithoutEvents(t *testing.T) {
+	withFastCardThrottle(t)
+	e := NewEngine("test", &resultAgent{session: newResultAgentSession("ok")}, []Platform{&stubPlatformEngine{n: "test"}}, "", LangChinese)
+	e.SetCardTickInterval(20 * time.Millisecond)
+	t.Cleanup(e.cancel)
+	p := &taskCardStubPlatform{stubPlatformEngine: stubPlatformEngine{n: "feishu"}}
+
+	tc := newTurnCard(e, p, "ctx", "k")
+	tc.EnsureStarted()
+
+	deadline := time.After(2 * time.Second)
+	for {
+		if p.updateCount() > 0 {
+			break
+		}
+		select {
+		case <-deadline:
+			t.Fatal("card did not refresh without agent events")
+		default:
+			time.Sleep(5 * time.Millisecond)
+		}
+	}
+	tc.Finish(taskCardDone, "")
+}
+
+// Finish must stop the ticker; no updates may continue after the terminal card.
+func TestTurnCard_FinishStopsTicker(t *testing.T) {
+	withFastCardThrottle(t)
+	e := NewEngine("test", &resultAgent{session: newResultAgentSession("ok")}, []Platform{&stubPlatformEngine{n: "test"}}, "", LangChinese)
+	e.SetCardTickInterval(20 * time.Millisecond)
+	t.Cleanup(e.cancel)
+	p := &taskCardStubPlatform{stubPlatformEngine: stubPlatformEngine{n: "feishu"}}
+
+	tc := newTurnCard(e, p, "ctx", "k")
+	tc.EnsureStarted()
+
+	deadline := time.After(2 * time.Second)
+	for {
+		if p.updateCount() > 0 {
+			break
+		}
+		select {
+		case <-deadline:
+			t.Fatal("card did not refresh before Finish")
+		default:
+			time.Sleep(5 * time.Millisecond)
+		}
+	}
+
+	tc.Finish(taskCardDone, "")
+	// Wait for the terminal card to land.
+	for {
+		final := p.last()
+		if final != nil && final.Header != nil && strings.Contains(final.Header.Title, "已完成") {
+			break
+		}
+		select {
+		case <-deadline:
+			t.Fatal("terminal card did not land")
+		default:
+			time.Sleep(5 * time.Millisecond)
+		}
+	}
+	before := p.updateCount()
+	time.Sleep(80 * time.Millisecond)
+	if got := p.updateCount(); got != before {
+		t.Fatalf("ticker kept refreshing after Finish: %d -> %d", before, got)
+	}
+}
+
+// A slow card PATCH must not queue unbounded refreshes behind it; a request
+// arriving while one is in flight is coalesced into one pending render.
+func TestTurnCard_RenderCoalescesWhileInFlight(t *testing.T) {
+	withFastCardThrottle(t)
+	e := NewEngine("test", &resultAgent{session: newResultAgentSession("ok")}, []Platform{&stubPlatformEngine{n: "test"}}, "", LangChinese)
+	t.Cleanup(e.cancel)
+	p := &taskCardStubPlatform{stubPlatformEngine: stubPlatformEngine{n: "feishu"}}
+
+	tc := newTurnCard(e, p, "ctx", "k")
+	tc.render(true) // create the card
+
+	tc.mu.Lock()
+	tc.rendering = true // simulate an in-flight PATCH
+	tc.mu.Unlock()
+	before := p.updateCount()
+
+	tc.render(true)
+	tc.render(true)
+	if got := p.updateCount(); got != before {
+		t.Fatalf("UpdateTaskCard calls = %d, want %d (no new tasks while in flight)", got, before)
+	}
+	tc.mu.Lock()
+	pending := tc.pendingRender
+	tc.mu.Unlock()
+	if !pending {
+		t.Fatal("pendingRender = false, want a coalesced refresh")
+	}
+}
+
+// While the agent is streaming output the ticker must stay quiet; it resumes
+// after two quiet intervals.
+func TestTurnCard_TickerQuietWhileAgentActive(t *testing.T) {
+	withFastCardThrottle(t)
+	e := NewEngine("test", &resultAgent{session: newResultAgentSession("ok")}, []Platform{&stubPlatformEngine{n: "test"}}, "", LangChinese)
+	e.SetCardTickInterval(30 * time.Millisecond)
+	t.Cleanup(e.cancel)
+	p := &taskCardStubPlatform{stubPlatformEngine: stubPlatformEngine{n: "feishu"}}
+
+	tc := newTurnCard(e, p, "ctx", "k")
+	tc.EnsureStarted()
+	time.Sleep(10 * time.Millisecond) // let the create land
+	tc.NoteActivity()
+
+	before := p.updateCount()
+	time.Sleep(45 * time.Millisecond) // one tick, but within the 60ms quiet window
+	if got := p.updateCount(); got > before {
+		t.Fatalf("card refreshed while the agent was active: %d -> %d", before, got)
+	}
+
+	deadline := time.After(500 * time.Millisecond)
+	for {
+		if p.updateCount() > before {
+			return
+		}
+		select {
+		case <-deadline:
+			t.Fatal("card ticker did not resume after the quiet window")
+		default:
+			time.Sleep(5 * time.Millisecond)
+		}
 	}
 }

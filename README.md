@@ -172,44 +172,20 @@ MiniMax-M2.7 is a next-generation large language model designed for autonomous e
 
 ## 🆕 What’s New in v1.3.0
 
-- **🌐 Web Admin UI (Recommended)** — Full management dashboard embedded in the binary — **no extra dependencies**. Create and edit projects, manage providers, monitor sessions, edit cron jobs, and **chat with your agent directly from the browser**. Supports 5 languages (en/zh/zh-TW/ja/es). We recommend managing cc-connect through the web UI instead of editing `config.toml` by hand. Run `cc-connect web` to configure and open the dashboard, then run `cc-connect` to start the service.
+- **🌐 Web Admin UI (Recommended)** — Full management dashboard embedded in the binary — **no extra dependencies**. Create and edit projects, manage providers, monitor sessions, edit cron jobs, and **chat with your agent directly from the browser**. Supports English and Simplified Chinese. We recommend managing cc-connect through the web UI instead of editing `config.toml` by hand. Run `cc-connect web` to configure and open the dashboard, then run `cc-connect` to start the service.
 - **Lifecycle Event Hooks** — New `[[hooks]]` config triggers shell commands or HTTP webhooks on message, session, cron, permission, and error events. Async by default, fail-open.
 - **Skill Management** — New `/skills` page with local skill browser and recommended presets.
 - **Global Provider Management** — Add/edit/delete providers in the web UI; import from cc-switch config.
-- **Personal WeChat** — Chat with your local agent from **Weixin (personal)** via ilink long-polling; QR `weixin setup`, CDN media, no public IP. *[Setup → `docs/weixin.md`](docs/weixin.md)*
-- **Weibo DM** — Chat with your agent via **Weibo private messages** over WebSocket; no public IP needed, text streaming supported.
 - **Feishu Enhancements** — Auto-resolve `@name` mentions, multi-level reply chain recognition, done-emoji reactions.
 - **New Agents** — Kimi CLI and Pi agent support added.
 
 
-## 🧩 Platform feature snapshot
+## 🧩 Supported platforms
 
-High-level view of what each **built-in platform** can do in cc-connect.
+cc-connect currently supports two messaging platforms:
 
-**Legend**
-
-| Symbol | Meaning |
-|--------|---------|
-| ✅ | Works in **stable** cc-connect with typical configuration |
-| ⚠️ | Partial, needs extra config (e.g. speech / ASR), or limited by the vendor app or API |
-| ❌ | Not supported or not applicable in practice |
-
-† **QQ (NapCat / OneBot)** — unofficial self-hosted bridge; behaviour depends on your NapCat / network setup.
-
-| Capability | Feishu | WPS Xiezuo | DingTalk | Telegram | Slack | Discord | LINE | WeCom | Weibo | **Weixin**<br>*(personal)* | QQ† | QQ Bot |
-|------------|:------:|:----------:|:--------:|:--------:|:-----:|:-------:|:----:|:-----:|:-----:|:-------------------------:|:---:|:------:|
-| Text & slash commands | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| Markdown / cards | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ⚠️ | ⚠️ | ❌ | ✅ | ✅ | ✅ |
-| Streaming / chunked replies | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| Images & files | ✅ | ❌ | ✅ | ✅ | ✅ | ✅ | ⚠️ | ✅ | ❌ | ✅ | ✅ | ✅ |
-| Voice / STT / TTS | ⚠️ | ❌ | ⚠️ | ✅ | ⚠️ | ⚠️ | ❌ | ⚠️ | ❌ | ✅ | ⚠️ | ⚠️ |
-| Private (DM) | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| Group / channel | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ⚠️ | ✅ | ❌ | ✅ | ✅ | ✅ |
-
-> **WeCom:** Webhook mode needs a **public URL**; long-connection / WS style setups often do not.  
-> **Voice row:** many platforms need `[speech]` / TTS providers enabled in `config.toml`; values are a best-effort summary.  
-> Per-platform setup: [Platform setup guides](#-platform-setup-guides) below.
-
+- **Feishu / Lark** — WebSocket long connection, interactive cards, topics/threads, images and files, streaming replies. *[Setup → `docs/feishu.md`](docs/feishu.md)*
+- **WeCom (企业微信)** — HTTP webhook or long-connection mode, text/Markdown replies, images and files. *[Setup → `docs/wecom.md`](docs/wecom.md)*
 
 ## ✨ Why cc-connect?
 
@@ -217,7 +193,7 @@ High-level view of what each **built-in platform** can do in cc-connect.
 **10+ AI Agents** — Claude Code, Codex, Cursor Agent, Kimi CLI, Qoder CLI, Gemini CLI, OpenCode, iFlow CLI, Pi, Devin — plus any agent that supports the [Agent Client Protocol (ACP)](https://agentclientprotocol.com/get-started/agents). Use whichever fits your workflow, or all of them at once.
 
 ### 📱 Platform Flexibility
-**12 Chat Platforms** — Feishu, WPS Xiezuo, DingTalk, Slack, Telegram, Discord, WeChat Work, Weibo, LINE, QQ, QQ Bot (Official), plus **Weixin (personal ilink)** for **personal WeChat**. Most platforms need **zero public IP**.
+**2 Chat Platforms** — **Feishu / Lark** and **WeCom (企业微信)**. Both support long-connection modes with no public IP required.
 
 ### 🔄 Multi-Agent Orchestration
 **Multi-Bot Relay** — Bind multiple bots in a group chat and let them communicate with each other. Ask Claude, get insights from Gemini — all in one conversation.
@@ -240,16 +216,14 @@ High-level view of what each **built-in platform** can do in cc-connect.
 **Multi-Project** — One process, multiple projects, each with its own agent + platform combo.
 
 ### 🌍 Multilingual Interface
-**5 Languages** — Native support for English, Chinese (Simplified & Traditional), Japanese, and Spanish. Built-in i18n ensures everyone feels at home.
+**2 Languages** — English and Simplified Chinese. Built-in i18n keeps both interfaces consistent.
 
 
 <p align="center">
-  <img src="docs/images/screenshot/cc-connect-lark.JPG" alt="飞书" width="32%" />
-  <img src="docs/images/screenshot/cc-connect-telegram.JPG" alt="Telegram" width="32%" />
-  <img src="docs/images/screenshot/cc-connect-wechat.JPG" alt="微信" width="32%" />
+  <img src="docs/images/screenshot/cc-connect-lark.JPG" alt="飞书" width="60%" />
 </p>
 <p align="center">
-  <em>Left：Lark &nbsp;|&nbsp; Telegram &nbsp;|&nbsp; Right：Wechat</em>
+  <em>Feishu / Lark</em>
 </p>
 
 
@@ -353,17 +327,7 @@ cc-connect update --pre     # Include pre-releases
 | Agent | Goose (Block) | 🔜 Planned |
 | Agent | Aider | 🔜 Planned |
 | Platform | Feishu (Lark) | ✅ WebSocket — no public IP needed |
-| Platform | DingTalk | ✅ Stream — no public IP needed |
-| Platform | WPS Xiezuo | ✅ WebSocket — no public IP needed |
-| Platform | Telegram | ✅ Long Polling — no public IP needed |
-| Platform | Slack | ✅ Socket Mode — no public IP needed |
-| Platform | Discord | ✅ Gateway — no public IP needed |
-| Platform | Weibo | ✅ WebSocket — no public IP needed |
-| Platform | LINE | ✅ Webhook — public URL required |
-| Platform | WeChat Work | ✅ WebSocket / Webhook |
-| Platform | Weixin (personal, ilink) | ✅— HTTP long polling — no public IP needed |
-| Platform | QQ (NapCat/OneBot) | ✅ WebSocket |
-| Platform | QQ Bot (Official) | ✅ WebSocket — no public IP needed |
+| Platform | WeCom (企业微信) | ✅ WebSocket / Webhook |
 
 
 ## 📖 Platform Setup Guides
@@ -371,15 +335,7 @@ cc-connect update --pre     # Include pre-releases
 | Platform | Guide | Connection | Public IP? |
 |----------|-------|------------|------------|
 | Feishu (Lark) | [docs/feishu.md](docs/feishu.md) | WebSocket | No |
-| DingTalk | [docs/dingtalk.md](docs/dingtalk.md) | Stream | No |
-| WPS Xiezuo | [docs/wps-xiezuo.md](docs/wps-xiezuo.md) | WebSocket | No |
-| Telegram | [docs/telegram.md](docs/telegram.md) | Long Polling | No |
-| Slack | [docs/slack.md](docs/slack.md) | Socket Mode | No |
-| Discord | [docs/discord.md](docs/discord.md) | Gateway | No |
-| Weibo | [docs/weibo.md](docs/weibo.md) | WebSocket | No |
-| WeChat Work | [docs/wecom.md](docs/wecom.md) | WebSocket / Webhook | No (WS) / Yes (Webhook) |
-| Weixin (personal) | [docs/weixin.md](docs/weixin.md) | HTTP long polling (ilink) | No |
-| QQ / QQ Bot | [docs/qq.md](docs/qq.md) | WebSocket | No |
+| WeCom (企业微信) | [docs/wecom.md](docs/wecom.md) | WebSocket / Webhook | No (WS) / Yes (Webhook) |
 
 
 ## 🎯 Key Features
@@ -486,7 +442,6 @@ When an agent generates a local screenshot, chart, PDF, bundle, or other file, i
 
 First release supports:
 - Feishu
-- Telegram
 
 If your agent does not natively inject the system prompt, run this once in chat after upgrading:
 
@@ -574,7 +529,7 @@ We're grateful to everyone who has supported this project. Leave your GitHub use
 
 We accept the following commercial collaborations:
 
-- **Enterprise Customization**: Custom deployment for internal AI tooling (Feishu, DingTalk, WeChat Work, Slack, etc.)
+- **Enterprise Customization**: Custom deployment for internal AI tooling (Feishu, WeCom, etc.)
 - **Technical Consulting**: AI agent integration and architecture design
 - **Outsourcing Projects**: AI-related system development
 

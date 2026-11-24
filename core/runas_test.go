@@ -99,7 +99,7 @@ func TestFilterEnvForSpawn_RunAsUser(t *testing.T) {
 	// sudo -i can rebuild it from the target user's login profile
 	// instead of inheriting the supervisor's PATH.
 	wantKept := map[string]bool{
-		"LANG=en_US.UTF-8":                 true,
+		"LANG=en_US.UTF-8":                  true,
 		"PGSSLROOTCERT=/etc/certs/root.crt": true,
 	}
 	for _, e := range got {
@@ -146,8 +146,8 @@ func TestVerifyRunAsUserCheap_Success(t *testing.T) {
 	ResetVerifyCache()
 	runner := &stubSudoRunner{
 		script: map[string]stubResponse{
-			key("-n", "-iu", "target", "--", "/usr/bin/true"):                           {nil, nil},
-			key("-n", "-iu", "target", "--", "sudo", "-n", "/usr/bin/true"):             {[]byte("a password is required"), &exec.ExitError{}},
+			key("-n", "-iu", "target", "--", "/usr/bin/true"):               {nil, nil},
+			key("-n", "-iu", "target", "--", "sudo", "-n", "/usr/bin/true"): {[]byte("a password is required"), &exec.ExitError{}},
 		},
 	}
 	if err := VerifyRunAsUserCheap(context.Background(), runner, "target"); err != nil {
@@ -222,4 +222,3 @@ func TestVerifyRunAsUserCheap_CacheHit(t *testing.T) {
 		t.Fatalf("cached call made runner calls; want 2 total, got %d", len(runner.calls))
 	}
 }
-

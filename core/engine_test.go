@@ -1360,7 +1360,7 @@ func TestProcessInteractiveEvents_ReplyFooterPrefersSessionRuntimeState(t *testi
 // Regression: an agent that only exposes a workdir (no model/effort/usage)
 // must not emit a footer at all. Previously this produced a footer like
 // "*~*" when the agent was running in the user's home directory, which
-// rendered as a bare "~" on Feishu/Weixin.
+// rendered as a bare "~" on Feishu/WeCom.
 func TestProcessInteractiveEvents_SuppressesReplyFooterWhenOnlyWorkDir(t *testing.T) {
 	homeDir := t.TempDir()
 	t.Setenv("HOME", homeDir)
@@ -8480,10 +8480,6 @@ func TestExecuteCardAction_LangSwitch(t *testing.T) {
 		t.Errorf("expected LangEnglish, got %v", e.i18n.CurrentLang())
 	}
 
-	e.executeCardAction("/lang", "ja", "test:user1")
-	if e.i18n.CurrentLang() != LangJapanese {
-		t.Errorf("expected LangJapanese, got %v", e.i18n.CurrentLang())
-	}
 }
 
 func TestExecuteCardAction_UnknownCommand_NoPanic(t *testing.T) {
@@ -13097,6 +13093,54 @@ func TestHandleMessageRejectsOversizedImage(t *testing.T) {
 	if len(sent) == 0 || !strings.Contains(sent[0], "图片过大") {
 		t.Fatalf("sent = %v, want an image-too-large notice", sent)
 	}
+	if strings.Contains(sent[0], "第 1 张") {
+		t.Fatalf("single-image notice should not include an index: %q", sent[0])
+	}
+}
+
+func TestHandleMessageOversizedImageMultiShowsIndexAndTotal(t *testing.T) {
+	p := &stubPlatformEngine{n: "test"}
+	e := NewEngine("test", &resultAgent{session: newResultAgentSession("should not run")}, []Platform{p}, "", LangChinese)
+	t.Cleanup(e.cancel)
+
+	small := func() ImageAttachment {
+		return ImageAttachment{MimeType: "image/png", Data: testPNG(t, 10, 10)}
+	}
+	big := ImageAttachment{MimeType: "image/png", Data: testPNG(t, MaxModelImageDimension+1, 2)}
+	msg := &Message{
+		SessionKey: "test:u1", Platform: "test", UserID: "u1",
+		Content:  "看下这几张图",
+		Images:   []ImageAttachment{small(), big, small()},
+		ReplyCtx: "ctx",
+	}
+	e.handleMessage(p, msg)
+
+	sent := p.getSent()
+	if len(sent) == 0 || !strings.Contains(sent[0], "第 2 张") || !strings.Contains(sent[0], "共 3 张") {
+		t.Fatalf("sent = %v, want index 2 of 3 in the notice", sent)
+	}
+}
+
+func TestHandleMessageOversizedQuotedImageHasNoIndex(t *testing.T) {
+	p := &stubPlatformEngine{n: "test"}
+	e := NewEngine("test", &resultAgent{session: newResultAgentSession("should not run")}, []Platform{p}, "", LangChinese)
+	t.Cleanup(e.cancel)
+
+	big := ImageAttachment{MimeType: "image/png", Data: testPNG(t, MaxModelImageDimension+1, 2)}
+	msg := &Message{
+		SessionKey: "test:u1", Platform: "test", UserID: "u1",
+		Content: "看下引用的图", Images: []ImageAttachment{big},
+		QuotedImages: []ImageAttachment{big}, ReplyCtx: "ctx",
+	}
+	e.handleMessage(p, msg)
+
+	sent := p.getSent()
+	if len(sent) == 0 || !strings.Contains(sent[0], "引用消息中的图片过大") {
+		t.Fatalf("sent = %v, want the quoted-image notice", sent)
+	}
+	if strings.Contains(sent[0], "第 ") {
+		t.Fatalf("quoted-image notice should not include an index: %q", sent[0])
+	}
 }
 
 // TestHandleMessageQuotedImagesDoNotBlockCommand covers the incident where a
@@ -13363,58 +13407,6 @@ func TestAgentErrorUserMessage(t *testing.T) {
 	}
 }
 
-// delayedResultSession keeps a turn silent long enough for the progress nudge.
-type delayedResultSession struct {
-	events chan Event
-	delay  time.Duration
-}
-
-func (s *delayedResultSession) Send(_ string, _ []ImageAttachment, _ []FileAttachment) error {
-	go func() {
-		time.Sleep(s.delay)
-		s.events <- Event{Type: EventResult, Content: "done", Done: true}
-		close(s.events)
-	}()
-	return nil
-}
-func (s *delayedResultSession) RespondPermission(_ string, _ PermissionResult) error { return nil }
-func (s *delayedResultSession) Events() <-chan Event                                 { return s.events }
-func (s *delayedResultSession) CurrentSessionID() string                             { return "delayed-session" }
-func (s *delayedResultSession) Alive() bool                                          { return true }
-func (s *delayedResultSession) Close() error                                         { return nil }
-
-func TestLongTurnProgressNudge(t *testing.T) {
-	p := &stubPlatformEngine{n: "test"}
-	sess := &delayedResultSession{events: make(chan Event, 1), delay: 250 * time.Millisecond}
-	e := NewEngine("test", &resultAgent{session: sess}, []Platform{p}, "", LangChinese)
-	e.SetTurnProgressInterval(50 * time.Millisecond)
-	t.Cleanup(e.cancel)
-
-	e.handleMessage(p, &Message{
-		SessionKey: "test:u1", Platform: "test", UserID: "u1",
-		Content: "跑一个很久的任务", ReplyCtx: "ctx",
-	})
-
-	deadline := time.After(3 * time.Second)
-	sawNudge, sawDone := false, false
-	for !sawNudge || !sawDone {
-		for _, s := range p.getSent() {
-			if strings.Contains(s, "仍在处理") {
-				sawNudge = true
-			}
-			if strings.Contains(s, "done") {
-				sawDone = true
-			}
-		}
-		select {
-		case <-deadline:
-			t.Fatalf("timed out: nudge=%v done=%v sent=%v", sawNudge, sawDone, p.getSent())
-		default:
-			time.Sleep(10 * time.Millisecond)
-		}
-	}
-}
-
 // A permission response must be honoured even when Feishu attached an
 // oversized quoted image to the reply; otherwise the agent blocks forever on
 // <-pending.Resolved.
@@ -13591,21 +13583,5 @@ func TestRedispatchOnlyImagesReportsToUser(t *testing.T) {
 	}
 	if got := sess.getImages(); len(got) != 0 {
 		t.Fatalf("agent received %d images, want none", len(got))
-	}
-}
-
-func TestNextTurnProgressDelay(t *testing.T) {
-	base := time.Minute
-	max := 15 * time.Minute
-	prev := base
-	want := []time.Duration{2, 4, 8, 15, 15}
-	for i, minutes := range want {
-		prev = nextTurnProgressDelay(prev, base, max)
-		if prev != minutes*time.Minute {
-			t.Fatalf("step %d delay = %v, want %v", i+1, prev, minutes*time.Minute)
-		}
-	}
-	if got := nextTurnProgressDelay(0, base, max); got != 2*base {
-		t.Fatalf("initial delay = %v, want %v", got, 2*base)
 	}
 }

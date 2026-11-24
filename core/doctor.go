@@ -432,21 +432,9 @@ var checkNameZh = map[string]string{
 	"Platforms":           "平台",
 }
 
-// checkNameJa provides Japanese translations for common check names.
-var checkNameJa = map[string]string{
-	"Memory (Go runtime)": "メモリ (Go runtime)",
-	"System Memory":       "システムメモリ",
-	"CPU Load":            "CPU 負荷",
-	"Disk Space":          "ディスク容量",
-	"FFmpeg (voice)":      "FFmpeg (音声)",
-	"Data Directory":      "データディレクトリ",
-	"Config File":         "設定ファイル",
-	"Platforms":           "プラットフォーム",
-}
-
 func localizeCheckName(name string, lang Language) string {
 	switch lang {
-	case LangChinese, LangTraditionalChinese:
+	case LangChinese:
 		// Translate known names; parametric names (e.g. "Agent CLI (claude)") need prefix matching
 		if zh, ok := checkNameZh[name]; ok {
 			return zh
@@ -459,19 +447,6 @@ func localizeCheckName(name string, lang Language) string {
 		}
 		if strings.Contains(name, "Auth") {
 			return strings.Replace(name, "Auth", "认证", 1)
-		}
-	case LangJapanese:
-		if ja, ok := checkNameJa[name]; ok {
-			return ja
-		}
-		if strings.HasPrefix(name, "Agent CLI") {
-			return strings.Replace(name, "Agent CLI", "Agent CLI", 1)
-		}
-		if strings.HasPrefix(name, "Platform (") {
-			return strings.Replace(name, "Platform", "プラットフォーム", 1)
-		}
-		if strings.Contains(name, "Auth") {
-			return strings.Replace(name, "Auth", "認証", 1)
 		}
 	}
 	return name

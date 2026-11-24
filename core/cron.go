@@ -8,8 +8,8 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
-	"reflect"
 	"path/filepath"
+	"reflect"
 	"strconv"
 	"strings"
 	"sync"
@@ -424,13 +424,13 @@ func toExportedFieldName(s string) string {
 
 // CronScheduler runs cron jobs by injecting synthetic messages into engines.
 type CronScheduler struct {
-	store         *CronStore
-	cron          *cron.Cron
-	engines       map[string]*Engine // project name → engine
-	mu            sync.RWMutex
-	entries       map[string]cron.EntryID // job ID → cron entry
-	defaultSilent      bool   // global default for suppressing cron start notifications
-	defaultSessionMode string // global default session mode; "" = reuse, "new_per_run" = fresh session each run
+	store              *CronStore
+	cron               *cron.Cron
+	engines            map[string]*Engine // project name → engine
+	mu                 sync.RWMutex
+	entries            map[string]cron.EntryID // job ID → cron entry
+	defaultSilent      bool                    // global default for suppressing cron start notifications
+	defaultSessionMode string                  // global default session mode; "" = reuse, "new_per_run" = fresh session each run
 }
 
 func NewCronScheduler(store *CronStore) *CronScheduler {
@@ -725,7 +725,6 @@ type mutePlatform struct {
 func (m *mutePlatform) Reply(_ context.Context, _ any, _ string) error { return nil }
 func (m *mutePlatform) Send(_ context.Context, _ any, _ string) error  { return nil }
 
-
 func GenerateCronID() string {
 	b := make([]byte, 4)
 	if _, err := rand.Read(b); err != nil {
@@ -743,19 +742,13 @@ func truncateStr(s string, n int) string {
 }
 
 var cronWeekdays = map[Language][7]string{
-	LangEnglish:            {"Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"},
-	LangChinese:            {"周日", "周一", "周二", "周三", "周四", "周五", "周六"},
-	LangTraditionalChinese: {"週日", "週一", "週二", "週三", "週四", "週五", "週六"},
-	LangJapanese:           {"日曜", "月曜", "火曜", "水曜", "木曜", "金曜", "土曜"},
-	LangSpanish:            {"domingo", "lunes", "martes", "miércoles", "jueves", "viernes", "sábado"},
+	LangEnglish: {"Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"},
+	LangChinese: {"周日", "周一", "周二", "周三", "周四", "周五", "周六"},
 }
 
 var cronMonths = map[Language][13]string{
-	LangEnglish:            {"", "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"},
-	LangChinese:            {"", "1月", "2月", "3月", "4月", "5月", "6月", "7月", "8月", "9月", "10月", "11月", "12月"},
-	LangTraditionalChinese: {"", "1月", "2月", "3月", "4月", "5月", "6月", "7月", "8月", "9月", "10月", "11月", "12月"},
-	LangJapanese:           {"", "1月", "2月", "3月", "4月", "5月", "6月", "7月", "8月", "9月", "10月", "11月", "12月"},
-	LangSpanish:            {"", "ene", "feb", "mar", "abr", "may", "jun", "jul", "ago", "sep", "oct", "nov", "dic"},
+	LangEnglish: {"", "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"},
+	LangChinese: {"", "1月", "2月", "3月", "4月", "5月", "6月", "7月", "8月", "9月", "10月", "11月", "12月"},
 }
 
 func cronLangNames(lang Language) (weekdays [7]string, months [13]string) {
@@ -773,7 +766,7 @@ func cronLangNames(lang Language) (weekdays [7]string, months [13]string) {
 }
 
 func isZhLikeLang(lang Language) bool {
-	return lang == LangChinese || lang == LangTraditionalChinese || lang == LangJapanese
+	return lang == LangChinese
 }
 
 // parseStep parses a cron step field like "*/5" and returns (5, true).
@@ -804,12 +797,6 @@ func CronExprToHuman(expr string, lang Language) string {
 		switch lang {
 		case LangChinese:
 			return fmt.Sprintf("每%d分钟", minStep)
-		case LangTraditionalChinese:
-			return fmt.Sprintf("每%d分鐘", minStep)
-		case LangJapanese:
-			return fmt.Sprintf("%d分ごと", minStep)
-		case LangSpanish:
-			return fmt.Sprintf("Cada %d min", minStep)
 		default:
 			return fmt.Sprintf("Every %d min", minStep)
 		}
@@ -824,12 +811,6 @@ func CronExprToHuman(expr string, lang Language) string {
 		switch lang {
 		case LangChinese:
 			return fmt.Sprintf("每%d小时 (:%s)", hourStep, m)
-		case LangTraditionalChinese:
-			return fmt.Sprintf("每%d小時 (:%s)", hourStep, m)
-		case LangJapanese:
-			return fmt.Sprintf("%d時間ごと (:%s)", hourStep, m)
-		case LangSpanish:
-			return fmt.Sprintf("Cada %d h (:%s)", hourStep, m)
 		default:
 			return fmt.Sprintf("Every %d h (:%s)", hourStep, m)
 		}
@@ -870,10 +851,8 @@ func CronExprToHuman(expr string, lang Language) string {
 	if hour != "*" && minute != "*" {
 		if minStep, ok := parseStep(minute); ok {
 			switch lang {
-			case LangChinese, LangTraditionalChinese:
+			case LangChinese:
 				parts = append(parts, fmt.Sprintf("%s时 每%d分钟", padZero(hour), minStep))
-			case LangJapanese:
-				parts = append(parts, fmt.Sprintf("%s時 %d分ごと", padZero(hour), minStep))
 			default:
 				parts = append(parts, fmt.Sprintf("hour %s every %d min", padZero(hour), minStep))
 			}
@@ -891,19 +870,13 @@ func CronExprToHuman(expr string, lang Language) string {
 			switch lang {
 			case LangChinese:
 				parts = append(parts, fmt.Sprintf("每%d分钟", minStep))
-			case LangTraditionalChinese:
-				parts = append(parts, fmt.Sprintf("每%d分鐘", minStep))
-			case LangJapanese:
-				parts = append(parts, fmt.Sprintf("%d分ごと", minStep))
 			default:
 				parts = append(parts, fmt.Sprintf("every %d min", minStep))
 			}
 		} else {
 			switch lang {
-			case LangChinese, LangTraditionalChinese:
+			case LangChinese:
 				parts = append(parts, "每小时第"+minute+"分")
-			case LangJapanese:
-				parts = append(parts, "毎時"+minute+"分")
 			default:
 				parts = append(parts, "minute "+minute+" of every hour")
 			}
@@ -913,34 +886,24 @@ func CronExprToHuman(expr string, lang Language) string {
 	// Frequency hint
 	if allWild {
 		switch lang {
-		case LangChinese, LangTraditionalChinese:
+		case LangChinese:
 			return "每天 " + strings.Join(parts, " ")
-		case LangJapanese:
-			return "毎日 " + strings.Join(parts, " ")
-		case LangSpanish:
-			return "Diario " + strings.Join(parts, " ")
 		default:
 			return "Daily at " + strings.Join(parts, " ")
 		}
 	}
 	if dow != "*" && month == "*" && dom == "*" {
 		switch lang {
-		case LangChinese, LangTraditionalChinese:
+		case LangChinese:
 			return "每" + strings.Join(parts, " ")
-		case LangJapanese:
-			return "毎" + strings.Join(parts, " ")
 		default:
 			return strings.Join(parts, " at ")
 		}
 	}
 	if dom != "*" && month == "*" && dow == "*" {
 		switch lang {
-		case LangChinese, LangTraditionalChinese:
+		case LangChinese:
 			return "每月" + strings.Join(parts, " ")
-		case LangJapanese:
-			return "毎月" + strings.Join(parts, " ")
-		case LangSpanish:
-			return "Mensual, " + strings.Join(parts, ", ")
 		default:
 			return "Monthly, " + strings.Join(parts, ", ")
 		}

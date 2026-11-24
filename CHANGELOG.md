@@ -8,12 +8,20 @@
 - **Commands in quoted replies**: a leading `/` command runs even when the message carries quoted images; permission responses are handled before image validation so `allow`/`deny` can never be swallowed by a bad attachment.
 - **Image safety**: images above 8000 px per side are rejected before reaching the model, identical images are de-duplicated per agent process, repeated quoted images are cached in memory (30 min, bounded), and image/resource downloads now have a 20s timeout.
 - **Final reply delivery**: chunks are delivered in order with retries; partial or complete loss is reported to the user instead of silently dropped.
-- **Progress card terminal state**: rate-limit-aware retries (230429/99991400), terminal backoff with plain-text fallback, and a visible notice when card updates are disabled.
+- **Progress card terminal state**: rate-limit-aware retries (230429/99991400), terminal backoff with plain-text fallback, and a visible notice when card updates degrade (the ticker is not permanently disabled).
 - **Error text**: one classification table drives localized user text, reset policy and redispatch image policy for agent/API errors; HTTP status codes take precedence over prose so wording changes cannot degrade classification.
-- **Long-turn progress**: a quiet-turn "still working" line now escalates its interval (1/2/4/8/15 min, capped, up to 8 per turn) instead of stopping after 3 minutes.
+- **Progress card ticker**: an independent `[display] card_tick_ms` ticker (default 5s) keeps elapsed time moving during long tool calls; single-flight coalescing prevents PATCH pile-ups under rate limits; the ticker stays quiet while the agent is streaming; ticker updates use one attempt (terminal delivery keeps full retries); failures back off to 30s instead of freezing the card, and terminal states stop the ticker.
+- **Card step text**: shows human-readable actions (running a command, reading a file, …); raw commands, paths and regex never reach the card.
+- **Image notices**: single-image notices omit the index; multi-image notices say "image i of N" so users can locate the bad image.
+- **Startup resilience**: a config entry for a platform this build no longer ships is skipped with a warning instead of exiting the whole process.
 
 ### Added
-- `turn_progress_mins` config (default 1 minute, 0 disables) as the base interval for the long-turn progress line.
+- `[display] card_tick_ms` config (default 5000; 0 disables).
+
+### Removed
+- Long-turn text heartbeat (`turn_progress_mins`) removed per user feedback; the progress card is the progress signal.
+- i18n now ships **English and Simplified Chinese only**.
+- Platform adapters now ship **Feishu/Lark and WeCom only**; removed Telegram, Discord, Slack, DingTalk, personal WeChat, Weibo, QQ/QQ Bot, LINE, MAX and WPS Xiezuo. The personal-WeChat `weixin` setup command and management endpoints were removed with it.
 
 ## v1.3.3-beta.2 (2026-05-09)
 

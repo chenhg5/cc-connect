@@ -10,8 +10,8 @@ import (
 // without a real process.
 type reviveSession struct{ *stopTestSession }
 
-func (s *reviveSession) Close() error  { return nil }
-func (s *reviveSession) Alive() bool   { return true }
+func (s *reviveSession) Close() error             { return nil }
+func (s *reviveSession) Alive() bool              { return true }
 func (s *reviveSession) CurrentSessionID() string { return "revive" }
 
 func newRestartEngine(t *testing.T) (*Engine, *stubPlatformEngine, *reviveSession, *Session, *SessionManager) {

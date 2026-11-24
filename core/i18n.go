@@ -9,12 +9,9 @@ import (
 type Language string
 
 const (
-	LangAuto               Language = "" // auto-detect from user messages
-	LangEnglish            Language = "en"
-	LangChinese            Language = "zh"
-	LangTraditionalChinese Language = "zh-TW"
-	LangJapanese           Language = "ja"
-	LangSpanish            Language = "es"
+	LangAuto    Language = "" // auto-detect from user messages
+	LangEnglish Language = "en"
+	LangChinese Language = "zh"
 )
 
 // I18n provides internationalized messages.
@@ -43,17 +40,9 @@ func (i *I18n) SetSaveFunc(fn func(Language) error) {
 
 func DetectLanguage(text string) Language {
 	for _, r := range text {
-		if isJapanese(r) {
-			return LangJapanese
-		}
-	}
-	for _, r := range text {
 		if isChinese(r) {
 			return LangChinese
 		}
-	}
-	if isSpanishHint(text) {
-		return LangSpanish
 	}
 	return LangEnglish
 }
@@ -67,24 +56,6 @@ func isChinese(r rune) bool {
 		(r >= 0x2B820 && r <= 0x2CEAF) ||
 		(r >= 0xF900 && r <= 0xFAFF) ||
 		(r >= 0x2F800 && r <= 0x2FA1F)
-}
-
-func isJapanese(r rune) bool {
-	return (r >= 0x3040 && r <= 0x309F) || // Hiragana
-		(r >= 0x30A0 && r <= 0x30FF) || // Katakana
-		(r >= 0x31F0 && r <= 0x31FF) || // Katakana Phonetic Extensions
-		(r >= 0xFF65 && r <= 0xFF9F) // Half-width Katakana
-}
-
-// isSpanishHint checks for characters common in Spanish but not English (ñ, ¿, ¡, accented vowels).
-func isSpanishHint(text string) bool {
-	for _, r := range text {
-		switch r {
-		case 'ñ', 'Ñ', '¿', '¡', 'á', 'é', 'í', 'ó', 'ú', 'ü':
-			return true
-		}
-	}
-	return false
 }
 
 func (i *I18n) DetectAndSet(text string) {
@@ -139,12 +110,11 @@ func (i *I18n) CurrentLang() Language {
 	return i.currentLang()
 }
 
-// IsZhLike returns true for Simplified and Traditional Chinese.
+// IsZhLike reports whether the current language is Chinese.
 func (i *I18n) IsZhLike() bool {
 	i.mu.RLock()
 	defer i.mu.RUnlock()
-	l := i.currentLang()
-	return l == LangChinese || l == LangTraditionalChinese
+	return i.currentLang() == LangChinese
 }
 
 // SetLang overrides the language (disabling auto-detect).
@@ -181,6 +151,16 @@ const (
 	MsgTaskCardStopBtn             MsgKey = "task_card_stop_btn"
 	MsgTaskCardWaitingConfirm      MsgKey = "task_card_waiting_confirm"
 	MsgTaskCardDegraded            MsgKey = "task_card_degraded"
+	MsgTaskCardNewInstruction      MsgKey = "task_card_new_instruction"
+	MsgToolActionCommand           MsgKey = "tool_action_command"
+	MsgToolActionRead              MsgKey = "tool_action_read"
+	MsgToolActionWrite             MsgKey = "tool_action_write"
+	MsgToolActionSearch            MsgKey = "tool_action_search"
+	MsgToolActionFind              MsgKey = "tool_action_find"
+	MsgToolActionWeb               MsgKey = "tool_action_web"
+	MsgToolActionTask              MsgKey = "tool_action_task"
+	MsgToolActionSkill             MsgKey = "tool_action_skill"
+	MsgToolActionGeneric           MsgKey = "tool_action_generic"
 	MsgSteerAck                    MsgKey = "steer_ack"
 	MsgAckProcessing               MsgKey = "ack_processing"
 	MsgNoExecution                 MsgKey = "no_execution"
@@ -194,7 +174,8 @@ const (
 	MsgToolAllowFailed             MsgKey = "tool_allow_failed"
 	MsgToolAllowedNew              MsgKey = "tool_allowed_new"
 	MsgError                       MsgKey = "error"
-	MsgImageTooLarge               MsgKey = "image_too_large"
+	MsgImageTooLargeSingle         MsgKey = "image_too_large_single"
+	MsgImageTooLargeMulti          MsgKey = "image_too_large_multi"
 	MsgQuotedImageTooLarge         MsgKey = "quoted_image_too_large"
 	MsgSessionAutoResetError       MsgKey = "session_auto_reset_error"
 	MsgSessionAutoResetRedispatch  MsgKey = "session_auto_reset_redispatch"
@@ -216,8 +197,6 @@ const (
 	MsgFinalDeliveryPartial        MsgKey = "final_delivery_partial"
 	MsgPreviousTurnFailedRestart   MsgKey = "previous_turn_failed_restart"
 	MsgSteerAfterTurnEnd           MsgKey = "steer_after_turn_end"
-	MsgTurnStillWorking            MsgKey = "turn_still_working"
-	MsgTurnWorkingStep             MsgKey = "turn_working_step"
 	MsgSessionNotFound             MsgKey = "session_not_found"
 	MsgFailedToStartAgentSession   MsgKey = "failed_to_start_agent_session"
 	MsgFailedToDeleteSession       MsgKey = "failed_to_delete_session"
@@ -659,589 +638,376 @@ const (
 
 var messages = map[MsgKey]map[Language]string{
 	MsgStarting: {
-		LangEnglish:            "⏳ Processing...",
-		LangChinese:            "⏳ 处理中...",
-		LangTraditionalChinese: "⏳ 處理中...",
-		LangJapanese:           "⏳ 処理中...",
-		LangSpanish:            "⏳ Procesando...",
+		LangEnglish: "⏳ Processing...",
+		LangChinese: "⏳ 处理中...",
 	},
 	MsgLoading: {
-		LangEnglish:            "Thinking...",
-		LangChinese:            "正在思考...",
-		LangTraditionalChinese: "正在思考...",
-		LangJapanese:           "考え中...",
-		LangSpanish:            "Pensando...",
+		LangEnglish: "Thinking...",
+		LangChinese: "正在思考...",
 	},
 	MsgThinking: {
 		LangEnglish: "💭 %s",
 		LangChinese: "💭 %s",
 	},
 	MsgTool: {
-		LangEnglish:            "🔧 **Tool #%d: %s**\n---\n%s",
-		LangChinese:            "🔧 **工具 #%d: %s**\n---\n%s",
-		LangTraditionalChinese: "🔧 **工具 #%d: %s**\n---\n%s",
-		LangJapanese:           "🔧 **ツール #%d: %s**\n---\n%s",
-		LangSpanish:            "🔧 **Herramienta #%d: %s**\n---\n%s",
+		LangEnglish: "🔧 **Tool #%d: %s**\n---\n%s",
+		LangChinese: "🔧 **工具 #%d: %s**\n---\n%s",
 	},
 	MsgToolResult: {
-		LangEnglish:            "📤 **%s**\n---\n%s",
-		LangChinese:            "📤 **%s**\n---\n%s",
-		LangTraditionalChinese: "📤 **%s**\n---\n%s",
-		LangJapanese:           "📤 **%s**\n---\n%s",
-		LangSpanish:            "📤 **%s**\n---\n%s",
+		LangEnglish: "📤 **%s**\n---\n%s",
+		LangChinese: "📤 **%s**\n---\n%s",
 	},
 	MsgToolResultFmtStatus: {
-		LangEnglish:            "Status",
-		LangChinese:            "状态",
-		LangTraditionalChinese: "狀態",
-		LangJapanese:           "ステータス",
-		LangSpanish:            "Estado",
+		LangEnglish: "Status",
+		LangChinese: "状态",
 	},
 	MsgToolResultFmtExit: {
-		LangEnglish:            "Exit",
-		LangChinese:            "退出码",
-		LangTraditionalChinese: "結束代碼",
-		LangJapanese:           "終了コード",
-		LangSpanish:            "Salida",
+		LangEnglish: "Exit",
+		LangChinese: "退出码",
 	},
 	MsgToolResultFmtNoOutput: {
-		LangEnglish:            "No output",
-		LangChinese:            "无输出",
-		LangTraditionalChinese: "無輸出",
-		LangJapanese:           "出力なし",
-		LangSpanish:            "Sin salida",
+		LangEnglish: "No output",
+		LangChinese: "无输出",
 	},
 	MsgToolResultFmtOk: {
-		LangEnglish:            "ok",
-		LangChinese:            "ok",
-		LangTraditionalChinese: "ok",
-		LangJapanese:           "ok",
-		LangSpanish:            "ok",
+		LangEnglish: "ok",
+		LangChinese: "ok",
 	},
 	MsgToolResultFmtFailed: {
-		LangEnglish:            "failed",
-		LangChinese:            "failed",
-		LangTraditionalChinese: "failed",
-		LangJapanese:           "failed",
-		LangSpanish:            "fallido",
+		LangEnglish: "failed",
+		LangChinese: "failed",
 	},
 	MsgExecutionStopped: {
-		LangEnglish:            "⏹ Execution stopped.",
-		LangChinese:            "⏹ 执行已停止。",
-		LangTraditionalChinese: "⏹ 執行已停止。",
-		LangJapanese:           "⏹ 実行を停止しました。",
-		LangSpanish:            "⏹ Ejecución detenida.",
+		LangEnglish: "⏹ Execution stopped.",
+		LangChinese: "⏹ 执行已停止。",
 	},
 	MsgTaskCardRunning: {
-		LangEnglish:            "⏳ Working · %s",
-		LangChinese:            "⏳ 正在处理 · %s",
-		LangTraditionalChinese: "⏳ 正在處理 · %s",
-		LangJapanese:           "⏳ 実行中 · %s",
-		LangSpanish:            "⏳ Trabajando · %s",
+		LangEnglish: "⏳ Working · %s",
+		LangChinese: "⏳ 正在处理 · %s",
 	},
 	MsgTaskCardDone: {
-		LangEnglish:            "✅ Done · %s",
-		LangChinese:            "✅ 已完成 · 用时 %s",
-		LangTraditionalChinese: "✅ 已完成 · 用時 %s",
-		LangJapanese:           "✅ 完了 · %s",
-		LangSpanish:            "✅ Terminado · %s",
+		LangEnglish: "✅ Done · %s",
+		LangChinese: "✅ 已完成 · 用时 %s",
 	},
 	MsgTaskCardStopped: {
-		LangEnglish:            "⏹ Stopped · %s",
-		LangChinese:            "⏹ 已停止 · 用时 %s",
-		LangTraditionalChinese: "⏹ 已停止 · 用時 %s",
-		LangJapanese:           "⏹ 停止しました · %s",
-		LangSpanish:            "⏹ Detenido · %s",
+		LangEnglish: "⏹ Stopped · %s",
+		LangChinese: "⏹ 已停止 · 用时 %s",
 	},
 	MsgTaskCardFailed: {
-		LangEnglish:            "❌ Failed · %s",
-		LangChinese:            "❌ 出错了 · 用时 %s",
-		LangTraditionalChinese: "❌ 出錯了 · 用時 %s",
-		LangJapanese:           "❌ 失敗しました · %s",
-		LangSpanish:            "❌ Error · %s",
+		LangEnglish: "❌ Failed · %s",
+		LangChinese: "❌ 出错了 · 用时 %s",
 	},
 	MsgTaskCardPreparing: {
-		LangEnglish:            "Preparing",
-		LangChinese:            "准备中",
-		LangTraditionalChinese: "準備中",
-		LangJapanese:           "準備中",
-		LangSpanish:            "Preparando",
+		LangEnglish: "Preparing",
+		LangChinese: "准备中",
 	},
 	MsgTaskCardStep: {
-		LangEnglish:            "Current step: %s",
-		LangChinese:            "当前步骤：%s",
-		LangTraditionalChinese: "當前步驟：%s",
-		LangJapanese:           "現在のステップ：%s",
-		LangSpanish:            "Paso actual: %s",
+		LangEnglish: "Current step: %s",
+		LangChinese: "当前步骤：%s",
 	},
 	MsgTaskCardLastStep: {
-		LangEnglish:            "Last step: %s",
-		LangChinese:            "最后步骤：%s",
-		LangTraditionalChinese: "最後步驟：%s",
-		LangJapanese:           "最後のステップ：%s",
-		LangSpanish:            "Último paso: %s",
+		LangEnglish: "Last step: %s",
+		LangChinese: "最后步骤：%s",
 	},
 	MsgTaskCardQueue: {
-		LangEnglish:            "📋 Queued (%d)",
-		LangChinese:            "📋 排队中 (%d)",
-		LangTraditionalChinese: "📋 排隊中 (%d)",
-		LangJapanese:           "📋 待機中 (%d)",
-		LangSpanish:            "📋 En cola (%d)",
+		LangEnglish: "📋 Queued (%d)",
+		LangChinese: "📋 排队中 (%d)",
 	},
 	MsgTaskCardStopBtn: {
-		LangEnglish:            "⏹ Stop",
-		LangChinese:            "⏹ 停止当前",
-		LangTraditionalChinese: "⏹ 停止當前",
-		LangJapanese:           "⏹ 停止",
-		LangSpanish:            "⏹ Detener",
+		LangEnglish: "⏹ Stop",
+		LangChinese: "⏹ 停止当前",
 	},
 	MsgAckProcessing: {
-		LangEnglish:            "Received, processing...",
-		LangChinese:            "收到，处理中...",
-		LangTraditionalChinese: "收到，處理中...",
-		LangJapanese:           "受信しました。処理中...",
-		LangSpanish:            "Recibido, procesando...",
+		LangEnglish: "Received, processing...",
+		LangChinese: "收到，处理中...",
 	},
 	MsgSteerAck: {
-		LangEnglish:            "Received — sent into the running task, please wait…",
-		LangChinese:            "收到，已插话到当前任务，处理中...",
-		LangTraditionalChinese: "收到，已插話到當前任務，處理中...",
-		LangJapanese:           "了解しました。実行中のタスクに送信しました。少々お待ちください…",
-		LangSpanish:            "Recibido — enviado a la tarea en curso, un momento…",
+		LangEnglish: "Received — sent into the running task, please wait…",
+		LangChinese: "收到，已插话到当前任务，处理中...",
 	},
 	MsgTaskCardWaitingConfirm: {
-		LangEnglish:            "waiting for your confirmation",
-		LangChinese:            "等待你的确认",
-		LangTraditionalChinese: "等待你的確認",
-		LangJapanese:           "確認待ち",
-		LangSpanish:            "esperando tu confirmación",
+		LangEnglish: "waiting for your confirmation",
+		LangChinese: "等待你的确认",
 	},
 	MsgTaskCardDegraded: {
-		LangEnglish:            "⚠️ Progress-card updates are being throttled by the messaging platform. The task is still running; progress may be delayed and the final result will be sent as a normal message.",
-		LangChinese:            "⚠️ 进度卡片更新被消息平台限流，任务仍在继续；后续进度可能延迟，最终结果会以普通消息发送。",
-		LangTraditionalChinese: "⚠️ 進度卡片更新被訊息平台限流，任務仍在繼續；後續進度可能延遲，最終結果會以普通訊息發送。",
-		LangJapanese:           "⚠️ 進捗カードの更新がメッセージプラットフォームにより制限されています。タスクは継続中で、進捗の反映が遅れる場合があります。最終結果は通常メッセージで送信します。",
-		LangSpanish:            "⚠️ Las actualizaciones de la tarjeta de progreso están limitadas por la plataforma de mensajería. La tarea sigue en curso; el progreso puede retrasarse y el resultado final se enviará como mensaje normal.",
+		LangEnglish: "⚠️ Progress-card updates keep failing (possibly throttled). The task is still running; the final result will be sent as a normal message.",
+		LangChinese: "⚠️ 进度卡片连续更新失败（可能被限流），任务仍在继续；最终结果会以普通消息发送。",
+	},
+	MsgTaskCardNewInstruction: {
+		LangEnglish: "handling a new instruction",
+		LangChinese: "处理新指令",
+	},
+	MsgToolActionCommand: {
+		LangEnglish: "running a command",
+		LangChinese: "执行命令",
+	},
+	MsgToolActionRead: {
+		LangEnglish: "reading a file",
+		LangChinese: "读取文件",
+	},
+	MsgToolActionWrite: {
+		LangEnglish: "editing files",
+		LangChinese: "修改文件",
+	},
+	MsgToolActionSearch: {
+		LangEnglish: "searching content",
+		LangChinese: "检索内容",
+	},
+	MsgToolActionFind: {
+		LangEnglish: "finding files",
+		LangChinese: "查找文件",
+	},
+	MsgToolActionWeb: {
+		LangEnglish: "looking up information",
+		LangChinese: "查询资料",
+	},
+	MsgToolActionTask: {
+		LangEnglish: "running a subtask",
+		LangChinese: "执行子任务",
+	},
+	MsgToolActionSkill: {
+		LangEnglish: "running a skill",
+		LangChinese: "调用技能",
+	},
+	MsgToolActionGeneric: {
+		LangEnglish: "running a tool",
+		LangChinese: "调用工具",
 	},
 	MsgNoExecution: {
-		LangEnglish:            "No execution in progress.",
-		LangChinese:            "没有正在执行的任务。",
-		LangTraditionalChinese: "沒有正在執行的任務。",
-		LangJapanese:           "実行中のタスクはありません。",
-		LangSpanish:            "No hay ejecución en progreso.",
+		LangEnglish: "No execution in progress.",
+		LangChinese: "没有正在执行的任务。",
 	},
 	MsgPreviousProcessing: {
-		LangEnglish:            "⏳ Previous request still processing. Use `/ps <message>` to send a P.S. to the running task.",
-		LangChinese:            "⏳ 上一个请求仍在处理中。使用 `/ps <消息>` 可向正在执行的任务追加补充信息。",
-		LangTraditionalChinese: "⏳ 上一個請求仍在處理中。使用 `/ps <訊息>` 可向正在執行的任務追加補充資訊。",
-		LangJapanese:           "⏳ 前のリクエストを処理中です。`/ps <メッセージ>` で実行中のタスクに補足情報を送れます。",
-		LangSpanish:            "⏳ La solicitud anterior aún se está procesando. Use `/ps <mensaje>` para enviar un P.S. a la tarea en curso.",
+		LangEnglish: "⏳ Previous request still processing. Use `/ps <message>` to send a P.S. to the running task.",
+		LangChinese: "⏳ 上一个请求仍在处理中。使用 `/ps <消息>` 可向正在执行的任务追加补充信息。",
 	},
 	MsgMessageQueued: {
-		LangEnglish:            "📬 Message received — will process after the current task finishes.",
-		LangChinese:            "收到，已排队，将在当前任务完成后处理...",
-		LangTraditionalChinese: "收到，已排隊，將在目前任務完成後處理...",
-		LangJapanese:           "📬 メッセージを受信しました。現在のタスク完了後に処理します。",
-		LangSpanish:            "📬 Mensaje recibido — se procesará después de que termine la tarea actual.",
+		LangEnglish: "📬 Message received — will process after the current task finishes.",
+		LangChinese: "收到，已排队，将在当前任务完成后处理...",
 	},
 	MsgQueueFull: {
-		LangEnglish:            "📬 Message queue is full (%d pending). Please wait for current tasks to complete.",
-		LangChinese:            "📬 消息队列已满（%d 条待处理）。请等待当前任务完成。",
-		LangTraditionalChinese: "📬 訊息佇列已滿（%d 則待處理）。請等待目前任務完成。",
-		LangJapanese:           "📬 メッセージキューが満杯です（%d 件待ち）。現在のタスク完了をお待ちください。",
-		LangSpanish:            "📬 La cola de mensajes está llena (%d pendientes). Espere a que las tareas actuales se completen.",
+		LangEnglish: "📬 Message queue is full (%d pending). Please wait for current tasks to complete.",
+		LangChinese: "📬 消息队列已满（%d 条待处理）。请等待当前任务完成。",
 	},
 	MsgNoToolsAllowed: {
-		LangEnglish:            "No tools pre-allowed.\nUsage: `/allow <tool_name>`\nExample: `/allow Bash`",
-		LangChinese:            "尚未预授权任何工具。\n用法: `/allow <工具名>`\n示例: `/allow Bash`",
-		LangTraditionalChinese: "尚未預授權任何工具。\n用法: `/allow <工具名>`\n範例: `/allow Bash`",
-		LangJapanese:           "事前許可されたツールはありません。\n使い方: `/allow <ツール名>`\n例: `/allow Bash`",
-		LangSpanish:            "No hay herramientas pre-autorizadas.\nUso: `/allow <nombre_herramienta>`\nEjemplo: `/allow Bash`",
+		LangEnglish: "No tools pre-allowed.\nUsage: `/allow <tool_name>`\nExample: `/allow Bash`",
+		LangChinese: "尚未预授权任何工具。\n用法: `/allow <工具名>`\n示例: `/allow Bash`",
 	},
 	MsgCurrentTools: {
-		LangEnglish:            "Pre-allowed tools: %s",
-		LangChinese:            "预授权的工具: %s",
-		LangTraditionalChinese: "預授權的工具: %s",
-		LangJapanese:           "事前許可済みツール: %s",
-		LangSpanish:            "Herramientas pre-autorizadas: %s",
+		LangEnglish: "Pre-allowed tools: %s",
+		LangChinese: "预授权的工具: %s",
 	},
 	MsgCurrentSession: {
-		LangEnglish:            "📌 Current session\nName: %s\nSession ID: %s\nLocal messages: %d",
-		LangChinese:            "📌 当前会话\n名称: %s\n会话 ID: %s\n本地消息数: %d",
-		LangTraditionalChinese: "📌 目前工作階段\n名稱: %s\n工作階段 ID: %s\n本機訊息數: %d",
-		LangJapanese:           "📌 現在のセッション\n名前: %s\nセッション ID: %s\nローカルメッセージ数: %d",
-		LangSpanish:            "📌 Sesión actual\nNombre: %s\nID de sesión: %s\nMensajes locales: %d",
+		LangEnglish: "📌 Current session\nName: %s\nSession ID: %s\nLocal messages: %d",
+		LangChinese: "📌 当前会话\n名称: %s\n会话 ID: %s\n本地消息数: %d",
 	},
 	MsgToolAuthNotSupported: {
-		LangEnglish:            "This agent does not support tool authorization.",
-		LangChinese:            "此代理不支持工具授权。",
-		LangTraditionalChinese: "此代理不支援工具授權。",
-		LangJapanese:           "このエージェントはツール認可をサポートしていません。",
-		LangSpanish:            "Este agente no soporta la autorización de herramientas.",
+		LangEnglish: "This agent does not support tool authorization.",
+		LangChinese: "此代理不支持工具授权。",
 	},
 	MsgToolAllowFailed: {
-		LangEnglish:            "Failed to allow tool: %v",
-		LangChinese:            "授权工具失败: %v",
-		LangTraditionalChinese: "授權工具失敗: %v",
-		LangJapanese:           "ツール許可に失敗しました: %v",
-		LangSpanish:            "Error al autorizar herramienta: %v",
+		LangEnglish: "Failed to allow tool: %v",
+		LangChinese: "授权工具失败: %v",
 	},
 	MsgToolAllowedNew: {
-		LangEnglish:            "✅ Tool `%s` pre-allowed. Takes effect on next session.",
-		LangChinese:            "✅ 工具 `%s` 已预授权。将在下次会话生效。",
-		LangTraditionalChinese: "✅ 工具 `%s` 已預授權。將在下次會話生效。",
-		LangJapanese:           "✅ ツール `%s` を事前許可しました。次のセッションから有効になります。",
-		LangSpanish:            "✅ Herramienta `%s` pre-autorizada. Se aplicará en la próxima sesión.",
+		LangEnglish: "✅ Tool `%s` pre-allowed. Takes effect on next session.",
+		LangChinese: "✅ 工具 `%s` 已预授权。将在下次会话生效。",
 	},
 	MsgError: {
-		LangEnglish:            "❌ Error: %v",
-		LangChinese:            "❌ 错误: %v",
-		LangTraditionalChinese: "❌ 錯誤: %v",
-		LangJapanese:           "❌ エラー: %v",
-		LangSpanish:            "❌ Error: %v",
+		LangEnglish: "❌ Error: %v",
+		LangChinese: "❌ 错误: %v",
 	},
 	MsgBackgroundAutoDenied: {
-		LangEnglish:            "⚠️ Background task requested permission for `%s` but was auto-denied (no active user turn). Send a message or use `/yolo` to approve future requests.",
-		LangChinese:            "⚠️ 后台任务请求使用工具 `%s` 的权限，但已自动拒绝（当前无活跃会话）。请发送消息或使用 `/yolo` 授权后续请求。",
-		LangTraditionalChinese: "⚠️ 後台任務請求使用工具 `%s` 的權限，但已自動拒絕（目前無活躍會話）。請發送訊息或使用 `/yolo` 授權後續請求。",
-		LangJapanese:           "⚠️ バックグラウンドタスクがツール `%s` の権限を要求しましたが、自動的に拒否されました（アクティブなユーザーターンなし）。メッセージを送信するか `/yolo` を使用して今後のリクエストを承認してください。",
-		LangSpanish:            "⚠️ Una tarea en segundo plano solicitó permiso para `%s` pero se denegó automáticamente (sin turno de usuario activo). Envía un mensaje o usa `/yolo` para aprobar solicitudes futuras.",
+		LangEnglish: "⚠️ Background task requested permission for `%s` but was auto-denied (no active user turn). Send a message or use `/yolo` to approve future requests.",
+		LangChinese: "⚠️ 后台任务请求使用工具 `%s` 的权限，但已自动拒绝（当前无活跃会话）。请发送消息或使用 `/yolo` 授权后续请求。",
 	},
 	MsgSessionNotFound: {
-		LangEnglish:            "⚠️ Session expired. Use /new to start a fresh conversation.",
-		LangChinese:            "⚠️ 会话已过期，请发送 /new 开始新会话",
-		LangTraditionalChinese: "⚠️ 會話已過期，請發送 /new 開始新會話",
-		LangJapanese:           "⚠️ セッションが期限切れです。/new で新しい会話を開始してください。",
-		LangSpanish:            "⚠️ Sesión expirada. Usa /new para iniciar una nueva conversación.",
+		LangEnglish: "⚠️ Session expired. Use /new to start a fresh conversation.",
+		LangChinese: "⚠️ 会话已过期，请发送 /new 开始新会话",
 	},
 	MsgFailedToStartAgentSession: {
-		LangEnglish:            "❌ Error: failed to start agent session",
-		LangChinese:            "❌ 错误: 启动 Agent 会话失败",
-		LangTraditionalChinese: "❌ 錯誤: 啟動 Agent 會話失敗",
-		LangJapanese:           "❌ エラー: Agentセッションの起動に失敗しました",
-		LangSpanish:            "❌ Error: error al iniciar la sesión del agente",
+		LangEnglish: "❌ Error: failed to start agent session",
+		LangChinese: "❌ 错误: 启动 Agent 会话失败",
 	},
-	MsgImageTooLarge: {
-		LangEnglish:            "⚠️ Image %d is too large (%d×%d). The model limit is %d px per side and an oversized image breaks the whole session. Please split it and resend.",
-		LangChinese:            "⚠️ 第 %d 张图片过大（%d×%d）。模型单边上限 %d px，且超限图片会导致整个会话不可用。请切分后重发。",
-		LangTraditionalChinese: "⚠️ 第 %d 張圖片過大（%d×%d）。模型單邊上限 %d px，且超限圖片會導致整個會話不可用。請切分後重發。",
-		LangJapanese:           "⚠️ %d 枚目の画像が大きすぎます（%d×%d）。モデルの上限は各辺 %d px で、超過するとセッション全体が使用できなくなります。分割して再送信してください。",
-		LangSpanish:            "⚠️ La imagen %d es demasiado grande (%d×%d). El límite del modelo es %d px por lado y una imagen sobredimensionada inutiliza toda la sesión. Divídela y vuelve a enviarla.",
+	MsgImageTooLargeSingle: {
+		LangEnglish: "⚠️ The image is too large (%d×%d), exceeding the model's %d px per-side limit. Please split it and resend.",
+		LangChinese: "⚠️ 图片过大（%d×%d），超过模型单边 %d px 上限。请切分后重发。",
+	},
+	MsgImageTooLargeMulti: {
+		LangEnglish: "⚠️ Image %d of %d is too large (%d×%d), exceeding the model's %d px per-side limit. Please split it and resend.",
+		LangChinese: "⚠️ 第 %d 张（共 %d 张）图片过大（%d×%d），超过模型单边 %d px 上限。请切分后重发。",
 	},
 	MsgQuotedImageTooLarge: {
-		LangEnglish:            "⚠️ The quoted message contains a %d×%d image, which exceeds the model's %d px per-side limit. Please quote a different message or ask the sender to split the image.",
-		LangChinese:            "⚠️ 引用消息中的图片过大（%d×%d），超过模型单边 %d px 上限。请改为引用其他消息，或让对方切分图片后重发。",
-		LangTraditionalChinese: "⚠️ 引用訊息中的圖片過大（%d×%d），超過模型單邊 %d px 上限。請改為引用其他訊息，或讓對方切分圖片後重發。",
-		LangJapanese:           "⚠️ 引用したメッセージの画像が大きすぎます（%d×%d）。モデルの各辺 %d px の上限を超えています。別のメッセージを引用するか、送信者に画像の分割を依頼してください。",
-		LangSpanish:            "⚠️ El mensaje citado contiene una imagen de %d×%d, que supera el límite de %d px por lado del modelo. Cita otro mensaje o pide al remitente que divida la imagen.",
+		LangEnglish: "⚠️ The quoted message contains a %d×%d image, which exceeds the model's %d px per-side limit. Please quote a different message or ask the sender to split the image.",
+		LangChinese: "⚠️ 引用消息中的图片过大（%d×%d），超过模型单边 %d px 上限。请改为引用其他消息，或让对方切分图片后重发。",
 	},
 	MsgSessionAutoResetError: {
-		LangEnglish:            "🔄 The session failed %d times in a row and has been reset (same as /new). Last message: “%s”. Please resend it.",
-		LangChinese:            "🔄 会话连续 %d 次处理失败，已自动重置（等同 /new）。上一条消息：『%s』。请重发这条消息。",
-		LangTraditionalChinese: "🔄 會話連續 %d 次處理失敗，已自動重置（等同 /new）。上一條訊息：『%s』。請重發這條訊息。",
-		LangJapanese:           "🔄 セッションで %d 回連続して失敗したため、自動的にリセットしました（/new と同じ）。直前のメッセージ：「%s」。再送信してください。",
-		LangSpanish:            "🔄 La sesión falló %d veces seguidas y se ha restablecido (igual que /new). Último mensaje: «%s». Vuelve a enviarlo.",
+		LangEnglish: "🔄 The session failed %d times in a row and has been reset (same as /new). Last message: “%s”. Please resend it.",
+		LangChinese: "🔄 会话连续 %d 次处理失败，已自动重置（等同 /new）。上一条消息：『%s』。请重发这条消息。",
 	},
 	MsgSessionAutoResetRedispatch: {
-		LangEnglish:            "🔄 The session failed %d times in a row and has been reset (same as /new). Re-processing your last message: “%s”. No need to resend.",
-		LangChinese:            "🔄 会话连续 %d 次处理失败，已自动重置（等同 /new），正在重新处理你的上一条消息：『%s』，无需重发。",
-		LangTraditionalChinese: "🔄 會話連續 %d 次處理失敗，已自動重置（等同 /new），正在重新處理你的上一條訊息：『%s』，無需重發。",
-		LangJapanese:           "🔄 セッションで %d 回連続して失敗したため、自動的にリセットしました（/new と同じ）。直前のメッセージ「%s」を再処理しています。再送信は不要です。",
-		LangSpanish:            "🔄 La sesión falló %d veces seguidas y se ha restablecido (igual que /new). Reprocesando tu último mensaje: «%s». No hace falta reenviarlo.",
+		LangEnglish: "🔄 The session failed %d times in a row and has been reset (same as /new). Re-processing your last message: “%s”. No need to resend.",
+		LangChinese: "🔄 会话连续 %d 次处理失败，已自动重置（等同 /new），正在重新处理你的上一条消息：『%s』，无需重发。",
 	},
 	MsgRedispatchFailed: {
-		LangEnglish:            "⚠️ The automatic retry also failed. Please resend your last message manually: “%s”.",
-		LangChinese:            "⚠️ 重置后的自动重试也失败了，请手动重发上一条消息：『%s』。",
-		LangTraditionalChinese: "⚠️ 重置後的自動重試也失敗了，請手動重發上一條訊息：『%s』。",
-		LangJapanese:           "⚠️ リセット後の自動再試行も失敗しました。直前のメッセージを手動で再送信してください：「%s」。",
-		LangSpanish:            "⚠️ El reintento automático también falló. Vuelve a enviar manualmente tu último mensaje: «%s».",
+		LangEnglish: "⚠️ The automatic retry also failed. Please resend your last message manually: “%s”.",
+		LangChinese: "⚠️ 重置后的自动重试也失败了，请手动重发上一条消息：『%s』。",
 	},
 	MsgRedispatchImagesSkipped: {
-		LangEnglish:            "⚠️ Skipped %d image(s) that would fail the same way. Processing your text now; please split and resend the image separately.",
-		LangChinese:            "⚠️ 已跳过 %d 张会导致同样失败的图片，先重新处理你的文字；图片请切分后单独重发。",
-		LangTraditionalChinese: "⚠️ 已跳過 %d 張會導致同樣失敗的圖片，先重新處理你的文字；圖片請切分後單獨重發。",
-		LangJapanese:           "⚠️ 同じ失敗を引き起こす %d 枚の画像をスキップしました。まず本文を再処理します。画像は分割して別途再送信してください。",
-		LangSpanish:            "⚠️ Se omitieron %d imagen(es) que volverían a fallar. Procesando tu texto ahora; divide y reenvía la imagen por separado.",
+		LangEnglish: "⚠️ Skipped %d image(s) that would fail the same way. Processing your text now; please split and resend the image separately.",
+		LangChinese: "⚠️ 已跳过 %d 张会导致同样失败的图片，先重新处理你的文字；图片请切分后单独重发。",
 	},
 	MsgRedispatchOnlyImagesSkipped: {
-		LangEnglish:            "⚠️ This message contained only image(s) that would fail again. Please split the image and resend it.",
-		LangChinese:            "⚠️ 这条消息只有会导致同样失败的图片，已跳过；请把图片切分后重新发送。",
-		LangTraditionalChinese: "⚠️ 這條訊息只有會導致同樣失敗的圖片，已跳過；請把圖片切分後重新發送。",
-		LangJapanese:           "⚠️ このメッセージは同じ失敗を引き起こす画像のみでした。画像を分割して再送信してください。",
-		LangSpanish:            "⚠️ Este mensaje solo contenía imagen(es) que volverían a fallar. Divide la imagen y vuelve a enviarla.",
+		LangEnglish: "⚠️ This message contained only image(s) that would fail again. Please split the image and resend it.",
+		LangChinese: "⚠️ 这条消息只有会导致同样失败的图片，已跳过；请把图片切分后重新发送。",
 	},
 	MsgSnippetUnknown: {
-		LangEnglish:            "(unknown content)",
-		LangChinese:            "（内容未知）",
-		LangTraditionalChinese: "（內容未知）",
-		LangJapanese:           "（内容不明）",
-		LangSpanish:            "(contenido desconocido)",
+		LangEnglish: "(unknown content)",
+		LangChinese: "（内容未知）",
 	},
 	MsgSnippetImage: {
-		LangEnglish:            "[image]",
-		LangChinese:            "[图片]",
-		LangTraditionalChinese: "[圖片]",
-		LangJapanese:           "[画像]",
-		LangSpanish:            "[imagen]",
+		LangEnglish: "[image]",
+		LangChinese: "[图片]",
 	},
 	MsgSnippetFile: {
-		LangEnglish:            "[file]",
-		LangChinese:            "[文件]",
-		LangTraditionalChinese: "[檔案]",
-		LangJapanese:           "[ファイル]",
-		LangSpanish:            "[archivo]",
+		LangEnglish: "[file]",
+		LangChinese: "[文件]",
 	},
 	MsgAgentErrorImageTooLarge: {
-		LangEnglish:            "⚠️ The image exceeds the model's size limit, so it could not be processed. The session will recover automatically; please split the image and resend it.",
-		LangChinese:            "⚠️ 图片超出模型尺寸上限，本次无法处理。会话会自动恢复；请把图片切分后重发。",
-		LangTraditionalChinese: "⚠️ 圖片超出模型尺寸上限，本次無法處理。會話會自動恢復；請把圖片切分後重發。",
-		LangJapanese:           "⚠️ 画像がモデルのサイズ上限を超えているため処理できませんでした。セッションは自動的に復旧します。画像を分割して再送信してください。",
-		LangSpanish:            "⚠️ La imagen supera el límite de tamaño del modelo y no se pudo procesar. La sesión se recuperará automáticamente; divide la imagen y vuelve a enviarla.",
+		LangEnglish: "⚠️ The image exceeds the model's size limit, so it could not be processed. The session will recover automatically; please split the image and resend it.",
+		LangChinese: "⚠️ 图片超出模型尺寸上限，本次无法处理。会话会自动恢复；请把图片切分后重发。",
 	},
 	MsgAgentErrorAuth: {
-		LangEnglish:            "⚠️ Model authentication failed. Please retry; if it keeps happening, ask the administrator to check the model configuration.",
-		LangChinese:            "⚠️ 模型鉴权失败，请重试；若持续失败请联系管理员检查模型配置。",
-		LangTraditionalChinese: "⚠️ 模型鑑權失敗，請重試；若持續失敗請聯繫管理員檢查模型設定。",
-		LangJapanese:           "⚠️ モデルの認証に失敗しました。再試行し、繰り返す場合は管理者にモデル設定の確認を依頼してください。",
-		LangSpanish:            "⚠️ La autenticación del modelo falló. Reinténtalo; si sigue ocurriendo, pide al administrador que revise la configuración del modelo.",
+		LangEnglish: "⚠️ Model authentication failed. Please retry; if it keeps happening, ask the administrator to check the model configuration.",
+		LangChinese: "⚠️ 模型鉴权失败，请重试；若持续失败请联系管理员检查模型配置。",
 	},
 	MsgAgentErrorRateLimit: {
-		LangEnglish:            "⚠️ The model request was throttled. Please retry in a moment.",
-		LangChinese:            "⚠️ 模型请求被限流，请稍后重试。",
-		LangTraditionalChinese: "⚠️ 模型請求被限流，請稍後重試。",
-		LangJapanese:           "⚠️ モデルへのリクエストが制限されました。しばらくしてから再試行してください。",
-		LangSpanish:            "⚠️ La solicitud al modelo ha sido limitada. Reinténtalo en unos momentos.",
+		LangEnglish: "⚠️ The model request was throttled. Please retry in a moment.",
+		LangChinese: "⚠️ 模型请求被限流，请稍后重试。",
 	},
 	MsgAgentErrorTimeout: {
-		LangEnglish:            "⚠️ The model response timed out. Please retry; if it keeps happening, send /new to start a fresh session.",
-		LangChinese:            "⚠️ 模型响应超时，请重试；若持续失败可发送 /new 重开会话。",
-		LangTraditionalChinese: "⚠️ 模型回應逾時，請重試；若持續失敗可發送 /new 重開會話。",
-		LangJapanese:           "⚠️ モデルの応答がタイムアウトしました。再試行し、繰り返す場合は /new で新しいセッションを開始してください。",
-		LangSpanish:            "⚠️ La respuesta del modelo agotó el tiempo de espera. Reinténtalo; si sigue ocurriendo, envía /new para iniciar una sesión nueva.",
+		LangEnglish: "⚠️ The model response timed out. Please retry; if it keeps happening, send /new to start a fresh session.",
+		LangChinese: "⚠️ 模型响应超时，请重试；若持续失败可发送 /new 重开会话。",
 	},
 	MsgAgentErrorContext: {
-		LangEnglish:            "⚠️ The conversation is longer than the model's context limit. Send /new to start a fresh session, then retry.",
-		LangChinese:            "⚠️ 上下文已超出模型上限，请发送 /new 重开会话后重试。",
-		LangTraditionalChinese: "⚠️ 上下文已超出模型上限，請發送 /new 重開會話後重試。",
-		LangJapanese:           "⚠️ 会話がモデルのコンテキスト上限を超えています。/new で新しいセッションを開始してから再試行してください。",
-		LangSpanish:            "⚠️ La conversación supera el límite de contexto del modelo. Envía /new para iniciar una sesión nueva y vuelve a intentarlo.",
+		LangEnglish: "⚠️ The conversation is longer than the model's context limit. Send /new to start a fresh session, then retry.",
+		LangChinese: "⚠️ 上下文已超出模型上限，请发送 /new 重开会话后重试。",
 	},
 	MsgAgentErrorGeneric: {
-		LangEnglish:            "❌ This turn failed. Please retry; if it keeps failing, send /new to start a fresh session.",
-		LangChinese:            "❌ 本轮处理失败，请重试；若持续失败，可发送 /new 重开会话。",
-		LangTraditionalChinese: "❌ 本輪處理失敗，請重試；若持續失敗，可發送 /new 重開會話。",
-		LangJapanese:           "❌ このターンは失敗しました。再試行し、繰り返す場合は /new で新しいセッションを開始してください。",
-		LangSpanish:            "❌ Este turno falló. Reinténtalo; si sigue fallando, envía /new para iniciar una sesión nueva.",
+		LangEnglish: "❌ This turn failed. Please retry; if it keeps failing, send /new to start a fresh session.",
+		LangChinese: "❌ 本轮处理失败，请重试；若持续失败，可发送 /new 重开会话。",
 	},
 	MsgAgentSendFailed: {
-		LangEnglish:            "❌ The message could not be sent to the assistant. Please retry; if it keeps failing, send /new.",
-		LangChinese:            "❌ 消息未能发送给助手，请重试；若持续失败可发送 /new。",
-		LangTraditionalChinese: "❌ 訊息未能發送給助手，請重試；若持續失敗可發送 /new。",
-		LangJapanese:           "❌ メッセージをアシスタントに送信できませんでした。再試行し、繰り返す場合は /new を送信してください。",
-		LangSpanish:            "❌ No se pudo enviar el mensaje al asistente. Reinténtalo; si sigue fallando, envía /new.",
+		LangEnglish: "❌ The message could not be sent to the assistant. Please retry; if it keeps failing, send /new.",
+		LangChinese: "❌ 消息未能发送给助手，请重试；若持续失败可发送 /new。",
 	},
 	MsgQueuedMessageDropped: {
-		LangEnglish:            "⚠️ This message could not be processed. Please send it again.",
-		LangChinese:            "⚠️ 这条消息未能处理，请重新发送。",
-		LangTraditionalChinese: "⚠️ 這條訊息未能處理，請重新發送。",
-		LangJapanese:           "⚠️ このメッセージは処理できませんでした。もう一度送信してください。",
-		LangSpanish:            "⚠️ No se pudo procesar este mensaje. Vuelve a enviarlo.",
+		LangEnglish: "⚠️ This message could not be processed. Please send it again.",
+		LangChinese: "⚠️ 这条消息未能处理，请重新发送。",
 	},
 	MsgFinalDeliveryFailed: {
-		LangEnglish:            "⚠️ The final answer could not be delivered. Please retry, or send /new if it keeps happening.",
-		LangChinese:            "⚠️ 结论未能送达，请重试；若持续失败可发送 /new 重开会话。",
-		LangTraditionalChinese: "⚠️ 結論未能送達，請重試；若持續失敗可發送 /new 重開會話。",
-		LangJapanese:           "⚠️ 最終回答を配信できませんでした。再試行するか、繰り返す場合は /new を送信してください。",
-		LangSpanish:            "⚠️ No se pudo entregar la respuesta final. Reinténtalo o envía /new si sigue ocurriendo.",
+		LangEnglish: "⚠️ The final answer could not be delivered. Please retry, or send /new if it keeps happening.",
+		LangChinese: "⚠️ 结论未能送达，请重试；若持续失败可发送 /new 重开会话。",
 	},
 	MsgFinalDeliveryPartial: {
-		LangEnglish:            "⚠️ Part of the answer could not be delivered. Please resend your question and I'll regenerate the full answer.",
-		LangChinese:            "⚠️ 部分内容未能送达，请重发你的问题，我会重新生成完整回答。",
-		LangTraditionalChinese: "⚠️ 部分內容未能送達，請重發你的問題，我會重新產生完整回答。",
-		LangJapanese:           "⚠️ 回答の一部を配信できませんでした。質問を再送信してください。完全な回答を再生成します。",
-		LangSpanish:            "⚠️ Parte de la respuesta no se pudo entregar. Vuelve a enviar tu pregunta y generaré la respuesta completa de nuevo.",
+		LangEnglish: "⚠️ Part of the answer could not be delivered. Please resend your question and I'll regenerate the full answer.",
+		LangChinese: "⚠️ 部分内容未能送达，请重发你的问题，我会重新生成完整回答。",
 	},
 	MsgPreviousTurnFailedRestart: {
-		LangEnglish:            "⚠️ The previous turn had already failed; this message is being handled as a fresh turn.",
-		LangChinese:            "⚠️ 上一轮已异常结束，已重新开始处理这条消息。",
-		LangTraditionalChinese: "⚠️ 上一輪已異常結束，已重新開始處理這條訊息。",
-		LangJapanese:           "⚠️ 前のターンは既に異常終了していたため、このメッセージを新しいターンとして処理します。",
-		LangSpanish:            "⚠️ El turno anterior ya había fallado; este mensaje se está procesando como un turno nuevo.",
+		LangEnglish: "⚠️ The previous turn had already failed; this message is being handled as a fresh turn.",
+		LangChinese: "⚠️ 上一轮已异常结束，已重新开始处理这条消息。",
 	},
 	MsgSteerAfterTurnEnd: {
-		LangEnglish:            "✅ Received — the previous turn had just finished, so this message is being handled as a new turn.",
-		LangChinese:            "✅ 收到，上一轮刚好结束，这条消息已作为新一轮处理。",
-		LangTraditionalChinese: "✅ 收到，上一輪剛好結束，這條訊息已作為新一輪處理。",
-		LangJapanese:           "✅ 受信しました。前のターンがちょうど終了したため、このメッセージは新しいターンとして処理します。",
-		LangSpanish:            "✅ Recibido: el turno anterior acababa de terminar, así que este mensaje se procesa como un turno nuevo.",
-	},
-	MsgTurnStillWorking: {
-		LangEnglish:            "⏳ Still working — %s elapsed. Current step: %s",
-		LangChinese:            "⏳ 仍在处理，已用时 %s。当前步骤：%s",
-		LangTraditionalChinese: "⏳ 仍在處理，已用時 %s。目前步驟：%s",
-		LangJapanese:           "⏳ 処理中です（経過 %s）。現在のステップ：%s",
-		LangSpanish:            "⏳ Aún trabajando — %s transcurridos. Paso actual: %s",
-	},
-	MsgTurnWorkingStep: {
-		LangEnglish:            "working",
-		LangChinese:            "处理中",
-		LangTraditionalChinese: "處理中",
-		LangJapanese:           "処理中",
-		LangSpanish:            "en curso",
+		LangEnglish: "✅ Received — the previous turn had just finished, so this message is being handled as a new turn.",
+		LangChinese: "✅ 收到，上一轮刚好结束，这条消息已作为新一轮处理。",
 	},
 	MsgFailedToDeleteSession: {
-		LangEnglish:            "❌ %s: %v",
-		LangChinese:            "❌ %s: %v",
-		LangTraditionalChinese: "❌ %s: %v",
-		LangJapanese:           "❌ %s: %v",
-		LangSpanish:            "❌ %s: %v",
+		LangEnglish: "❌ %s: %v",
+		LangChinese: "❌ %s: %v",
 	},
 	MsgEmptyResponse: {
-		LangEnglish:            "(empty response)",
-		LangChinese:            "(空响应)",
-		LangTraditionalChinese: "(空回應)",
-		LangJapanese:           "（空のレスポンス）",
-		LangSpanish:            "(respuesta vacía)",
+		LangEnglish: "(empty response)",
+		LangChinese: "(空响应)",
 	},
 	MsgPermissionPrompt: {
-		LangEnglish:            "⚠️ **Permission Request**\n\nAgent wants to use **%s**:\n\n```\n%s\n```\n\nReply **allow** / **deny** / **allow all** (skip all future prompts this session).",
-		LangChinese:            "⚠️ **权限请求**\n\nAgent 想要使用 **%s**:\n\n```\n%s\n```\n\n回复 **允许** / **拒绝** / **允许所有**（本次会话不再提醒）。",
-		LangTraditionalChinese: "⚠️ **權限請求**\n\nAgent 想要使用 **%s**:\n\n```\n%s\n```\n\n回覆 **允許** / **拒絕** / **允許所有**（本次會話不再提醒）。",
-		LangJapanese:           "⚠️ **権限リクエスト**\n\nエージェントが **%s** を使用しようとしています:\n\n```\n%s\n```\n\n**allow** / **deny** / **allow all**（このセッション中は全て自動許可）で返信してください。",
-		LangSpanish:            "⚠️ **Solicitud de permiso**\n\nEl agente quiere usar **%s**:\n\n```\n%s\n```\n\nResponda **allow** / **deny** / **allow all** (omitir futuras solicitudes en esta sesión).",
+		LangEnglish: "⚠️ **Permission Request**\n\nAgent wants to use **%s**:\n\n```\n%s\n```\n\nReply **allow** / **deny** / **allow all** (skip all future prompts this session).",
+		LangChinese: "⚠️ **权限请求**\n\nAgent 想要使用 **%s**:\n\n```\n%s\n```\n\n回复 **允许** / **拒绝** / **允许所有**（本次会话不再提醒）。",
 	},
 	MsgPermissionAllowed: {
-		LangEnglish:            "✅ Allowed, continuing...",
-		LangChinese:            "✅ 已允许，继续执行...",
-		LangTraditionalChinese: "✅ 已允許，繼續執行...",
-		LangJapanese:           "✅ 許可しました。続行中...",
-		LangSpanish:            "✅ Permitido, continuando...",
+		LangEnglish: "✅ Allowed, continuing...",
+		LangChinese: "✅ 已允许，继续执行...",
 	},
 	MsgPermissionApproveAll: {
-		LangEnglish:            "✅ All permissions auto-approved for this session.",
-		LangChinese:            "✅ 本次会话已开启自动批准，后续权限请求将自动允许。",
-		LangTraditionalChinese: "✅ 本次會話已開啟自動批准，後續權限請求將自動允許。",
-		LangJapanese:           "✅ このセッションの全ての権限を自動承認に設定しました。",
-		LangSpanish:            "✅ Todos los permisos se aprobarán automáticamente en esta sesión.",
+		LangEnglish: "✅ All permissions auto-approved for this session.",
+		LangChinese: "✅ 本次会话已开启自动批准，后续权限请求将自动允许。",
 	},
 	MsgPermissionDenied: {
-		LangEnglish:            "❌ Denied. Agent will stop this tool use.",
-		LangChinese:            "❌ 已拒绝。Agent 将停止此工具使用。",
-		LangTraditionalChinese: "❌ 已拒絕。Agent 將停止此工具使用。",
-		LangJapanese:           "❌ 拒否しました。エージェントはこのツールの使用を中止します。",
-		LangSpanish:            "❌ Denegado. El agente detendrá el uso de esta herramienta.",
+		LangEnglish: "❌ Denied. Agent will stop this tool use.",
+		LangChinese: "❌ 已拒绝。Agent 将停止此工具使用。",
 	},
 	MsgPermissionHint: {
-		LangEnglish:            "⚠️ Waiting for permission response. Reply **allow** / **deny** / **allow all**.",
-		LangChinese:            "⚠️ 等待权限响应。请回复 **允许** / **拒绝** / **允许所有**。",
-		LangTraditionalChinese: "⚠️ 等待權限回應。請回覆 **允許** / **拒絕** / **允許所有**。",
-		LangJapanese:           "⚠️ 権限の応答を待っています。**allow** / **deny** / **allow all** で返信してください。",
-		LangSpanish:            "⚠️ Esperando respuesta de permiso. Responda **allow** / **deny** / **allow all**.",
+		LangEnglish: "⚠️ Waiting for permission response. Reply **allow** / **deny** / **allow all**.",
+		LangChinese: "⚠️ 等待权限响应。请回复 **允许** / **拒绝** / **允许所有**。",
 	},
 	MsgQuietOn: {
-		LangEnglish:            "🔇 Quiet mode ON — thinking and tool progress messages will be hidden.",
-		LangChinese:            "🔇 安静模式已开启 — 将不再推送思考和工具调用进度消息。",
-		LangTraditionalChinese: "🔇 安靜模式已開啟 — 將不再推送思考和工具調用進度訊息。",
-		LangJapanese:           "🔇 静音モード ON — 思考とツール実行の進捗メッセージを非表示にします。",
-		LangSpanish:            "🔇 Modo silencioso activado — los mensajes de progreso se ocultarán.",
+		LangEnglish: "🔇 Quiet mode ON — thinking and tool progress messages will be hidden.",
+		LangChinese: "🔇 安静模式已开启 — 将不再推送思考和工具调用进度消息。",
 	},
 	MsgQuietOff: {
-		LangEnglish:            "🔔 Quiet mode OFF — thinking and tool progress messages will be shown.",
-		LangChinese:            "🔔 安静模式已关闭 — 将恢复推送思考和工具调用进度消息。",
-		LangTraditionalChinese: "🔔 安靜模式已關閉 — 將恢復推送思考和工具調用進度訊息。",
-		LangJapanese:           "🔔 静音モード OFF — 思考とツール実行の進捗メッセージを表示します。",
-		LangSpanish:            "🔔 Modo silencioso desactivado — los mensajes de progreso se mostrarán.",
+		LangEnglish: "🔔 Quiet mode OFF — thinking and tool progress messages will be shown.",
+		LangChinese: "🔔 安静模式已关闭 — 将恢复推送思考和工具调用进度消息。",
 	},
 	MsgDisplayModeCompact: {
-		LangEnglish:            "📋 Compact mode — thinking/tool hidden, each text segment sent separately.",
-		LangChinese:            "📋 紧凑模式 — 隐藏思考和工具消息，每段文本独立发送。",
-		LangTraditionalChinese: "📋 緊湊模式 — 隱藏思考和工具訊息，每段文字獨立發送。",
-		LangJapanese:           "📋 コンパクトモード — 思考・ツール非表示、テキストは個別に送信。",
-		LangSpanish:            "📋 Modo compacto — pensamiento/herramientas ocultos, cada segmento de texto enviado por separado.",
+		LangEnglish: "📋 Compact mode — thinking/tool hidden, each text segment sent separately.",
+		LangChinese: "📋 紧凑模式 — 隐藏思考和工具消息，每段文本独立发送。",
 	},
 	MsgQuietGlobalOn: {
-		LangEnglish:            "🔇 Global quiet mode ON — all sessions will hide thinking and tool progress.",
-		LangChinese:            "🔇 全局安静模式已开启 — 所有会话将不再推送思考和工具调用进度消息。",
-		LangTraditionalChinese: "🔇 全域安靜模式已開啟 — 所有會話將不再推送思考和工具調用進度訊息。",
-		LangJapanese:           "🔇 グローバル静音モード ON — 全セッションで思考とツール進捗を非表示にします。",
-		LangSpanish:            "🔇 Modo silencioso global activado — todas las sesiones ocultarán los mensajes de progreso.",
+		LangEnglish: "🔇 Global quiet mode ON — all sessions will hide thinking and tool progress.",
+		LangChinese: "🔇 全局安静模式已开启 — 所有会话将不再推送思考和工具调用进度消息。",
 	},
 	MsgQuietGlobalOff: {
-		LangEnglish:            "🔔 Global quiet mode OFF — all sessions will show thinking and tool progress.",
-		LangChinese:            "🔔 全局安静模式已关闭 — 所有会话将恢复推送思考和工具调用进度消息。",
-		LangTraditionalChinese: "🔔 全域安靜模式已關閉 — 所有會話將恢復推送思考和工具調用進度訊息。",
-		LangJapanese:           "🔔 グローバル静音モード OFF — 全セッションで思考とツール進捗を表示します。",
-		LangSpanish:            "🔔 Modo silencioso global desactivado — todas las sesiones mostrarán los mensajes de progreso.",
+		LangEnglish: "🔔 Global quiet mode OFF — all sessions will show thinking and tool progress.",
+		LangChinese: "🔔 全局安静模式已关闭 — 所有会话将恢复推送思考和工具调用进度消息。",
 	},
 	MsgModeChanged: {
-		LangEnglish:            "🔄 Permission mode switched to **%s**. New sessions will use this mode.",
-		LangChinese:            "🔄 权限模式已切换为 **%s**，新会话将使用此模式。",
-		LangTraditionalChinese: "🔄 權限模式已切換為 **%s**，新會話將使用此模式。",
-		LangJapanese:           "🔄 権限モードを **%s** に切り替えました。新しいセッションで有効になります。",
-		LangSpanish:            "🔄 Modo de permisos cambiado a **%s**. Las nuevas sesiones usarán este modo.",
+		LangEnglish: "🔄 Permission mode switched to **%s**. New sessions will use this mode.",
+		LangChinese: "🔄 权限模式已切换为 **%s**，新会话将使用此模式。",
 	},
 	MsgModeNotSupported: {
-		LangEnglish:            "This agent does not support permission mode switching.",
-		LangChinese:            "当前 Agent 不支持权限模式切换。",
-		LangTraditionalChinese: "當前 Agent 不支援權限模式切換。",
-		LangJapanese:           "このエージェントは権限モードの切り替えをサポートしていません。",
-		LangSpanish:            "Este agente no soporta el cambio de modo de permisos.",
+		LangEnglish: "This agent does not support permission mode switching.",
+		LangChinese: "当前 Agent 不支持权限模式切换。",
 	},
 	MsgSessionRestarting: {
-		LangEnglish:            "🔄 Session process exited, restarting...",
-		LangChinese:            "🔄 会话进程已退出，正在重启...",
-		LangTraditionalChinese: "🔄 會話進程已退出，正在重啟...",
-		LangJapanese:           "🔄 セッションプロセスが終了しました。再起動中...",
-		LangSpanish:            "🔄 El proceso de sesión finalizó, reiniciando...",
+		LangEnglish: "🔄 Session process exited, restarting...",
+		LangChinese: "🔄 会话进程已退出，正在重启...",
 	},
 	MsgSessionNotStarted: {
-		LangEnglish:            "(new — not yet started)",
-		LangChinese:            "(新会话 — 尚未开始)",
-		LangTraditionalChinese: "(新會話 — 尚未開始)",
-		LangJapanese:           "(新規 — まだ開始されていません)",
-		LangSpanish:            "(nuevo — aún no iniciado)",
+		LangEnglish: "(new — not yet started)",
+		LangChinese: "(新会话 — 尚未开始)",
 	},
 	MsgUntitled: {
-		LangEnglish:            "(untitled)",
-		LangChinese:            "(未命名)",
-		LangTraditionalChinese: "(未命名)",
-		LangJapanese:           "(無題)",
-		LangSpanish:            "(sin título)",
+		LangEnglish: "(untitled)",
+		LangChinese: "(未命名)",
 	},
 	MsgLangChanged: {
-		LangEnglish:            "🌐 Language switched to **%s**.",
-		LangChinese:            "🌐 语言已切换为 **%s**。",
-		LangTraditionalChinese: "🌐 語言已切換為 **%s**。",
-		LangJapanese:           "🌐 言語を **%s** に切り替えました。",
-		LangSpanish:            "🌐 Idioma cambiado a **%s**.",
+		LangEnglish: "🌐 Language switched to **%s**.",
+		LangChinese: "🌐 语言已切换为 **%s**。",
 	},
 	MsgLangInvalid: {
-		LangEnglish:            "Unknown language. Supported: `en`, `zh`, `zh-TW`, `ja`, `es`, `auto`.",
-		LangChinese:            "未知语言。支持: `en`, `zh`, `zh-TW`, `ja`, `es`, `auto`。",
-		LangTraditionalChinese: "未知語言。支援: `en`, `zh`, `zh-TW`, `ja`, `es`, `auto`。",
-		LangJapanese:           "不明な言語です。対応: `en`, `zh`, `zh-TW`, `ja`, `es`, `auto`。",
-		LangSpanish:            "Idioma desconocido. Soportados: `en`, `zh`, `zh-TW`, `ja`, `es`, `auto`.",
+		LangEnglish: "Unknown language. Supported: `en`, `zh`, `auto`.",
+		LangChinese: "未知语言。支持: `en`, `zh`, `auto`。",
 	},
 	MsgLangCurrent: {
-		LangEnglish:            "🌐 Current language: **%s**\n\nUsage: /lang <en|zh|zh-TW|ja|es|auto>",
-		LangChinese:            "🌐 当前语言: **%s**\n\n用法: /lang <en|zh|zh-TW|ja|es|auto>",
-		LangTraditionalChinese: "🌐 當前語言: **%s**\n\n用法: /lang <en|zh|zh-TW|ja|es|auto>",
-		LangJapanese:           "🌐 現在の言語: **%s**\n\n使い方: /lang <en|zh|zh-TW|ja|es|auto>",
-		LangSpanish:            "🌐 Idioma actual: **%s**\n\nUso: /lang <en|zh|zh-TW|ja|es|auto>",
+		LangEnglish: "🌐 Current language: **%s**\n\nUsage: /lang <en|zh|auto>",
+		LangChinese: "🌐 当前语言: **%s**\n\n用法: /lang <en|zh|auto>",
 	},
 	MsgUnknownCommand: {
-		LangEnglish:            "`%s` is not a cc-connect command, forwarding to agent...",
-		LangChinese:            "`%s` 不是 cc-connect 命令，已转发给 Agent 处理...",
-		LangTraditionalChinese: "`%s` 不是 cc-connect 命令，已轉發給 Agent 處理...",
-		LangJapanese:           "`%s` は cc-connect のコマンドではありません。エージェントに転送します...",
-		LangSpanish:            "`%s` no es un comando de cc-connect, reenviando al agente...",
+		LangEnglish: "`%s` is not a cc-connect command, forwarding to agent...",
+		LangChinese: "`%s` 不是 cc-connect 命令，已转发给 Agent 处理...",
 	},
 	MsgWelcome: {
-		LangEnglish:            "👋 Hi! I'm cc-connect, bridging you to **%s**.\n\nJust send a message to chat with the agent. Type /help to see built-in commands.",
-		LangChinese:            "👋 你好！我是 cc-connect，已为你连接到 **%s**。\n\n直接发送消息即可与 Agent 对话。输入 /help 查看内置命令。",
-		LangTraditionalChinese: "👋 你好！我是 cc-connect，已為你連接到 **%s**。\n\n直接發送訊息即可與 Agent 對話。輸入 /help 查看內建命令。",
-		LangJapanese:           "👋 こんにちは！cc-connect が **%s** に接続しました。\n\nメッセージを送信すればエージェントと会話できます。/help で組み込みコマンド一覧を確認できます。",
-		LangSpanish:            "👋 ¡Hola! Soy cc-connect, conectándote con **%s**.\n\nEnvía un mensaje para chatear con el agente. Usa /help para ver los comandos integrados.",
+		LangEnglish: "👋 Hi! I'm cc-connect, bridging you to **%s**.\n\nJust send a message to chat with the agent. Type /help to see built-in commands.",
+		LangChinese: "👋 你好！我是 cc-connect，已为你连接到 **%s**。\n\n直接发送消息即可与 Agent 对话。输入 /help 查看内置命令。",
 	},
 	MsgHelp: {
 		LangEnglish: "📖 Available Commands\n\n" +
@@ -1259,7 +1025,7 @@ var messages = map[MsgKey]map[Language]string{
 			"/model [switch <name>]\n  View/switch model\n\n" +
 			"/reasoning [level]\n  View/switch reasoning effort\n\n" +
 			"/mode [name]\n  View/switch permission mode\n\n" +
-			"/lang [en|zh|zh-TW|ja|es|auto]\n  View/switch language\n\n" +
+			"/lang [en|zh|auto]\n  View/switch language\n\n" +
 			"/compress\n  Compress conversation context\n\n" +
 			"/tts [always|voice_only]\n  View/switch text-to-speech mode\n\n" +
 			"/shell [--timeout <sec>] <command>\n  Run a shell command and return the output (! prefix shortcut: !cmd)\n\n" +
@@ -1302,7 +1068,7 @@ var messages = map[MsgKey]map[Language]string{
 			"/model [switch <名称>]\n  查看/切换模型\n\n" +
 			"/reasoning [级别]\n  查看/切换推理强度\n\n" +
 			"/mode [名称]\n  查看/切换权限模式\n\n" +
-			"/lang [en|zh|zh-TW|ja|es|auto]\n  查看/切换语言\n\n" +
+			"/lang [en|zh|auto]\n  查看/切换语言\n\n" +
 			"/compress\n  压缩会话上下文\n\n" +
 			"/tts [always|voice_only]\n  查看/切换语音合成模式\n\n" +
 			"/shell [--timeout <秒>] <命令>\n  执行 Shell 命令并返回结果（快捷方式：!命令）\n\n" +
@@ -1330,137 +1096,10 @@ var messages = map[MsgKey]map[Language]string{
 			"命令别名：使用 `/alias add <触发词> <命令>` 或在 config.toml 中配置 `[[aliases]]`。\n\n" +
 			"Agent Skills：自动发现自 .claude/skills/<name>/SKILL.md 等目录。\n\n" +
 			"权限模式：default / edit / plan / yolo",
-		LangTraditionalChinese: "📖 可用命令\n\n" +
-			"/new [名稱]\n  建立新會話\n\n" +
-			"/list\n  列出 Agent 會話列表\n\n" +
-			"/search <關鍵詞>\n  搜尋會話名稱或 ID\n\n" +
-			"/switch <序號>\n  按列表序號切換會話\n\n" +
-			"/delete <序號>|1,2,3|3-7|1,3-5,8\n  按列表序號批量/單筆刪除會話\n\n" +
-			"/name [序號] <名稱>\n  為會話命名，方便辨識\n\n" +
-			"/current\n  查看當前活躍會話\n\n" +
-			"/history [n]\n  查看最近 n 條訊息（預設 10）\n\n" +
-			"/provider [list|add|remove|switch|clear]\n  管理 API Provider\n\n" +
-			"/memory [add|global|global add]\n  查看/編輯 Agent 記憶檔案\n\n" +
-			"/allow <工具名>\n  預授權工具（下次會話生效）\n\n" +
-			"/model [switch <名稱>]\n  查看/切換模型\n\n" +
-			"/reasoning [級別]\n  查看/切換推理強度\n\n" +
-			"/mode [名稱]\n  查看/切換權限模式\n\n" +
-			"/lang [en|zh|zh-TW|ja|es|auto]\n  查看/切換語言\n\n" +
-			"/compress\n  壓縮會話上下文\n\n" +
-			"/tts [always|voice_only]\n  查看/切換語音合成模式\n\n" +
-			"/shell [--timeout <秒>] <命令>\n  執行 Shell 命令並返回結果（快捷方式：!命令）\n\n" +
-			"/dir [路徑|reset]\n  查看、切換或重置 Agent 工作目錄\n\n" +
-			"/stop\n  停止當前執行\n\n" +
-			"/cron [add|list|del|enable|disable]\n  管理定時任務\n\n" +
-			"/heartbeat [status|pause|resume|run|interval]\n  管理心跳\n\n" +
-			"/commands [add|del]\n  管理自訂命令\n\n" +
-			"/alias [add|del]\n  管理命令別名（如 幫助 → /help）\n\n" +
-			"/skills\n  列出 Agent Skills（來自 SKILL.md）\n\n" +
-			"/config [get|set|reload] [key] [value]\n  查看/修改執行階段配置\n\n" +
-			"/bind [項目名|remove]\n  管理群聊中繼綁定\n\n" +
-			"/workspace [init]\n  管理工作區\n\n" +
-			"/doctor\n  執行系統診斷\n\n" +
-			"/usage\n  查看帳號/模型限額使用情況\n\n" +
-			"/upgrade\n  檢查更新並自動升級\n\n" +
-			"/restart\n  重啟 cc-connect 服務\n\n" +
-			"/status\n  查看系統狀態\n\n" +
-			"/version\n  查看 cc-connect 版本\n\n" +
-			"/whoami\n  查看你的 User ID（用於 allow_from / admin_from 設定）\n\n" +
-			"/help\n  顯示此說明\n\n" +
-			"提示：命令支持前綴匹配，如 `/pro l` = `/provider list`，`/sw 2` = `/switch 2`。\n\n" +
-			"自訂命令：透過 `/commands add` 新增，或在 config.toml 中配置 `[[commands]]`。\n\n" +
-			"命令別名：使用 `/alias add <觸發詞> <命令>` 或在 config.toml 中配置 `[[aliases]]`。\n\n" +
-			"Agent Skills：自動發現自 .claude/skills/<name>/SKILL.md 等目錄。\n\n" +
-			"權限模式：default / edit / plan / yolo",
-		LangJapanese: "📖 利用可能なコマンド\n\n" +
-			"/new [名前]\n  新しいセッションを開始\n\n" +
-			"/list\n  エージェントセッション一覧\n\n" +
-			"/switch <番号>\n  リスト番号でセッションを切り替え\n\n" +
-			"/delete <番号>|1,2,3|3-7|1,3-5,8\n  リスト番号でセッションを単体/複数削除\n\n" +
-			"/name [番号] <名前>\n  セッションに名前を付ける\n\n" +
-			"/current\n  現在のアクティブセッションを表示\n\n" +
-			"/history [n]\n  直近 n 件のメッセージを表示（デフォルト 10）\n\n" +
-			"/provider [list|add|remove|switch|clear]\n  API プロバイダ管理\n\n" +
-			"/memory [add|global|global add]\n  エージェントメモリの表示/編集\n\n" +
-			"/allow <ツール名>\n  ツールを事前許可（次のセッションで有効）\n\n" +
-			"/model [switch <名前>]\n  モデルの表示/切り替え\n\n" +
-			"/reasoning [レベル]\n  推論レベルの表示/切り替え\n\n" +
-			"/mode [名前]\n  権限モードの表示/切り替え\n\n" +
-			"/lang [en|zh|zh-TW|ja|es|auto]\n  言語の表示/切り替え\n\n" +
-			"/compress\n  会話コンテキストを圧縮\n\n" +
-			"/tts [always|voice_only]\n  音声合成モードの表示/切り替え\n\n" +
-			"/shell [--timeout <秒>] <コマンド>\n  シェルコマンドを実行して結果を返す（ショートカット：!コマンド）\n\n" +
-			"/dir [パス|reset]\n  エージェントの作業ディレクトリを表示/切り替え/リセット\n\n" +
-			"/stop\n  現在の実行を停止\n\n" +
-			"/cron [add|list|del|enable|disable]\n  スケジュールタスク管理\n\n" +
-			"/heartbeat [status|pause|resume|run|interval]\n  ハートビート管理\n\n" +
-			"/commands [add|del]\n  カスタムコマンド管理\n\n" +
-			"/alias [add|del]\n  コマンドエイリアス管理（例: ヘルプ → /help）\n\n" +
-			"/skills\n  エージェントスキル一覧（SKILL.md から）\n\n" +
-			"/config [get|set|reload] [key] [value]\n  ランタイム設定の表示/変更\n\n" +
-			"/bind [プロジェクト|remove]\n  グループチャットのリレー管理\n\n" +
-			"/workspace [init]\n  ワークスペース管理\n\n" +
-			"/doctor\n  システム診断を実行\n\n" +
-			"/usage\n  アカウント/モデル使用量を表示\n\n" +
-			"/upgrade\n  アップデートを確認して自動更新\n\n" +
-			"/restart\n  cc-connect サービスを再起動\n\n" +
-			"/status\n  システム状態を表示\n\n" +
-			"/version\n  cc-connect のバージョンを表示\n\n" +
-			"/whoami\n  あなたの User ID を表示（allow_from / admin_from 設定用）\n\n" +
-			"/help\n  このヘルプを表示\n\n" +
-			"ヒント：コマンドはプレフィックスマッチに対応しています。例: `/pro l` = `/provider list`、`/sw 2` = `/switch 2`。\n\n" +
-			"カスタムコマンド: `/commands add` または config.toml の `[[commands]]` で定義。\n\n" +
-			"コマンドエイリアス: `/alias add <トリガー> <コマンド>` または config.toml の `[[aliases]]` で定義。\n\n" +
-			"エージェントスキル: .claude/skills/<name>/SKILL.md などから自動検出。\n\n" +
-			"権限モード: default / edit / plan / yolo",
-		LangSpanish: "📖 Comandos disponibles\n\n" +
-			"/new [nombre]\n  Iniciar una nueva sesión\n\n" +
-			"/list\n  Listar sesiones del agente\n\n" +
-			"/switch <número>\n  Reanudar sesión por su número en la lista\n\n" +
-			"/delete <número>|1,2,3|3-7|1,3-5,8\n  Eliminar una o varias sesiones por número de lista\n\n" +
-			"/name [número] <texto>\n  Nombrar una sesión para fácil identificación\n\n" +
-			"/current\n  Mostrar sesión activa actual\n\n" +
-			"/history [n]\n  Mostrar últimos n mensajes (por defecto 10)\n\n" +
-			"/provider [list|add|remove|switch|clear]\n  Gestionar proveedores API\n\n" +
-			"/memory [add|global|global add]\n  Ver/editar archivos de memoria del agente\n\n" +
-			"/allow <herramienta>\n  Pre-autorizar herramienta (próxima sesión)\n\n" +
-			"/model [switch <nombre>]\n  Ver/cambiar modelo\n\n" +
-			"/reasoning [nivel]\n  Ver/cambiar nivel de razonamiento\n\n" +
-			"/mode [nombre]\n  Ver/cambiar modo de permisos\n\n" +
-			"/lang [en|zh|zh-TW|ja|es|auto]\n  Ver/cambiar idioma\n\n" +
-			"/compress\n  Comprimir contexto de conversación\n\n" +
-			"/tts [always|voice_only]\n  Ver/cambiar modo de síntesis de voz\n\n" +
-			"/shell [--timeout <seg>] <comando>\n  Ejecutar un comando shell y devolver la salida (atajo: !comando)\n\n" +
-			"/dir [ruta|reset]\n  Ver, cambiar o restablecer el directorio de trabajo del agente\n\n" +
-			"/stop\n  Detener ejecución actual\n\n" +
-			"/cron [add|list|del|enable|disable]\n  Gestionar tareas programadas\n\n" +
-			"/heartbeat [status|pause|resume|run|interval]\n  Gestionar heartbeat\n\n" +
-			"/commands [add|del]\n  Gestionar comandos personalizados\n\n" +
-			"/alias [add|del]\n  Gestionar alias de comandos (ej. ayuda → /help)\n\n" +
-			"/skills\n  Listar skills del agente (desde SKILL.md)\n\n" +
-			"/config [get|set|reload] [key] [value]\n  Ver/actualizar configuración en tiempo de ejecución\n\n" +
-			"/bind [proyecto|remove]\n  Gestionar retransmisión en chats de grupo\n\n" +
-			"/workspace [init]\n  Gestionar workspace\n\n" +
-			"/doctor\n  Ejecutar diagnósticos del sistema\n\n" +
-			"/usage\n  Mostrar uso de cuota de cuenta/modelo\n\n" +
-			"/upgrade\n  Buscar actualizaciones y auto-actualizar\n\n" +
-			"/restart\n  Reiniciar el servicio cc-connect\n\n" +
-			"/status\n  Mostrar estado del sistema\n\n" +
-			"/version\n  Mostrar versión de cc-connect\n\n" +
-			"/whoami\n  Mostrar tu User ID (para allow_from / admin_from)\n\n" +
-			"/help\n  Mostrar esta ayuda\n\n" +
-			"Consejo: Los comandos admiten coincidencia por prefijo, ej. `/pro l` = `/provider list`, `/sw 2` = `/switch 2`.\n\n" +
-			"Comandos personalizados: use `/commands add` o defina `[[commands]]` en config.toml.\n\n" +
-			"Alias de comandos: use `/alias add <trigger> <comando>` o `[[aliases]]` en config.toml.\n\n" +
-			"Skills del agente: descubiertos de .claude/skills/<name>/SKILL.md etc.\n\n" +
-			"Modos de permisos: default / edit / plan / yolo",
 	},
 	MsgHelpTitle: {
-		LangEnglish:            "cc-connect Help",
-		LangChinese:            "cc-connect 帮助",
-		LangTraditionalChinese: "cc-connect 說明",
-		LangJapanese:           "cc-connect ヘルプ",
-		LangSpanish:            "cc-connect Ayuda",
+		LangEnglish: "cc-connect Help",
+		LangChinese: "cc-connect 帮助",
 	},
 	MsgHelpSessionSection: {
 		LangEnglish: "**Session Management**\n" +
@@ -1481,33 +1120,6 @@ var messages = map[MsgKey]map[Language]string{
 			"/name [序号] <名称> — 命名会话\n" +
 			"/current — 查看当前会话\n" +
 			"/history [n] — 查看最近 n 条消息",
-		LangTraditionalChinese: "**會話管理**\n" +
-			"/new [名稱] — 建立新會話\n" +
-			"/list — 列出會話列表\n" +
-			"/search <關鍵詞> — 搜尋會話\n" +
-			"/switch <序號> — 切換會話\n" +
-			"/delete <序號>|1,2,3|3-7|1,3-5,8 — 刪除會話\n" +
-			"/name [序號] <名稱> — 命名會話\n" +
-			"/current — 查看當前會話\n" +
-			"/history [n] — 查看最近 n 條訊息",
-		LangJapanese: "**セッション管理**\n" +
-			"/new [名前] — 新しいセッションを開始\n" +
-			"/list — セッション一覧\n" +
-			"/search <キーワード> — セッション検索\n" +
-			"/switch <番号> — セッション切り替え\n" +
-			"/delete <番号>|1,2,3|3-7|1,3-5,8 — セッション削除\n" +
-			"/name [番号] <名前> — セッションに名前を付ける\n" +
-			"/current — 現在のセッションを表示\n" +
-			"/history [n] — 直近 n 件のメッセージを表示",
-		LangSpanish: "**Gestión de sesiones**\n" +
-			"/new [nombre] — Iniciar nueva sesión\n" +
-			"/list — Listar sesiones\n" +
-			"/search <keyword> — Buscar sesiones\n" +
-			"/switch <número> — Reanudar sesión\n" +
-			"/delete <número>|1,2,3|3-7|1,3-5,8 — Eliminar sesión(es)\n" +
-			"/name [número] <texto> — Nombrar sesión\n" +
-			"/current — Mostrar sesión activa\n" +
-			"/history [n] — Mostrar últimos n mensajes",
 	},
 	MsgHelpAgentSection: {
 		LangEnglish: "**Agent Configuration**\n" +
@@ -1524,27 +1136,6 @@ var messages = map[MsgKey]map[Language]string{
 			"/memory [add|global|...] — 查看/编辑记忆文件\n" +
 			"/allow <工具名> — 预授权工具\n" +
 			"/lang [en|zh|...] — 查看/切换语言",
-		LangTraditionalChinese: "**Agent 配置**\n" +
-			"/model [switch <名稱>] — 查看/切換模型\n" +
-			"/mode [名稱] — 查看/切換權限模式\n" +
-			"/provider [list|add|...] — 管理 API Provider\n" +
-			"/memory [add|global|...] — 查看/編輯記憶檔案\n" +
-			"/allow <工具名> — 預授權工具\n" +
-			"/lang [en|zh|...] — 查看/切換語言",
-		LangJapanese: "**エージェント設定**\n" +
-			"/model [switch <名前>] — モデルの表示/切り替え\n" +
-			"/mode [名前] — 権限モードの表示/切り替え\n" +
-			"/provider [list|add|...] — API プロバイダ管理\n" +
-			"/memory [add|global|...] — メモリの表示/編集\n" +
-			"/allow <ツール名> — ツールを事前許可\n" +
-			"/lang [en|zh|...] — 言語の表示/切り替え",
-		LangSpanish: "**Configuración del agente**\n" +
-			"/model [switch <nombre>] — Ver/cambiar modelo\n" +
-			"/mode [nombre] — Ver/cambiar modo de permisos\n" +
-			"/provider [list|add|...] — Gestionar proveedores\n" +
-			"/memory [add|global|...] — Ver/editar memoria\n" +
-			"/allow <herramienta> — Pre-autorizar herramienta\n" +
-			"/lang [en|zh|...] — Ver/cambiar idioma",
 	},
 	MsgHelpToolsSection: {
 		LangEnglish: "**Tools & Automation**\n" +
@@ -1567,36 +1158,6 @@ var messages = map[MsgKey]map[Language]string{
 			"/skills — 列出 Agent Skills\n" +
 			"/compress — 压缩上下文\n" +
 			"/stop — 停止当前执行",
-		LangTraditionalChinese: "**工具與自動化**\n" +
-			"/shell <命令> — 執行 Shell 命令（!快捷方式）\n" +
-			"/show <引用> — 按引用查看檔案、目錄或程式碼片段\n" +
-			"/dir [路徑|reset] — 查看、切換或重置工作目錄\n" +
-			"/cron [add|list|del|...] — 定時任務\n" +
-			"/commands [add|del] — 自訂命令\n" +
-			"/alias [add|del] — 命令別名\n" +
-			"/skills — 列出 Agent Skills\n" +
-			"/compress — 壓縮上下文\n" +
-			"/stop — 停止當前執行",
-		LangJapanese: "**ツール・自動化**\n" +
-			"/shell <コマンド> — シェルコマンド実行（!ショートカット）\n" +
-			"/show <参照> — ファイル/ディレクトリ/スニペットを参照で表示\n" +
-			"/dir [パス|reset] — 作業ディレクトリの表示/切り替え/リセット\n" +
-			"/cron [add|list|del|...] — スケジュールタスク\n" +
-			"/commands [add|del] — カスタムコマンド\n" +
-			"/alias [add|del] — コマンドエイリアス\n" +
-			"/skills — エージェントスキル一覧\n" +
-			"/compress — コンテキスト圧縮\n" +
-			"/stop — 現在の実行を停止",
-		LangSpanish: "**Herramientas y automatización**\n" +
-			"/shell <comando> — Ejecutar comando shell (! atajo)\n" +
-			"/show <ref> — Ver archivo/directorio/fragmento por referencia\n" +
-			"/dir [ruta|reset] — Ver, cambiar o restablecer directorio de trabajo\n" +
-			"/cron [add|list|del|...] — Tareas programadas\n" +
-			"/commands [add|del] — Comandos personalizados\n" +
-			"/alias [add|del] — Alias de comandos\n" +
-			"/skills — Listar skills del agente\n" +
-			"/compress — Comprimir contexto\n" +
-			"/stop — Detener ejecución actual",
 	},
 	MsgHelpSystemSection: {
 		LangEnglish: "**System**\n" +
@@ -1617,187 +1178,94 @@ var messages = map[MsgKey]map[Language]string{
 			"/restart — 重启服务\n" +
 			"/status — 系统状态\n" +
 			"/version — 查看版本",
-		LangTraditionalChinese: "**系統**\n" +
-			"/config [get|set|reload] — 執行階段配置\n" +
-			"/doctor — 系統診斷\n" +
-			"/usage — 帳號/模型限額\n" +
-			"/whoami — 查看你的 User ID\n" +
-			"/upgrade — 檢查更新\n" +
-			"/restart — 重啟服務\n" +
-			"/status — 系統狀態\n" +
-			"/version — 查看版本",
-		LangJapanese: "**システム**\n" +
-			"/config [get|set|reload] — ランタイム設定\n" +
-			"/doctor — システム診断\n" +
-			"/usage — アカウント/モデル使用量\n" +
-			"/whoami — User ID を表示\n" +
-			"/upgrade — アップデート確認\n" +
-			"/restart — サービス再起動\n" +
-			"/status — システム状態\n" +
-			"/version — バージョン表示",
-		LangSpanish: "**Sistema**\n" +
-			"/config [get|set|reload] — Configuración\n" +
-			"/doctor — Diagnósticos del sistema\n" +
-			"/usage — Uso de cuota de cuenta/modelo\n" +
-			"/whoami — Mostrar tu User ID\n" +
-			"/upgrade — Buscar actualizaciones\n" +
-			"/restart — Reiniciar servicio\n" +
-			"/status — Estado del sistema\n" +
-			"/version — Mostrar versión",
 	},
 	MsgHelpTip: {
-		LangEnglish:            "Tip: Commands support prefix matching, e.g. /pro l = /provider list",
-		LangChinese:            "提示：命令支持前缀匹配，如 /pro l = /provider list",
-		LangTraditionalChinese: "提示：命令支持前綴匹配，如 /pro l = /provider list",
-		LangJapanese:           "ヒント：コマンドはプレフィックスマッチに対応、例: /pro l = /provider list",
-		LangSpanish:            "Consejo: Los comandos admiten coincidencia por prefijo, ej. /pro l = /provider list",
+		LangEnglish: "Tip: Commands support prefix matching, e.g. /pro l = /provider list",
+		LangChinese: "提示：命令支持前缀匹配，如 /pro l = /provider list",
 	},
 	MsgListTitle: {
-		LangEnglish:            "**%s Sessions** (%d)\n\n",
-		LangChinese:            "**%s 会话列表** (%d)\n\n",
-		LangTraditionalChinese: "**%s 會話列表** (%d)\n\n",
-		LangJapanese:           "**%s セッション** (%d)\n\n",
-		LangSpanish:            "**Sesiones de %s** (%d)\n\n",
+		LangEnglish: "**%s Sessions** (%d)\n\n",
+		LangChinese: "**%s 会话列表** (%d)\n\n",
 	},
 	MsgListTitlePaged: {
-		LangEnglish:            "**%s Sessions** (%d) · Page %d/%d\n\n",
-		LangChinese:            "**%s 会话列表** (%d) · 第 %d/%d 页\n\n",
-		LangTraditionalChinese: "**%s 會話列表** (%d) · 第 %d/%d 頁\n\n",
-		LangJapanese:           "**%s セッション** (%d) · %d/%d ページ\n\n",
-		LangSpanish:            "**Sesiones de %s** (%d) · Página %d/%d\n\n",
+		LangEnglish: "**%s Sessions** (%d) · Page %d/%d\n\n",
+		LangChinese: "**%s 会话列表** (%d) · 第 %d/%d 页\n\n",
 	},
 	MsgListEmpty: {
-		LangEnglish:            "No sessions found for this project.",
-		LangChinese:            "未找到此项目的会话。",
-		LangTraditionalChinese: "未找到此項目的會話。",
-		LangJapanese:           "このプロジェクトのセッションが見つかりません。",
-		LangSpanish:            "No se encontraron sesiones para este proyecto.",
+		LangEnglish: "No sessions found for this project.",
+		LangChinese: "未找到此项目的会话。",
 	},
 	MsgListMore: {
-		LangEnglish:            "\n... and %d more\n",
-		LangChinese:            "\n... 还有 %d 条\n",
-		LangTraditionalChinese: "\n... 還有 %d 條\n",
-		LangJapanese:           "\n... 他 %d 件\n",
-		LangSpanish:            "\n... y %d más\n",
+		LangEnglish: "\n... and %d more\n",
+		LangChinese: "\n... 还有 %d 条\n",
 	},
 	MsgListPageHint: {
-		LangEnglish:            "\n\nPage %d/%d \n\n`/list <page>` for more\n",
-		LangChinese:            "\n\n第 %d/%d 页 \n\n`/list <页码>` 翻页\n",
-		LangTraditionalChinese: "\n\n第 %d/%d 頁 \n\n`/list <頁碼>` 翻頁\n",
-		LangJapanese:           "\n\n%d/%d ページ \n\n`/list <ページ>` で移動\n",
-		LangSpanish:            "\n\nPágina %d/%d \n\n`/list <página>` para más\n",
+		LangEnglish: "\n\nPage %d/%d \n\n`/list <page>` for more\n",
+		LangChinese: "\n\n第 %d/%d 页 \n\n`/list <页码>` 翻页\n",
 	},
 	MsgListSwitchHint: {
-		LangEnglish:            "\n`/switch <number>` to switch session",
-		LangChinese:            "\n`/switch <序号>` 切换会话",
-		LangTraditionalChinese: "\n`/switch <序號>` 切換會話",
-		LangJapanese:           "\n`/switch <番号>` でセッション切替",
-		LangSpanish:            "\n`/switch <número>` para cambiar sesión",
+		LangEnglish: "\n`/switch <number>` to switch session",
+		LangChinese: "\n`/switch <序号>` 切换会话",
 	},
 	MsgListError: {
-		LangEnglish:            "❌ Failed to list sessions: %v",
-		LangChinese:            "❌ 获取会话列表失败: %v",
-		LangTraditionalChinese: "❌ 取得會話列表失敗: %v",
-		LangJapanese:           "❌ セッション一覧の取得に失敗しました: %v",
-		LangSpanish:            "❌ Error al listar sesiones: %v",
+		LangEnglish: "❌ Failed to list sessions: %v",
+		LangChinese: "❌ 获取会话列表失败: %v",
 	},
 	MsgHistoryEmpty: {
-		LangEnglish:            "No history in current session.",
-		LangChinese:            "当前会话暂无历史消息。",
-		LangTraditionalChinese: "當前會話暫無歷史訊息。",
-		LangJapanese:           "現在のセッションに履歴がありません。",
-		LangSpanish:            "No hay historial en la sesión actual.",
+		LangEnglish: "No history in current session.",
+		LangChinese: "当前会话暂无历史消息。",
 	},
 	MsgNameUsage: {
-		LangEnglish:            "Usage:\n`/name <text>` — name the current session\n`/name <number> <text>` — name a session by list number",
-		LangChinese:            "用法：\n`/name <名称>` — 命名当前会话\n`/name <序号> <名称>` — 按列表序号命名会话",
-		LangTraditionalChinese: "用法：\n`/name <名稱>` — 命名當前會話\n`/name <序號> <名稱>` — 按列表序號命名會話",
-		LangJapanese:           "使い方：\n`/name <名前>` — 現在のセッションに名前を付ける\n`/name <番号> <名前>` — リスト番号でセッションに名前を付ける",
-		LangSpanish:            "Uso:\n`/name <texto>` — nombrar la sesión actual\n`/name <número> <texto>` — nombrar una sesión por número de lista",
+		LangEnglish: "Usage:\n`/name <text>` — name the current session\n`/name <number> <text>` — name a session by list number",
+		LangChinese: "用法：\n`/name <名称>` — 命名当前会话\n`/name <序号> <名称>` — 按列表序号命名会话",
 	},
 	MsgNameSet: {
-		LangEnglish:            "✅ Session named: **%s** (%s)",
-		LangChinese:            "✅ 会话已命名：**%s** (%s)",
-		LangTraditionalChinese: "✅ 會話已命名：**%s** (%s)",
-		LangJapanese:           "✅ セッション名設定：**%s** (%s)",
-		LangSpanish:            "✅ Sesión nombrada: **%s** (%s)",
+		LangEnglish: "✅ Session named: **%s** (%s)",
+		LangChinese: "✅ 会话已命名：**%s** (%s)",
 	},
 	MsgNameNoSession: {
-		LangEnglish:            "❌ No active session. Send a message first or switch to a session.",
-		LangChinese:            "❌ 没有活跃会话，请先发送消息或切换到一个会话。",
-		LangTraditionalChinese: "❌ 沒有活躍會話，請先傳送訊息或切換到一個會話。",
-		LangJapanese:           "❌ アクティブなセッションがありません。メッセージを送信するかセッションに切り替えてください。",
-		LangSpanish:            "❌ No hay sesión activa. Envía un mensaje primero o cambia a una sesión.",
+		LangEnglish: "❌ No active session. Send a message first or switch to a session.",
+		LangChinese: "❌ 没有活跃会话，请先发送消息或切换到一个会话。",
 	},
 	MsgProviderNotSupported: {
-		LangEnglish:            "This agent does not support provider switching.",
-		LangChinese:            "当前 Agent 不支持 Provider 切换。",
-		LangTraditionalChinese: "當前 Agent 不支援 Provider 切換。",
-		LangJapanese:           "このエージェントはプロバイダの切り替えをサポートしていません。",
-		LangSpanish:            "Este agente no soporta el cambio de proveedor.",
+		LangEnglish: "This agent does not support provider switching.",
+		LangChinese: "当前 Agent 不支持 Provider 切换。",
 	},
 	MsgProviderNone: {
-		LangEnglish:            "No provider configured. Using agent's default environment.\n\nAdd providers in `config.toml` or via `cc-connect provider add`.",
-		LangChinese:            "未配置 Provider，使用 Agent 默认环境。\n\n可在 `config.toml` 中添加或使用 `cc-connect provider add` 命令。",
-		LangTraditionalChinese: "未配置 Provider，使用 Agent 預設環境。\n\n可在 `config.toml` 中新增或使用 `cc-connect provider add` 命令。",
-		LangJapanese:           "プロバイダが設定されていません。エージェントのデフォルト環境を使用します。\n\n`config.toml` または `cc-connect provider add` でプロバイダを追加してください。",
-		LangSpanish:            "No hay proveedor configurado. Usando el entorno predeterminado del agente.\n\nAgregue proveedores en `config.toml` o mediante `cc-connect provider add`.",
+		LangEnglish: "No provider configured. Using agent's default environment.\n\nAdd providers in `config.toml` or via `cc-connect provider add`.",
+		LangChinese: "未配置 Provider，使用 Agent 默认环境。\n\n可在 `config.toml` 中添加或使用 `cc-connect provider add` 命令。",
 	},
 	MsgProviderCurrent: {
-		LangEnglish:            "📡 Active provider: **%s**\n\nUse `/provider list` to see all, `/provider switch <name>` to switch.",
-		LangChinese:            "📡 当前 Provider: **%s**\n\n使用 `/provider list` 查看全部，`/provider switch <名称>` 切换。",
-		LangTraditionalChinese: "📡 當前 Provider: **%s**\n\n使用 `/provider list` 查看全部，`/provider switch <名稱>` 切換。",
-		LangJapanese:           "📡 現在のプロバイダ: **%s**\n\n`/provider list` で一覧、`/provider switch <名前>` で切り替え。",
-		LangSpanish:            "📡 Proveedor activo: **%s**\n\nUse `/provider list` para ver todos, `/provider switch <nombre>` para cambiar.",
+		LangEnglish: "📡 Active provider: **%s**\n\nUse `/provider list` to see all, `/provider switch <name>` to switch.",
+		LangChinese: "📡 当前 Provider: **%s**\n\n使用 `/provider list` 查看全部，`/provider switch <名称>` 切换。",
 	},
 	MsgProviderListTitle: {
-		LangEnglish:            "📡 Providers\n\n",
-		LangChinese:            "📡 Provider 列表\n\n",
-		LangTraditionalChinese: "📡 Provider 列表\n\n",
-		LangJapanese:           "📡 プロバイダ一覧\n\n",
-		LangSpanish:            "📡 Proveedores\n\n",
+		LangEnglish: "📡 Providers\n\n",
+		LangChinese: "📡 Provider 列表\n\n",
 	},
 	MsgProviderListEmpty: {
-		LangEnglish:            "No providers configured.\n\nAdd providers in `config.toml` or via `cc-connect provider add`.",
-		LangChinese:            "未配置 Provider。\n\n可在 `config.toml` 中添加或使用 `cc-connect provider add` 命令。",
-		LangTraditionalChinese: "未配置 Provider。\n\n可在 `config.toml` 中新增或使用 `cc-connect provider add` 命令。",
-		LangJapanese:           "プロバイダが設定されていません。\n\n`config.toml` または `cc-connect provider add` で追加してください。",
-		LangSpanish:            "No hay proveedores configurados.\n\nAgregue proveedores en `config.toml` o mediante `cc-connect provider add`.",
+		LangEnglish: "No providers configured.\n\nAdd providers in `config.toml` or via `cc-connect provider add`.",
+		LangChinese: "未配置 Provider。\n\n可在 `config.toml` 中添加或使用 `cc-connect provider add` 命令。",
 	},
 	MsgProviderSwitchHint: {
-		LangEnglish:            "`/provider switch <name>` to switch | `/provider clear` to reset",
-		LangChinese:            "`/provider switch <名称>` 切换 | `/provider clear` 清除",
-		LangTraditionalChinese: "`/provider switch <名稱>` 切換 | `/provider clear` 清除",
-		LangJapanese:           "`/provider switch <名前>` で切り替え | `/provider clear` でリセット",
-		LangSpanish:            "`/provider switch <nombre>` para cambiar | `/provider clear` para restablecer",
+		LangEnglish: "`/provider switch <name>` to switch | `/provider clear` to reset",
+		LangChinese: "`/provider switch <名称>` 切换 | `/provider clear` 清除",
 	},
 	MsgProviderNotFound: {
-		LangEnglish:            "❌ Provider %q not found. Use `/provider list` to see available providers.",
-		LangChinese:            "❌ 未找到 Provider %q。使用 `/provider list` 查看可用列表。",
-		LangTraditionalChinese: "❌ 未找到 Provider %q。使用 `/provider list` 查看可用列表。",
-		LangJapanese:           "❌ プロバイダ %q が見つかりません。`/provider list` で一覧を確認してください。",
-		LangSpanish:            "❌ Proveedor %q no encontrado. Use `/provider list` para ver los disponibles.",
+		LangEnglish: "❌ Provider %q not found. Use `/provider list` to see available providers.",
+		LangChinese: "❌ 未找到 Provider %q。使用 `/provider list` 查看可用列表。",
 	},
 	MsgProviderSwitched: {
-		LangEnglish:            "✅ Provider switched to **%s**. New sessions will use this provider.",
-		LangChinese:            "✅ Provider 已切换为 **%s**，新会话将使用此 Provider。",
-		LangTraditionalChinese: "✅ Provider 已切換為 **%s**，新會話將使用此 Provider。",
-		LangJapanese:           "✅ プロバイダを **%s** に切り替えました。新しいセッションで使用されます。",
-		LangSpanish:            "✅ Proveedor cambiado a **%s**. Las nuevas sesiones usarán este proveedor.",
+		LangEnglish: "✅ Provider switched to **%s**. New sessions will use this provider.",
+		LangChinese: "✅ Provider 已切换为 **%s**，新会话将使用此 Provider。",
 	},
 	MsgProviderCleared: {
-		LangEnglish:            "✅ Provider cleared. New sessions will use the default provider.",
-		LangChinese:            "✅ Provider 已清除，新会话将使用默认 Provider。",
-		LangTraditionalChinese: "✅ Provider 已清除，新會話將使用預設 Provider。",
-		LangJapanese:           "✅ プロバイダをクリアしました。新しいセッションではデフォルトのプロバイダが使用されます。",
-		LangSpanish:            "✅ Proveedor eliminado. Las nuevas sesiones usarán el proveedor predeterminado.",
+		LangEnglish: "✅ Provider cleared. New sessions will use the default provider.",
+		LangChinese: "✅ Provider 已清除，新会话将使用默认 Provider。",
 	},
 	MsgProviderAdded: {
-		LangEnglish:            "✅ Provider **%s** added.\n\nUse `/provider switch %s` to activate.",
-		LangChinese:            "✅ Provider **%s** 已添加。\n\n使用 `/provider switch %s` 激活。",
-		LangTraditionalChinese: "✅ Provider **%s** 已新增。\n\n使用 `/provider switch %s` 啟用。",
-		LangJapanese:           "✅ プロバイダ **%s** を追加しました。\n\n`/provider switch %s` で有効化してください。",
-		LangSpanish:            "✅ Proveedor **%s** agregado.\n\nUse `/provider switch %s` para activarlo.",
+		LangEnglish: "✅ Provider **%s** added.\n\nUse `/provider switch %s` to activate.",
+		LangChinese: "✅ Provider **%s** 已添加。\n\n使用 `/provider switch %s` 激活。",
 	},
 	MsgProviderAddUsage: {
 		LangEnglish: "Usage:\n\n" +
@@ -1808,163 +1276,91 @@ var messages = map[MsgKey]map[Language]string{
 			"`/provider add <名称> <api_key> [base_url] [model]`\n\n" +
 			"或 JSON:\n" +
 			"`/provider add {\"name\":\"relay\",\"api_key\":\"sk-xxx\",\"base_url\":\"https://...\",\"model\":\"...\"}`",
-		LangTraditionalChinese: "用法:\n\n" +
-			"`/provider add <名稱> <api_key> [base_url] [model]`\n\n" +
-			"或 JSON:\n" +
-			"`/provider add {\"name\":\"relay\",\"api_key\":\"sk-xxx\",\"base_url\":\"https://...\",\"model\":\"...\"}`",
-		LangJapanese: "使い方:\n\n" +
-			"`/provider add <名前> <api_key> [base_url] [model]`\n\n" +
-			"または JSON:\n" +
-			"`/provider add {\"name\":\"relay\",\"api_key\":\"sk-xxx\",\"base_url\":\"https://...\",\"model\":\"...\"}`",
-		LangSpanish: "Uso:\n\n" +
-			"`/provider add <nombre> <api_key> [base_url] [model]`\n\n" +
-			"O JSON:\n" +
-			"`/provider add {\"name\":\"relay\",\"api_key\":\"sk-xxx\",\"base_url\":\"https://...\",\"model\":\"...\"}`",
 	},
 	MsgProviderAddFailed: {
-		LangEnglish:            "❌ Failed to add provider: %v",
-		LangChinese:            "❌ 添加 Provider 失败: %v",
-		LangTraditionalChinese: "❌ 新增 Provider 失敗: %v",
-		LangJapanese:           "❌ プロバイダの追加に失敗しました: %v",
-		LangSpanish:            "❌ Error al agregar proveedor: %v",
+		LangEnglish: "❌ Failed to add provider: %v",
+		LangChinese: "❌ 添加 Provider 失败: %v",
 	},
 	MsgProviderRemoved: {
-		LangEnglish:            "✅ Provider **%s** removed.",
-		LangChinese:            "✅ Provider **%s** 已移除。",
-		LangTraditionalChinese: "✅ Provider **%s** 已移除。",
-		LangJapanese:           "✅ プロバイダ **%s** を削除しました。",
-		LangSpanish:            "✅ Proveedor **%s** eliminado.",
+		LangEnglish: "✅ Provider **%s** removed.",
+		LangChinese: "✅ Provider **%s** 已移除。",
 	},
 	MsgProviderRemoveFailed: {
-		LangEnglish:            "❌ Failed to remove provider: %v",
-		LangChinese:            "❌ 移除 Provider 失败: %v",
-		LangTraditionalChinese: "❌ 移除 Provider 失敗: %v",
-		LangJapanese:           "❌ プロバイダの削除に失敗しました: %v",
-		LangSpanish:            "❌ Error al eliminar proveedor: %v",
+		LangEnglish: "❌ Failed to remove provider: %v",
+		LangChinese: "❌ 移除 Provider 失败: %v",
 	},
 	MsgCardTitleProviderAdd: {
-		LangEnglish: "Add Provider", LangChinese: "添加服务商", LangTraditionalChinese: "新增服務商",
-		LangJapanese: "プロバイダーを追加", LangSpanish: "Añadir proveedor",
+		LangEnglish: "Add Provider", LangChinese: "添加服务商",
 	},
 	MsgProviderAddPickHint: {
-		LangEnglish:            "Pick a provider below, or choose **Other** to enter manually.\nAfter selecting, send your API key to complete.",
-		LangChinese:            "选择一个服务商，或选择 **自定义** 手动填写。\n选择后，请发送你的 API Key 来完成添加。",
-		LangTraditionalChinese: "選擇一個服務商，或選擇 **自訂** 手動填寫。\n選擇後，請傳送你的 API Key 來完成新增。",
-		LangJapanese:           "プロバイダーを選択するか、**その他** を選んで手動入力してください。\n選択後、API キーを送信して完了します。",
-		LangSpanish:            "Elige un proveedor o selecciona **Otro** para ingresar manualmente.\nDespués de seleccionar, envía tu API Key para completar.",
+		LangEnglish: "Pick a provider below, or choose **Other** to enter manually.\nAfter selecting, send your API key to complete.",
+		LangChinese: "选择一个服务商，或选择 **自定义** 手动填写。\n选择后，请发送你的 API Key 来完成添加。",
 	},
 	MsgProviderAddOther: {
-		LangEnglish: "Other (manual)", LangChinese: "自定义 (手动)", LangTraditionalChinese: "自訂 (手動)",
-		LangJapanese: "その他 (手動)", LangSpanish: "Otro (manual)",
+		LangEnglish: "Other (manual)", LangChinese: "自定义 (手动)",
 	},
 	MsgProviderAddApiKeyPrompt: {
-		LangEnglish:            "✅ Selected **%s**.\n\nPlease send your **API Key** for this provider.\nFormat: just the key, e.g. `sk-xxxxxxxx`",
-		LangChinese:            "✅ 已选择 **%s**。\n\n请发送你的 **API Key**。\n格式：直接发送密钥即可，如 `sk-xxxxxxxx`",
-		LangTraditionalChinese: "✅ 已選擇 **%s**。\n\n請傳送你的 **API Key**。\n格式：直接傳送金鑰即可，如 `sk-xxxxxxxx`",
-		LangJapanese:           "✅ **%s** を選択しました。\n\n**API キー** を送信してください。\n形式: キーをそのまま送信（例: `sk-xxxxxxxx`）",
-		LangSpanish:            "✅ Seleccionado **%s**.\n\nPor favor envía tu **API Key** para este proveedor.\nFormato: solo la clave, por ejemplo `sk-xxxxxxxx`",
+		LangEnglish: "✅ Selected **%s**.\n\nPlease send your **API Key** for this provider.\nFormat: just the key, e.g. `sk-xxxxxxxx`",
+		LangChinese: "✅ 已选择 **%s**。\n\n请发送你的 **API Key**。\n格式：直接发送密钥即可，如 `sk-xxxxxxxx`",
 	},
 	MsgProviderAddInviteHint: {
-		LangEnglish:            "🔑 Don't have a key? Register here: %s",
-		LangChinese:            "🔑 还没有 Key？点击注册获取：%s",
-		LangTraditionalChinese: "🔑 還沒有 Key？點擊註冊取得：%s",
-		LangJapanese:           "🔑 キーをお持ちでない場合はこちらから登録: %s",
-		LangSpanish:            "🔑 ¿No tienes una clave? Regístrate aquí: %s",
+		LangEnglish: "🔑 Don't have a key? Register here: %s",
+		LangChinese: "🔑 还没有 Key？点击注册获取：%s",
 	},
 	MsgProviderLinkGlobal: {
-		LangEnglish: "Link existing provider", LangChinese: "关联已有服务商", LangTraditionalChinese: "關聯已有服務商",
-		LangJapanese: "既存プロバイダーをリンク", LangSpanish: "Vincular proveedor existente",
+		LangEnglish: "Link existing provider", LangChinese: "关联已有服务商",
 	},
 	MsgProviderLinked: {
-		LangEnglish:            "✅ Provider **%s** linked to this project.",
-		LangChinese:            "✅ 已关联服务商 **%s** 到当前项目。",
-		LangTraditionalChinese: "✅ 已關聯服務商 **%s** 到目前專案。",
-		LangJapanese:           "✅ プロバイダー **%s** をこのプロジェクトにリンクしました。",
-		LangSpanish:            "✅ Proveedor **%s** vinculado a este proyecto.",
+		LangEnglish: "✅ Provider **%s** linked to this project.",
+		LangChinese: "✅ 已关联服务商 **%s** 到当前项目。",
 	},
 	MsgVoiceNotEnabled: {
-		LangEnglish:            "🎙 Voice messages are not enabled. Please configure `[speech]` in config.toml.",
-		LangChinese:            "🎙 语音消息未启用，请在 config.toml 中配置 `[speech]` 部分。",
-		LangTraditionalChinese: "🎙 語音訊息未啟用，請在 config.toml 中配置 `[speech]` 部分。",
-		LangJapanese:           "🎙 音声メッセージは有効になっていません。config.toml で `[speech]` を設定してください。",
-		LangSpanish:            "🎙 Los mensajes de voz no están habilitados. Configure `[speech]` en config.toml.",
+		LangEnglish: "🎙 Voice messages are not enabled. Please configure `[speech]` in config.toml.",
+		LangChinese: "🎙 语音消息未启用，请在 config.toml 中配置 `[speech]` 部分。",
 	},
 	MsgVoiceUsingPlatformRecognition: {
-		LangEnglish:            "⚠️ Voice transcription not configured, using %s built-in recognition",
-		LangChinese:            "⚠️ 未配置语音转录，使用 %s 内置语音识别",
-		LangTraditionalChinese: "⚠️ 未配置語音轉錄，使用 %s 內置語音識別",
-		LangJapanese:           "⚠️ 音声転写が設定されていないため、%s の組み込み認識を使用",
-		LangSpanish:            "⚠️ Transcripción de voz no configurada, usando reconocimiento integrado de %s",
+		LangEnglish: "⚠️ Voice transcription not configured, using %s built-in recognition",
+		LangChinese: "⚠️ 未配置语音转录，使用 %s 内置语音识别",
 	},
 	MsgVoiceNoFFmpeg: {
-		LangEnglish:            "🎙 Voice message requires `ffmpeg` for format conversion. Please install ffmpeg.",
-		LangChinese:            "🎙 语音消息需要 `ffmpeg` 进行格式转换，请安装 ffmpeg。",
-		LangTraditionalChinese: "🎙 語音訊息需要 `ffmpeg` 進行格式轉換，請安裝 ffmpeg。",
-		LangJapanese:           "🎙 音声メッセージのフォーマット変換に `ffmpeg` が必要です。ffmpeg をインストールしてください。",
-		LangSpanish:            "🎙 Los mensajes de voz requieren `ffmpeg` para la conversión de formato. Instale ffmpeg.",
+		LangEnglish: "🎙 Voice message requires `ffmpeg` for format conversion. Please install ffmpeg.",
+		LangChinese: "🎙 语音消息需要 `ffmpeg` 进行格式转换，请安装 ffmpeg。",
 	},
 	MsgVoiceTranscribing: {
-		LangEnglish:            "🎙 Transcribing voice message...",
-		LangChinese:            "🎙 正在转录语音消息...",
-		LangTraditionalChinese: "🎙 正在轉錄語音訊息...",
-		LangJapanese:           "🎙 音声メッセージを文字起こし中...",
-		LangSpanish:            "🎙 Transcribiendo mensaje de voz...",
+		LangEnglish: "🎙 Transcribing voice message...",
+		LangChinese: "🎙 正在转录语音消息...",
 	},
 	MsgVoiceTranscribed: {
-		LangEnglish:            "🎙 [Voice] %s",
-		LangChinese:            "🎙 [语音] %s",
-		LangTraditionalChinese: "🎙 [語音] %s",
-		LangJapanese:           "🎙 [音声] %s",
-		LangSpanish:            "🎙 [Voz] %s",
+		LangEnglish: "🎙 [Voice] %s",
+		LangChinese: "🎙 [语音] %s",
 	},
 	MsgVoiceTranscribeFailed: {
-		LangEnglish:            "🎙 Voice transcription failed: %v",
-		LangChinese:            "🎙 语音转文字失败: %v",
-		LangTraditionalChinese: "🎙 語音轉文字失敗: %v",
-		LangJapanese:           "🎙 音声の文字起こしに失敗しました: %v",
-		LangSpanish:            "🎙 Error en la transcripción de voz: %v",
+		LangEnglish: "🎙 Voice transcription failed: %v",
+		LangChinese: "🎙 语音转文字失败: %v",
 	},
 	MsgVoiceEmpty: {
-		LangEnglish:            "🎙 Voice message was empty or could not be recognized.",
-		LangChinese:            "🎙 语音消息为空或无法识别。",
-		LangTraditionalChinese: "🎙 語音訊息為空或無法識別。",
-		LangJapanese:           "🎙 音声メッセージが空か、認識できませんでした。",
-		LangSpanish:            "🎙 El mensaje de voz estaba vacío o no se pudo reconocer.",
+		LangEnglish: "🎙 Voice message was empty or could not be recognized.",
+		LangChinese: "🎙 语音消息为空或无法识别。",
 	},
 	MsgTTSNotEnabled: {
-		LangEnglish:            "TTS is not enabled. Please configure `[tts]` in config.toml.",
-		LangChinese:            "TTS 未启用，请在 config.toml 中配置 `[tts]` 部分。",
-		LangTraditionalChinese: "TTS 未啟用，請在 config.toml 中配置 `[tts]` 部分。",
-		LangJapanese:           "TTS は有効になっていません。config.toml で `[tts]` を設定してください。",
-		LangSpanish:            "TTS no está habilitado. Configure `[tts]` en config.toml.",
+		LangEnglish: "TTS is not enabled. Please configure `[tts]` in config.toml.",
+		LangChinese: "TTS 未启用，请在 config.toml 中配置 `[tts]` 部分。",
 	},
 	MsgTTSStatus: {
-		LangEnglish:            "TTS status: enabled=true, mode=%s, provider=%s",
-		LangChinese:            "TTS 状态：enabled=true，mode=%s，provider=%s",
-		LangTraditionalChinese: "TTS 狀態：enabled=true，mode=%s，provider=%s",
-		LangJapanese:           "TTS 状態: enabled=true, mode=%s, provider=%s",
-		LangSpanish:            "Estado TTS: enabled=true, mode=%s, provider=%s",
+		LangEnglish: "TTS status: enabled=true, mode=%s, provider=%s",
+		LangChinese: "TTS 状态：enabled=true，mode=%s，provider=%s",
 	},
 	MsgTTSSwitched: {
-		LangEnglish:            "TTS mode switched to: %s",
-		LangChinese:            "TTS 已切换为 %s 模式",
-		LangTraditionalChinese: "TTS 已切換為 %s 模式",
-		LangJapanese:           "TTS モードを %s に切り替えました",
-		LangSpanish:            "Modo TTS cambiado a: %s",
+		LangEnglish: "TTS mode switched to: %s",
+		LangChinese: "TTS 已切换为 %s 模式",
 	},
 	MsgTTSUsage: {
-		LangEnglish:            "Usage: /tts [always|voice_only]",
-		LangChinese:            "用法：/tts [always|voice_only]",
-		LangTraditionalChinese: "用法：/tts [always|voice_only]",
-		LangJapanese:           "使い方: /tts [always|voice_only]",
-		LangSpanish:            "Uso: /tts [always|voice_only]",
+		LangEnglish: "Usage: /tts [always|voice_only]",
+		LangChinese: "用法：/tts [always|voice_only]",
 	},
 	MsgHeartbeatNotAvailable: {
-		LangEnglish:            "Heartbeat is not configured for this project.",
-		LangChinese:            "当前项目未配置心跳。",
-		LangTraditionalChinese: "當前項目未配置心跳。",
-		LangJapanese:           "このプロジェクトにはハートビートが設定されていません。",
-		LangSpanish:            "El heartbeat no está configurado para este proyecto.",
+		LangEnglish: "Heartbeat is not configured for this project.",
+		LangChinese: "当前项目未配置心跳。",
 	},
 	MsgHeartbeatStatus: {
 		LangEnglish: "💓 Heartbeat Status\n\n" +
@@ -1985,243 +1381,126 @@ var messages = map[MsgKey]map[Language]string{
 			"失败次数: %d\n" +
 			"跳过 (忙碌): %d\n" +
 			"%s",
-		LangTraditionalChinese: "💓 心跳狀態\n\n" +
-			"狀態: %s\n" +
-			"間隔: %d 分鐘\n" +
-			"僅空閒時: %s\n" +
-			"靜默: %s\n" +
-			"執行次數: %d\n" +
-			"失敗次數: %d\n" +
-			"跳過 (忙碌): %d\n" +
-			"%s",
-		LangJapanese: "💓 ハートビート状態\n\n" +
-			"状態: %s\n" +
-			"間隔: %d 分\n" +
-			"アイドル時のみ: %s\n" +
-			"サイレント: %s\n" +
-			"実行回数: %d\n" +
-			"エラー: %d\n" +
-			"スキップ (ビジー): %d\n" +
-			"%s",
-		LangSpanish: "💓 Estado del Heartbeat\n\n" +
-			"Estado: %s\n" +
-			"Intervalo: %d min\n" +
-			"Solo cuando inactivo: %s\n" +
-			"Silencioso: %s\n" +
-			"Ejecuciones: %d\n" +
-			"Errores: %d\n" +
-			"Omitidos (ocupado): %d\n" +
-			"%s",
 	},
 	MsgHeartbeatPaused: {
-		LangEnglish:            "💓 Heartbeat paused.",
-		LangChinese:            "💓 心跳已暂停。",
-		LangTraditionalChinese: "💓 心跳已暫停。",
-		LangJapanese:           "💓 ハートビートを一時停止しました。",
-		LangSpanish:            "💓 Heartbeat pausado.",
+		LangEnglish: "💓 Heartbeat paused.",
+		LangChinese: "💓 心跳已暂停。",
 	},
 	MsgHeartbeatResumed: {
-		LangEnglish:            "💓 Heartbeat resumed.",
-		LangChinese:            "💓 心跳已恢复。",
-		LangTraditionalChinese: "💓 心跳已恢復。",
-		LangJapanese:           "💓 ハートビートを再開しました。",
-		LangSpanish:            "💓 Heartbeat reanudado.",
+		LangEnglish: "💓 Heartbeat resumed.",
+		LangChinese: "💓 心跳已恢复。",
 	},
 	MsgHeartbeatInterval: {
-		LangEnglish:            "💓 Heartbeat interval changed to %d minutes.",
-		LangChinese:            "💓 心跳间隔已调整为 %d 分钟。",
-		LangTraditionalChinese: "💓 心跳間隔已調整為 %d 分鐘。",
-		LangJapanese:           "💓 ハートビート間隔を %d 分に変更しました。",
-		LangSpanish:            "💓 Intervalo del heartbeat cambiado a %d minutos.",
+		LangEnglish: "💓 Heartbeat interval changed to %d minutes.",
+		LangChinese: "💓 心跳间隔已调整为 %d 分钟。",
 	},
 	MsgHeartbeatTriggered: {
-		LangEnglish:            "💓 Heartbeat triggered.",
-		LangChinese:            "💓 心跳已触发。",
-		LangTraditionalChinese: "💓 心跳已觸發。",
-		LangJapanese:           "💓 ハートビートをトリガーしました。",
-		LangSpanish:            "💓 Heartbeat activado.",
+		LangEnglish: "💓 Heartbeat triggered.",
+		LangChinese: "💓 心跳已触发。",
 	},
 	MsgHeartbeatUsage: {
-		LangEnglish:            "Usage: /heartbeat [status|pause|resume|run|interval <mins>]",
-		LangChinese:            "用法: /heartbeat [status|pause|resume|run|interval <分钟>]",
-		LangTraditionalChinese: "用法: /heartbeat [status|pause|resume|run|interval <分鐘>]",
-		LangJapanese:           "使い方: /heartbeat [status|pause|resume|run|interval <分>]",
-		LangSpanish:            "Uso: /heartbeat [status|pause|resume|run|interval <minutos>]",
+		LangEnglish: "Usage: /heartbeat [status|pause|resume|run|interval <mins>]",
+		LangChinese: "用法: /heartbeat [status|pause|resume|run|interval <分钟>]",
 	},
 	MsgHeartbeatInvalidMins: {
-		LangEnglish:            "Invalid interval. Please provide a positive number of minutes.",
-		LangChinese:            "无效的间隔。请输入正整数的分钟数。",
-		LangTraditionalChinese: "無效的間隔。請輸入正整數的分鐘數。",
-		LangJapanese:           "無効な間隔です。正の整数を分で指定してください。",
-		LangSpanish:            "Intervalo inválido. Proporcione un número positivo de minutos.",
+		LangEnglish: "Invalid interval. Please provide a positive number of minutes.",
+		LangChinese: "无效的间隔。请输入正整数的分钟数。",
 	},
 	MsgCronNotAvailable: {
-		LangEnglish:            "Cron scheduler is not available.",
-		LangChinese:            "定时任务调度器未启用。",
-		LangTraditionalChinese: "定時任務調度器未啟用。",
-		LangJapanese:           "スケジューラは利用できません。",
-		LangSpanish:            "El programador de tareas no está disponible.",
+		LangEnglish: "Cron scheduler is not available.",
+		LangChinese: "定时任务调度器未启用。",
 	},
 	MsgCronUsage: {
-		LangEnglish:            "Usage:\n/cron add <min> <hour> <day> <month> <weekday> <prompt>\n/cron list\n/cron del <id>\n/cron enable <id> · /cron disable <id>\n/cron mute <id> · /cron unmute <id>\n/cron setup — write cc-connect instructions to agent memory file",
-		LangChinese:            "用法：\n/cron add <分> <时> <日> <月> <周> <任务描述>\n/cron list\n/cron del <id>\n/cron enable <id> · /cron disable <id>\n/cron mute <id> · /cron unmute <id> 静音/取消静音\n/cron setup — 将 cc-connect 指令写入 agent 记忆文件",
-		LangTraditionalChinese: "用法：\n/cron add <分> <時> <日> <月> <週> <任務描述>\n/cron list\n/cron del <id>\n/cron enable <id> · /cron disable <id>\n/cron mute <id> · /cron unmute <id> 靜音/取消靜音\n/cron setup — 將 cc-connect 指令寫入 agent 記憶檔案",
-		LangJapanese:           "使い方:\n/cron add <分> <時> <日> <月> <曜日> <タスク内容>\n/cron list\n/cron del <id>\n/cron enable <id> · /cron disable <id>\n/cron mute <id> · /cron unmute <id> ミュート/解除\n/cron setup — cc-connect の指示をエージェントのメモリファイルに書き込む",
-		LangSpanish:            "Uso:\n/cron add <min> <hora> <día> <mes> <día_semana> <tarea>\n/cron list\n/cron del <id>\n/cron enable <id> · /cron disable <id>\n/cron mute <id> · /cron unmute <id>\n/cron setup — escribir las instrucciones de cc-connect en el archivo de memoria del agente",
+		LangEnglish: "Usage:\n/cron add <min> <hour> <day> <month> <weekday> <prompt>\n/cron list\n/cron del <id>\n/cron enable <id> · /cron disable <id>\n/cron mute <id> · /cron unmute <id>\n/cron setup — write cc-connect instructions to agent memory file",
+		LangChinese: "用法：\n/cron add <分> <时> <日> <月> <周> <任务描述>\n/cron list\n/cron del <id>\n/cron enable <id> · /cron disable <id>\n/cron mute <id> · /cron unmute <id> 静音/取消静音\n/cron setup — 将 cc-connect 指令写入 agent 记忆文件",
 	},
 	MsgCronAddUsage: {
-		LangEnglish:            "Usage: /cron add <min> <hour> <day> <month> <weekday> <prompt>\nExample: /cron add 0 6 * * * Collect GitHub trending data and send me a summary",
-		LangChinese:            "用法：/cron add <分> <时> <日> <月> <周> <任务描述>\n示例：/cron add 0 6 * * * 收集 GitHub Trending 数据整理成简报发给我",
-		LangTraditionalChinese: "用法：/cron add <分> <時> <日> <月> <週> <任務描述>\n範例：/cron add 0 6 * * * 收集 GitHub Trending 資料整理成簡報發給我",
-		LangJapanese:           "使い方: /cron add <分> <時> <日> <月> <曜日> <タスク内容>\n例: /cron add 0 6 * * * GitHub Trending を収集してまとめを送って",
-		LangSpanish:            "Uso: /cron add <min> <hora> <día> <mes> <día_semana> <tarea>\nEjemplo: /cron add 0 6 * * * Recopilar datos de GitHub Trending y enviarme un resumen",
+		LangEnglish: "Usage: /cron add <min> <hour> <day> <month> <weekday> <prompt>\nExample: /cron add 0 6 * * * Collect GitHub trending data and send me a summary",
+		LangChinese: "用法：/cron add <分> <时> <日> <月> <周> <任务描述>\n示例：/cron add 0 6 * * * 收集 GitHub Trending 数据整理成简报发给我",
 	},
 	MsgCronAdded: {
-		LangEnglish:            "✅ Cron job created\nID: `%s`\nSchedule: `%s`\nPrompt: %s",
-		LangChinese:            "✅ 定时任务已创建\nID: `%s`\n调度: `%s`\n内容: %s",
-		LangTraditionalChinese: "✅ 定時任務已建立\nID: `%s`\n調度: `%s`\n內容: %s",
-		LangJapanese:           "✅ スケジュールタスクを作成しました\nID: `%s`\nスケジュール: `%s`\n内容: %s",
-		LangSpanish:            "✅ Tarea programada creada\nID: `%s`\nProgramación: `%s`\nContenido: %s",
+		LangEnglish: "✅ Cron job created\nID: `%s`\nSchedule: `%s`\nPrompt: %s",
+		LangChinese: "✅ 定时任务已创建\nID: `%s`\n调度: `%s`\n内容: %s",
 	},
 	MsgCronAddedExec: {
-		LangEnglish:            "✅ Shell cron job created\nID: `%s`\nSchedule: `%s`\nCommand: `%s`",
-		LangChinese:            "✅ Shell 定时任务已创建\nID: `%s`\n调度: `%s`\n命令: `%s`",
-		LangTraditionalChinese: "✅ Shell 定時任務已建立\nID: `%s`\n調度: `%s`\n命令: `%s`",
-		LangJapanese:           "✅ Shell スケジュールタスクを作成しました\nID: `%s`\nスケジュール: `%s`\nコマンド: `%s`",
-		LangSpanish:            "✅ Tarea shell programada creada\nID: `%s`\nProgramación: `%s`\nComando: `%s`",
+		LangEnglish: "✅ Shell cron job created\nID: `%s`\nSchedule: `%s`\nCommand: `%s`",
+		LangChinese: "✅ Shell 定时任务已创建\nID: `%s`\n调度: `%s`\n命令: `%s`",
 	},
 	MsgCronAddExecUsage: {
-		LangEnglish:            "Usage: /cron addexec <min> <hour> <day> <month> <weekday> <shell command>\nExample: /cron addexec 0 6 * * * df -h",
-		LangChinese:            "用法：/cron addexec <分> <时> <日> <月> <周> <shell 命令>\n示例：/cron addexec 0 6 * * * df -h",
-		LangTraditionalChinese: "用法：/cron addexec <分> <時> <日> <月> <週> <shell 命令>\n範例：/cron addexec 0 6 * * * df -h",
-		LangJapanese:           "使い方: /cron addexec <分> <時> <日> <月> <曜日> <シェルコマンド>\n例: /cron addexec 0 6 * * * df -h",
-		LangSpanish:            "Uso: /cron addexec <min> <hora> <día> <mes> <día_semana> <comando shell>\nEjemplo: /cron addexec 0 6 * * * df -h",
+		LangEnglish: "Usage: /cron addexec <min> <hour> <day> <month> <weekday> <shell command>\nExample: /cron addexec 0 6 * * * df -h",
+		LangChinese: "用法：/cron addexec <分> <时> <日> <月> <周> <shell 命令>\n示例：/cron addexec 0 6 * * * df -h",
 	},
 	MsgCronEmpty: {
-		LangEnglish:            "No scheduled tasks.",
-		LangChinese:            "暂无定时任务。",
-		LangTraditionalChinese: "暫無定時任務。",
-		LangJapanese:           "スケジュールタスクはありません。",
-		LangSpanish:            "No hay tareas programadas.",
+		LangEnglish: "No scheduled tasks.",
+		LangChinese: "暂无定时任务。",
 	},
 	MsgCronListTitle: {
-		LangEnglish:            "⏰ Scheduled Tasks (%d)",
-		LangChinese:            "⏰ 定时任务 (%d)",
-		LangTraditionalChinese: "⏰ 定時任務 (%d)",
-		LangJapanese:           "⏰ スケジュールタスク (%d)",
-		LangSpanish:            "⏰ Tareas programadas (%d)",
+		LangEnglish: "⏰ Scheduled Tasks (%d)",
+		LangChinese: "⏰ 定时任务 (%d)",
 	},
 	MsgCronListFooter: {
-		LangEnglish:            "`/cron del <id>` remove · `/cron enable/disable <id>` toggle · `/cron mute/unmute <id>` mute",
-		LangChinese:            "`/cron del <id>` 删除 · `/cron enable/disable <id>` 启停 · `/cron mute/unmute <id>` 静音",
-		LangTraditionalChinese: "`/cron del <id>` 刪除 · `/cron enable/disable <id>` 啟停 · `/cron mute/unmute <id>` 靜音",
-		LangJapanese:           "`/cron del <id>` 削除 · `/cron enable/disable <id>` 切替 · `/cron mute/unmute <id>` ミュート",
-		LangSpanish:            "`/cron del <id>` eliminar · `/cron enable/disable <id>` activar/desactivar · `/cron mute/unmute <id>` silenciar",
+		LangEnglish: "`/cron del <id>` remove · `/cron enable/disable <id>` toggle · `/cron mute/unmute <id>` mute",
+		LangChinese: "`/cron del <id>` 删除 · `/cron enable/disable <id>` 启停 · `/cron mute/unmute <id>` 静音",
 	},
 	MsgCronDelUsage: {
-		LangEnglish:            "Usage: /cron del <id>",
-		LangChinese:            "用法：/cron del <id>",
-		LangTraditionalChinese: "用法：/cron del <id>",
-		LangJapanese:           "使い方: /cron del <id>",
-		LangSpanish:            "Uso: /cron del <id>",
+		LangEnglish: "Usage: /cron del <id>",
+		LangChinese: "用法：/cron del <id>",
 	},
 	MsgCronDeleted: {
-		LangEnglish:            "✅ Cron job `%s` deleted.",
-		LangChinese:            "✅ 定时任务 `%s` 已删除。",
-		LangTraditionalChinese: "✅ 定時任務 `%s` 已刪除。",
-		LangJapanese:           "✅ スケジュールタスク `%s` を削除しました。",
-		LangSpanish:            "✅ Tarea programada `%s` eliminada.",
+		LangEnglish: "✅ Cron job `%s` deleted.",
+		LangChinese: "✅ 定时任务 `%s` 已删除。",
 	},
 	MsgCronNotFound: {
-		LangEnglish:            "❌ Cron job `%s` not found.",
-		LangChinese:            "❌ 定时任务 `%s` 未找到。",
-		LangTraditionalChinese: "❌ 定時任務 `%s` 未找到。",
-		LangJapanese:           "❌ スケジュールタスク `%s` が見つかりません。",
-		LangSpanish:            "❌ Tarea programada `%s` no encontrada.",
+		LangEnglish: "❌ Cron job `%s` not found.",
+		LangChinese: "❌ 定时任务 `%s` 未找到。",
 	},
 	MsgCronEnabled: {
-		LangEnglish:            "✅ Cron job `%s` enabled.",
-		LangChinese:            "✅ 定时任务 `%s` 已启用。",
-		LangTraditionalChinese: "✅ 定時任務 `%s` 已啟用。",
-		LangJapanese:           "✅ スケジュールタスク `%s` を有効にしました。",
-		LangSpanish:            "✅ Tarea programada `%s` habilitada.",
+		LangEnglish: "✅ Cron job `%s` enabled.",
+		LangChinese: "✅ 定时任务 `%s` 已启用。",
 	},
 	MsgCronDisabled: {
-		LangEnglish:            "⏸ Cron job `%s` disabled.",
-		LangChinese:            "⏸ 定时任务 `%s` 已暂停。",
-		LangTraditionalChinese: "⏸ 定時任務 `%s` 已暫停。",
-		LangJapanese:           "⏸ スケジュールタスク `%s` を無効にしました。",
-		LangSpanish:            "⏸ Tarea programada `%s` deshabilitada.",
+		LangEnglish: "⏸ Cron job `%s` disabled.",
+		LangChinese: "⏸ 定时任务 `%s` 已暂停。",
 	},
 	MsgCronMuted: {
-		LangEnglish:            "🔇 Cron job `%s` muted (all messages suppressed).",
-		LangChinese:            "🔇 定时任务 `%s` 已静音（所有消息均不发送）。",
-		LangTraditionalChinese: "🔇 定時任務 `%s` 已靜音（所有訊息均不發送）。",
-		LangJapanese:           "🔇 スケジュールタスク `%s` をミュートしました（全メッセージ抑制）。",
-		LangSpanish:            "🔇 Tarea programada `%s` silenciada (todos los mensajes suprimidos).",
+		LangEnglish: "🔇 Cron job `%s` muted (all messages suppressed).",
+		LangChinese: "🔇 定时任务 `%s` 已静音（所有消息均不发送）。",
 	},
 	MsgCronUnmuted: {
-		LangEnglish:            "🔔 Cron job `%s` unmuted.",
-		LangChinese:            "🔔 定时任务 `%s` 已取消静音。",
-		LangTraditionalChinese: "🔔 定時任務 `%s` 已取消靜音。",
-		LangJapanese:           "🔔 スケジュールタスク `%s` のミュートを解除しました。",
-		LangSpanish:            "🔔 Tarea programada `%s` reactivada.",
+		LangEnglish: "🔔 Cron job `%s` unmuted.",
+		LangChinese: "🔔 定时任务 `%s` 已取消静音。",
 	},
 	MsgCronCardHint: {
-		LangEnglish:            "💡 `/cron add` · `/cron del <id>` · `/cron enable/disable <id>` · `/cron mute/unmute <id>`",
-		LangChinese:            "💡 `/cron add` 添加 · `/cron del <id>` 删除 · `/cron enable/disable <id>` 启停 · `/cron mute/unmute <id>` 静音",
-		LangTraditionalChinese: "💡 `/cron add` 新增 · `/cron del <id>` 刪除 · `/cron enable/disable <id>` 啟停 · `/cron mute/unmute <id>` 靜音",
-		LangJapanese:           "💡 `/cron add` 追加 · `/cron del <id>` 削除 · `/cron enable/disable <id>` 切替 · `/cron mute/unmute <id>` ミュート",
-		LangSpanish:            "💡 `/cron add` · `/cron del <id>` · `/cron enable/disable <id>` · `/cron mute/unmute <id>`",
+		LangEnglish: "💡 `/cron add` · `/cron del <id>` · `/cron enable/disable <id>` · `/cron mute/unmute <id>`",
+		LangChinese: "💡 `/cron add` 添加 · `/cron del <id>` 删除 · `/cron enable/disable <id>` 启停 · `/cron mute/unmute <id>` 静音",
 	},
 	MsgCronBtnEnable: {
-		LangEnglish:            "Enable",
-		LangChinese:            "启用",
-		LangTraditionalChinese: "啟用",
-		LangJapanese:           "有効",
-		LangSpanish:            "Activar",
+		LangEnglish: "Enable",
+		LangChinese: "启用",
 	},
 	MsgCronBtnDisable: {
-		LangEnglish:            "Disable",
-		LangChinese:            "暂停",
-		LangTraditionalChinese: "暫停",
-		LangJapanese:           "無効",
-		LangSpanish:            "Desactivar",
+		LangEnglish: "Disable",
+		LangChinese: "暂停",
 	},
 	MsgCronBtnMute: {
-		LangEnglish:            "Mute",
-		LangChinese:            "静音",
-		LangTraditionalChinese: "靜音",
-		LangJapanese:           "ミュート",
-		LangSpanish:            "Silenciar",
+		LangEnglish: "Mute",
+		LangChinese: "静音",
 	},
 	MsgCronBtnUnmute: {
-		LangEnglish:            "Unmute",
-		LangChinese:            "取消静音",
-		LangTraditionalChinese: "取消靜音",
-		LangJapanese:           "ミュート解除",
-		LangSpanish:            "Reactivar",
+		LangEnglish: "Unmute",
+		LangChinese: "取消静音",
 	},
 	MsgCronBtnDelete: {
-		LangEnglish:            "Delete",
-		LangChinese:            "删除",
-		LangTraditionalChinese: "刪除",
-		LangJapanese:           "削除",
-		LangSpanish:            "Eliminar",
+		LangEnglish: "Delete",
+		LangChinese: "删除",
 	},
 	MsgCronNextShort: {
-		LangEnglish:            "Next",
-		LangChinese:            "下次",
-		LangTraditionalChinese: "下次",
-		LangJapanese:           "次回",
-		LangSpanish:            "Prox",
+		LangEnglish: "Next",
+		LangChinese: "下次",
 	},
 	MsgCronLastShort: {
-		LangEnglish:            "Last",
-		LangChinese:            "上次",
-		LangTraditionalChinese: "上次",
-		LangJapanese:           "前回",
-		LangSpanish:            "Últ",
+		LangEnglish: "Last",
+		LangChinese: "上次",
 	},
 	MsgStatusTitle: {
 		LangEnglish: "cc-connect Status\n\n" +
@@ -2240,163 +1519,82 @@ var messages = map[MsgKey]map[Language]string{
 			"运行时间: %s\n" +
 			"语言: %s\n" +
 			"%s" + "%s" + "%s" + "%s" + "%s" + "%s",
-		LangTraditionalChinese: "cc-connect 狀態\n\n" +
-			"項目: %s\n" +
-			"Agent: %s\n" +
-			"工作目錄: %s\n" +
-			"平台: %s\n" +
-			"運行時間: %s\n" +
-			"語言: %s\n" +
-			"%s" + "%s" + "%s" + "%s" + "%s" + "%s",
-		LangJapanese: "cc-connect ステータス\n\n" +
-			"プロジェクト: %s\n" +
-			"エージェント: %s\n" +
-			"作業ディレクトリ: %s\n" +
-			"プラットフォーム: %s\n" +
-			"稼働時間: %s\n" +
-			"言語: %s\n" +
-			"%s" + "%s" + "%s" + "%s" + "%s" + "%s",
-		LangSpanish: "Estado de cc-connect\n\n" +
-			"Proyecto: %s\n" +
-			"Agente: %s\n" +
-			"Directorio: %s\n" +
-			"Plataformas: %s\n" +
-			"Tiempo activo: %s\n" +
-			"Idioma: %s\n" +
-			"%s" + "%s" + "%s" + "%s" + "%s" + "%s",
 	},
 	MsgReplyFooterRemaining: {
-		LangEnglish:            "%d%% left",
-		LangChinese:            "剩余 %d%%",
-		LangTraditionalChinese: "剩餘 %d%%",
-		LangJapanese:           "残り %d%%",
-		LangSpanish:            "%d%% restante",
+		LangEnglish: "%d%% left",
+		LangChinese: "剩余 %d%%",
 	},
 	MsgModelCurrent: {
-		LangEnglish:            "Current model: %s",
-		LangChinese:            "当前模型: %s",
-		LangTraditionalChinese: "當前模型: %s",
-		LangJapanese:           "現在のモデル: %s",
-		LangSpanish:            "Modelo actual: %s",
+		LangEnglish: "Current model: %s",
+		LangChinese: "当前模型: %s",
 	},
 	MsgModelChanged: {
-		LangEnglish:            "Model switched to `%s`. New sessions will use this model.",
-		LangChinese:            "模型已切换为 `%s`，新会话将使用此模型。",
-		LangTraditionalChinese: "模型已切換為 `%s`，新會話將使用此模型。",
-		LangJapanese:           "モデルを `%s` に切り替えました。新しいセッションで使用されます。",
-		LangSpanish:            "Modelo cambiado a `%s`. Las nuevas sesiones usarán este modelo.",
+		LangEnglish: "Model switched to `%s`. New sessions will use this model.",
+		LangChinese: "模型已切换为 `%s`，新会话将使用此模型。",
 	},
 	MsgModelChangeFailed: {
-		LangEnglish:            "❌ Failed to change model: %v",
-		LangChinese:            "❌ 切换模型失败: %v",
-		LangTraditionalChinese: "❌ 切換模型失敗: %v",
-		LangJapanese:           "❌ モデルの切り替えに失敗しました: %v",
-		LangSpanish:            "❌ Error al cambiar el modelo: %v",
+		LangEnglish: "❌ Failed to change model: %v",
+		LangChinese: "❌ 切换模型失败: %v",
 	},
 	MsgModelCardSwitching: {
-		LangEnglish:            "Switching model to `%s`...",
-		LangChinese:            "正在切换模型为 `%s`...",
-		LangTraditionalChinese: "正在切換模型為 `%s`...",
-		LangJapanese:           "モデルを `%s` に切り替えています...",
-		LangSpanish:            "Cambiando el modelo a `%s`...",
+		LangEnglish: "Switching model to `%s`...",
+		LangChinese: "正在切换模型为 `%s`...",
 	},
 	MsgModelCardSwitched: {
-		LangEnglish:            "Model switched to `%s`.",
-		LangChinese:            "模型已切换为 `%s`。",
-		LangTraditionalChinese: "模型已切換為 `%s`。",
-		LangJapanese:           "モデルを `%s` に切り替えました。",
-		LangSpanish:            "Modelo cambiado a `%s`.",
+		LangEnglish: "Model switched to `%s`.",
+		LangChinese: "模型已切换为 `%s`。",
 	},
 	MsgModelCardSwitchFailed: {
-		LangEnglish:            "Failed to switch model: %v",
-		LangChinese:            "切换模型失败: %v",
-		LangTraditionalChinese: "切換模型失敗: %v",
-		LangJapanese:           "モデルの切り替えに失敗しました: %v",
-		LangSpanish:            "Error al cambiar el modelo: %v",
+		LangEnglish: "Failed to switch model: %v",
+		LangChinese: "切换模型失败: %v",
 	},
 	MsgModelNotSupported: {
-		LangEnglish:            "This agent does not support model switching.",
-		LangChinese:            "当前 Agent 不支持模型切换。",
-		LangTraditionalChinese: "當前 Agent 不支援模型切換。",
-		LangJapanese:           "このエージェントはモデルの切り替えをサポートしていません。",
-		LangSpanish:            "Este agente no soporta el cambio de modelo.",
+		LangEnglish: "This agent does not support model switching.",
+		LangChinese: "当前 Agent 不支持模型切换。",
 	},
 	MsgReasoningCurrent: {
-		LangEnglish:            "Current reasoning effort: %s",
-		LangChinese:            "当前推理强度: %s",
-		LangTraditionalChinese: "當前推理強度: %s",
-		LangJapanese:           "現在の推論強度: %s",
-		LangSpanish:            "Esfuerzo de razonamiento actual: %s",
+		LangEnglish: "Current reasoning effort: %s",
+		LangChinese: "当前推理强度: %s",
 	},
 	MsgReasoningChanged: {
-		LangEnglish:            "Reasoning effort switched to `%s`. New sessions will use this setting.",
-		LangChinese:            "推理强度已切换为 `%s`，新会话将使用此设置。",
-		LangTraditionalChinese: "推理強度已切換為 `%s`，新會話將使用此設定。",
-		LangJapanese:           "推論強度を `%s` に切り替えました。新しいセッションで使用されます。",
-		LangSpanish:            "Esfuerzo de razonamiento cambiado a `%s`. Las nuevas sesiones usarán esta configuración.",
+		LangEnglish: "Reasoning effort switched to `%s`. New sessions will use this setting.",
+		LangChinese: "推理强度已切换为 `%s`，新会话将使用此设置。",
 	},
 	MsgReasoningNotSupported: {
-		LangEnglish:            "This agent does not support reasoning effort switching.",
-		LangChinese:            "当前 Agent 不支持推理强度切换。",
-		LangTraditionalChinese: "當前 Agent 不支援推理強度切換。",
-		LangJapanese:           "このエージェントは推論強度の切り替えをサポートしていません。",
-		LangSpanish:            "Este agente no soporta el cambio de esfuerzo de razonamiento.",
+		LangEnglish: "This agent does not support reasoning effort switching.",
+		LangChinese: "当前 Agent 不支持推理强度切换。",
 	},
 	MsgMemoryNotSupported: {
-		LangEnglish:            "This agent does not support memory files.",
-		LangChinese:            "当前 Agent 不支持记忆文件。",
-		LangTraditionalChinese: "當前 Agent 不支援記憶檔案。",
-		LangJapanese:           "このエージェントはメモリファイルをサポートしていません。",
-		LangSpanish:            "Este agente no soporta archivos de memoria.",
+		LangEnglish: "This agent does not support memory files.",
+		LangChinese: "当前 Agent 不支持记忆文件。",
 	},
 	MsgMemoryShowProject: {
-		LangEnglish:            "📝 **Project Memory** (`%s`)\n\n%s",
-		LangChinese:            "📝 **项目记忆** (`%s`)\n\n%s",
-		LangTraditionalChinese: "📝 **項目記憶** (`%s`)\n\n%s",
-		LangJapanese:           "📝 **プロジェクトメモリ** (`%s`)\n\n%s",
-		LangSpanish:            "📝 **Memoria del proyecto** (`%s`)\n\n%s",
+		LangEnglish: "📝 **Project Memory** (`%s`)\n\n%s",
+		LangChinese: "📝 **项目记忆** (`%s`)\n\n%s",
 	},
 	MsgMemoryShowGlobal: {
-		LangEnglish:            "📝 **Global Memory** (`%s`)\n\n%s",
-		LangChinese:            "📝 **全局记忆** (`%s`)\n\n%s",
-		LangTraditionalChinese: "📝 **全域記憶** (`%s`)\n\n%s",
-		LangJapanese:           "📝 **グローバルメモリ** (`%s`)\n\n%s",
-		LangSpanish:            "📝 **Memoria global** (`%s`)\n\n%s",
+		LangEnglish: "📝 **Global Memory** (`%s`)\n\n%s",
+		LangChinese: "📝 **全局记忆** (`%s`)\n\n%s",
 	},
 	MsgMemoryEmpty: {
-		LangEnglish:            "📝 `%s`\n\n(empty — no content yet)",
-		LangChinese:            "📝 `%s`\n\n（空 — 尚无内容）",
-		LangTraditionalChinese: "📝 `%s`\n\n（空 — 尚無內容）",
-		LangJapanese:           "📝 `%s`\n\n（空 — まだ内容がありません）",
-		LangSpanish:            "📝 `%s`\n\n(vacío — aún sin contenido)",
+		LangEnglish: "📝 `%s`\n\n(empty — no content yet)",
+		LangChinese: "📝 `%s`\n\n（空 — 尚无内容）",
 	},
 	MsgMemoryAdded: {
-		LangEnglish:            "✅ Added to `%s`",
-		LangChinese:            "✅ 已追加到 `%s`",
-		LangTraditionalChinese: "✅ 已追加到 `%s`",
-		LangJapanese:           "✅ `%s` に追加しました",
-		LangSpanish:            "✅ Agregado a `%s`",
+		LangEnglish: "✅ Added to `%s`",
+		LangChinese: "✅ 已追加到 `%s`",
 	},
 	MsgMemoryAddFailed: {
-		LangEnglish:            "❌ Failed to write memory file: %v",
-		LangChinese:            "❌ 写入记忆文件失败: %v",
-		LangTraditionalChinese: "❌ 寫入記憶檔案失敗: %v",
-		LangJapanese:           "❌ メモリファイルの書き込みに失敗しました: %v",
-		LangSpanish:            "❌ Error al escribir archivo de memoria: %v",
+		LangEnglish: "❌ Failed to write memory file: %v",
+		LangChinese: "❌ 写入记忆文件失败: %v",
 	},
 	MsgUsageNotSupported: {
-		LangEnglish:            "Current agent does not support `/usage`.",
-		LangChinese:            "当前 Agent 不支持 `/usage`。",
-		LangTraditionalChinese: "目前 Agent 不支援 `/usage`。",
-		LangJapanese:           "現在のエージェントは `/usage` をサポートしていません。",
-		LangSpanish:            "El agente actual no admite `/usage`.",
+		LangEnglish: "Current agent does not support `/usage`.",
+		LangChinese: "当前 Agent 不支持 `/usage`。",
 	},
 	MsgUsageFetchFailed: {
-		LangEnglish:            "Failed to fetch usage: %v",
-		LangChinese:            "获取 usage 失败：%v",
-		LangTraditionalChinese: "取得 usage 失敗：%v",
-		LangJapanese:           "usage の取得に失敗しました: %v",
-		LangSpanish:            "No se pudo obtener usage: %v",
+		LangEnglish: "Failed to fetch usage: %v",
+		LangChinese: "获取 usage 失败：%v",
 	},
 	MsgMemoryAddUsage: {
 		LangEnglish: "Usage:\n" +
@@ -2409,556 +1607,338 @@ var messages = map[MsgKey]map[Language]string{
 			"`/memory add <文本>` — 追加到项目记忆\n" +
 			"`/memory global` — 查看全局记忆\n" +
 			"`/memory global add <文本>` — 追加到全局记忆",
-		LangTraditionalChinese: "用法：\n" +
-			"`/memory` — 查看項目記憶\n" +
-			"`/memory add <文字>` — 追加到項目記憶\n" +
-			"`/memory global` — 查看全域記憶\n" +
-			"`/memory global add <文字>` — 追加到全域記憶",
-		LangJapanese: "使い方:\n" +
-			"`/memory` — プロジェクトメモリを表示\n" +
-			"`/memory add <テキスト>` — プロジェクトメモリに追加\n" +
-			"`/memory global` — グローバルメモリを表示\n" +
-			"`/memory global add <テキスト>` — グローバルメモリに追加",
-		LangSpanish: "Uso:\n" +
-			"`/memory` — ver memoria del proyecto\n" +
-			"`/memory add <texto>` — agregar a memoria del proyecto\n" +
-			"`/memory global` — ver memoria global\n" +
-			"`/memory global add <texto>` — agregar a memoria global",
 	},
 	MsgCompressNotSupported: {
-		LangEnglish:            "This agent does not support context compression.",
-		LangChinese:            "当前 Agent 不支持上下文压缩。可以使用 `/new` 开始新会话。",
-		LangTraditionalChinese: "當前 Agent 不支援上下文壓縮。可以使用 `/new` 開始新會話。",
-		LangJapanese:           "このエージェントはコンテキスト圧縮をサポートしていません。`/new` で新しいセッションを開始できます。",
-		LangSpanish:            "Este agente no soporta la compresión de contexto. Puede usar `/new` para iniciar una nueva sesión.",
+		LangEnglish: "This agent does not support context compression.",
+		LangChinese: "当前 Agent 不支持上下文压缩。可以使用 `/new` 开始新会话。",
 	},
 	MsgCompressing: {
-		LangEnglish:            "🗜 Compressing context...",
-		LangChinese:            "🗜 正在压缩上下文...",
-		LangTraditionalChinese: "🗜 正在壓縮上下文...",
-		LangJapanese:           "🗜 コンテキストを圧縮中...",
-		LangSpanish:            "🗜 Comprimiendo contexto...",
+		LangEnglish: "🗜 Compressing context...",
+		LangChinese: "🗜 正在压缩上下文...",
 	},
 	MsgCompressNoSession: {
-		LangEnglish:            "No active session to compress. Send a message first.",
-		LangChinese:            "没有活跃的会话可以压缩。请先发送一条消息。",
-		LangTraditionalChinese: "沒有活躍的會話可以壓縮。請先發送一條訊息。",
-		LangJapanese:           "圧縮するアクティブなセッションがありません。まずメッセージを送信してください。",
-		LangSpanish:            "No hay sesión activa para comprimir. Envíe un mensaje primero.",
+		LangEnglish: "No active session to compress. Send a message first.",
+		LangChinese: "没有活跃的会话可以压缩。请先发送一条消息。",
 	},
 	MsgCompressDone: {
-		LangEnglish:            "✅ Context compressed.",
-		LangChinese:            "✅ 上下文压缩完成。",
-		LangTraditionalChinese: "✅ 上下文壓縮完成。",
-		LangJapanese:           "✅ コンテキスト圧縮完了。",
-		LangSpanish:            "✅ Contexto comprimido.",
+		LangEnglish: "✅ Context compressed.",
+		LangChinese: "✅ 上下文压缩完成。",
 	},
 
 	// Inline strings for engine.go commands
 	MsgStatusMode: {
-		LangEnglish:            "Mode: %s\n",
-		LangChinese:            "权限模式: %s\n",
-		LangTraditionalChinese: "權限模式: %s\n",
-		LangJapanese:           "権限モード: %s\n",
-		LangSpanish:            "Modo: %s\n",
+		LangEnglish: "Mode: %s\n",
+		LangChinese: "权限模式: %s\n",
 	},
 	MsgStatusSession: {
-		LangEnglish:            "Session: %s (messages: %d)\n",
-		LangChinese:            "当前会话: %s (消息: %d)\n",
-		LangTraditionalChinese: "當前會話: %s (訊息: %d)\n",
-		LangJapanese:           "セッション: %s (メッセージ: %d)\n",
-		LangSpanish:            "Sesión: %s (mensajes: %d)\n",
+		LangEnglish: "Session: %s (messages: %d)\n",
+		LangChinese: "当前会话: %s (消息: %d)\n",
 	},
 	MsgStatusCron: {
-		LangEnglish:            "Cron jobs: %d (enabled: %d)\n",
-		LangChinese:            "定时任务: %d (启用: %d)\n",
-		LangTraditionalChinese: "定時任務: %d (啟用: %d)\n",
-		LangJapanese:           "スケジュールタスク: %d (有効: %d)\n",
-		LangSpanish:            "Tareas programadas: %d (habilitadas: %d)\n",
+		LangEnglish: "Cron jobs: %d (enabled: %d)\n",
+		LangChinese: "定时任务: %d (启用: %d)\n",
 	},
 	MsgStatusThinkingMessages: {
-		LangEnglish:            "Thinking messages: %s\n",
-		LangChinese:            "思考消息: %s\n",
-		LangTraditionalChinese: "思考訊息: %s\n",
-		LangJapanese:           "思考メッセージ: %s\n",
-		LangSpanish:            "Mensajes de razonamiento: %s\n",
+		LangEnglish: "Thinking messages: %s\n",
+		LangChinese: "思考消息: %s\n",
 	},
 	MsgStatusToolMessages: {
-		LangEnglish:            "Tool progress: %s\n",
-		LangChinese:            "工具进度: %s\n",
-		LangTraditionalChinese: "工具進度: %s\n",
-		LangJapanese:           "ツール進捗: %s\n",
-		LangSpanish:            "Progreso de herramientas: %s\n",
+		LangEnglish: "Tool progress: %s\n",
+		LangChinese: "工具进度: %s\n",
 	},
 	MsgStatusSessionKey: {
-		LangEnglish:            "Session Key: `%s`\n",
-		LangChinese:            "会话 Key: `%s`\n",
-		LangTraditionalChinese: "會話 Key: `%s`\n",
-		LangJapanese:           "セッションキー: `%s`\n",
-		LangSpanish:            "Clave de sesión: `%s`\n",
+		LangEnglish: "Session Key: `%s`\n",
+		LangChinese: "会话 Key: `%s`\n",
 	},
 	MsgStatusAgentSID: {
-		LangEnglish:            "Agent SID: `%s`\n",
-		LangChinese:            "Agent SID: `%s`\n",
-		LangTraditionalChinese: "Agent SID: `%s`\n",
-		LangJapanese:           "Agent SID: `%s`\n",
-		LangSpanish:            "Agent SID: `%s`\n",
+		LangEnglish: "Agent SID: `%s`\n",
+		LangChinese: "Agent SID: `%s`\n",
 	},
 	MsgStatusUserID: {
-		LangEnglish:            "User ID: `%s`\n",
-		LangChinese:            "User ID: `%s`\n",
-		LangTraditionalChinese: "User ID: `%s`\n",
-		LangJapanese:           "ユーザーID: `%s`\n",
-		LangSpanish:            "ID de usuario: `%s`\n",
+		LangEnglish: "User ID: `%s`\n",
+		LangChinese: "User ID: `%s`\n",
 	},
 	MsgEnabledShort: {
-		LangEnglish:            "ON",
-		LangChinese:            "开启",
-		LangTraditionalChinese: "開啟",
-		LangJapanese:           "ON",
-		LangSpanish:            "Activado",
+		LangEnglish: "ON",
+		LangChinese: "开启",
 	},
 	MsgDisabledShort: {
-		LangEnglish:            "OFF",
-		LangChinese:            "关闭",
-		LangTraditionalChinese: "關閉",
-		LangJapanese:           "OFF",
-		LangSpanish:            "Desactivado",
+		LangEnglish: "OFF",
+		LangChinese: "关闭",
 	},
 	MsgModelDefault: {
-		LangEnglish:            "Current model: (not set, using agent default)\n",
-		LangChinese:            "当前模型: (未设置，使用 Agent 默认值)\n",
-		LangTraditionalChinese: "當前模型: (未設置，使用 Agent 預設值)\n",
-		LangJapanese:           "現在のモデル: (未設定、エージェントのデフォルトを使用)\n",
-		LangSpanish:            "Modelo actual: (no configurado, usando predeterminado del agente)\n",
+		LangEnglish: "Current model: (not set, using agent default)\n",
+		LangChinese: "当前模型: (未设置，使用 Agent 默认值)\n",
 	},
 	MsgModelListTitle: {
-		LangEnglish:            "Available models:\n",
-		LangChinese:            "可用模型:\n",
-		LangTraditionalChinese: "可用模型:\n",
-		LangJapanese:           "利用可能なモデル:\n",
-		LangSpanish:            "Modelos disponibles:\n",
+		LangEnglish: "Available models:\n",
+		LangChinese: "可用模型:\n",
 	},
 	MsgModelUsage: {
-		LangEnglish:            "Usage: `/model switch <number>` or `/model switch <model_name>`",
-		LangChinese:            "用法: `/model switch <序号>` 或 `/model switch <模型名>`",
-		LangTraditionalChinese: "用法: `/model switch <序號>` 或 `/model switch <模型名>`",
-		LangJapanese:           "使い方: `/model switch <番号>` または `/model switch <モデル名>`",
-		LangSpanish:            "Uso: `/model switch <número>` o `/model switch <nombre_modelo>`",
+		LangEnglish: "Usage: `/model switch <number>` or `/model switch <model_name>`",
+		LangChinese: "用法: `/model switch <序号>` 或 `/model switch <模型名>`",
 	},
 	MsgReasoningDefault: {
-		LangEnglish:            "Current reasoning effort: (not set, using Codex default)\n",
-		LangChinese:            "当前推理强度: (未设置，使用 Codex 默认值)\n",
-		LangTraditionalChinese: "當前推理強度: (未設置，使用 Codex 預設值)\n",
-		LangJapanese:           "現在の推論強度: (未設定、Codex のデフォルトを使用)\n",
-		LangSpanish:            "Esfuerzo de razonamiento actual: (no configurado, usando el valor predeterminado de Codex)\n",
+		LangEnglish: "Current reasoning effort: (not set, using Codex default)\n",
+		LangChinese: "当前推理强度: (未设置，使用 Codex 默认值)\n",
 	},
 	MsgReasoningListTitle: {
-		LangEnglish:            "Available reasoning levels:\n",
-		LangChinese:            "可用推理强度:\n",
-		LangTraditionalChinese: "可用推理強度:\n",
-		LangJapanese:           "利用可能な推論強度:\n",
-		LangSpanish:            "Niveles de razonamiento disponibles:\n",
+		LangEnglish: "Available reasoning levels:\n",
+		LangChinese: "可用推理强度:\n",
 	},
 	MsgReasoningUsage: {
-		LangEnglish:            "Usage: `/reasoning <number>` or `/reasoning <low|medium|high|xhigh>`",
-		LangChinese:            "用法: `/reasoning <序号>` 或 `/reasoning <low|medium|high|xhigh>`",
-		LangTraditionalChinese: "用法: `/reasoning <序號>` 或 `/reasoning <low|medium|high|xhigh>`",
-		LangJapanese:           "使い方: `/reasoning <番号>` または `/reasoning <low|medium|high|xhigh>`",
-		LangSpanish:            "Uso: `/reasoning <número>` o `/reasoning <low|medium|high|xhigh>`",
+		LangEnglish: "Usage: `/reasoning <number>` or `/reasoning <low|medium|high|xhigh>`",
+		LangChinese: "用法: `/reasoning <序号>` 或 `/reasoning <low|medium|high|xhigh>`",
 	},
 	MsgModeUsage: {
-		LangEnglish:            "\nUse `/mode <name>` to switch.\nAvailable: %s",
-		LangChinese:            "\n使用 `/mode <名称>` 切换模式\n可用值: %s",
-		LangTraditionalChinese: "\n使用 `/mode <名稱>` 切換模式\n可用值: %s",
-		LangJapanese:           "\n`/mode <名前>` で切り替え\n選択肢: %s",
-		LangSpanish:            "\nUse `/mode <nombre>` para cambiar.\nDisponibles: %s",
+		LangEnglish: "\nUse `/mode <name>` to switch.\nAvailable: %s",
+		LangChinese: "\n使用 `/mode <名称>` 切换模式\n可用值: %s",
 	},
 	MsgLangSelectPlaceholder: {
-		LangEnglish: "Select language", LangChinese: "选择语言", LangTraditionalChinese: "選擇語言",
-		LangJapanese: "言語を選択", LangSpanish: "Seleccionar idioma",
+		LangEnglish: "Select language", LangChinese: "选择语言",
 	},
 	MsgModelSelectPlaceholder: {
-		LangEnglish: "Select model", LangChinese: "选择模型", LangTraditionalChinese: "選擇模型",
-		LangJapanese: "モデルを選択", LangSpanish: "Seleccionar modelo",
+		LangEnglish: "Select model", LangChinese: "选择模型",
 	},
 	MsgReasoningSelectPlaceholder: {
-		LangEnglish: "Select reasoning level", LangChinese: "选择推理强度", LangTraditionalChinese: "選擇推理強度",
-		LangJapanese: "推論強度を選択", LangSpanish: "Seleccionar nivel de razonamiento",
+		LangEnglish: "Select reasoning level", LangChinese: "选择推理强度",
 	},
 	MsgModeSelectPlaceholder: {
-		LangEnglish: "Select mode", LangChinese: "选择模式", LangTraditionalChinese: "選擇模式",
-		LangJapanese: "モードを選択", LangSpanish: "Seleccionar modo",
+		LangEnglish: "Select mode", LangChinese: "选择模式",
 	},
 	MsgProviderSelectPlaceholder: {
-		LangEnglish: "Select provider", LangChinese: "选择 Provider", LangTraditionalChinese: "選擇 Provider",
-		LangJapanese: "プロバイダーを選択", LangSpanish: "Seleccionar proveedor",
+		LangEnglish: "Select provider", LangChinese: "选择 Provider",
 	},
 	MsgProviderClearOption: {
-		LangEnglish: "Do not use provider", LangChinese: "不使用服务商", LangTraditionalChinese: "不使用服務商",
-		LangJapanese: "プロバイダーを使用しない", LangSpanish: "No usar proveedor",
+		LangEnglish: "Do not use provider", LangChinese: "不使用服务商",
 	},
 	MsgCardBack: {
-		LangEnglish: "← Back", LangChinese: "← 返回", LangTraditionalChinese: "← 返回",
-		LangJapanese: "← 戻る", LangSpanish: "← Volver",
+		LangEnglish: "← Back", LangChinese: "← 返回",
 	},
 	MsgCardPrev: {
-		LangEnglish: "← Prev", LangChinese: "← 上一页", LangTraditionalChinese: "← 上一頁",
-		LangJapanese: "← 前へ", LangSpanish: "← Anterior",
+		LangEnglish: "← Prev", LangChinese: "← 上一页",
 	},
 	MsgCardNext: {
-		LangEnglish: "Next →", LangChinese: "下一页 →", LangTraditionalChinese: "下一頁 →",
-		LangJapanese: "次へ →", LangSpanish: "Siguiente →",
+		LangEnglish: "Next →", LangChinese: "下一页 →",
 	},
 	MsgCardTitleStatus: {
-		LangEnglish: "cc-connect Status", LangChinese: "cc-connect 状态", LangTraditionalChinese: "cc-connect 狀態",
-		LangJapanese: "cc-connect ステータス", LangSpanish: "Estado de cc-connect",
+		LangEnglish: "cc-connect Status", LangChinese: "cc-connect 状态",
 	},
 	MsgCardTitleLanguage: {
-		LangEnglish: "Language", LangChinese: "语言", LangTraditionalChinese: "語言",
-		LangJapanese: "言語", LangSpanish: "Idioma",
+		LangEnglish: "Language", LangChinese: "语言",
 	},
 	MsgCardTitleModel: {
-		LangEnglish: "Model", LangChinese: "模型", LangTraditionalChinese: "模型",
-		LangJapanese: "モデル", LangSpanish: "Modelo",
+		LangEnglish: "Model", LangChinese: "模型",
 	},
 	MsgCardTitleReasoning: {
-		LangEnglish: "Reasoning", LangChinese: "推理强度", LangTraditionalChinese: "推理強度",
-		LangJapanese: "推論強度", LangSpanish: "Razonamiento",
+		LangEnglish: "Reasoning", LangChinese: "推理强度",
 	},
 	MsgCardTitleMode: {
-		LangEnglish: "Permission Mode", LangChinese: "权限模式", LangTraditionalChinese: "權限模式",
-		LangJapanese: "権限モード", LangSpanish: "Modo de permisos",
+		LangEnglish: "Permission Mode", LangChinese: "权限模式",
 	},
 	MsgCardTitleSessions: {
-		LangEnglish: "%s Sessions (%d)", LangChinese: "%s 会话列表 (%d)", LangTraditionalChinese: "%s 會話列表 (%d)",
-		LangJapanese: "%s セッション (%d)", LangSpanish: "Sesiones de %s (%d)",
+		LangEnglish: "%s Sessions (%d)", LangChinese: "%s 会话列表 (%d)",
 	},
 	MsgCardTitleSessionsPaged: {
-		LangEnglish: "%s Sessions (%d) — %d/%d", LangChinese: "%s 会话列表 (%d) · 第 %d/%d 页", LangTraditionalChinese: "%s 會話列表 (%d) · 第 %d/%d 頁",
-		LangJapanese: "%s セッション (%d) · %d/%d ページ", LangSpanish: "Sesiones de %s (%d) · Página %d/%d",
+		LangEnglish: "%s Sessions (%d) — %d/%d", LangChinese: "%s 会话列表 (%d) · 第 %d/%d 页",
 	},
 	MsgCardTitleCurrentSession: {
-		LangEnglish: "Current Session", LangChinese: "当前会话", LangTraditionalChinese: "當前會話",
-		LangJapanese: "現在のセッション", LangSpanish: "Sesión actual",
+		LangEnglish: "Current Session", LangChinese: "当前会话",
 	},
 	MsgCardTitleHistory: {
-		LangEnglish: "History", LangChinese: "历史记录", LangTraditionalChinese: "歷史記錄",
-		LangJapanese: "履歴", LangSpanish: "Historial",
+		LangEnglish: "History", LangChinese: "历史记录",
 	},
 	MsgCardTitleHistoryLast: {
-		LangEnglish: "History (last %d)", LangChinese: "历史记录（最近 %d 条）", LangTraditionalChinese: "歷史記錄（最近 %d 條）",
-		LangJapanese: "履歴（直近 %d 件）", LangSpanish: "Historial (últimos %d)",
+		LangEnglish: "History (last %d)", LangChinese: "历史记录（最近 %d 条）",
 	},
 	MsgCardTitleProvider: {
-		LangEnglish: "Provider", LangChinese: "Provider", LangTraditionalChinese: "Provider",
-		LangJapanese: "プロバイダー", LangSpanish: "Proveedor",
+		LangEnglish: "Provider", LangChinese: "Provider",
 	},
 	MsgCardTitleCron: {
-		LangEnglish: "Cron", LangChinese: "定时任务", LangTraditionalChinese: "定時任務",
-		LangJapanese: "スケジュールタスク", LangSpanish: "Tareas programadas",
+		LangEnglish: "Cron", LangChinese: "定时任务",
 	},
 	MsgCardTitleHeartbeat: {
-		LangEnglish: "Heartbeat", LangChinese: "心跳", LangTraditionalChinese: "心跳",
-		LangJapanese: "ハートビート", LangSpanish: "Heartbeat",
+		LangEnglish: "Heartbeat", LangChinese: "心跳",
 	},
 	MsgCardTitleCommands: {
-		LangEnglish: "Commands", LangChinese: "命令", LangTraditionalChinese: "命令",
-		LangJapanese: "コマンド", LangSpanish: "Comandos",
+		LangEnglish: "Commands", LangChinese: "命令",
 	},
 	MsgCardTitleAlias: {
-		LangEnglish: "Alias", LangChinese: "别名", LangTraditionalChinese: "別名",
-		LangJapanese: "エイリアス", LangSpanish: "Alias",
+		LangEnglish: "Alias", LangChinese: "别名",
 	},
 	MsgCardTitleConfig: {
-		LangEnglish: "Config", LangChinese: "配置", LangTraditionalChinese: "配置",
-		LangJapanese: "設定", LangSpanish: "Configuración",
+		LangEnglish: "Config", LangChinese: "配置",
 	},
 	MsgCardTitleSkills: {
-		LangEnglish: "Skills", LangChinese: "Skills", LangTraditionalChinese: "Skills",
-		LangJapanese: "スキル", LangSpanish: "Skills",
+		LangEnglish: "Skills", LangChinese: "Skills",
 	},
 	MsgCardTitleDoctor: {
-		LangEnglish: "Doctor", LangChinese: "系统诊断", LangTraditionalChinese: "系統診斷",
-		LangJapanese: "診断", LangSpanish: "Diagnóstico",
+		LangEnglish: "Doctor", LangChinese: "系统诊断",
 	},
 	MsgCardTitleVersion: {
-		LangEnglish: "Version", LangChinese: "版本", LangTraditionalChinese: "版本",
-		LangJapanese: "バージョン", LangSpanish: "Versión",
+		LangEnglish: "Version", LangChinese: "版本",
 	},
 	MsgCardTitleUpgrade: {
-		LangEnglish: "Upgrade", LangChinese: "升级", LangTraditionalChinese: "升級",
-		LangJapanese: "アップグレード", LangSpanish: "Actualización",
+		LangEnglish: "Upgrade", LangChinese: "升级",
 	},
 	MsgListItem: {
-		LangEnglish:            "%s **%d.** %s · **%d** msgs · %s",
-		LangChinese:            "%s **%d.** %s · **%d** 条消息 · %s",
-		LangTraditionalChinese: "%s **%d.** %s · **%d** 則訊息 · %s",
-		LangJapanese:           "%s **%d.** %s · **%d** 件のメッセージ · %s",
-		LangSpanish:            "%s **%d.** %s · **%d** mensajes · %s",
+		LangEnglish: "%s **%d.** %s · **%d** msgs · %s",
+		LangChinese: "%s **%d.** %s · **%d** 条消息 · %s",
 	},
 	MsgListEmptySummary: {
-		LangEnglish: "(empty)", LangChinese: "（空）", LangTraditionalChinese: "（空）",
-		LangJapanese: "（空）", LangSpanish: "(vacío)",
+		LangEnglish: "(empty)", LangChinese: "（空）",
 	},
 	MsgCronIDLabel: {
-		LangEnglish: "ID: %s\n", LangChinese: "ID：%s\n", LangTraditionalChinese: "ID：%s\n",
-		LangJapanese: "ID: %s\n", LangSpanish: "ID: %s\n",
+		LangEnglish: "ID: %s\n", LangChinese: "ID：%s\n",
 	},
 	MsgCronFailedSuffix: {
-		LangEnglish: " (failed: %s)", LangChinese: "（失败：%s）", LangTraditionalChinese: "（失敗：%s）",
-		LangJapanese: "（失敗: %s）", LangSpanish: " (falló: %s)",
+		LangEnglish: " (failed: %s)", LangChinese: "（失败：%s）",
 	},
 	MsgCommandsTagAgent: {
-		LangEnglish: " [agent]", LangChinese: " [代理]", LangTraditionalChinese: " [代理]",
-		LangJapanese: " [エージェント]", LangSpanish: " [agente]",
+		LangEnglish: " [agent]", LangChinese: " [代理]",
 	},
 	MsgCommandsTagShell: {
-		LangEnglish: " [shell]", LangChinese: " [终端]", LangTraditionalChinese: " [終端]",
-		LangJapanese: " [シェル]", LangSpanish: " [shell]",
+		LangEnglish: " [shell]", LangChinese: " [终端]",
 	},
 	MsgUpgradeTimeoutSuffix: {
-		LangEnglish: " (timeout)", LangChinese: "（超时）", LangTraditionalChinese: "（逾時）",
-		LangJapanese: "（タイムアウト）", LangSpanish: " (tiempo de espera agotado)",
+		LangEnglish: " (timeout)", LangChinese: "（超时）",
 	},
 	MsgCronScheduleLabel: {
-		LangEnglish:            "Schedule: %s `%s`\n",
-		LangChinese:            "调度: %s `%s`\n",
-		LangTraditionalChinese: "調度: %s `%s`\n",
-		LangJapanese:           "スケジュール: %s `%s`\n",
-		LangSpanish:            "Programación: %s `%s`\n",
+		LangEnglish: "Schedule: %s `%s`\n",
+		LangChinese: "调度: %s `%s`\n",
 	},
 	MsgCronNextRunLabel: {
-		LangEnglish:            "Next run: %s\n",
-		LangChinese:            "下次执行: %s\n",
-		LangTraditionalChinese: "下次執行: %s\n",
-		LangJapanese:           "次回実行: %s\n",
-		LangSpanish:            "Próxima ejecución: %s\n",
+		LangEnglish: "Next run: %s\n",
+		LangChinese: "下次执行: %s\n",
 	},
 	MsgCronLastRunLabel: {
-		LangEnglish:            "Last run: %s",
-		LangChinese:            "上次执行: %s",
-		LangTraditionalChinese: "上次執行: %s",
-		LangJapanese:           "前回実行: %s",
-		LangSpanish:            "Última ejecución: %s",
+		LangEnglish: "Last run: %s",
+		LangChinese: "上次执行: %s",
 	},
 	MsgPermBtnAllow: {
-		LangEnglish:            "Allow",
-		LangChinese:            "允许",
-		LangTraditionalChinese: "允許",
-		LangJapanese:           "許可",
-		LangSpanish:            "Permitir",
+		LangEnglish: "Allow",
+		LangChinese: "允许",
 	},
 	MsgPermBtnDeny: {
-		LangEnglish:            "Deny",
-		LangChinese:            "拒绝",
-		LangTraditionalChinese: "拒絕",
-		LangJapanese:           "拒否",
-		LangSpanish:            "Denegar",
+		LangEnglish: "Deny",
+		LangChinese: "拒绝",
 	},
 	MsgPermBtnAllowAll: {
-		LangEnglish:            "Allow All (this session)",
-		LangChinese:            "允许所有 (本次会话)",
-		LangTraditionalChinese: "允許所有 (本次會話)",
-		LangJapanese:           "すべて許可 (このセッション)",
-		LangSpanish:            "Permitir todo (esta sesión)",
+		LangEnglish: "Allow All (this session)",
+		LangChinese: "允许所有 (本次会话)",
 	},
 	MsgPermCardTitle: {
-		LangEnglish:            "Permission Request",
-		LangChinese:            "权限请求",
-		LangTraditionalChinese: "權限請求",
-		LangJapanese:           "権限リクエスト",
-		LangSpanish:            "Solicitud de permiso",
+		LangEnglish: "Permission Request",
+		LangChinese: "权限请求",
 	},
 	MsgPermCardBody: {
-		LangEnglish:            "Agent wants to use **%s**:\n\n```\n%s\n```",
-		LangChinese:            "Agent 想要使用 **%s**:\n\n```\n%s\n```",
-		LangTraditionalChinese: "Agent 想要使用 **%s**:\n\n```\n%s\n```",
-		LangJapanese:           "エージェントが **%s** を使用しようとしています:\n\n```\n%s\n```",
-		LangSpanish:            "El agente quiere usar **%s**:\n\n```\n%s\n```",
+		LangEnglish: "Agent wants to use **%s**:\n\n```\n%s\n```",
+		LangChinese: "Agent 想要使用 **%s**:\n\n```\n%s\n```",
 	},
 	MsgPermCardNote: {
-		LangEnglish:            "If buttons are unresponsive, reply: allow / deny / allow all",
-		LangChinese:            "如果按钮无响应，请直接回复：允许 / 拒绝 / 允许所有",
-		LangTraditionalChinese: "若按鈕無回應，請直接回覆：允許 / 拒絕 / 允許所有",
-		LangJapanese:           "ボタンが反応しない場合は直接返信: allow / deny / allow all",
-		LangSpanish:            "Si los botones no responden, responda: allow / deny / allow all",
+		LangEnglish: "If buttons are unresponsive, reply: allow / deny / allow all",
+		LangChinese: "如果按钮无响应，请直接回复：允许 / 拒绝 / 允许所有",
 	},
 	MsgAskQuestionTitle: {
-		LangEnglish:            "Agent Question",
-		LangChinese:            "Agent 提问",
-		LangTraditionalChinese: "Agent 提問",
-		LangJapanese:           "エージェントの質問",
-		LangSpanish:            "Pregunta del agente",
+		LangEnglish: "Agent Question",
+		LangChinese: "Agent 提问",
 	},
 	MsgAskQuestionNote: {
-		LangEnglish:            "If buttons are unresponsive, reply with the option number (e.g. 1) or type your answer",
-		LangChinese:            "如果按钮无响应，请回复选项编号（如 1）或直接输入你的回答",
-		LangTraditionalChinese: "若按鈕無回應，請回覆選項編號（如 1）或直接輸入你的回答",
-		LangJapanese:           "ボタンが反応しない場合は、番号（例: 1）で返信するか、直接回答を入力してください",
-		LangSpanish:            "Si los botones no responden, responda con el número de opción (ej. 1) o escriba su respuesta",
+		LangEnglish: "If buttons are unresponsive, reply with the option number (e.g. 1) or type your answer",
+		LangChinese: "如果按钮无响应，请回复选项编号（如 1）或直接输入你的回答",
 	},
 	MsgAskQuestionMulti: {
-		LangEnglish:            " (multiple selections allowed, separate with commas)",
-		LangChinese:            "（可多选，用逗号分隔）",
-		LangTraditionalChinese: "（可多選，用逗號分隔）",
-		LangJapanese:           "（複数選択可、カンマで区切る）",
-		LangSpanish:            " (selección múltiple permitida, separe con comas)",
+		LangEnglish: " (multiple selections allowed, separate with commas)",
+		LangChinese: "（可多选，用逗号分隔）",
 	},
 	MsgAskQuestionPrompt: {
-		LangEnglish:            "❓ **%s**\n\n%s\n\nReply with the option number or type your answer.",
-		LangChinese:            "❓ **%s**\n\n%s\n\n请回复选项编号或直接输入你的回答。",
-		LangTraditionalChinese: "❓ **%s**\n\n%s\n\n請回覆選項編號或直接輸入你的回答。",
-		LangJapanese:           "❓ **%s**\n\n%s\n\n番号で返信するか、回答を直接入力してください。",
-		LangSpanish:            "❓ **%s**\n\n%s\n\nResponda con el número de opción o escriba su respuesta.",
+		LangEnglish: "❓ **%s**\n\n%s\n\nReply with the option number or type your answer.",
+		LangChinese: "❓ **%s**\n\n%s\n\n请回复选项编号或直接输入你的回答。",
 	},
 	MsgAskQuestionAnswered: {
-		LangEnglish:            "Answer",
-		LangChinese:            "已回答",
-		LangTraditionalChinese: "已回答",
-		LangJapanese:           "回答済み",
-		LangSpanish:            "Respondido",
+		LangEnglish: "Answer",
+		LangChinese: "已回答",
 	},
 	MsgCommandsTitle: {
-		LangEnglish:            "🔧 **Custom Commands** (%d)\n\n",
-		LangChinese:            "🔧 **自定义命令** (%d)\n\n",
-		LangTraditionalChinese: "🔧 **自訂命令** (%d)\n\n",
-		LangJapanese:           "🔧 **カスタムコマンド** (%d)\n\n",
-		LangSpanish:            "🔧 **Comandos personalizados** (%d)\n\n",
+		LangEnglish: "🔧 **Custom Commands** (%d)\n\n",
+		LangChinese: "🔧 **自定义命令** (%d)\n\n",
 	},
 	MsgCommandsEmpty: {
-		LangEnglish:            "No custom commands configured.\n\nUse `/commands add <name> <prompt>` or add `[[commands]]` in config.toml.",
-		LangChinese:            "未配置自定义命令。\n\n使用 `/commands add <名称> <prompt>` 添加，或在 config.toml 中配置 `[[commands]]`。",
-		LangTraditionalChinese: "未配置自訂命令。\n\n使用 `/commands add <名稱> <prompt>` 新增，或在 config.toml 中配置 `[[commands]]`。",
-		LangJapanese:           "カスタムコマンドが設定されていません。\n\n`/commands add <名前> <プロンプト>` で追加するか、config.toml に `[[commands]]` を追加してください。",
-		LangSpanish:            "No hay comandos personalizados configurados.\n\nUse `/commands add <nombre> <prompt>` o agregue `[[commands]]` en config.toml.",
+		LangEnglish: "No custom commands configured.\n\nUse `/commands add <name> <prompt>` or add `[[commands]]` in config.toml.",
+		LangChinese: "未配置自定义命令。\n\n使用 `/commands add <名称> <prompt>` 添加，或在 config.toml 中配置 `[[commands]]`。",
 	},
 	MsgCommandsHint: {
-		LangEnglish:            "Type `/<name> [args]` to use.\n`/commands add <name> <prompt>` to add prompt command\n`/commands addexec <name> <shell>` to add exec command\n`/commands del <name>` to remove",
-		LangChinese:            "输入 `/<名称> [参数]` 使用。\n`/commands add <名称> <prompt>` 添加 prompt 命令\n`/commands addexec <名称> <shell命令>` 添加 exec 命令\n`/commands del <名称>` 删除",
-		LangTraditionalChinese: "輸入 `/<名稱> [參數]` 使用。\n`/commands add <名稱> <prompt>` 新增 prompt 命令\n`/commands addexec <名稱> <shell命令>` 新增 exec 命令\n`/commands del <名稱>` 刪除",
-		LangJapanese:           "`/<名前> [引数]` で使用。\n`/commands add <名前> <プロンプト>` プロンプトコマンド追加\n`/commands addexec <名前> <シェルコマンド>` execコマンド追加\n`/commands del <名前>` 削除",
-		LangSpanish:            "Escriba `/<nombre> [args]` para usar.\n`/commands add <nombre> <prompt>` agregar comando prompt\n`/commands addexec <nombre> <shell>` agregar comando exec\n`/commands del <nombre>` eliminar",
+		LangEnglish: "Type `/<name> [args]` to use.\n`/commands add <name> <prompt>` to add prompt command\n`/commands addexec <name> <shell>` to add exec command\n`/commands del <name>` to remove",
+		LangChinese: "输入 `/<名称> [参数]` 使用。\n`/commands add <名称> <prompt>` 添加 prompt 命令\n`/commands addexec <名称> <shell命令>` 添加 exec 命令\n`/commands del <名称>` 删除",
 	},
 	MsgCommandsUsage: {
-		LangEnglish:            "Usage:\n`/commands` — list all custom commands\n`/commands add <name> <prompt>` — add prompt command\n`/commands addexec <name> <shell>` — add exec command\n`/commands del <name>` — remove a command",
-		LangChinese:            "用法：\n`/commands` — 列出所有自定义命令\n`/commands add <名称> <prompt>` — 添加 prompt 命令\n`/commands addexec <名称> <shell命令>` — 添加 exec 命令\n`/commands del <名称>` — 删除命令",
-		LangTraditionalChinese: "用法：\n`/commands` — 列出所有自訂命令\n`/commands add <名稱> <prompt>` — 新增 prompt 命令\n`/commands addexec <名稱> <shell命令>` — 新增 exec 命令\n`/commands del <名稱>` — 刪除命令",
-		LangJapanese:           "使い方:\n`/commands` — カスタムコマンド一覧\n`/commands add <名前> <プロンプト>` — プロンプトコマンド追加\n`/commands addexec <名前> <シェルコマンド>` — execコマンド追加\n`/commands del <名前>` — コマンド削除",
-		LangSpanish:            "Uso:\n`/commands` — listar comandos personalizados\n`/commands add <nombre> <prompt>` — agregar comando prompt\n`/commands addexec <nombre> <shell>` — agregar comando exec\n`/commands del <nombre>` — eliminar comando",
+		LangEnglish: "Usage:\n`/commands` — list all custom commands\n`/commands add <name> <prompt>` — add prompt command\n`/commands addexec <name> <shell>` — add exec command\n`/commands del <name>` — remove a command",
+		LangChinese: "用法：\n`/commands` — 列出所有自定义命令\n`/commands add <名称> <prompt>` — 添加 prompt 命令\n`/commands addexec <名称> <shell命令>` — 添加 exec 命令\n`/commands del <名称>` — 删除命令",
 	},
 	MsgCommandsAddUsage: {
-		LangEnglish:            "Usage: `/commands add <name> <prompt template>`\n\nExample: `/commands add finduser Search the database for user「{{1}}」`",
-		LangChinese:            "用法：`/commands add <名称> <prompt 模板>`\n\n示例：`/commands add finduser 在数据库中查找用户「{{1}}」`",
-		LangTraditionalChinese: "用法：`/commands add <名稱> <prompt 模板>`\n\n範例：`/commands add finduser 在資料庫中查找用戶「{{1}}」`",
-		LangJapanese:           "使い方: `/commands add <名前> <プロンプトテンプレート>`\n\n例: `/commands add finduser データベースでユーザー「{{1}}」を検索`",
-		LangSpanish:            "Uso: `/commands add <nombre> <plantilla prompt>`\n\nEjemplo: `/commands add finduser Buscar en la base de datos al usuario「{{1}}」`",
+		LangEnglish: "Usage: `/commands add <name> <prompt template>`\n\nExample: `/commands add finduser Search the database for user「{{1}}」`",
+		LangChinese: "用法：`/commands add <名称> <prompt 模板>`\n\n示例：`/commands add finduser 在数据库中查找用户「{{1}}」`",
 	},
 	MsgCommandsAddExecUsage: {
-		LangEnglish:            "Usage: `/commands addexec <name> <shell command>`\n         `/commands addexec --work-dir <dir> <name> <shell command>`\n\nExamples:\n`/commands addexec push git push`\n`/commands addexec status git status {{args}}`",
-		LangChinese:            "用法：`/commands addexec <名称> <shell 命令>`\n      `/commands addexec --work-dir <目录> <名称> <shell 命令>`\n\n示例：\n`/commands addexec push git push`\n`/commands addexec status git status {{args}}`",
-		LangTraditionalChinese: "用法：`/commands addexec <名稱> <shell 命令>`\n      `/commands addexec --work-dir <目錄> <名稱> <shell 命令>`\n\n範例：\n`/commands addexec push git push`\n`/commands addexec status git status {{args}}`",
-		LangJapanese:           "使い方: `/commands addexec <名前> <シェルコマンド>`\n         `/commands addexec --work-dir <ディレクトリ> <名前> <シェルコマンド>`\n\n例:\n`/commands addexec push git push`\n`/commands addexec status git status {{args}}`",
-		LangSpanish:            "Uso: `/commands addexec <nombre> <comando shell>`\n      `/commands addexec --work-dir <dir> <nombre> <comando shell>`\n\nEjemplos:\n`/commands addexec push git push`\n`/commands addexec status git status {{args}}`",
+		LangEnglish: "Usage: `/commands addexec <name> <shell command>`\n         `/commands addexec --work-dir <dir> <name> <shell command>`\n\nExamples:\n`/commands addexec push git push`\n`/commands addexec status git status {{args}}`",
+		LangChinese: "用法：`/commands addexec <名称> <shell 命令>`\n      `/commands addexec --work-dir <目录> <名称> <shell 命令>`\n\n示例：\n`/commands addexec push git push`\n`/commands addexec status git status {{args}}`",
 	},
 	MsgCommandsAdded: {
-		LangEnglish:            "✅ Command `/%s` added.\nPrompt: %s",
-		LangChinese:            "✅ 命令 `/%s` 已添加。\nPrompt: %s",
-		LangTraditionalChinese: "✅ 命令 `/%s` 已新增。\nPrompt: %s",
-		LangJapanese:           "✅ コマンド `/%s` を追加しました。\nプロンプト: %s",
-		LangSpanish:            "✅ Comando `/%s` agregado.\nPrompt: %s",
+		LangEnglish: "✅ Command `/%s` added.\nPrompt: %s",
+		LangChinese: "✅ 命令 `/%s` 已添加。\nPrompt: %s",
 	},
 	MsgCommandsAddExists: {
-		LangEnglish:            "❌ Command `/%s` already exists. Remove it first with `/commands del %s`.",
-		LangChinese:            "❌ 命令 `/%s` 已存在。请先使用 `/commands del %s` 删除。",
-		LangTraditionalChinese: "❌ 命令 `/%s` 已存在。請先使用 `/commands del %s` 刪除。",
-		LangJapanese:           "❌ コマンド `/%s` は既に存在します。`/commands del %s` で削除してから追加してください。",
-		LangSpanish:            "❌ El comando `/%s` ya existe. Elimínelo primero con `/commands del %s`.",
+		LangEnglish: "❌ Command `/%s` already exists. Remove it first with `/commands del %s`.",
+		LangChinese: "❌ 命令 `/%s` 已存在。请先使用 `/commands del %s` 删除。",
 	},
 	MsgCommandsDelUsage: {
-		LangEnglish:            "Usage: `/commands del <name>`",
-		LangChinese:            "用法：`/commands del <名称>`",
-		LangTraditionalChinese: "用法：`/commands del <名稱>`",
-		LangJapanese:           "使い方: `/commands del <名前>`",
-		LangSpanish:            "Uso: `/commands del <nombre>`",
+		LangEnglish: "Usage: `/commands del <name>`",
+		LangChinese: "用法：`/commands del <名称>`",
 	},
 	MsgCommandsDeleted: {
-		LangEnglish:            "✅ Command `/%s` removed.",
-		LangChinese:            "✅ 命令 `/%s` 已删除。",
-		LangTraditionalChinese: "✅ 命令 `/%s` 已刪除。",
-		LangJapanese:           "✅ コマンド `/%s` を削除しました。",
-		LangSpanish:            "✅ Comando `/%s` eliminado.",
+		LangEnglish: "✅ Command `/%s` removed.",
+		LangChinese: "✅ 命令 `/%s` 已删除。",
 	},
 	MsgCommandsNotFound: {
-		LangEnglish:            "❌ Command `/%s` not found. Use `/commands` to see available commands.",
-		LangChinese:            "❌ 命令 `/%s` 未找到。使用 `/commands` 查看可用命令。",
-		LangTraditionalChinese: "❌ 命令 `/%s` 未找到。使用 `/commands` 查看可用命令。",
-		LangJapanese:           "❌ コマンド `/%s` が見つかりません。`/commands` で一覧を確認してください。",
-		LangSpanish:            "❌ Comando `/%s` no encontrado. Use `/commands` para ver los comandos disponibles.",
+		LangEnglish: "❌ Command `/%s` not found. Use `/commands` to see available commands.",
+		LangChinese: "❌ 命令 `/%s` 未找到。使用 `/commands` 查看可用命令。",
 	},
 	MsgCommandsExecAdded: {
-		LangEnglish:            "✅ Exec command `/%s` added.\nCommand: %s",
-		LangChinese:            "✅ Exec 命令 `/%s` 已添加。\n命令: %s",
-		LangTraditionalChinese: "✅ Exec 命令 `/%s` 已新增。\n命令: %s",
-		LangJapanese:           "✅ Exec コマンド `/%s` を追加しました。\nコマンド: %s",
-		LangSpanish:            "✅ Comando exec `/%s` agregado.\nComando: %s",
+		LangEnglish: "✅ Exec command `/%s` added.\nCommand: %s",
+		LangChinese: "✅ Exec 命令 `/%s` 已添加。\n命令: %s",
 	},
 	MsgCommandExecTimeout: {
-		LangEnglish:            "⏱️ Command `/%s` timed out (60s limit).",
-		LangChinese:            "⏱️ 命令 `/%s` 超时（60秒限制）。",
-		LangTraditionalChinese: "⏱️ 命令 `/%s` 超時（60秒限制）。",
-		LangJapanese:           "⏱️ コマンド `/%s` がタイムアウトしました（60秒制限）。",
-		LangSpanish:            "⏱️ Comando `/%s` agotó el tiempo (límite 60s).",
+		LangEnglish: "⏱️ Command `/%s` timed out (60s limit).",
+		LangChinese: "⏱️ 命令 `/%s` 超时（60秒限制）。",
 	},
 	MsgCommandExecError: {
-		LangEnglish:            "❌ Command `/%s` failed:\n%s",
-		LangChinese:            "❌ 命令 `/%s` 执行失败：\n%s",
-		LangTraditionalChinese: "❌ 命令 `/%s` 執行失敗：\n%s",
-		LangJapanese:           "❌ コマンド `/%s` が失敗しました：\n%s",
-		LangSpanish:            "❌ Comando `/%s` falló:\n%s",
+		LangEnglish: "❌ Command `/%s` failed:\n%s",
+		LangChinese: "❌ 命令 `/%s` 执行失败：\n%s",
 	},
 	MsgCommandExecSuccess: {
-		LangEnglish:            "✅ Command executed successfully (no output).",
-		LangChinese:            "✅ 命令执行成功（无输出）。",
-		LangTraditionalChinese: "✅ 命令執行成功（無輸出）。",
-		LangJapanese:           "✅ コマンドが正常に実行されました（出力なし）。",
-		LangSpanish:            "✅ Comando ejecutado exitosamente (sin salida).",
+		LangEnglish: "✅ Command executed successfully (no output).",
+		LangChinese: "✅ 命令执行成功（无输出）。",
 	},
 	MsgSkillsTitle: {
-		LangEnglish:            "📋 Available Skills (%s) — %d skill(s)\n\n",
-		LangChinese:            "📋 可用 Skills (%s) — %d 个\n\n",
-		LangTraditionalChinese: "📋 可用 Skills (%s) — %d 個\n\n",
-		LangJapanese:           "📋 利用可能なスキル (%s) — %d 個\n\n",
-		LangSpanish:            "📋 Skills disponibles (%s) — %d skill(s)\n\n",
+		LangEnglish: "📋 Available Skills (%s) — %d skill(s)\n\n",
+		LangChinese: "📋 可用 Skills (%s) — %d 个\n\n",
 	},
 	MsgSkillsEmpty: {
-		LangEnglish:            "No skills found.\nSkills are discovered from agent directories (e.g. .claude/skills/<name>/SKILL.md).",
-		LangChinese:            "未发现任何 Skill。\nSkill 从 Agent 目录自动发现（如 .claude/skills/<name>/SKILL.md）。",
-		LangTraditionalChinese: "未發現任何 Skill。\nSkill 從 Agent 目錄自動發現（如 .claude/skills/<name>/SKILL.md）。",
-		LangJapanese:           "スキルが見つかりません。\nスキルはエージェントのディレクトリから自動検出されます（例: .claude/skills/<name>/SKILL.md）。",
-		LangSpanish:            "No se encontraron skills.\nLos skills se descubren de los directorios del agente (ej. .claude/skills/<name>/SKILL.md).",
+		LangEnglish: "No skills found.\nSkills are discovered from agent directories (e.g. .claude/skills/<name>/SKILL.md).",
+		LangChinese: "未发现任何 Skill。\nSkill 从 Agent 目录自动发现（如 .claude/skills/<name>/SKILL.md）。",
 	},
 	MsgSkillsHint: {
-		LangEnglish:            "Usage: /<skill-name> [args...] to invoke a skill.",
-		LangChinese:            "用法：/<skill名称> [参数...] 来调用 Skill。",
-		LangTraditionalChinese: "用法：/<skill名稱> [參數...] 來調用 Skill。",
-		LangJapanese:           "使い方：/<スキル名> [引数...] でスキルを実行します。",
-		LangSpanish:            "Uso: /<nombre-skill> [args...] para invocar un skill.",
+		LangEnglish: "Usage: /<skill-name> [args...] to invoke a skill.",
+		LangChinese: "用法：/<skill名称> [参数...] 来调用 Skill。",
 	},
 	MsgSkillsTelegramMenuHint: {
-		LangEnglish:            "Telegram's command menu is full, so skill commands are not listed there. You can still invoke them by typing /<skill-name> manually.",
-		LangChinese:            "Telegram 的命令菜单已满，因此 Skill 不会显示在那里。你仍然可以手动输入 /<skill名称> 来调用它们。",
-		LangTraditionalChinese: "Telegram 的命令選單已滿，因此 Skill 不會顯示在那裡。你仍然可以手動輸入 /<skill名稱> 來調用它們。",
-		LangJapanese:           "Telegram のコマンドメニューがいっぱいのため、スキルコマンドはそこに表示されません。手動で /<スキル名> と入力すれば実行できます。",
-		LangSpanish:            "El menú de comandos de Telegram está lleno, así que los skills no aparecen allí. Aun así puedes invocarlos escribiendo /<nombre-skill> manualmente.",
+		LangEnglish: "Telegram's command menu is full, so skill commands are not listed there. You can still invoke them by typing /<skill-name> manually.",
+		LangChinese: "Telegram 的命令菜单已满，因此 Skill 不会显示在那里。你仍然可以手动输入 /<skill名称> 来调用它们。",
 	},
 
 	MsgConfigTitle: {
-		LangEnglish:            "⚙️ **Runtime Configuration**\n\n",
-		LangChinese:            "⚙️ **运行时配置**\n\n",
-		LangTraditionalChinese: "⚙️ **執行階段配置**\n\n",
-		LangJapanese:           "⚙️ **ランタイム設定**\n\n",
-		LangSpanish:            "⚙️ **Configuración en tiempo de ejecución**\n\n",
+		LangEnglish: "⚙️ **Runtime Configuration**\n\n",
+		LangChinese: "⚙️ **运行时配置**\n\n",
 	},
 	MsgConfigHint: {
 		LangEnglish: "Usage:\n" +
@@ -2971,105 +1951,54 @@ var messages = map[MsgKey]map[Language]string{
 			"`/config thinking_max_len 200` — 修改配置\n" +
 			"`/config get thinking_max_len` — 查看单项\n\n" +
 			"设为 `0` 表示不截断。",
-		LangTraditionalChinese: "用法：\n" +
-			"`/config` — 查看所有配置\n" +
-			"`/config thinking_max_len 200` — 修改配置\n" +
-			"`/config get thinking_max_len` — 查看單項\n\n" +
-			"設為 `0` 表示不截斷。",
-		LangJapanese: "使い方:\n" +
-			"`/config` — 全設定を表示\n" +
-			"`/config thinking_max_len 200` — 変更\n" +
-			"`/config get thinking_max_len` — 単一確認\n\n" +
-			"`0` = 切り捨てなし",
-		LangSpanish: "Uso:\n" +
-			"`/config` — ver todo\n" +
-			"`/config thinking_max_len 200` — actualizar\n" +
-			"`/config get thinking_max_len` — ver uno\n\n" +
-			"Establecer `0` para no truncar.",
 	},
 	MsgConfigGetUsage: {
-		LangEnglish:            "Usage: `/config get thinking_max_len`",
-		LangChinese:            "用法：`/config get thinking_max_len`",
-		LangTraditionalChinese: "用法：`/config get thinking_max_len`",
-		LangJapanese:           "使い方: `/config get thinking_max_len`",
-		LangSpanish:            "Uso: `/config get thinking_max_len`",
+		LangEnglish: "Usage: `/config get thinking_max_len`",
+		LangChinese: "用法：`/config get thinking_max_len`",
 	},
 	MsgConfigSetUsage: {
-		LangEnglish:            "Usage: `/config set thinking_max_len 200`",
-		LangChinese:            "用法：`/config set thinking_max_len 200`",
-		LangTraditionalChinese: "用法：`/config set thinking_max_len 200`",
-		LangJapanese:           "使い方: `/config set thinking_max_len 200`",
-		LangSpanish:            "Uso: `/config set thinking_max_len 200`",
+		LangEnglish: "Usage: `/config set thinking_max_len 200`",
+		LangChinese: "用法：`/config set thinking_max_len 200`",
 	},
 	MsgConfigUpdated: {
-		LangEnglish:            "✅ `%s` → `%s`",
-		LangChinese:            "✅ `%s` → `%s`",
-		LangTraditionalChinese: "✅ `%s` → `%s`",
-		LangJapanese:           "✅ `%s` → `%s`",
-		LangSpanish:            "✅ `%s` → `%s`",
+		LangEnglish: "✅ `%s` → `%s`",
+		LangChinese: "✅ `%s` → `%s`",
 	},
 	MsgConfigKeyNotFound: {
-		LangEnglish:            "❌ Unknown config key `%s`. Use `/config` to see available keys.",
-		LangChinese:            "❌ 未知配置项 `%s`。使用 `/config` 查看可用配置。",
-		LangTraditionalChinese: "❌ 未知配置項 `%s`。使用 `/config` 查看可用配置。",
-		LangJapanese:           "❌ 不明な設定キー `%s`。`/config` で一覧を確認してください。",
-		LangSpanish:            "❌ Clave de configuración desconocida `%s`. Use `/config` para ver las disponibles.",
+		LangEnglish: "❌ Unknown config key `%s`. Use `/config` to see available keys.",
+		LangChinese: "❌ 未知配置项 `%s`。使用 `/config` 查看可用配置。",
 	},
 	MsgConfigReloaded: {
-		LangEnglish:            "✅ Config reloaded\n\nDisplay updated: %v\nProviders synced: %d\nCommands synced: %d",
-		LangChinese:            "✅ 配置已重新加载\n\n显示设置已更新：%v\nProvider 已同步：%d 个\n自定义命令已同步：%d 个",
-		LangTraditionalChinese: "✅ 配置已重新載入\n\n顯示設定已更新：%v\nProvider 已同步：%d 個\n自訂命令已同步：%d 個",
-		LangJapanese:           "✅ 設定をリロードしました\n\n表示設定更新: %v\nプロバイダ同期: %d 件\nコマンド同期: %d 件",
-		LangSpanish:            "✅ Configuración recargada\n\nPantalla actualizada: %v\nProveedores sincronizados: %d\nComandos sincronizados: %d",
+		LangEnglish: "✅ Config reloaded\n\nDisplay updated: %v\nProviders synced: %d\nCommands synced: %d",
+		LangChinese: "✅ 配置已重新加载\n\n显示设置已更新：%v\nProvider 已同步：%d 个\n自定义命令已同步：%d 个",
 	},
 	MsgDoctorRunning: {
-		LangEnglish:            "🏥 Running diagnostics...",
-		LangChinese:            "🏥 正在运行系统诊断...",
-		LangTraditionalChinese: "🏥 正在執行系統診斷...",
-		LangJapanese:           "🏥 診断を実行中...",
-		LangSpanish:            "🏥 Ejecutando diagnósticos...",
+		LangEnglish: "🏥 Running diagnostics...",
+		LangChinese: "🏥 正在运行系统诊断...",
 	},
 	MsgDoctorTitle: {
-		LangEnglish:            "🏥 **System Diagnostic Report**\n\n",
-		LangChinese:            "🏥 **系统诊断报告**\n\n",
-		LangTraditionalChinese: "🏥 **系統診斷報告**\n\n",
-		LangJapanese:           "🏥 **システム診断レポート**\n\n",
-		LangSpanish:            "🏥 **Informe de diagnóstico del sistema**\n\n",
+		LangEnglish: "🏥 **System Diagnostic Report**\n\n",
+		LangChinese: "🏥 **系统诊断报告**\n\n",
 	},
 	MsgDoctorSummary: {
-		LangEnglish:            "\n✅ %d passed  ⚠️ %d warnings  ❌ %d failed",
-		LangChinese:            "\n✅ %d 项通过  ⚠️ %d 项警告  ❌ %d 项失败",
-		LangTraditionalChinese: "\n✅ %d 項通過  ⚠️ %d 項警告  ❌ %d 項失敗",
-		LangJapanese:           "\n✅ %d 合格  ⚠️ %d 警告  ❌ %d 失敗",
-		LangSpanish:            "\n✅ %d aprobados  ⚠️ %d advertencias  ❌ %d fallidos",
+		LangEnglish: "\n✅ %d passed  ⚠️ %d warnings  ❌ %d failed",
+		LangChinese: "\n✅ %d 项通过  ⚠️ %d 项警告  ❌ %d 项失败",
 	},
 	MsgRestarting: {
-		LangEnglish:            "🔄 Restarting cc-connect...",
-		LangChinese:            "🔄 正在重启 cc-connect...",
-		LangTraditionalChinese: "🔄 正在重啟 cc-connect...",
-		LangJapanese:           "🔄 cc-connect を再起動中...",
-		LangSpanish:            "🔄 Reiniciando cc-connect...",
+		LangEnglish: "🔄 Restarting cc-connect...",
+		LangChinese: "🔄 正在重启 cc-connect...",
 	},
 	MsgRestartSuccess: {
-		LangEnglish:            "✅ cc-connect restarted successfully.",
-		LangChinese:            "✅ cc-connect 重启成功。",
-		LangTraditionalChinese: "✅ cc-connect 重啟成功。",
-		LangJapanese:           "✅ cc-connect の再起動が完了しました。",
-		LangSpanish:            "✅ cc-connect se reinició correctamente.",
+		LangEnglish: "✅ cc-connect restarted successfully.",
+		LangChinese: "✅ cc-connect 重启成功。",
 	},
 	MsgUpgradeChecking: {
-		LangEnglish:            "🔍 Checking for updates...",
-		LangChinese:            "🔍 正在检查更新...",
-		LangTraditionalChinese: "🔍 正在檢查更新...",
-		LangJapanese:           "🔍 アップデートを確認中...",
-		LangSpanish:            "🔍 Buscando actualizaciones...",
+		LangEnglish: "🔍 Checking for updates...",
+		LangChinese: "🔍 正在检查更新...",
 	},
 	MsgUpgradeUpToDate: {
-		LangEnglish:            "✅ Already up to date (%s)",
-		LangChinese:            "✅ 已是最新版本 (%s)",
-		LangTraditionalChinese: "✅ 已是最新版本 (%s)",
-		LangJapanese:           "✅ 最新バージョンです (%s)",
-		LangSpanish:            "✅ Ya está actualizado (%s)",
+		LangEnglish: "✅ Already up to date (%s)",
+		LangChinese: "✅ 已是最新版本 (%s)",
 	},
 	MsgUpgradeAvailable: {
 		LangEnglish: "🆕 New version available!\n\n\n" +
@@ -3082,56 +2011,26 @@ var messages = map[MsgKey]map[Language]string{
 			"最新版本：**%s**\n\n\n" +
 			"%s\n\n\n" +
 			"执行 `/upgrade confirm` 进行更新。",
-		LangTraditionalChinese: "🆕 發現新版本！\n\n\n" +
-			"當前版本：**%s**\n" +
-			"最新版本：**%s**\n\n\n" +
-			"%s\n\n\n" +
-			"執行 `/upgrade confirm` 進行更新。",
-		LangJapanese: "🆕 新しいバージョンがあります！\n\n\n" +
-			"現在: **%s**\n" +
-			"最新: **%s**\n\n\n" +
-			"%s\n\n" +
-			"`/upgrade confirm` でインストール。",
-		LangSpanish: "🆕 ¡Nueva versión disponible!\n\n\n" +
-			"Actual: **%s**\n" +
-			"Última: **%s**\n\n\n" +
-			"%s\n\n\n" +
-			"Ejecute `/upgrade confirm` para instalar.",
 	},
 	MsgUpgradeDownloading: {
-		LangEnglish:            "⬇️ Downloading %s ...",
-		LangChinese:            "⬇️ 正在下载 %s ...",
-		LangTraditionalChinese: "⬇️ 正在下載 %s ...",
-		LangJapanese:           "⬇️ ダウンロード中 %s ...",
-		LangSpanish:            "⬇️ Descargando %s ...",
+		LangEnglish: "⬇️ Downloading %s ...",
+		LangChinese: "⬇️ 正在下载 %s ...",
 	},
 	MsgUpgradeSuccess: {
-		LangEnglish:            "✅ Updated to **%s** successfully! Restarting...",
-		LangChinese:            "✅ 已成功更新到 **%s**！正在重启...",
-		LangTraditionalChinese: "✅ 已成功更新到 **%s**！正在重啟...",
-		LangJapanese:           "✅ **%s** に更新しました！再起動中...",
-		LangSpanish:            "✅ ¡Actualizado a **%s** con éxito! Reiniciando...",
+		LangEnglish: "✅ Updated to **%s** successfully! Restarting...",
+		LangChinese: "✅ 已成功更新到 **%s**！正在重启...",
 	},
 	MsgUpgradeDevBuild: {
-		LangEnglish:            "⚠️ Running a dev build — version check is not available. Please build from source or install a release version.",
-		LangChinese:            "⚠️ 当前为开发版本，无法检查更新。请从源码构建或安装正式发布版本。",
-		LangTraditionalChinese: "⚠️ 當前為開發版本，無法檢查更新。請從源碼構建或安裝正式發佈版本。",
-		LangJapanese:           "⚠️ 開発ビルドのため、バージョン確認ができません。ソースからビルドするか、リリース版をインストールしてください。",
-		LangSpanish:            "⚠️ Compilación de desarrollo — la verificación de versión no está disponible. Compile desde el código fuente o instale una versión publicada.",
+		LangEnglish: "⚠️ Running a dev build — version check is not available. Please build from source or install a release version.",
+		LangChinese: "⚠️ 当前为开发版本，无法检查更新。请从源码构建或安装正式发布版本。",
 	},
 	MsgWebNotSupported: {
-		LangEnglish:            "⚠️ Web admin is not available in this build. Rebuild without the `no_web` tag to enable it.",
-		LangChinese:            "⚠️ 当前版本未包含 Web 管理后台。请去掉 `no_web` 标签重新编译以启用。",
-		LangTraditionalChinese: "⚠️ 目前版本未包含 Web 管理後台。請移除 `no_web` 標籤重新編譯以啟用。",
-		LangJapanese:           "⚠️ このビルドにはWeb管理画面が含まれていません。`no_web` タグなしで再ビルドしてください。",
-		LangSpanish:            "⚠️ La administración web no está incluida en esta compilación. Recompile sin la etiqueta `no_web`.",
+		LangEnglish: "⚠️ Web admin is not available in this build. Rebuild without the `no_web` tag to enable it.",
+		LangChinese: "⚠️ 当前版本未包含 Web 管理后台。请去掉 `no_web` 标签重新编译以启用。",
 	},
 	MsgWebNotEnabled: {
-		LangEnglish:            "ℹ️ Web admin is not enabled.\n\nUse `/web setup` to configure and enable it.",
-		LangChinese:            "ℹ️ Web 管理后台未启用。\n\n使用 `/web setup` 配置并启用。",
-		LangTraditionalChinese: "ℹ️ Web 管理後台未啟用。\n\n使用 `/web setup` 設定並啟用。",
-		LangJapanese:           "ℹ️ Web管理画面は有効になっていません。\n\n`/web setup` で設定して有効にしてください。",
-		LangSpanish:            "ℹ️ La administración web no está habilitada.\n\nUsa `/web setup` para configurarla.",
+		LangEnglish: "ℹ️ Web admin is not enabled.\n\nUse `/web setup` to configure and enable it.",
+		LangChinese: "ℹ️ Web 管理后台未启用。\n\n使用 `/web setup` 配置并启用。",
 	},
 	MsgWebSetupSuccess: {
 		LangEnglish: "✅ Web admin configured!\n\n" +
@@ -3140,344 +2039,194 @@ var messages = map[MsgKey]map[Language]string{
 		LangChinese: "✅ Web 管理后台配置完成！\n\n" +
 			"🌐 地址：%s\n🔑 令牌：`%s`\n\n" +
 			"在浏览器打开地址，使用令牌登录。",
-		LangTraditionalChinese: "✅ Web 管理後台設定完成！\n\n" +
-			"🌐 網址：%s\n🔑 權杖：`%s`\n\n" +
-			"在瀏覽器開啟網址，使用權杖登入。",
-		LangJapanese: "✅ Web管理画面の設定が完了しました！\n\n" +
-			"🌐 URL: %s\n🔑 トークン: `%s`\n\n" +
-			"ブラウザでURLを開き、トークンでログインしてください。",
-		LangSpanish: "✅ Administración web configurada!\n\n" +
-			"🌐 URL: %s\n🔑 Token: `%s`\n\n" +
-			"Abre la URL en tu navegador y usa el token para iniciar sesión.",
 	},
 	MsgWebNeedRestart: {
-		LangEnglish:            "🔄 Restart the service with `/restart` to activate the web admin.",
-		LangChinese:            "🔄 请使用 `/restart` 重启服务以激活 Web 管理后台。",
-		LangTraditionalChinese: "🔄 請使用 `/restart` 重新啟動服務以啟動 Web 管理後台。",
-		LangJapanese:           "🔄 `/restart` でサービスを再起動して、Web管理画面を有効にしてください。",
-		LangSpanish:            "🔄 Reinicia el servicio con `/restart` para activar la administración web.",
+		LangEnglish: "🔄 Restart the service with `/restart` to activate the web admin.",
+		LangChinese: "🔄 请使用 `/restart` 重启服务以激活 Web 管理后台。",
 	},
 	MsgWebStatus: {
-		LangEnglish:            "🌐 **Web Admin**\n\nURL: %s",
-		LangChinese:            "🌐 **Web 管理后台**\n\n地址：%s",
-		LangTraditionalChinese: "🌐 **Web 管理後台**\n\n網址：%s",
-		LangJapanese:           "🌐 **Web管理画面**\n\nURL: %s",
-		LangSpanish:            "🌐 **Administración Web**\n\nURL: %s",
+		LangEnglish: "🌐 **Web Admin**\n\nURL: %s",
+		LangChinese: "🌐 **Web 管理后台**\n\n地址：%s",
 	},
 	MsgAliasEmpty: {
-		LangEnglish:            "No aliases configured. Use `/alias add <trigger> <command>` to create one.",
-		LangChinese:            "暂无别名配置。使用 `/alias add <触发词> <命令>` 创建别名。",
-		LangTraditionalChinese: "尚無別名配置。使用 `/alias add <觸發詞> <命令>` 建立別名。",
-		LangJapanese:           "エイリアスは設定されていません。`/alias add <トリガー> <コマンド>` で作成してください。",
-		LangSpanish:            "No hay alias configurados. Use `/alias add <trigger> <comando>` para crear uno.",
+		LangEnglish: "No aliases configured. Use `/alias add <trigger> <command>` to create one.",
+		LangChinese: "暂无别名配置。使用 `/alias add <触发词> <命令>` 创建别名。",
 	},
 	MsgAliasListHeader: {
-		LangEnglish:            "📎 Aliases (%d)",
-		LangChinese:            "📎 命令别名 (%d)",
-		LangTraditionalChinese: "📎 命令別名 (%d)",
-		LangJapanese:           "📎 エイリアス (%d)",
-		LangSpanish:            "📎 Alias (%d)",
+		LangEnglish: "📎 Aliases (%d)",
+		LangChinese: "📎 命令别名 (%d)",
 	},
 	MsgAliasAdded: {
-		LangEnglish:            "✅ Alias added: %s → %s",
-		LangChinese:            "✅ 别名已添加：%s → %s",
-		LangTraditionalChinese: "✅ 別名已新增：%s → %s",
-		LangJapanese:           "✅ エイリアス追加：%s → %s",
-		LangSpanish:            "✅ Alias añadido: %s → %s",
+		LangEnglish: "✅ Alias added: %s → %s",
+		LangChinese: "✅ 别名已添加：%s → %s",
 	},
 	MsgAliasDeleted: {
-		LangEnglish:            "✅ Alias removed: %s",
-		LangChinese:            "✅ 别名已删除：%s",
-		LangTraditionalChinese: "✅ 別名已刪除：%s",
-		LangJapanese:           "✅ エイリアス削除：%s",
-		LangSpanish:            "✅ Alias eliminado: %s",
+		LangEnglish: "✅ Alias removed: %s",
+		LangChinese: "✅ 别名已删除：%s",
 	},
 	MsgAliasNotFound: {
-		LangEnglish:            "❌ Alias `%s` not found.",
-		LangChinese:            "❌ 别名 `%s` 不存在。",
-		LangTraditionalChinese: "❌ 別名 `%s` 不存在。",
-		LangJapanese:           "❌ エイリアス `%s` が見つかりません。",
-		LangSpanish:            "❌ Alias `%s` no encontrado.",
+		LangEnglish: "❌ Alias `%s` not found.",
+		LangChinese: "❌ 别名 `%s` 不存在。",
 	},
 	MsgAliasUsage: {
-		LangEnglish:            "Usage:\n  `/alias` — list all aliases\n  `/alias add <trigger> <command>` — add alias\n  `/alias del <trigger>` — remove alias\n\nExample: `/alias add 帮助 /help`",
-		LangChinese:            "用法：\n  `/alias` — 列出所有别名\n  `/alias add <触发词> <命令>` — 添加别名\n  `/alias del <触发词>` — 删除别名\n\n示例：`/alias add 帮助 /help`",
-		LangTraditionalChinese: "用法：\n  `/alias` — 列出所有別名\n  `/alias add <觸發詞> <命令>` — 新增別名\n  `/alias del <觸發詞>` — 刪除別名\n\n範例：`/alias add 幫助 /help`",
-		LangJapanese:           "使い方：\n  `/alias` — エイリアス一覧\n  `/alias add <トリガー> <コマンド>` — 追加\n  `/alias del <トリガー>` — 削除\n\n例: `/alias add ヘルプ /help`",
-		LangSpanish:            "Uso:\n  `/alias` — listar aliases\n  `/alias add <trigger> <comando>` — añadir alias\n  `/alias del <trigger>` — eliminar alias\n\nEjemplo: `/alias add ayuda /help`",
+		LangEnglish: "Usage:\n  `/alias` — list all aliases\n  `/alias add <trigger> <command>` — add alias\n  `/alias del <trigger>` — remove alias\n\nExample: `/alias add 帮助 /help`",
+		LangChinese: "用法：\n  `/alias` — 列出所有别名\n  `/alias add <触发词> <命令>` — 添加别名\n  `/alias del <触发词>` — 删除别名\n\n示例：`/alias add 帮助 /help`",
 	},
 	MsgNewSessionCreated: {
-		LangEnglish:            "✅ New session created",
-		LangChinese:            "✅ 新会话已创建",
-		LangTraditionalChinese: "✅ 新會話已建立",
-		LangJapanese:           "✅ 新しいセッションを作成しました",
-		LangSpanish:            "✅ Nueva sesión creada",
+		LangEnglish: "✅ New session created",
+		LangChinese: "✅ 新会话已创建",
 	},
 	MsgNewSessionCreatedName: {
-		LangEnglish:            "✅ New session created: **%s**",
-		LangChinese:            "✅ 新会话已创建：**%s**",
-		LangTraditionalChinese: "✅ 新會話已建立：**%s**",
-		LangJapanese:           "✅ 新しいセッションを作成しました：**%s**",
-		LangSpanish:            "✅ Nueva sesión creada: **%s**",
+		LangEnglish: "✅ New session created: **%s**",
+		LangChinese: "✅ 新会话已创建：**%s**",
 	},
 	MsgSessionAutoResetIdle: {
-		LangEnglish:            "⏰ Session auto-reset after %d minute(s) of inactivity.",
-		LangChinese:            "⏰ 因空闲超过 %d 分钟，已自动切换到新会话。",
-		LangTraditionalChinese: "⏰ 因閒置超過 %d 分鐘，已自動切換到新會話。",
-		LangJapanese:           "⏰ %d 分以上操作がなかったため、新しいセッションに自動切り替えました。",
-		LangSpanish:            "⏰ La sesión se reinició automáticamente tras %d minuto(s) de inactividad.",
+		LangEnglish: "⏰ Session auto-reset after %d minute(s) of inactivity.",
+		LangChinese: "⏰ 因空闲超过 %d 分钟，已自动切换到新会话。",
 	},
 	MsgSessionClosingGraceful: {
-		LangEnglish:            "⏳ Wrapping up your previous session (usually a few seconds, up to 2 minutes). Your new session will start automatically.",
-		LangChinese:            "⏳ 正在结束上一个会话（通常几秒钟，最多2分钟）。新会话将自动启动。",
-		LangTraditionalChinese: "⏳ 正在結束上一個會話（通常幾秒鐘，最多2分鐘）。新會話將自動啟動。",
-		LangJapanese:           "⏳ 前のセッションを終了中です（通常は数秒、最大2分）。新しいセッションは自動的に開始されます。",
-		LangSpanish:            "⏳ Cerrando la sesión anterior (normalmente unos segundos, hasta 2 minutos). La nueva sesión se iniciará automáticamente.",
+		LangEnglish: "⏳ Wrapping up your previous session (usually a few seconds, up to 2 minutes). Your new session will start automatically.",
+		LangChinese: "⏳ 正在结束上一个会话（通常几秒钟，最多2分钟）。新会话将自动启动。",
 	},
 	MsgDeleteUsage: {
-		LangEnglish:            "Usage: `/delete <number>` or `/delete 1,2,3` or `/delete 3-7` or `/delete 1,3-5,8`.\nUse `/list` to see session numbers.",
-		LangChinese:            "用法：`/delete <序号>`，或 `/delete 1,2,3`，或 `/delete 3-7`，或 `/delete 1,3-5,8`。\n使用 `/list` 查看会话序号。",
-		LangTraditionalChinese: "用法：`/delete <序號>`，或 `/delete 1,2,3`，或 `/delete 3-7`，或 `/delete 1,3-5,8`。\n使用 `/list` 查看會話序號。",
-		LangJapanese:           "使い方：`/delete <番号>`、または `/delete 1,2,3`、または `/delete 3-7`、または `/delete 1,3-5,8`。\n`/list` で番号を確認できます。",
-		LangSpanish:            "Uso: `/delete <número>` o `/delete 1,2,3` o `/delete 3-7` o `/delete 1,3-5,8`.\nUse `/list` para ver los números.",
+		LangEnglish: "Usage: `/delete <number>` or `/delete 1,2,3` or `/delete 3-7` or `/delete 1,3-5,8`.\nUse `/list` to see session numbers.",
+		LangChinese: "用法：`/delete <序号>`，或 `/delete 1,2,3`，或 `/delete 3-7`，或 `/delete 1,3-5,8`。\n使用 `/list` 查看会话序号。",
 	},
 	MsgDeleteSuccess: {
-		LangEnglish:            "🗑️ Session deleted: %s",
-		LangChinese:            "🗑️ 会话已删除：%s",
-		LangTraditionalChinese: "🗑️ 會話已刪除：%s",
-		LangJapanese:           "🗑️ セッション削除：%s",
-		LangSpanish:            "🗑️ Sesión eliminada: %s",
+		LangEnglish: "🗑️ Session deleted: %s",
+		LangChinese: "🗑️ 会话已删除：%s",
 	},
 	MsgSwitchSuccess: {
-		LangEnglish:            "✅ Switched to: %s (%s, %d msgs)",
-		LangChinese:            "✅ 已切换到：%s（%s，%d 条消息）",
-		LangTraditionalChinese: "✅ 已切換到：%s（%s，%d 則訊息）",
-		LangJapanese:           "✅ 切り替え：%s（%s、%d件）",
-		LangSpanish:            "✅ Cambiado a: %s (%s, %d mensajes)",
+		LangEnglish: "✅ Switched to: %s (%s, %d msgs)",
+		LangChinese: "✅ 已切换到：%s（%s，%d 条消息）",
 	},
 	MsgSwitchNoMatch: {
-		LangEnglish:            "❌ No session matching %q",
-		LangChinese:            "❌ 没有找到匹配 %q 的会话",
-		LangTraditionalChinese: "❌ 沒有找到匹配 %q 的會話",
-		LangJapanese:           "❌ %q に一致するセッションが見つかりません",
-		LangSpanish:            "❌ No hay sesión que coincida con %q",
+		LangEnglish: "❌ No session matching %q",
+		LangChinese: "❌ 没有找到匹配 %q 的会话",
 	},
 	MsgSwitchNoSession: {
-		LangEnglish:            "❌ No session #%d",
-		LangChinese:            "❌ 没有第 %d 个会话",
-		LangTraditionalChinese: "❌ 沒有第 %d 個會話",
-		LangJapanese:           "❌ セッション #%d が見つかりません",
-		LangSpanish:            "❌ No hay sesión #%d",
+		LangEnglish: "❌ No session #%d",
+		LangChinese: "❌ 没有第 %d 个会话",
 	},
 	MsgCommandTimeout: {
-		LangEnglish:            "⏰ Command timed out (60s): `%s`",
-		LangChinese:            "⏰ 命令超时 (60秒): `%s`",
-		LangTraditionalChinese: "⏰ 命令逾時 (60秒): `%s`",
-		LangJapanese:           "⏰ コマンドがタイムアウトしました (60秒): `%s`",
-		LangSpanish:            "⏰ Comando agotado (60s): `%s`",
+		LangEnglish: "⏰ Command timed out (60s): `%s`",
+		LangChinese: "⏰ 命令超时 (60秒): `%s`",
 	},
 	MsgDeleteActiveDenied: {
-		LangEnglish:            "❌ Cannot delete the currently active session. Switch to another session first.",
-		LangChinese:            "❌ 不能删除当前活跃会话，请先切换到其他会话。",
-		LangTraditionalChinese: "❌ 不能刪除當前活躍會話，請先切換到其他會話。",
-		LangJapanese:           "❌ 現在アクティブなセッションは削除できません。先に別のセッションに切り替えてください。",
-		LangSpanish:            "❌ No se puede eliminar la sesión activa. Cambie a otra sesión primero.",
+		LangEnglish: "❌ Cannot delete the currently active session. Switch to another session first.",
+		LangChinese: "❌ 不能删除当前活跃会话，请先切换到其他会话。",
 	},
 	MsgDeleteNotSupported: {
-		LangEnglish:            "❌ This agent does not support session deletion.",
-		LangChinese:            "❌ 当前 Agent 不支持删除会话。",
-		LangTraditionalChinese: "❌ 當前 Agent 不支持刪除會話。",
-		LangJapanese:           "❌ このエージェントはセッション削除をサポートしていません。",
-		LangSpanish:            "❌ Este agente no admite la eliminación de sesiones.",
+		LangEnglish: "❌ This agent does not support session deletion.",
+		LangChinese: "❌ 当前 Agent 不支持删除会话。",
 	},
 	MsgDeleteModeTitle: {
-		LangEnglish:            "Delete Sessions",
-		LangChinese:            "删除会话",
-		LangTraditionalChinese: "刪除會話",
-		LangJapanese:           "セッション削除",
-		LangSpanish:            "Eliminar sesiones",
+		LangEnglish: "Delete Sessions",
+		LangChinese: "删除会话",
 	},
 	MsgDeleteModeSelect: {
-		LangEnglish:            "Select",
-		LangChinese:            "选择",
-		LangTraditionalChinese: "選擇",
-		LangJapanese:           "選択",
-		LangSpanish:            "Seleccionar",
+		LangEnglish: "Select",
+		LangChinese: "选择",
 	},
 	MsgDeleteModeSelected: {
-		LangEnglish:            "Selected",
-		LangChinese:            "已选",
-		LangTraditionalChinese: "已選",
-		LangJapanese:           "選択済み",
-		LangSpanish:            "Seleccionado",
+		LangEnglish: "Selected",
+		LangChinese: "已选",
 	},
 	MsgDeleteModeSelectedCount: {
-		LangEnglish:            "%d selected",
-		LangChinese:            "已选 %d 项",
-		LangTraditionalChinese: "已選 %d 項",
-		LangJapanese:           "%d 件を選択中",
-		LangSpanish:            "%d seleccionadas",
+		LangEnglish: "%d selected",
+		LangChinese: "已选 %d 项",
 	},
 	MsgDeleteModeDeleteSelected: {
-		LangEnglish:            "Delete Selected",
-		LangChinese:            "删除已选",
-		LangTraditionalChinese: "刪除已選",
-		LangJapanese:           "選択項目を削除",
-		LangSpanish:            "Eliminar seleccionadas",
+		LangEnglish: "Delete Selected",
+		LangChinese: "删除已选",
 	},
 	MsgDeleteModeCancel: {
-		LangEnglish:            "Cancel",
-		LangChinese:            "取消",
-		LangTraditionalChinese: "取消",
-		LangJapanese:           "キャンセル",
-		LangSpanish:            "Cancelar",
+		LangEnglish: "Cancel",
+		LangChinese: "取消",
 	},
 	MsgDeleteModeConfirmTitle: {
-		LangEnglish:            "Confirm Delete",
-		LangChinese:            "确认删除",
-		LangTraditionalChinese: "確認刪除",
-		LangJapanese:           "削除確認",
-		LangSpanish:            "Confirmar eliminación",
+		LangEnglish: "Confirm Delete",
+		LangChinese: "确认删除",
 	},
 	MsgDeleteModeConfirmButton: {
-		LangEnglish:            "Confirm Delete",
-		LangChinese:            "确认删除",
-		LangTraditionalChinese: "確認刪除",
-		LangJapanese:           "削除を確認",
-		LangSpanish:            "Confirmar eliminación",
+		LangEnglish: "Confirm Delete",
+		LangChinese: "确认删除",
 	},
 	MsgDeleteModeBackButton: {
-		LangEnglish:            "Back",
-		LangChinese:            "返回继续选择",
-		LangTraditionalChinese: "返回繼續選擇",
-		LangJapanese:           "選択に戻る",
-		LangSpanish:            "Volver",
+		LangEnglish: "Back",
+		LangChinese: "返回继续选择",
 	},
 	MsgDeleteModeEmptySelection: {
-		LangEnglish:            "Select at least one session.",
-		LangChinese:            "请至少选择一个会话。",
-		LangTraditionalChinese: "請至少選擇一個會話。",
-		LangJapanese:           "少なくとも 1 つのセッションを選択してください。",
-		LangSpanish:            "Seleccione al menos una sesión.",
+		LangEnglish: "Select at least one session.",
+		LangChinese: "请至少选择一个会话。",
 	},
 	MsgDeleteModeResultTitle: {
-		LangEnglish:            "Delete Result",
-		LangChinese:            "删除结果",
-		LangTraditionalChinese: "刪除結果",
-		LangJapanese:           "削除結果",
-		LangSpanish:            "Resultado de eliminación",
+		LangEnglish: "Delete Result",
+		LangChinese: "删除结果",
 	},
 	MsgDeleteModeDeletingTitle: {
-		LangEnglish:            "Deleting Sessions...",
-		LangChinese:            "正在删除会话...",
-		LangTraditionalChinese: "正在刪除會話...",
-		LangJapanese:           "セッションを削除中...",
-		LangSpanish:            "Eliminando sesiones...",
+		LangEnglish: "Deleting Sessions...",
+		LangChinese: "正在删除会话...",
 	},
 	MsgDeleteModeDeletingBody: {
-		LangEnglish:            "Deleting %d session(s), please wait...",
-		LangChinese:            "正在删除 %d 个会话，请稍候...",
-		LangTraditionalChinese: "正在刪除 %d 個會話，請稍候...",
-		LangJapanese:           "%d 件のセッションを削除中、お待ちください...",
-		LangSpanish:            "Eliminando %d sesión(es), por favor espere...",
+		LangEnglish: "Deleting %d session(s), please wait...",
+		LangChinese: "正在删除 %d 个会话，请稍候...",
 	},
 	MsgDeleteModeMissingSession: {
-		LangEnglish:            "❌ Missing selected session: %s",
-		LangChinese:            "❌ 已选会话不存在：%s",
-		LangTraditionalChinese: "❌ 已選會話不存在：%s",
-		LangJapanese:           "❌ 選択したセッションが見つかりません: %s",
-		LangSpanish:            "❌ Falta la sesión seleccionada: %s",
+		LangEnglish: "❌ Missing selected session: %s",
+		LangChinese: "❌ 已选会话不存在：%s",
 	},
 	MsgBannedWordBlocked: {
-		LangEnglish:            "⚠️ Your message was blocked because it contains a prohibited word.",
-		LangChinese:            "⚠️ 消息已被拦截，包含违禁词。",
-		LangTraditionalChinese: "⚠️ 訊息已被攔截，包含違禁詞。",
-		LangJapanese:           "⚠️ 禁止ワードが含まれているため、メッセージがブロックされました。",
-		LangSpanish:            "⚠️ Su mensaje fue bloqueado porque contiene una palabra prohibida.",
+		LangEnglish: "⚠️ Your message was blocked because it contains a prohibited word.",
+		LangChinese: "⚠️ 消息已被拦截，包含违禁词。",
 	},
 	MsgCommandDisabled: {
-		LangEnglish:            "🚫 Command `%s` is disabled for this project.",
-		LangChinese:            "🚫 命令 `%s` 在当前项目中已被禁用。",
-		LangTraditionalChinese: "🚫 命令 `%s` 在當前專案中已被停用。",
-		LangJapanese:           "🚫 コマンド `%s` はこのプロジェクトで無効化されています。",
-		LangSpanish:            "🚫 El comando `%s` está deshabilitado para este proyecto.",
+		LangEnglish: "🚫 Command `%s` is disabled for this project.",
+		LangChinese: "🚫 命令 `%s` 在当前项目中已被禁用。",
 	},
 	MsgAdminRequired: {
-		LangEnglish:            "🔒 Command `%s` requires admin privilege. Set `admin_from` in config to authorize users.",
-		LangChinese:            "🔒 命令 `%s` 需要管理员权限。请在配置中设置 `admin_from` 来授权用户。",
-		LangTraditionalChinese: "🔒 命令 `%s` 需要管理員權限。請在配置中設定 `admin_from` 來授權使用者。",
-		LangJapanese:           "🔒 コマンド `%s` には管理者権限が必要です。設定で `admin_from` を設定してユーザーを承認してください。",
-		LangSpanish:            "🔒 El comando `%s` requiere privilegios de administrador. Configure `admin_from` en la configuración.",
+		LangEnglish: "🔒 Command `%s` requires admin privilege. Set `admin_from` in config to authorize users.",
+		LangChinese: "🔒 命令 `%s` 需要管理员权限。请在配置中设置 `admin_from` 来授权用户。",
 	},
 	MsgRateLimited: {
-		LangEnglish:            "⏳ You are sending messages too fast. Please wait a moment.",
-		LangChinese:            "⏳ 消息发送过快，请稍后再试。",
-		LangTraditionalChinese: "⏳ 訊息發送過快，請稍後再試。",
-		LangJapanese:           "⏳ メッセージの送信が速すぎます。しばらくお待ちください。",
-		LangSpanish:            "⏳ Estás enviando mensajes demasiado rápido. Espera un momento.",
+		LangEnglish: "⏳ You are sending messages too fast. Please wait a moment.",
+		LangChinese: "⏳ 消息发送过快，请稍后再试。",
 	},
 	MsgPsSent: {
-		LangEnglish:            "✅ P.S. delivered.",
-		LangChinese:            "✅ P.S. 已送达。",
-		LangTraditionalChinese: "✅ P.S. 已送達。",
-		LangJapanese:           "✅ P.S. を送信しました。",
-		LangSpanish:            "✅ P.S. entregado.",
+		LangEnglish: "✅ P.S. delivered.",
+		LangChinese: "✅ P.S. 已送达。",
 	},
 	MsgPsSendFailed: {
-		LangEnglish:            "❌ Failed to deliver P.S.",
-		LangChinese:            "❌ P.S. 发送失败。",
-		LangTraditionalChinese: "❌ P.S. 傳送失敗。",
-		LangJapanese:           "❌ P.S. の送信に失敗しました。",
-		LangSpanish:            "❌ Error al entregar el P.S.",
+		LangEnglish: "❌ Failed to deliver P.S.",
+		LangChinese: "❌ P.S. 发送失败。",
 	},
 	MsgPsEmpty: {
-		LangEnglish:            "Usage: `/ps <message>`",
-		LangChinese:            "用法：`/ps <消息>`",
-		LangTraditionalChinese: "用法：`/ps <訊息>`",
-		LangJapanese:           "使い方：`/ps <メッセージ>`",
-		LangSpanish:            "Uso: `/ps <mensaje>`",
+		LangEnglish: "Usage: `/ps <message>`",
+		LangChinese: "用法：`/ps <消息>`",
 	},
 	MsgPsNoSession: {
-		LangEnglish:            "No task is currently running.",
-		LangChinese:            "当前没有正在执行的任务。",
-		LangTraditionalChinese: "目前沒有正在執行的任務。",
-		LangJapanese:           "現在実行中のタスクはありません。",
-		LangSpanish:            "No hay ninguna tarea en ejecución.",
+		LangEnglish: "No task is currently running.",
+		LangChinese: "当前没有正在执行的任务。",
 	},
 	MsgWhoamiTitle: {
-		LangEnglish:            "🪪 **Your Identity**",
-		LangChinese:            "🪪 **你的身份信息**",
-		LangTraditionalChinese: "🪪 **你的身分資訊**",
-		LangJapanese:           "🪪 **あなたの身元情報**",
-		LangSpanish:            "🪪 **Tu identidad**",
+		LangEnglish: "🪪 **Your Identity**",
+		LangChinese: "🪪 **你的身份信息**",
 	},
 	MsgWhoamiCardTitle: {
-		LangEnglish:            "Your Identity",
-		LangChinese:            "你的身份信息",
-		LangTraditionalChinese: "你的身分資訊",
-		LangJapanese:           "あなたの身元情報",
-		LangSpanish:            "Tu identidad",
+		LangEnglish: "Your Identity",
+		LangChinese: "你的身份信息",
 	},
 	MsgWhoamiName: {
-		LangEnglish:            "Name",
-		LangChinese:            "名称",
-		LangTraditionalChinese: "名稱",
-		LangJapanese:           "名前",
-		LangSpanish:            "Nombre",
+		LangEnglish: "Name",
+		LangChinese: "名称",
 	},
 	MsgWhoamiPlatform: {
-		LangEnglish:            "Platform",
-		LangChinese:            "平台",
-		LangTraditionalChinese: "平台",
-		LangJapanese:           "プラットフォーム",
-		LangSpanish:            "Plataforma",
+		LangEnglish: "Platform",
+		LangChinese: "平台",
 	},
 	MsgWhoamiUsage: {
-		LangEnglish:            "💡 Use the `User ID` above for `allow_from` and `admin_from` in your `config.toml`.",
-		LangChinese:            "💡 可将上方 `User ID` 填入 `config.toml` 的 `allow_from` 或 `admin_from` 中。",
-		LangTraditionalChinese: "💡 可將上方 `User ID` 填入 `config.toml` 的 `allow_from` 或 `admin_from` 中。",
-		LangJapanese:           "💡 上記の `User ID` を `config.toml` の `allow_from` や `admin_from` に設定してください。",
-		LangSpanish:            "💡 Usa el `User ID` de arriba para `allow_from` y `admin_from` en tu `config.toml`.",
+		LangEnglish: "💡 Use the `User ID` above for `allow_from` and `admin_from` in your `config.toml`.",
+		LangChinese: "💡 可将上方 `User ID` 填入 `config.toml` 的 `allow_from` 或 `admin_from` 中。",
 	},
 	MsgRelayNoBinding: {
 		LangEnglish: "No relay binding in this chat.\nUse `/bind <project>` to bind another bot.\nThe <project> is the project name from your config.toml.",
@@ -3512,756 +2261,435 @@ var messages = map[MsgKey]map[Language]string{
 		LangChinese: "项目 %q 不存在。没有配置其他项目。",
 	},
 	MsgRelayBindRemoved: {
-		LangEnglish:            "✅ Removed %s from binding",
-		LangChinese:            "✅ 已从绑定中移除 %s",
-		LangTraditionalChinese: "✅ 已從綁定中移除 %s",
-		LangJapanese:           "✅ %s をバインドから削除しました",
-		LangSpanish:            "✅ Eliminado %s del enlace",
+		LangEnglish: "✅ Removed %s from binding",
+		LangChinese: "✅ 已从绑定中移除 %s",
 	},
 	MsgRelayBindNotFound: {
-		LangEnglish:            "❌ %s is not bound or binding does not exist",
-		LangChinese:            "❌ %s 未绑定或绑定不存在",
-		LangTraditionalChinese: "❌ %s 未綁定或綁定不存在",
-		LangJapanese:           "❌ %s はバインドされていないか、バインドが存在しません",
-		LangSpanish:            "❌ %s no está vinculado o el enlace no existe",
+		LangEnglish: "❌ %s is not bound or binding does not exist",
+		LangChinese: "❌ %s 未绑定或绑定不存在",
 	},
 	MsgRelayBindSuccess: {
-		LangEnglish:            "✅ Bind successful! Current group bound: %s\n\nYou can now ask this bot to communicate with %s.\nExample: \"Ask %s about ...\"",
-		LangChinese:            "✅ 绑定成功！当前群组已绑定: %s\n\n你现在可以让本机器人去询问 %s。\n示例：\"帮我问一下 %s ...\"",
-		LangTraditionalChinese: "✅ 綁定成功！當前群組已綁定: %s\n\n你現在可以讓本機器人去詢問 %s。\n示例：\"幫我問一下 %s ...\"",
-		LangJapanese:           "✅ バインド成功！現在のグループ: %s\n\nこのボットに %s への問い合わせを依頼できます。\n例：「%s に...を聞いて」",
-		LangSpanish:            "✅ ¡Enlace exitoso! Grupo actual: %s\n\nAhora puede pedir a este bot que consulte a %s.\nEjemplo: \"Pregunta a %s sobre ...\"",
+		LangEnglish: "✅ Bind successful! Current group bound: %s\n\nYou can now ask this bot to communicate with %s.\nExample: \"Ask %s about ...\"",
+		LangChinese: "✅ 绑定成功！当前群组已绑定: %s\n\n你现在可以让本机器人去询问 %s。\n示例：\"帮我问一下 %s ...\"",
 	},
 	MsgRelaySetupHint: {
-		LangEnglish:            "\n\n⚠️ This agent does not auto-inject cc-connect instructions.\nPlease run `/bind setup` or `/cron setup` to write instructions to %s.",
-		LangChinese:            "\n\n⚠️ 当前 agent 不会自动注入 cc-connect 指令。\n请运行 `/bind setup` 或 `/cron setup` 将指令写入 %s。",
-		LangTraditionalChinese: "\n\n⚠️ 當前 agent 不會自動注入 cc-connect 指令。\n請執行 `/bind setup` 或 `/cron setup` 將指令寫入 %s。",
-		LangJapanese:           "\n\n⚠️ このエージェントは cc-connect の指示を自動注入しません。\n`/bind setup` または `/cron setup` を実行して %s に指示を書き込んでください。",
-		LangSpanish:            "\n\n⚠️ Este agente no inyecta automáticamente las instrucciones de cc-connect.\nEjecute `/bind setup` o `/cron setup` para escribirlas en %s.",
+		LangEnglish: "\n\n⚠️ This agent does not auto-inject cc-connect instructions.\nPlease run `/bind setup` or `/cron setup` to write instructions to %s.",
+		LangChinese: "\n\n⚠️ 当前 agent 不会自动注入 cc-connect 指令。\n请运行 `/bind setup` 或 `/cron setup` 将指令写入 %s。",
 	},
 	MsgRelaySetupOK: {
-		LangEnglish:            "✅ cc-connect instructions written to %s\nThe agent can now use relay, cron, and attachment send-back.",
-		LangChinese:            "✅ cc-connect 指令已写入 %s\nagent 现在可以使用中继、定时任务和附件回传功能了。",
-		LangTraditionalChinese: "✅ cc-connect 指令已寫入 %s\nagent 現在可以使用中繼、定時任務和附件回傳功能了。",
-		LangJapanese:           "✅ cc-connect の指示を %s に書き込みました。\nエージェントがリレー、cron、添付ファイル返送を使えるようになりました。",
-		LangSpanish:            "✅ Instrucciones de cc-connect escritas en %s\nEl agente ahora puede usar relay, cron y reenvío de adjuntos.",
+		LangEnglish: "✅ cc-connect instructions written to %s\nThe agent can now use relay, cron, and attachment send-back.",
+		LangChinese: "✅ cc-connect 指令已写入 %s\nagent 现在可以使用中继、定时任务和附件回传功能了。",
 	},
 	MsgRelaySetupExists: {
-		LangEnglish:            "ℹ️ cc-connect instructions already exist in %s — no changes made.",
-		LangChinese:            "ℹ️ cc-connect 指令已存在于 %s 中，无需重复写入。",
-		LangTraditionalChinese: "ℹ️ cc-connect 指令已存在於 %s 中，無需重複寫入。",
-		LangJapanese:           "ℹ️ cc-connect の指示は既に %s に存在します。変更はありません。",
-		LangSpanish:            "ℹ️ Las instrucciones de cc-connect ya existen en %s — sin cambios.",
+		LangEnglish: "ℹ️ cc-connect instructions already exist in %s — no changes made.",
+		LangChinese: "ℹ️ cc-connect 指令已存在于 %s 中，无需重复写入。",
 	},
 	MsgRelaySetupNoMemory: {
-		LangEnglish:            "❌ This agent does not support instruction files.",
-		LangChinese:            "❌ 当前 agent 不支持指令文件。",
-		LangTraditionalChinese: "❌ 當前 agent 不支持指令檔案。",
-		LangJapanese:           "❌ このエージェントは指示ファイルをサポートしていません。",
-		LangSpanish:            "❌ Este agente no soporta archivos de instrucciones.",
+		LangEnglish: "❌ This agent does not support instruction files.",
+		LangChinese: "❌ 当前 agent 不支持指令文件。",
 	},
 	MsgSetupNative: {
-		LangEnglish:            "✅ This agent natively supports cc-connect instructions — no setup needed.",
-		LangChinese:            "✅ 当前 agent 已原生支持 cc-connect 指令，无需额外配置。",
-		LangTraditionalChinese: "✅ 當前 agent 已原生支持 cc-connect 指令，無需額外配置。",
-		LangJapanese:           "✅ このエージェントは cc-connect の指示をネイティブサポートしています。セットアップ不要です。",
-		LangSpanish:            "✅ Este agente soporta nativamente las instrucciones de cc-connect — no se necesita configuración.",
+		LangEnglish: "✅ This agent natively supports cc-connect instructions — no setup needed.",
+		LangChinese: "✅ 当前 agent 已原生支持 cc-connect 指令，无需额外配置。",
 	},
 	MsgCronSetupOK: {
-		LangEnglish:            "✅ cc-connect instructions written to %s\nThe agent can now use relay, cron, and attachment send-back.",
-		LangChinese:            "✅ cc-connect 指令已写入 %s\nagent 现在可以使用中继、定时任务和附件回传功能了。",
-		LangTraditionalChinese: "✅ cc-connect 指令已寫入 %s\nagent 現在可以使用中繼、定時任務和附件回傳功能了。",
-		LangJapanese:           "✅ cc-connect の指示を %s に書き込みました。\nエージェントがリレー、cron、添付ファイル返送を使えるようになりました。",
-		LangSpanish:            "✅ Instrucciones de cc-connect escritas en %s\nEl agente ahora puede usar relay, cron y reenvío de adjuntos.",
+		LangEnglish: "✅ cc-connect instructions written to %s\nThe agent can now use relay, cron, and attachment send-back.",
+		LangChinese: "✅ cc-connect 指令已写入 %s\nagent 现在可以使用中继、定时任务和附件回传功能了。",
 	},
 	MsgSearchUsage: {
-		LangEnglish:            "Usage: /search <keyword>\nSearch sessions by name or ID.",
-		LangChinese:            "用法: /search <关键词>\n搜索会话名称或 ID。",
-		LangTraditionalChinese: "用法: /search <關鍵詞>\n搜尋會話名稱或 ID。",
-		LangJapanese:           "使い方: /search <キーワード>\nセッション名またはIDで検索。",
-		LangSpanish:            "Uso: /search <palabra_clave>\nBuscar sesiones por nombre o ID.",
+		LangEnglish: "Usage: /search <keyword>\nSearch sessions by name or ID.",
+		LangChinese: "用法: /search <关键词>\n搜索会话名称或 ID。",
 	},
 	MsgSearchError: {
-		LangEnglish:            "❌ Search error: %v",
-		LangChinese:            "❌ 搜索失败: %v",
-		LangTraditionalChinese: "❌ 搜尋失敗: %v",
-		LangJapanese:           "❌ 検索エラー: %v",
-		LangSpanish:            "❌ Error de búsqueda: %v",
+		LangEnglish: "❌ Search error: %v",
+		LangChinese: "❌ 搜索失败: %v",
 	},
 	MsgSearchNoResult: {
-		LangEnglish:            "No sessions found matching %q",
-		LangChinese:            "没有找到匹配 %q 的会话",
-		LangTraditionalChinese: "沒有找到匹配 %q 的會話",
-		LangJapanese:           "%q に一致するセッションが見つかりません",
-		LangSpanish:            "No se encontraron sesiones que coincidan con %q",
+		LangEnglish: "No sessions found matching %q",
+		LangChinese: "没有找到匹配 %q 的会话",
 	},
 	MsgSearchResult: {
-		LangEnglish:            "🔍 Found %d session(s) matching %q:",
-		LangChinese:            "🔍 找到 %d 个匹配 %q 的会话:",
-		LangTraditionalChinese: "🔍 找到 %d 個匹配 %q 的會話:",
-		LangJapanese:           "🔍 %q に一致する %d 件のセッション:",
-		LangSpanish:            "🔍 Se encontraron %d sesiones que coinciden con %q:",
+		LangEnglish: "🔍 Found %d session(s) matching %q:",
+		LangChinese: "🔍 找到 %d 个匹配 %q 的会话:",
 	},
 	MsgSearchHint: {
-		LangEnglish:            "Use /switch <id> to switch to a session.",
-		LangChinese:            "使用 /switch <id> 切换到对应会话。",
-		LangTraditionalChinese: "使用 /switch <id> 切換到對應會話。",
-		LangJapanese:           "/switch <id> でセッションを切り替え。",
-		LangSpanish:            "Usa /switch <id> para cambiar a una sesión.",
+		LangEnglish: "Use /switch <id> to switch to a session.",
+		LangChinese: "使用 /switch <id> 切换到对应会话。",
 	},
 	// Builtin command descriptions
 	MsgBuiltinCmdNew: {
-		LangEnglish:            "Start a new session, arg: [name]",
-		LangChinese:            "创建新会话，参数: [名称]",
-		LangTraditionalChinese: "建立新會話，參數: [名稱]",
-		LangJapanese:           "新しいセッションを開始、引数: [名前]",
-		LangSpanish:            "Iniciar una nueva sesión, arg: [nombre]",
+		LangEnglish: "Start a new session, arg: [name]",
+		LangChinese: "创建新会话，参数: [名称]",
 	},
 	MsgBuiltinCmdList: {
-		LangEnglish:            "List agent sessions",
-		LangChinese:            "列出 Agent 会话列表",
-		LangTraditionalChinese: "列出 Agent 會話列表",
-		LangJapanese:           "エージェントセッション一覧",
-		LangSpanish:            "Listar sesiones del agente",
+		LangEnglish: "List agent sessions",
+		LangChinese: "列出 Agent 会话列表",
 	},
 	MsgBuiltinCmdSearch: {
-		LangEnglish:            "Search sessions by name or ID, arg: <keyword>",
-		LangChinese:            "搜索会话名称或 ID，参数: <关键词>",
-		LangTraditionalChinese: "搜尋會話名稱或 ID，參數: <關鍵詞>",
-		LangJapanese:           "セッションを名前またはIDで検索、引数: <キーワード>",
-		LangSpanish:            "Buscar sesiones por nombre o ID, arg: <palabra_clave>",
+		LangEnglish: "Search sessions by name or ID, arg: <keyword>",
+		LangChinese: "搜索会话名称或 ID，参数: <关键词>",
 	},
 	MsgBuiltinCmdSwitch: {
-		LangEnglish:            "Resume a session by its list number, arg: <number>",
-		LangChinese:            "按列表序号切换会话，参数: <序号>",
-		LangTraditionalChinese: "按列表序號切換會話，參數: <序號>",
-		LangJapanese:           "リスト番号でセッションを切り替え、引数: <番号>",
-		LangSpanish:            "Reanudar sesión por su número en la lista, arg: <número>",
+		LangEnglish: "Resume a session by its list number, arg: <number>",
+		LangChinese: "按列表序号切换会话，参数: <序号>",
 	},
 	MsgBuiltinCmdDelete: {
-		LangEnglish:            "Delete session(s) by list number, args: <number> | 1,2,3 | 3-7 | 1,3-5,8",
-		LangChinese:            "按列表序号删除会话，参数: <序号> | 1,2,3 | 3-7 | 1,3-5,8",
-		LangTraditionalChinese: "按列表序號刪除會話，參數: <序號> | 1,2,3 | 3-7 | 1,3-5,8",
-		LangJapanese:           "リスト番号でセッションを削除、引数: <番号> | 1,2,3 | 3-7 | 1,3-5,8",
-		LangSpanish:            "Eliminar sesión(es) por número de lista, args: <número> | 1,2,3 | 3-7 | 1,3-5,8",
+		LangEnglish: "Delete session(s) by list number, args: <number> | 1,2,3 | 3-7 | 1,3-5,8",
+		LangChinese: "按列表序号删除会话，参数: <序号> | 1,2,3 | 3-7 | 1,3-5,8",
 	},
 	MsgBuiltinCmdName: {
-		LangEnglish:            "Name a session for easy identification, arg: [number] <text>",
-		LangChinese:            "给会话命名，方便识别，参数: [序号] <名称>",
-		LangTraditionalChinese: "為會話命名，方便辨識，參數: [序號] <名稱>",
-		LangJapanese:           "セッションに名前を付ける、引数: [番号] <名前>",
-		LangSpanish:            "Nombrar una sesión para fácil identificación, arg: [número] <texto>",
+		LangEnglish: "Name a session for easy identification, arg: [number] <text>",
+		LangChinese: "给会话命名，方便识别，参数: [序号] <名称>",
 	},
 	MsgBuiltinCmdCurrent: {
-		LangEnglish:            "Show current active session",
-		LangChinese:            "查看当前活跃会话",
-		LangTraditionalChinese: "查看當前活躍會話",
-		LangJapanese:           "現在のアクティブセッションを表示",
-		LangSpanish:            "Mostrar sesión activa actual",
+		LangEnglish: "Show current active session",
+		LangChinese: "查看当前活跃会话",
 	},
 	MsgBuiltinCmdHistory: {
-		LangEnglish:            "Show last n messages, arg: [n] (default 10)",
-		LangChinese:            "查看最近 n 条消息，参数: [n]（默认 10）",
-		LangTraditionalChinese: "查看最近 n 條訊息，參數: [n]（預設 10）",
-		LangJapanese:           "直近 n 件のメッセージを表示、引数: [n]（デフォルト 10）",
-		LangSpanish:            "Mostrar últimos n mensajes, arg: [n] (por defecto 10)",
+		LangEnglish: "Show last n messages, arg: [n] (default 10)",
+		LangChinese: "查看最近 n 条消息，参数: [n]（默认 10）",
 	},
 	MsgBuiltinCmdProvider: {
-		LangEnglish:            "Manage API providers, arg: [list|add|remove|switch|clear]",
-		LangChinese:            "管理 API Provider，参数: [list|add|remove|switch|clear]",
-		LangTraditionalChinese: "管理 API Provider，參數: [list|add|remove|switch|clear]",
-		LangJapanese:           "API プロバイダ管理、引数: [list|add|remove|switch|clear]",
-		LangSpanish:            "Gestionar proveedores API, arg: [list|add|remove|switch|clear]",
+		LangEnglish: "Manage API providers, arg: [list|add|remove|switch|clear]",
+		LangChinese: "管理 API Provider，参数: [list|add|remove|switch|clear]",
 	},
 	MsgBuiltinCmdMemory: {
-		LangEnglish:            "View/edit agent memory files, arg: [add|global|global add]",
-		LangChinese:            "查看/编辑 Agent 记忆文件，参数: [add|global|global add]",
-		LangTraditionalChinese: "查看/編輯 Agent 記憶檔案，參數: [add|global|global add]",
-		LangJapanese:           "エージェントメモリの表示/編集、引数: [add|global|global add]",
-		LangSpanish:            "Ver/editar archivos de memoria del agente, arg: [add|global|global add]",
+		LangEnglish: "View/edit agent memory files, arg: [add|global|global add]",
+		LangChinese: "查看/编辑 Agent 记忆文件，参数: [add|global|global add]",
 	},
 	MsgBuiltinCmdAllow: {
-		LangEnglish:            "Pre-allow a tool (next session), arg: <tool>",
-		LangChinese:            "预授权工具（下次会话生效），参数: <工具名>",
-		LangTraditionalChinese: "預授權工具（下次會話生效），參數: <工具名>",
-		LangJapanese:           "ツールを事前許可（次のセッションで有効）、引数: <ツール>",
-		LangSpanish:            "Pre-autorizar herramienta (próxima sesión), arg: <herramienta>",
+		LangEnglish: "Pre-allow a tool (next session), arg: <tool>",
+		LangChinese: "预授权工具（下次会话生效），参数: <工具名>",
 	},
 	MsgBuiltinCmdModel: {
-		LangEnglish:            "View/switch model, arg: [name]",
-		LangChinese:            "查看/切换模型，参数: [名称]",
-		LangTraditionalChinese: "查看/切換模型，參數: [名稱]",
-		LangJapanese:           "モデルの表示/切り替え、引数: [名前]",
-		LangSpanish:            "Ver/cambiar modelo, arg: [nombre]",
+		LangEnglish: "View/switch model, arg: [name]",
+		LangChinese: "查看/切换模型，参数: [名称]",
 	},
 	MsgBuiltinCmdReasoning: {
-		LangEnglish:            "View/switch reasoning effort, arg: [level]",
-		LangChinese:            "查看/切换推理强度，参数: [等级]",
-		LangTraditionalChinese: "查看/切換推理強度，參數: [等級]",
-		LangJapanese:           "推論強度の表示/切り替え、引数: [レベル]",
-		LangSpanish:            "Ver/cambiar esfuerzo de razonamiento, arg: [nivel]",
+		LangEnglish: "View/switch reasoning effort, arg: [level]",
+		LangChinese: "查看/切换推理强度，参数: [等级]",
 	},
 	MsgBuiltinCmdMode: {
-		LangEnglish:            "View/switch permission mode, arg: [name]",
-		LangChinese:            "查看/切换权限模式，参数: [名称]",
-		LangTraditionalChinese: "查看/切換權限模式，參數: [名稱]",
-		LangJapanese:           "権限モードの表示/切り替え、引数: [名前]",
-		LangSpanish:            "Ver/cambiar modo de permisos, arg: [nombre]",
+		LangEnglish: "View/switch permission mode, arg: [name]",
+		LangChinese: "查看/切换权限模式，参数: [名称]",
 	},
 	MsgBuiltinCmdLang: {
-		LangEnglish:            "View/switch language, arg: [en|zh|zh-TW|ja|es|auto]",
-		LangChinese:            "查看/切换语言，参数: [en|zh|zh-TW|ja|es|auto]",
-		LangTraditionalChinese: "查看/切換語言，參數: [en|zh|zh-TW|ja|es|auto]",
-		LangJapanese:           "言語の表示/切り替え、引数: [en|zh|zh-TW|ja|es|auto]",
-		LangSpanish:            "Ver/cambiar idioma, arg: [en|zh|zh-TW|ja|es|auto]",
+		LangEnglish: "View/switch language, arg: [en|zh|auto]",
+		LangChinese: "查看/切换语言，参数: [en|zh|auto]",
 	},
 	MsgBuiltinCmdQuiet: {
-		LangEnglish:            "Toggle thinking/tool progress, arg: [global]",
-		LangChinese:            "开关思考和工具进度消息, 参数: [global]",
-		LangTraditionalChinese: "開關思考和工具進度訊息, 參數: [global]",
-		LangJapanese:           "思考/ツール進捗メッセージの表示切替, 引数: [global]",
-		LangSpanish:            "Alternar mensajes de progreso, arg: [global]",
+		LangEnglish: "Toggle thinking/tool progress, arg: [global]",
+		LangChinese: "开关思考和工具进度消息, 参数: [global]",
 	},
 	MsgBuiltinCmdCompress: {
-		LangEnglish:            "Compress conversation context",
-		LangChinese:            "压缩会话上下文",
-		LangTraditionalChinese: "壓縮會話上下文",
-		LangJapanese:           "会話コンテキストを圧縮",
-		LangSpanish:            "Comprimir contexto de conversación",
+		LangEnglish: "Compress conversation context",
+		LangChinese: "压缩会话上下文",
 	},
 	MsgBuiltinCmdStop: {
-		LangEnglish:            "Stop current execution",
-		LangChinese:            "停止当前执行",
-		LangTraditionalChinese: "停止當前執行",
-		LangJapanese:           "現在の実行を停止",
-		LangSpanish:            "Detener ejecución actual",
+		LangEnglish: "Stop current execution",
+		LangChinese: "停止当前执行",
 	},
 	MsgBuiltinCmdCron: {
-		LangEnglish:            "Manage scheduled tasks, arg: [add|list|del|enable|disable]",
-		LangChinese:            "管理定时任务，参数: [add|list|del|enable|disable]",
-		LangTraditionalChinese: "管理定時任務，參數: [add|list|del|enable|disable]",
-		LangJapanese:           "スケジュールタスク管理、引数: [add|list|del|enable|disable]",
-		LangSpanish:            "Gestionar tareas programadas, arg: [add|list|del|enable|disable]",
+		LangEnglish: "Manage scheduled tasks, arg: [add|list|del|enable|disable]",
+		LangChinese: "管理定时任务，参数: [add|list|del|enable|disable]",
 	},
 	MsgBuiltinCmdCommands: {
-		LangEnglish:            "Manage custom slash commands, arg: [add|del]",
-		LangChinese:            "管理自定义命令，参数: [add|del]",
-		LangTraditionalChinese: "管理自訂命令，參數: [add|del]",
-		LangJapanese:           "カスタムコマンド管理、引数: [add|del]",
-		LangSpanish:            "Gestionar comandos personalizados, arg: [add|del]",
+		LangEnglish: "Manage custom slash commands, arg: [add|del]",
+		LangChinese: "管理自定义命令，参数: [add|del]",
 	},
 	MsgBuiltinCmdAlias: {
-		LangEnglish:            "Manage command aliases, arg: [add|del]",
-		LangChinese:            "管理命令别名，参数: [add|del]",
-		LangTraditionalChinese: "管理命令別名，參數: [add|del]",
-		LangJapanese:           "コマンドエイリアス管理、引数: [add|del]",
-		LangSpanish:            "Gestionar alias de comandos, arg: [add|del]",
+		LangEnglish: "Manage command aliases, arg: [add|del]",
+		LangChinese: "管理命令别名，参数: [add|del]",
 	},
 	MsgBuiltinCmdSkills: {
-		LangEnglish:            "List agent skills (from SKILL.md)",
-		LangChinese:            "列出 Agent Skills（来自 SKILL.md）",
-		LangTraditionalChinese: "列出 Agent Skills（來自 SKILL.md）",
-		LangJapanese:           "エージェントスキル一覧（SKILL.md から）",
-		LangSpanish:            "Listar skills del agente (desde SKILL.md)",
+		LangEnglish: "List agent skills (from SKILL.md)",
+		LangChinese: "列出 Agent Skills（来自 SKILL.md）",
 	},
 	MsgBuiltinCmdConfig: {
-		LangEnglish:            "View/update runtime configuration, arg: [get|set|reload] [key] [value]",
-		LangChinese:            "查看/修改运行时配置，参数: [get|set|reload] [键] [值]",
-		LangTraditionalChinese: "查看/修改執行階段配置，參數: [get|set|reload] [鍵] [值]",
-		LangJapanese:           "ランタイム設定の表示/変更、引数: [get|set|reload] [キー] [値]",
-		LangSpanish:            "Ver/actualizar configuración en tiempo de ejecución, arg: [get|set|reload] [clave] [valor]",
+		LangEnglish: "View/update runtime configuration, arg: [get|set|reload] [key] [value]",
+		LangChinese: "查看/修改运行时配置，参数: [get|set|reload] [键] [值]",
 	},
 	MsgBuiltinCmdDoctor: {
-		LangEnglish:            "Run system diagnostics",
-		LangChinese:            "运行系统诊断",
-		LangTraditionalChinese: "執行系統診斷",
-		LangJapanese:           "システム診断を実行",
-		LangSpanish:            "Ejecutar diagnósticos del sistema",
+		LangEnglish: "Run system diagnostics",
+		LangChinese: "运行系统诊断",
 	},
 	MsgBuiltinCmdUpgrade: {
-		LangEnglish:            "Check for updates and self-update",
-		LangChinese:            "检查更新并自动升级",
-		LangTraditionalChinese: "檢查更新並自動升級",
-		LangJapanese:           "アップデートを確認して自動更新",
-		LangSpanish:            "Buscar actualizaciones y auto-actualizar",
+		LangEnglish: "Check for updates and self-update",
+		LangChinese: "检查更新并自动升级",
 	},
 	MsgBuiltinCmdRestart: {
-		LangEnglish:            "Restart cc-connect service",
-		LangChinese:            "重启 cc-connect 服务",
-		LangTraditionalChinese: "重啟 cc-connect 服務",
-		LangJapanese:           "cc-connect サービスを再起動",
-		LangSpanish:            "Reiniciar el servicio cc-connect",
+		LangEnglish: "Restart cc-connect service",
+		LangChinese: "重启 cc-connect 服务",
 	},
 	MsgBuiltinCmdStatus: {
-		LangEnglish:            "Show system status",
-		LangChinese:            "查看系统状态",
-		LangTraditionalChinese: "查看系統狀態",
-		LangJapanese:           "システム状態を表示",
-		LangSpanish:            "Mostrar estado del sistema",
+		LangEnglish: "Show system status",
+		LangChinese: "查看系统状态",
 	},
 	MsgBuiltinCmdUsage: {
-		LangEnglish:            "Show account/model quota usage",
-		LangChinese:            "查看账号/模型限额使用情况",
-		LangTraditionalChinese: "查看帳號/模型限額使用情況",
-		LangJapanese:           "アカウント/モデル使用量を表示",
-		LangSpanish:            "Mostrar uso de cuota de cuenta/modelo",
+		LangEnglish: "Show account/model quota usage",
+		LangChinese: "查看账号/模型限额使用情况",
 	},
 	MsgBuiltinCmdVersion: {
-		LangEnglish:            "Show cc-connect version",
-		LangChinese:            "查看 cc-connect 版本",
-		LangTraditionalChinese: "查看 cc-connect 版本",
-		LangJapanese:           "cc-connect のバージョンを表示",
-		LangSpanish:            "Mostrar versión de cc-connect",
+		LangEnglish: "Show cc-connect version",
+		LangChinese: "查看 cc-connect 版本",
 	},
 	MsgBuiltinCmdHelp: {
-		LangEnglish:            "Show this help",
-		LangChinese:            "显示此帮助",
-		LangTraditionalChinese: "顯示此說明",
-		LangJapanese:           "このヘルプを表示",
-		LangSpanish:            "Mostrar esta ayuda",
+		LangEnglish: "Show this help",
+		LangChinese: "显示此帮助",
 	},
 	MsgBuiltinCmdBind: {
-		LangEnglish:            "Bind current session to a target, arg: <target>",
-		LangChinese:            "绑定当前会话到目标，参数: <目标>",
-		LangTraditionalChinese: "綁定當前會話到目標，參數: <目標>",
-		LangJapanese:           "現在のセッションをターゲットにバインド、引数: <ターゲット>",
-		LangSpanish:            "Vincular sesión actual a un objetivo, arg: <objetivo>",
+		LangEnglish: "Bind current session to a target, arg: <target>",
+		LangChinese: "绑定当前会话到目标，参数: <目标>",
 	},
 	MsgBuiltinCmdShell: {
-		LangEnglish:            "Run a shell command, arg: <command>",
-		LangChinese:            "执行 Shell 命令，参数: <命令>",
-		LangTraditionalChinese: "執行 Shell 命令，參數: <命令>",
-		LangJapanese:           "シェルコマンドを実行、引数: <コマンド>",
-		LangSpanish:            "Ejecutar un comando shell, arg: <comando>",
+		LangEnglish: "Run a shell command, arg: <command>",
+		LangChinese: "执行 Shell 命令，参数: <命令>",
 	},
 	MsgBuiltinCmdDir: {
-		LangEnglish:            "Show, switch, or reset agent working directory, arg: <path>",
-		LangChinese:            "查看、切换或重置 Agent 工作目录，参数: <路径>",
-		LangTraditionalChinese: "查看、切換或重置 Agent 工作目錄，參數: <路徑>",
-		LangJapanese:           "エージェントの作業ディレクトリを表示/変更/リセット、引数: <パス>",
-		LangSpanish:            "Ver, cambiar o restablecer el directorio de trabajo del agente, arg: <ruta>",
+		LangEnglish: "Show, switch, or reset agent working directory, arg: <path>",
+		LangChinese: "查看、切换或重置 Agent 工作目录，参数: <路径>",
 	},
 	MsgBuiltinCmdDiff: {
-		LangEnglish:            "Generate git diff as HTML file, arg: [target]",
-		LangChinese:            "生成 git diff 并以 HTML 文件发送，参数: [目标]",
-		LangTraditionalChinese: "產生 git diff 並以 HTML 檔案傳送，參數: [目標]",
-		LangJapanese:           "git diff を HTML ファイルで生成、引数: [ターゲット]",
-		LangSpanish:            "Generar git diff como archivo HTML, arg: [objetivo]",
+		LangEnglish: "Generate git diff as HTML file, arg: [target]",
+		LangChinese: "生成 git diff 并以 HTML 文件发送，参数: [目标]",
 	},
 	MsgBuiltinCmdPs: {
-		LangEnglish:            "Send a P.S. to the running task",
-		LangChinese:            "向正在执行的任务追加补充信息",
-		LangTraditionalChinese: "向正在執行的任務追加補充資訊",
-		LangJapanese:           "実行中のタスクに補足情報を送信",
-		LangSpanish:            "Enviar un P.S. a la tarea en curso",
+		LangEnglish: "Send a P.S. to the running task",
+		LangChinese: "向正在执行的任务追加补充信息",
 	},
 	MsgDiffEmpty: {
-		LangEnglish:            "No diff — clean working tree (or no changes vs `%s`).",
-		LangChinese:            "无差异 — 工作区干净（或与 `%s` 无变化）。",
-		LangTraditionalChinese: "無差異 — 工作區乾淨（或與 `%s` 無變化）。",
-		LangJapanese:           "差分なし — 作業ツリーはクリーン（または `%s` との差分なし）。",
-		LangSpanish:            "Sin diferencias — árbol limpio (o sin cambios vs `%s`).",
+		LangEnglish: "No diff — clean working tree (or no changes vs `%s`).",
+		LangChinese: "无差异 — 工作区干净（或与 `%s` 无变化）。",
 	},
 	MsgDiffNoDiff2HTML: {
-		LangEnglish:            "`diff2html` is not installed, sending plain text diff.\nInstall: `npm install -g diff2html-cli`",
-		LangChinese:            "未安装 `diff2html`，将以纯文本发送差异。\n安装命令: `npm install -g diff2html-cli`",
-		LangTraditionalChinese: "未安裝 `diff2html`，將以純文字傳送差異。\n安裝指令: `npm install -g diff2html-cli`",
-		LangJapanese:           "`diff2html` がインストールされていません。プレーンテキストで差分を送信します。\nインストール: `npm install -g diff2html-cli`",
-		LangSpanish:            "`diff2html` no está instalado, enviando diff en texto plano.\nInstalar: `npm install -g diff2html-cli`",
+		LangEnglish: "`diff2html` is not installed, sending plain text diff.\nInstall: `npm install -g diff2html-cli`",
+		LangChinese: "未安装 `diff2html`，将以纯文本发送差异。\n安装命令: `npm install -g diff2html-cli`",
 	},
 	MsgDirChanged: {
-		LangEnglish:            "✅ Work directory changed to: `%s`\nThe next session will start in this directory.",
-		LangChinese:            "✅ 工作目录已切换为: `%s`\n下次会话将在此目录下启动。",
-		LangTraditionalChinese: "✅ 工作目錄已切換為: `%s`\n下次會話將在此目錄下啟動。",
-		LangJapanese:           "✅ 作業ディレクトリを変更しました: `%s`\n次のセッションはこのディレクトリで起動します。",
-		LangSpanish:            "✅ Directorio de trabajo cambiado a: `%s`\nLa próxima sesión iniciará en este directorio.",
+		LangEnglish: "✅ Work directory changed to: `%s`\nThe next session will start in this directory.",
+		LangChinese: "✅ 工作目录已切换为: `%s`\n下次会话将在此目录下启动。",
 	},
 	MsgDirCurrent: {
-		LangEnglish:            "📂 Current work directory: `%s`",
-		LangChinese:            "📂 当前工作目录: `%s`",
-		LangTraditionalChinese: "📂 當前工作目錄: `%s`",
-		LangJapanese:           "📂 現在の作業ディレクトリ: `%s`",
-		LangSpanish:            "📂 Directorio de trabajo actual: `%s`",
+		LangEnglish: "📂 Current work directory: `%s`",
+		LangChinese: "📂 当前工作目录: `%s`",
 	},
 	MsgDirReset: {
-		LangEnglish:            "✅ Work directory reset to the configured default: `%s`",
-		LangChinese:            "✅ 工作目录已重置为配置的默认目录: `%s`",
-		LangTraditionalChinese: "✅ 工作目錄已重置為設定的預設目錄: `%s`",
-		LangJapanese:           "✅ 作業ディレクトリを設定済みのデフォルトに戻しました: `%s`",
-		LangSpanish:            "✅ El directorio de trabajo se restauró al valor predeterminado configurado: `%s`",
+		LangEnglish: "✅ Work directory reset to the configured default: `%s`",
+		LangChinese: "✅ 工作目录已重置为配置的默认目录: `%s`",
 	},
 	MsgDirUsage: {
-		LangEnglish:            "Usage: `/dir <path>`\n       `/dir reset`\nExample: `/dir ../project`",
-		LangChinese:            "用法: `/dir <路径>`\n      `/dir reset`\n示例: `/dir ../project`",
-		LangTraditionalChinese: "用法: `/dir <路徑>`\n      `/dir reset`\n範例: `/dir ../project`",
-		LangJapanese:           "使い方: `/dir <パス>`\n       `/dir reset`\n例: `/dir ../project`",
-		LangSpanish:            "Uso: `/dir <ruta>`\n      `/dir reset`\nEjemplo: `/dir ../project`",
+		LangEnglish: "Usage: `/dir <path>`\n       `/dir reset`\nExample: `/dir ../project`",
+		LangChinese: "用法: `/dir <路径>`\n      `/dir reset`\n示例: `/dir ../project`",
 	},
 	MsgDirNotSupported: {
-		LangEnglish:            "This agent does not support dynamic work directory switching.",
-		LangChinese:            "当前 Agent 不支持动态切换工作目录。",
-		LangTraditionalChinese: "當前 Agent 不支援動態切換工作目錄。",
-		LangJapanese:           "このエージェントは動的な作業ディレクトリの切り替えをサポートしていません。",
-		LangSpanish:            "Este agente no soporta el cambio dinámico de directorio de trabajo.",
+		LangEnglish: "This agent does not support dynamic work directory switching.",
+		LangChinese: "当前 Agent 不支持动态切换工作目录。",
 	},
 	MsgDirInvalidPath: {
-		LangEnglish:            "❌ Directory does not exist: `%s`",
-		LangChinese:            "❌ 目录不存在: `%s`",
-		LangTraditionalChinese: "❌ 目錄不存在: `%s`",
-		LangJapanese:           "❌ ディレクトリが存在しません: `%s`",
-		LangSpanish:            "❌ El directorio no existe: `%s`",
+		LangEnglish: "❌ Directory does not exist: `%s`",
+		LangChinese: "❌ 目录不存在: `%s`",
 	},
 	MsgDirHistoryTitle: {
-		LangEnglish:            "📋 History:",
-		LangChinese:            "📋 历史记录:",
-		LangTraditionalChinese: "📋 歷史記錄:",
-		LangJapanese:           "📋 履歴:",
-		LangSpanish:            "📋 Historial:",
+		LangEnglish: "📋 History:",
+		LangChinese: "📋 历史记录:",
 	},
 	MsgDirHistoryHint: {
-		LangEnglish:            "💡 Use `/dir <number>` to switch, or `/dir -` for previous.",
-		LangChinese:            "💡 使用 `/dir <序号>` 切换，或 `/dir -` 返回上一个目录。",
-		LangTraditionalChinese: "💡 使用 `/dir <序號>` 切換，或 `/dir -` 返回上一個目錄。",
-		LangJapanese:           "💡 `/dir <番号>` で切り替え、`/dir -` で前のディレクトリに戻ります。",
-		LangSpanish:            "💡 Usa `/dir <número>` para cambiar, o `/dir -` para el anterior.",
+		LangEnglish: "💡 Use `/dir <number>` to switch, or `/dir -` for previous.",
+		LangChinese: "💡 使用 `/dir <序号>` 切换，或 `/dir -` 返回上一个目录。",
 	},
 	MsgDirInvalidIndex: {
-		LangEnglish:            "❌ Invalid history index: %d",
-		LangChinese:            "❌ 无效的历史序号: %d",
-		LangTraditionalChinese: "❌ 無效的歷史序號: %d",
-		LangJapanese:           "❌ 無効な履歴番号: %d",
-		LangSpanish:            "❌ Índice de historial inválido: %d",
+		LangEnglish: "❌ Invalid history index: %d",
+		LangChinese: "❌ 无效的历史序号: %d",
 	},
 	MsgDirNoHistory: {
-		LangEnglish:            "❌ No directory history available.",
-		LangChinese:            "❌ 暂无目录历史记录。",
-		LangTraditionalChinese: "❌ 暫無目錄歷史記錄。",
-		LangJapanese:           "❌ ディレクトリの履歴がありません。",
-		LangSpanish:            "❌ No hay historial de directorios.",
+		LangEnglish: "❌ No directory history available.",
+		LangChinese: "❌ 暂无目录历史记录。",
 	},
 	MsgDirNoPrevious: {
-		LangEnglish:            "❌ No previous directory in history.",
-		LangChinese:            "❌ 没有上一个目录记录。",
-		LangTraditionalChinese: "❌ 沒有上一個目錄記錄。",
-		LangJapanese:           "❌ 前のディレクトリが履歴にありません。",
-		LangSpanish:            "❌ No hay directorio anterior en el historial.",
+		LangEnglish: "❌ No previous directory in history.",
+		LangChinese: "❌ 没有上一个目录记录。",
 	},
 	MsgDirCardTitle: {
-		LangEnglish:            "Working directory",
-		LangChinese:            "工作目录",
-		LangTraditionalChinese: "工作目錄",
-		LangJapanese:           "作業ディレクトリ",
-		LangSpanish:            "Directorio de trabajo",
+		LangEnglish: "Working directory",
+		LangChinese: "工作目录",
 	},
 	MsgDirCardPageHint: {
-		LangEnglish:            "Page %d/%d — use `/dir <page>` or the buttons below.",
-		LangChinese:            "第 %d/%d 页 — 可用 `/dir <页码>` 或下方按钮翻页。",
-		LangTraditionalChinese: "第 %d/%d 頁 — 可用 `/dir <頁碼>` 或下方按鈕翻頁。",
-		LangJapanese:           "%d/%d ページ — `/dir <ページ>` または下のボタンで移動。",
-		LangSpanish:            "Página %d/%d — usa `/dir <página>` o los botones.",
+		LangEnglish: "Page %d/%d — use `/dir <page>` or the buttons below.",
+		LangChinese: "第 %d/%d 页 — 可用 `/dir <页码>` 或下方按钮翻页。",
 	},
 	MsgDirCardEmptyHistory: {
-		LangEnglish:            "No directory history yet. Type `/dir <path>` to switch, or use **Reset** to restore the default.",
-		LangChinese:            "暂无目录历史。可发送 `/dir <路径>` 切换，或点 **重置** 恢复默认目录。",
-		LangTraditionalChinese: "暫無目錄歷史。可傳送 `/dir <路徑>` 切換，或點 **重置** 恢復預設目錄。",
-		LangJapanese:           "まだディレクトリ履歴がありません。`/dir <パス>` で切替えるか、**リセット** で既定に戻せます。",
-		LangSpanish:            "Aún no hay historial de directorios. Usa `/dir <ruta>` o **Restablecer** al valor por defecto.",
+		LangEnglish: "No directory history yet. Type `/dir <path>` to switch, or use **Reset** to restore the default.",
+		LangChinese: "暂无目录历史。可发送 `/dir <路径>` 切换，或点 **重置** 恢复默认目录。",
 	},
 	MsgDirCardReset: {
-		LangEnglish:            "Reset",
-		LangChinese:            "重置",
-		LangTraditionalChinese: "重置",
-		LangJapanese:           "リセット",
-		LangSpanish:            "Restablecer",
+		LangEnglish: "Reset",
+		LangChinese: "重置",
 	},
 	MsgDirCardPrev: {
-		LangEnglish:            "Previous",
-		LangChinese:            "上一目录",
-		LangTraditionalChinese: "上一目錄",
-		LangJapanese:           "前へ",
-		LangSpanish:            "Anterior",
+		LangEnglish: "Previous",
+		LangChinese: "上一目录",
 	},
 	MsgShow: {
-		LangEnglish:            "View file / directory / snippet by reference",
-		LangChinese:            "按引用查看文件、目录或代码片段",
-		LangTraditionalChinese: "按引用查看檔案、目錄或程式碼片段",
-		LangJapanese:           "参照からファイル・ディレクトリ・コード断片を表示",
-		LangSpanish:            "Ver archivo/directorio/fragmento por referencia",
+		LangEnglish: "View file / directory / snippet by reference",
+		LangChinese: "按引用查看文件、目录或代码片段",
 	},
 	MsgShowUsage: {
-		LangEnglish:            "Usage: `/show <path|path:line|path:start-end|dir/>`\nExample: `/show svc/recovery_session_reconciler.go:12`",
-		LangChinese:            "用法: `/show <路径|路径:行号|路径:起止行|目录/>`\n示例: `/show svc/recovery_session_reconciler.go:12`",
-		LangTraditionalChinese: "用法: `/show <路徑|路徑:行號|路徑:起止行|目錄/>`\n範例: `/show svc/recovery_session_reconciler.go:12`",
-		LangJapanese:           "使い方: `/show <パス|パス:行|パス:開始-終了|dir/>`\n例: `/show svc/recovery_session_reconciler.go:12`",
-		LangSpanish:            "Uso: `/show <ruta|ruta:línea|ruta:inicio-fin|dir/>`\nEjemplo: `/show svc/recovery_session_reconciler.go:12`",
+		LangEnglish: "Usage: `/show <path|path:line|path:start-end|dir/>`\nExample: `/show svc/recovery_session_reconciler.go:12`",
+		LangChinese: "用法: `/show <路径|路径:行号|路径:起止行|目录/>`\n示例: `/show svc/recovery_session_reconciler.go:12`",
 	},
 	MsgShowParseError: {
-		LangEnglish:            "❌ Cannot parse reference: `%s`",
-		LangChinese:            "❌ 无法解析引用: `%s`",
-		LangTraditionalChinese: "❌ 無法解析引用: `%s`",
-		LangJapanese:           "❌ 参照を解析できません: `%s`",
-		LangSpanish:            "❌ No se puede interpretar la referencia: `%s`",
+		LangEnglish: "❌ Cannot parse reference: `%s`",
+		LangChinese: "❌ 无法解析引用: `%s`",
 	},
 	MsgShowNotFound: {
-		LangEnglish:            "❌ Referenced path does not exist: `%s`",
-		LangChinese:            "❌ 引用路径不存在: `%s`",
-		LangTraditionalChinese: "❌ 引用路徑不存在: `%s`",
-		LangJapanese:           "❌ 参照パスが存在しません: `%s`",
-		LangSpanish:            "❌ La ruta referenciada no existe: `%s`",
+		LangEnglish: "❌ Referenced path does not exist: `%s`",
+		LangChinese: "❌ 引用路径不存在: `%s`",
 	},
 	MsgShowDirWithLocation: {
-		LangEnglish:            "❌ Directory references cannot include line information: `%s`",
-		LangChinese:            "❌ 目录引用不能带行号信息: `%s`",
-		LangTraditionalChinese: "❌ 目錄引用不能帶行號資訊: `%s`",
-		LangJapanese:           "❌ ディレクトリ参照に行情報は指定できません: `%s`",
-		LangSpanish:            "❌ Una referencia de directorio no puede incluir líneas: `%s`",
+		LangEnglish: "❌ Directory references cannot include line information: `%s`",
+		LangChinese: "❌ 目录引用不能带行号信息: `%s`",
 	},
 	MsgShowReadFailed: {
-		LangEnglish:            "❌ Failed to read reference: %s",
-		LangChinese:            "❌ 读取引用失败: %s",
-		LangTraditionalChinese: "❌ 讀取引用失敗: %s",
-		LangJapanese:           "❌ 参照の読み取りに失敗しました: %s",
-		LangSpanish:            "❌ Error al leer la referencia: %s",
+		LangEnglish: "❌ Failed to read reference: %s",
+		LangChinese: "❌ 读取引用失败: %s",
 	},
 
 	// Multi-workspace messages
 	MsgWsNotEnabled: {
-		LangEnglish:            "Workspace commands are only available in multi-workspace mode.",
-		LangChinese:            "工作区命令仅在多工作区模式下可用。",
-		LangTraditionalChinese: "工作區命令僅在多工作區模式下可用。",
-		LangJapanese:           "ワークスペースコマンドはマルチワークスペースモードでのみ使用できます。",
-		LangSpanish:            "Los comandos de workspace solo están disponibles en modo multi-workspace.",
+		LangEnglish: "Workspace commands are only available in multi-workspace mode.",
+		LangChinese: "工作区命令仅在多工作区模式下可用。",
 	},
 	MsgWsNoBinding: {
-		LangEnglish:            "No workspace bound to this channel.",
-		LangChinese:            "此频道未绑定工作区。",
-		LangTraditionalChinese: "此頻道未綁定工作區。",
-		LangJapanese:           "このチャンネルにワークスペースがバインドされていません。",
-		LangSpanish:            "No hay workspace vinculado a este canal.",
+		LangEnglish: "No workspace bound to this channel.",
+		LangChinese: "此频道未绑定工作区。",
 	},
 	MsgWsInfo: {
-		LangEnglish:            "Workspace: `%s`\nBound: %s",
-		LangChinese:            "工作区: `%s`\n绑定时间: %s",
-		LangTraditionalChinese: "工作區: `%s`\n綁定時間: %s",
-		LangJapanese:           "ワークスペース: `%s`\nバインド: %s",
-		LangSpanish:            "Workspace: `%s`\nVinculado: %s",
+		LangEnglish: "Workspace: `%s`\nBound: %s",
+		LangChinese: "工作区: `%s`\n绑定时间: %s",
 	},
 	MsgWsInfoShared: {
-		LangEnglish:            "Workspace: `%s`\nBound: %s\nSource: shared",
-		LangChinese:            "工作区: `%s`\n绑定时间: %s\n来源: shared",
-		LangTraditionalChinese: "工作區: `%s`\n綁定時間: %s\n來源: shared",
-		LangJapanese:           "ワークスペース: `%s`\nバインド: %s\nソース: shared",
-		LangSpanish:            "Workspace: `%s`\nVinculado: %s\nOrigen: shared",
+		LangEnglish: "Workspace: `%s`\nBound: %s\nSource: shared",
+		LangChinese: "工作区: `%s`\n绑定时间: %s\n来源: shared",
 	},
 	MsgWsUsage: {
-		LangEnglish:            "Usage: `/workspace [bind <name> | route <absolute-path> | init <url> | unbind | list | shared ...]`",
-		LangChinese:            "用法: `/workspace [bind <名称> | route <绝对路径> | init <仓库地址> | unbind | list | shared ...]`",
-		LangTraditionalChinese: "用法: `/workspace [bind <名稱> | route <絕對路徑> | init <倉庫地址> | unbind | list | shared ...]`",
-		LangJapanese:           "使い方: `/workspace [bind <名前> | route <絶対パス> | init <url> | unbind | list | shared ...]`",
-		LangSpanish:            "Uso: `/workspace [bind <nombre> | route <ruta-absoluta> | init <url> | unbind | list | shared ...]`",
+		LangEnglish: "Usage: `/workspace [bind <name> | route <absolute-path> | init <url> | unbind | list | shared ...]`",
+		LangChinese: "用法: `/workspace [bind <名称> | route <绝对路径> | init <仓库地址> | unbind | list | shared ...]`",
 	},
 	MsgWsInitUsage: {
-		LangEnglish:            "Usage: `/workspace init <git-url or directory-path>`",
-		LangChinese:            "用法: `/workspace init <git仓库地址或目录路径>`",
-		LangTraditionalChinese: "用法: `/workspace init <git倉庫地址或目錄路徑>`",
-		LangJapanese:           "使い方: `/workspace init <git-urlまたはディレクトリパス>`",
-		LangSpanish:            "Uso: `/workspace init <git-url o ruta-de-directorio>`",
+		LangEnglish: "Usage: `/workspace init <git-url or directory-path>`",
+		LangChinese: "用法: `/workspace init <git仓库地址或目录路径>`",
 	},
 	MsgWsBindUsage: {
-		LangEnglish:            "Usage: `/workspace bind <workspace-name>`",
-		LangChinese:            "用法: `/workspace bind <工作区名称>`",
-		LangTraditionalChinese: "用法: `/workspace bind <工作區名稱>`",
-		LangJapanese:           "使い方: `/workspace bind <ワークスペース名>`",
-		LangSpanish:            "Uso: `/workspace bind <nombre-workspace>`",
+		LangEnglish: "Usage: `/workspace bind <workspace-name>`",
+		LangChinese: "用法: `/workspace bind <工作区名称>`",
 	},
 	MsgWsBindSuccess: {
-		LangEnglish:            "✅ Workspace bound: `%s`",
-		LangChinese:            "✅ 工作区绑定成功: `%s`",
-		LangTraditionalChinese: "✅ 工作區綁定成功: `%s`",
-		LangJapanese:           "✅ ワークスペースをバインドしました: `%s`",
-		LangSpanish:            "✅ Workspace vinculado: `%s`",
+		LangEnglish: "✅ Workspace bound: `%s`",
+		LangChinese: "✅ 工作区绑定成功: `%s`",
 	},
 	MsgWsBindNotFound: {
-		LangEnglish:            "Workspace not found: `%s`",
-		LangChinese:            "工作区不存在: `%s`",
-		LangTraditionalChinese: "工作區不存在: `%s`",
-		LangJapanese:           "ワークスペースが見つかりません: `%s`",
-		LangSpanish:            "Workspace no encontrado: `%s`",
+		LangEnglish: "Workspace not found: `%s`",
+		LangChinese: "工作区不存在: `%s`",
 	},
 	MsgWsRouteUsage: {
-		LangEnglish:            "Usage: `/workspace route <absolute-path>`",
-		LangChinese:            "用法: `/workspace route <绝对路径>`",
-		LangTraditionalChinese: "用法: `/workspace route <絕對路徑>`",
-		LangJapanese:           "使い方: `/workspace route <絶対パス>`",
-		LangSpanish:            "Uso: `/workspace route <ruta-absoluta>`",
+		LangEnglish: "Usage: `/workspace route <absolute-path>`",
+		LangChinese: "用法: `/workspace route <绝对路径>`",
 	},
 	MsgWsRouteSuccess: {
-		LangEnglish:            "✅ Workspace routed: `%s`",
-		LangChinese:            "✅ 工作区路由成功: `%s`",
-		LangTraditionalChinese: "✅ 工作區路由成功: `%s`",
-		LangJapanese:           "✅ ワークスペースをルーティングしました: `%s`",
-		LangSpanish:            "✅ Workspace enrutado: `%s`",
+		LangEnglish: "✅ Workspace routed: `%s`",
+		LangChinese: "✅ 工作区路由成功: `%s`",
 	},
 	MsgWsRouteAbsoluteRequired: {
-		LangEnglish:            "Workspace route must use an absolute path: `%s`",
-		LangChinese:            "工作区路由必须使用绝对路径: `%s`",
-		LangTraditionalChinese: "工作區路由必須使用絕對路徑: `%s`",
-		LangJapanese:           "ワークスペースの route には絶対パスが必要です: `%s`",
-		LangSpanish:            "La ruta del workspace debe ser absoluta: `%s`",
+		LangEnglish: "Workspace route must use an absolute path: `%s`",
+		LangChinese: "工作区路由必须使用绝对路径: `%s`",
 	},
 	MsgWsRouteNotFound: {
-		LangEnglish:            "Workspace path not found: `%s`",
-		LangChinese:            "工作区路径不存在: `%s`",
-		LangTraditionalChinese: "工作區路徑不存在: `%s`",
-		LangJapanese:           "ワークスペースのパスが見つかりません: `%s`",
-		LangSpanish:            "Ruta de workspace no encontrada: `%s`",
+		LangEnglish: "Workspace path not found: `%s`",
+		LangChinese: "工作区路径不存在: `%s`",
 	},
 	MsgWsRouteNotDirectory: {
-		LangEnglish:            "Workspace route target is not a directory: `%s`",
-		LangChinese:            "工作区路由目标不是目录: `%s`",
-		LangTraditionalChinese: "工作區路由目標不是目錄: `%s`",
-		LangJapanese:           "ワークスペースの route 先がディレクトリではありません: `%s`",
-		LangSpanish:            "El destino de workspace route no es un directorio: `%s`",
+		LangEnglish: "Workspace route target is not a directory: `%s`",
+		LangChinese: "工作区路由目标不是目录: `%s`",
 	},
 	MsgWsUnbindSuccess: {
-		LangEnglish:            "✅ Workspace unbound.",
-		LangChinese:            "✅ 已解除工作区绑定。",
-		LangTraditionalChinese: "✅ 已解除工作區綁定。",
-		LangJapanese:           "✅ ワークスペースのバインドを解除しました。",
-		LangSpanish:            "✅ Workspace desvinculado.",
+		LangEnglish: "✅ Workspace unbound.",
+		LangChinese: "✅ 已解除工作区绑定。",
 	},
 	MsgWsListEmpty: {
-		LangEnglish:            "No workspaces bound.",
-		LangChinese:            "没有绑定的工作区。",
-		LangTraditionalChinese: "沒有綁定的工作區。",
-		LangJapanese:           "バインドされたワークスペースがありません。",
-		LangSpanish:            "No hay workspaces vinculados.",
+		LangEnglish: "No workspaces bound.",
+		LangChinese: "没有绑定的工作区。",
 	},
 	MsgWsListTitle: {
-		LangEnglish:            "Bound workspaces:",
-		LangChinese:            "已绑定的工作区：",
-		LangTraditionalChinese: "已綁定的工作區：",
-		LangJapanese:           "バインドされたワークスペース：",
-		LangSpanish:            "Workspaces vinculados:",
+		LangEnglish: "Bound workspaces:",
+		LangChinese: "已绑定的工作区：",
 	},
 	MsgWsSharedNoBinding: {
-		LangEnglish:            "No shared workspace bound to this channel.",
-		LangChinese:            "此频道未绑定共享工作区。",
-		LangTraditionalChinese: "此頻道未綁定共享工作區。",
-		LangJapanese:           "このチャンネルに共有ワークスペースがバインドされていません。",
-		LangSpanish:            "No hay workspace compartido vinculado a este canal.",
+		LangEnglish: "No shared workspace bound to this channel.",
+		LangChinese: "此频道未绑定共享工作区。",
 	},
 	MsgWsSharedUsage: {
-		LangEnglish:            "Usage: `/workspace shared [bind <name> | route <absolute-path> | init <url> | unbind | list]`",
-		LangChinese:            "用法: `/workspace shared [bind <名称> | route <绝对路径> | init <仓库地址> | unbind | list]`",
-		LangTraditionalChinese: "用法: `/workspace shared [bind <名稱> | route <絕對路徑> | init <倉庫地址> | unbind | list]`",
-		LangJapanese:           "使い方: `/workspace shared [bind <名前> | route <絶対パス> | init <url> | unbind | list]`",
-		LangSpanish:            "Uso: `/workspace shared [bind <nombre> | route <ruta-absoluta> | init <url> | unbind | list]`",
+		LangEnglish: "Usage: `/workspace shared [bind <name> | route <absolute-path> | init <url> | unbind | list]`",
+		LangChinese: "用法: `/workspace shared [bind <名称> | route <绝对路径> | init <仓库地址> | unbind | list]`",
 	},
 	MsgWsSharedBindSuccess: {
-		LangEnglish:            "✅ Shared workspace bound: `%s`",
-		LangChinese:            "✅ 共享工作区绑定成功: `%s`",
-		LangTraditionalChinese: "✅ 共享工作區綁定成功: `%s`",
-		LangJapanese:           "✅ 共有ワークスペースをバインドしました: `%s`",
-		LangSpanish:            "✅ Workspace compartido vinculado: `%s`",
+		LangEnglish: "✅ Shared workspace bound: `%s`",
+		LangChinese: "✅ 共享工作区绑定成功: `%s`",
 	},
 	MsgWsSharedRouteSuccess: {
-		LangEnglish:            "✅ Shared workspace routed: `%s`",
-		LangChinese:            "✅ 共享工作区路由成功: `%s`",
-		LangTraditionalChinese: "✅ 共享工作區路由成功: `%s`",
-		LangJapanese:           "✅ 共有ワークスペースをルーティングしました: `%s`",
-		LangSpanish:            "✅ Workspace compartido enrutado: `%s`",
+		LangEnglish: "✅ Shared workspace routed: `%s`",
+		LangChinese: "✅ 共享工作区路由成功: `%s`",
 	},
 	MsgWsSharedUnbindSuccess: {
-		LangEnglish:            "✅ Shared workspace unbound.",
-		LangChinese:            "✅ 已解除共享工作区绑定。",
-		LangTraditionalChinese: "✅ 已解除共享工作區綁定。",
-		LangJapanese:           "✅ 共有ワークスペースのバインドを解除しました。",
-		LangSpanish:            "✅ Workspace compartido desvinculado.",
+		LangEnglish: "✅ Shared workspace unbound.",
+		LangChinese: "✅ 已解除共享工作区绑定。",
 	},
 	MsgWsSharedListEmpty: {
-		LangEnglish:            "No shared workspaces bound.",
-		LangChinese:            "没有绑定的共享工作区。",
-		LangTraditionalChinese: "沒有綁定的共享工作區。",
-		LangJapanese:           "バインドされた共有ワークスペースがありません。",
-		LangSpanish:            "No hay workspaces compartidos vinculados.",
+		LangEnglish: "No shared workspaces bound.",
+		LangChinese: "没有绑定的共享工作区。",
 	},
 	MsgWsSharedListTitle: {
-		LangEnglish:            "Shared workspaces:",
-		LangChinese:            "共享工作区：",
-		LangTraditionalChinese: "共享工作區：",
-		LangJapanese:           "共有ワークスペース：",
-		LangSpanish:            "Workspaces compartidos:",
+		LangEnglish: "Shared workspaces:",
+		LangChinese: "共享工作区：",
 	},
 	MsgWsSharedOnlyHint: {
-		LangEnglish:            "The current effective workspace comes from the shared layer. Use `/workspace shared unbind` to remove it.",
-		LangChinese:            "当前生效的工作区来自 shared 层。请使用 `/workspace shared unbind` 解除绑定。",
-		LangTraditionalChinese: "當前生效的工作區來自 shared 層。請使用 `/workspace shared unbind` 解除綁定。",
-		LangJapanese:           "現在有効なワークスペースは shared レイヤー由来です。解除するには `/workspace shared unbind` を使用してください。",
-		LangSpanish:            "El workspace efectivo actual proviene de la capa shared. Usa `/workspace shared unbind` para quitarlo.",
+		LangEnglish: "The current effective workspace comes from the shared layer. Use `/workspace shared unbind` to remove it.",
+		LangChinese: "当前生效的工作区来自 shared 层。请使用 `/workspace shared unbind` 解除绑定。",
 	},
 	MsgWsNotFoundHint: {
-		LangEnglish:            "No workspace found for this channel. Send a git repo URL, a local directory path, or use `/workspace init <url-or-path>`.",
-		LangChinese:            "此频道未找到工作区。请发送 git 仓库地址或本地目录路径，或使用 `/workspace init <仓库地址或目录路径>`。",
-		LangTraditionalChinese: "此頻道未找到工作區。請發送 git 倉庫地址或本地目錄路徑，或使用 `/workspace init <倉庫地址或目錄路徑>`。",
-		LangJapanese:           "このチャンネルにワークスペースが見つかりません。git URL またはローカルディレクトリパスを送信するか、`/workspace init <urlまたはパス>` を使用してください。",
-		LangSpanish:            "No se encontró workspace para este canal. Envía una URL de repo git, una ruta de directorio local, o usa `/workspace init <url-o-ruta>`.",
+		LangEnglish: "No workspace found for this channel. Send a git repo URL, a local directory path, or use `/workspace init <url-or-path>`.",
+		LangChinese: "此频道未找到工作区。请发送 git 仓库地址或本地目录路径，或使用 `/workspace init <仓库地址或目录路径>`。",
 	},
 	MsgWsNotFoundHintGitOnly: {
-		LangEnglish:            "No workspace found for this channel. Send a git repo URL or use `/workspace init <git-url>`.",
-		LangChinese:            "此频道未找到工作区。请发送 git 仓库地址，或使用 `/workspace init <git仓库地址>`。",
-		LangTraditionalChinese: "此頻道未找到工作區。請發送 git 倉庫地址，或使用 `/workspace init <git倉庫地址>`。",
-		LangJapanese:           "このチャンネルにワークスペースが見つかりません。git URL を送信するか、`/workspace init <git-url>` を使用してください。",
-		LangSpanish:            "No se encontró workspace para este canal. Envía una URL de repo git o usa `/workspace init <git-url>`.",
+		LangEnglish: "No workspace found for this channel. Send a git repo URL or use `/workspace init <git-url>`.",
+		LangChinese: "此频道未找到工作区。请发送 git 仓库地址，或使用 `/workspace init <git仓库地址>`。",
 	},
 	MsgWsResolutionError: {
-		LangEnglish:            "Workspace resolution error: %v",
-		LangChinese:            "工作区解析错误: %v",
-		LangTraditionalChinese: "工作區解析錯誤: %v",
-		LangJapanese:           "ワークスペース解決エラー: %v",
-		LangSpanish:            "Error de resolución de workspace: %v",
+		LangEnglish: "Workspace resolution error: %v",
+		LangChinese: "工作区解析错误: %v",
 	},
 	MsgWsCloneProgress: {
-		LangEnglish:            "🔄 Cloning repository: %s",
-		LangChinese:            "🔄 正在克隆仓库: %s",
-		LangTraditionalChinese: "🔄 正在克隆倉庫: %s",
-		LangJapanese:           "🔄 リポジトリをクローン中: %s",
-		LangSpanish:            "🔄 Clonando repositorio: %s",
+		LangEnglish: "🔄 Cloning repository: %s",
+		LangChinese: "🔄 正在克隆仓库: %s",
 	},
 	MsgWsCloneSuccess: {
-		LangEnglish:            "✅ Repository cloned successfully: `%s`",
-		LangChinese:            "✅ 仓库克隆成功: `%s`",
-		LangTraditionalChinese: "✅ 倉庫克隆成功: `%s`",
-		LangJapanese:           "✅ リポジトリのクローンに成功しました: `%s`",
-		LangSpanish:            "✅ Repositorio clonado exitosamente: `%s`",
+		LangEnglish: "✅ Repository cloned successfully: `%s`",
+		LangChinese: "✅ 仓库克隆成功: `%s`",
 	},
 	MsgWsCloneFailed: {
-		LangEnglish:            "❌ Failed to clone repository: %v",
-		LangChinese:            "❌ 克隆仓库失败: %v",
-		LangTraditionalChinese: "❌ 克隆倉庫失敗: %v",
-		LangJapanese:           "❌ リポジトリのクローンに失敗しました: %v",
-		LangSpanish:            "❌ Error al clonar repositorio: %v",
+		LangEnglish: "❌ Failed to clone repository: %v",
+		LangChinese: "❌ 克隆仓库失败: %v",
 	},
 	MsgWsInitDirNotFound: {
-		LangEnglish:            "Directory not found: `%s`. Please provide a valid directory path or a git URL.",
-		LangChinese:            "目录不存在: `%s`。请提供有效的目录路径或 git 仓库地址。",
-		LangTraditionalChinese: "目錄不存在: `%s`。請提供有效的目錄路徑或 git 倉庫地址。",
-		LangJapanese:           "ディレクトリが見つかりません: `%s`。有効なディレクトリパスまたは git URL を指定してください。",
-		LangSpanish:            "Directorio no encontrado: `%s`. Proporcione una ruta de directorio válida o una URL de git.",
+		LangEnglish: "Directory not found: `%s`. Please provide a valid directory path or a git URL.",
+		LangChinese: "目录不存在: `%s`。请提供有效的目录路径或 git 仓库地址。",
 	},
 	MsgWsInitInvalidTarget: {
-		LangEnglish:            "Please provide a git URL (e.g. `https://github.com/org/repo`) or a local directory path.",
-		LangChinese:            "请提供 git 仓库地址（如 `https://github.com/org/repo`）或本地目录路径。",
-		LangTraditionalChinese: "請提供 git 倉庫地址（如 `https://github.com/org/repo`）或本地目錄路徑。",
-		LangJapanese:           "git URL（例: `https://github.com/org/repo`）またはローカルディレクトリパスを指定してください。",
-		LangSpanish:            "Proporcione una URL de git (ej. `https://github.com/org/repo`) o una ruta de directorio local.",
+		LangEnglish: "Please provide a git URL (e.g. `https://github.com/org/repo`) or a local directory path.",
+		LangChinese: "请提供 git 仓库地址（如 `https://github.com/org/repo`）或本地目录路径。",
 	},
 	MsgWsInitLocalPathsDisabled: {
-		LangEnglish:            "Local directory targets are disabled for `/workspace init`. Use a git URL, or enable `workspace_init_allow_local_paths = true` for this project.",
-		LangChinese:            "`/workspace init` 未启用本地目录目标。请使用 git 仓库地址，或在此项目配置 `workspace_init_allow_local_paths = true`。",
-		LangTraditionalChinese: "`/workspace init` 未啟用本機目錄目標。請使用 git 倉庫地址，或在此專案配置 `workspace_init_allow_local_paths = true`。",
-		LangJapanese:           "`/workspace init` ではローカルディレクトリ対象が無効です。git URL を使うか、このプロジェクトで `workspace_init_allow_local_paths = true` を有効にしてください。",
-		LangSpanish:            "Los destinos de directorio local están deshabilitados para `/workspace init`. Use una URL de git o habilite `workspace_init_allow_local_paths = true` para este proyecto.",
+		LangEnglish: "Local directory targets are disabled for `/workspace init`. Use a git URL, or enable `workspace_init_allow_local_paths = true` for this project.",
+		LangChinese: "`/workspace init` 未启用本地目录目标。请使用 git 仓库地址，或在此项目配置 `workspace_init_allow_local_paths = true`。",
 	},
 }
 
@@ -4272,12 +2700,6 @@ func (i *I18n) T(key MsgKey) string {
 	if msg, ok := messages[key]; ok {
 		if translated, ok := msg[lang]; ok {
 			return translated
-		}
-		// Fallback: zh-TW → zh → en
-		if lang == LangTraditionalChinese {
-			if translated, ok := msg[LangChinese]; ok {
-				return translated
-			}
 		}
 		if msg[LangEnglish] != "" {
 			return msg[LangEnglish]

@@ -111,7 +111,7 @@ func TestConfigValidate(t *testing.T) {
 						p := validProject("demo")
 						p.References = ReferenceConfig{
 							NormalizeAgents: []string{"codex", "claudecode"},
-							RenderPlatforms: []string{"feishu", "weixin"},
+							RenderPlatforms: []string{"feishu"},
 							DisplayPath:     "dirname_basename",
 							MarkerStyle:     "emoji",
 							EnclosureStyle:  "code",
@@ -1983,24 +1983,6 @@ app_token = "xapp-token"
 bot_token = "xoxb-token"
 `
 
-const weixinConfigFixture = `
-[[projects]]
-name = "alpha"
-
-[projects.agent]
-type = "codex"
-
-[projects.agent.options]
-work_dir = "/tmp/alpha"
-
-[[projects.platforms]]
-type = "weixin"
-
-[projects.platforms.options]
-token = "old_weixin_token"
-base_url = "https://ilink.example"
-`
-
 const preserveFormatFixture = `# top comment should stay
 custom_top = "keep_me"
 
@@ -2334,139 +2316,6 @@ func TestCloneAgentConfig(t *testing.T) {
 			t.Error("Provider Env is same reference, not a deep copy")
 		}
 	})
-}
-
-func TestEnsureProjectWithWeixinPlatform_CreatesMissingProject(t *testing.T) {
-	configPath := writeConfigFixture(t, feishuConfigFixture)
-	patchConfigPath(t, configPath)
-
-	result, err := EnsureProjectWithWeixinPlatform(EnsureProjectWithWeixinOptions{
-		ProjectName: "gamma",
-		WorkDir:     "/tmp/gamma",
-	})
-	if err != nil {
-		t.Fatalf("EnsureProjectWithWeixinPlatform returned error: %v", err)
-	}
-	if !result.Created {
-		t.Fatal("result.Created = false, want true")
-	}
-	if result.AddedPlatform {
-		t.Fatal("result.AddedPlatform = true, want false")
-	}
-
-	cfg := readConfigFixture(t, configPath)
-	if len(cfg.Projects) != 2 {
-		t.Fatalf("len(cfg.Projects) = %d, want 2", len(cfg.Projects))
-	}
-	proj := cfg.Projects[1]
-	if proj.Name != "gamma" {
-		t.Fatalf("proj.Name = %q, want %q", proj.Name, "gamma")
-	}
-	if len(proj.Platforms) != 1 {
-		t.Fatalf("len(proj.Platforms) = %d, want 1", len(proj.Platforms))
-	}
-	if proj.Platforms[0].Type != "weixin" {
-		t.Fatalf("platform type = %q, want weixin", proj.Platforms[0].Type)
-	}
-}
-
-func TestEnsureProjectWithWeixinPlatform_AddsPlatformWhenMissing(t *testing.T) {
-	configPath := writeConfigFixture(t, projectWithoutFeishuFixture)
-	patchConfigPath(t, configPath)
-
-	result, err := EnsureProjectWithWeixinPlatform(EnsureProjectWithWeixinOptions{
-		ProjectName: "beta",
-	})
-	if err != nil {
-		t.Fatalf("EnsureProjectWithWeixinPlatform returned error: %v", err)
-	}
-	if result.Created {
-		t.Fatal("result.Created = true, want false")
-	}
-	if !result.AddedPlatform {
-		t.Fatal("result.AddedPlatform = false, want true")
-	}
-
-	cfg := readConfigFixture(t, configPath)
-	proj := cfg.Projects[0]
-	if len(proj.Platforms) != 2 {
-		t.Fatalf("len(proj.Platforms) = %d, want 2", len(proj.Platforms))
-	}
-	if proj.Platforms[1].Type != "weixin" {
-		t.Fatalf("platform type = %q, want weixin", proj.Platforms[1].Type)
-	}
-}
-
-func TestSaveWeixinPlatformCredentials_UpdateToken(t *testing.T) {
-	configPath := writeConfigFixture(t, weixinConfigFixture)
-	patchConfigPath(t, configPath)
-
-	_, err := SaveWeixinPlatformCredentials(WeixinCredentialUpdateOptions{
-		ProjectName: "alpha",
-		Token:       "new_weixin_token",
-		BaseURL:     "https://ilinkai.weixin.qq.com",
-	})
-	if err != nil {
-		t.Fatalf("SaveWeixinPlatformCredentials returned error: %v", err)
-	}
-
-	cfg := readConfigFixture(t, configPath)
-	tok, _ := cfg.Projects[0].Platforms[0].Options["token"].(string)
-	if tok != "new_weixin_token" {
-		t.Fatalf("token = %q, want new_weixin_token", tok)
-	}
-	bu, _ := cfg.Projects[0].Platforms[0].Options["base_url"].(string)
-	if bu != "https://ilinkai.weixin.qq.com" {
-		t.Fatalf("base_url = %q", bu)
-	}
-}
-
-func TestSaveWeixinPlatformCredentials_AppendsScannedUserToAllowFrom(t *testing.T) {
-	configPath := writeConfigFixture(t, strings.Replace(weixinConfigFixture, `base_url = "https://ilink.example"`, "base_url = \"https://ilink.example\"\nallow_from = \"wx_user_1\"", 1))
-	patchConfigPath(t, configPath)
-
-	result, err := SaveWeixinPlatformCredentials(WeixinCredentialUpdateOptions{
-		ProjectName:       "alpha",
-		Token:             "new_weixin_token",
-		ScannedUserID:     "wx_user_2",
-		SetAllowFromEmpty: true,
-	})
-	if err != nil {
-		t.Fatalf("SaveWeixinPlatformCredentials returned error: %v", err)
-	}
-
-	if result.AllowFrom != "wx_user_1,wx_user_2" {
-		t.Fatalf("result.AllowFrom = %q, want %q", result.AllowFrom, "wx_user_1,wx_user_2")
-	}
-
-	cfg := readConfigFixture(t, configPath)
-	if got := stringMapValue(cfg.Projects[0].Platforms[0].Options, "allow_from"); got != "wx_user_1,wx_user_2" {
-		t.Fatalf("allow_from = %q, want %q", got, "wx_user_1,wx_user_2")
-	}
-}
-
-func TestSaveWeixinPlatformCredentials_LeavesWildcardAllowFromUnchanged(t *testing.T) {
-	configPath := writeConfigFixture(t, strings.Replace(weixinConfigFixture, `base_url = "https://ilink.example"`, "base_url = \"https://ilink.example\"\nallow_from = \"*\"", 1))
-	patchConfigPath(t, configPath)
-
-	result, err := SaveWeixinPlatformCredentials(WeixinCredentialUpdateOptions{
-		ProjectName:       "alpha",
-		Token:             "new_weixin_token",
-		ScannedUserID:     "wx_user_2",
-		SetAllowFromEmpty: true,
-	})
-	if err != nil {
-		t.Fatalf("SaveWeixinPlatformCredentials returned error: %v", err)
-	}
-
-	if result.AllowFrom != "*" {
-		t.Fatalf("result.AllowFrom = %q, want %q", result.AllowFrom, "*")
-	}
-
-	cfg := readConfigFixture(t, configPath)
-	if got := stringMapValue(cfg.Projects[0].Platforms[0].Options, "allow_from"); got != "*" {
-		t.Fatalf("allow_from = %q, want %q", got, "*")
-	}
 }
 
 func TestSaveProjectSettings_ExtraFields(t *testing.T) {

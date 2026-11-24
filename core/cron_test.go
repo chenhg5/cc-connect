@@ -113,7 +113,6 @@ func TestMutePlatform_DiscardMessages(t *testing.T) {
 	}
 }
 
-
 func TestCronJob_MuteField(t *testing.T) {
 	job := &CronJob{ID: "m1", Mute: false}
 	if job.Mute {
@@ -138,7 +137,6 @@ func TestCronExprToHuman_BasicCases(t *testing.T) {
 		{"*/5 * * * *", LangEnglish, "Every 5 min"},
 		{"*/5 * * * *", LangChinese, "每5分钟"},
 		{"*/30 * * * *", LangChinese, "每30分钟"},
-		{"*/15 * * * *", LangJapanese, "15分ごと"},
 		{"0 */2 * * *", LangEnglish, "Every 2 h (:00)"},
 		{"0 */2 * * *", LangChinese, "每2小时 (:00)"},
 		{"30 */6 * * *", LangEnglish, "Every 6 h (:30)"},

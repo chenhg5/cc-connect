@@ -172,44 +172,20 @@ MiniMax M2.7 是 MiniMax 首个深度参与自我迭代的模型，可自主构�
 
 ## 🆕 v1.3.0 更新了什么
 
-- **🌐 Web 管理后台（推荐）** — 内置全功能可视化管理界面，**无需额外依赖**。支持项目增删改查、服务商管理、会话监控、定时任务编辑，还可以**直接在浏览器里和 Agent 对话**。支持 5 种语言 (en/zh/zh-TW/ja/es)。建议通过 Web UI 管理 cc-connect，无需手动编辑 `config.toml`。运行 `cc-connect web` 配置并打开管理后台，然后运行 `cc-connect` 启动服务。
+- **🌐 Web 管理后台（推荐）** — 内置全功能可视化管理界面，**无需额外依赖**。支持项目增删改查、服务商管理、会话监控、定时任务编辑，还可以**直接在浏览器里和 Agent 对话**。支持英文和简体中文。建议通过 Web UI 管理 cc-connect，无需手动编辑 `config.toml`。运行 `cc-connect web` 配置并打开管理后台，然后运行 `cc-connect` 启动服务。
 - **生命周期事件钩子** — 新增 `[[hooks]]` 配置，支持在消息收发、会话开始/结束、定时任务触发、权限请求、错误等事件时触发 Shell 命令或 HTTP Webhook。默认异步，失败不阻塞。
 - **技能管理** — 新增 `/skills` 页面，支持本地技能浏览和推荐预设。
 - **全局服务商管理** — 在 Web UI 中添加/编辑/删除 Provider，支持从 cc-switch 配置导入。
-- **个人微信** — 用 **微信个人号（ilink 长轮询）** 和本地 Agent 对话；支持扫码 `weixin setup`、CDN 收发图片/文件，**无需公网 IP**。*[接入说明 → `docs/weixin.md`](docs/weixin.md)*
-- **微博私信** — 通过 **微博私信** 与 Agent 对话，WebSocket 连接，无需公网 IP，支持流式文本回复。
 - **飞书增强** — 自动解析 `@成员` 提及、多级回复链识别、完成 Emoji 反应。
 - **新增 Agent** — 支持 Kimi CLI 和 Pi agent。
 
 
-## 🧩 平台能力一览
+## 🧩 支持平台
 
-内置各渠道在 cc-connect 里的大致能力对照，方便快速对比。
+cc-connect 目前支持两个消息平台：
 
-**图例**
-
-| 符号 | 含义 |
-|------|------|
-| ✅ | **稳定版** cc-connect + 常规配置下可用 |
-| ⚠️ | 部分支持、需额外配置（如语音/STT）或受厂商接口 / 应用类型限制 |
-| ❌ | 不支持或实际不可用 |
-
-† **QQ（NapCat / OneBot）** — 非官方自建桥接，体验依赖你的 NapCat 与网络环境。
-
-| 能力 | 飞书 | WPS 协作 | 钉钉 | Telegram | Slack | Discord | LINE | 企业微信 | 微博 | **微信个人号**<br>（ilink） | QQ† | QQ 官方机器人 |
-|------|:----:|:--------:|:----:|:--------:|:-----:|:-------:|:----:|:--------:|:----:|:--------------------------:|:---:|:------------:|
-| 文本与斜杠命令 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| Markdown / 卡片 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ⚠️ | ⚠️ | ❌ | ✅ | ✅ | ✅ |
-| 流式 / 分片回复 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| 图片与文件 | ✅ | ❌ | ✅ | ✅ | ✅ | ✅ | ⚠️ | ✅ | ❌ | ✅ | ✅ | ✅ |
-| 语音 / STT / TTS | ⚠️ | ❌ | ⚠️ | ✅ | ⚠️ | ⚠️ | ❌ | ⚠️ | ❌ | ✅ | ⚠️ | ⚠️ |
-| 私聊 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| 群聊 / 频道 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ⚠️ | ✅ | ❌ | ✅ | ✅ | ✅ |
-
-> **企业微信：** Webhook 模式需要**公网 URL**；长连接等模式多数**不需要**。  
-> **语音行：** 多数平台要在 `config.toml` 里配置 `[speech]` / TTS 等，表中为经验性归纳。  
-> 分平台接入步骤见下文 [平台接入指南](#-平台接入指南)。
-
+- **飞书 / Lark** — WebSocket 长连接、交互卡片、话题/回复、图片与文件、流式回复。*[接入说明 → `docs/feishu.md`](docs/feishu.md)*
+- **企业微信** — Webhook 或长连接模式、文本/Markdown、图片与文件。*[接入说明 → `docs/wecom.md`](docs/wecom.md)*
 
 ## ✨ 为什么选择 cc-connect？
 
@@ -217,7 +193,7 @@ MiniMax M2.7 是 MiniMax 首个深度参与自我迭代的模型，可自主构�
 **10+ 大 AI Agent** — Claude Code、Codex、Cursor Agent、Kimi CLI、Qoder CLI、Gemini CLI、OpenCode、iFlow CLI、Pi、Devin，还可通过 [Agent Client Protocol (ACP)](https://agentclientprotocol.com/get-started/agents) 接入更多 Agent。按需选用，或同时使用全部。
 
 ### 📱 平台灵活性
-**12 大聊天平台** — 飞书、WPS 协作、钉钉、Slack、Telegram、Discord、企业微信、微博、LINE、QQ、QQ 官方机器人，以及 **微信个人号（ilink）**。大部分平台**无需公网 IP**。
+**2 个聊天平台** — **飞书 / Lark** 和 **企业微信**，均支持无需公网 IP 的长连接模式。
 
 ### 🔄 多 Agent 编排
 **多机器人中继** — 在群聊中绑定多个机器人，让它们相互协作。问 Claude，再听 Gemini 的见解 — 同一个对话搞定。
@@ -240,16 +216,14 @@ MiniMax M2.7 是 MiniMax 首个深度参与自我迭代的模型，可自主构�
 **多项目管理** — 一个进程同时管理多个项目，各自独立的 Agent + 平台组合。
 
 ### 🌍 多语言界面
-**5 种语言** — 原生支持英语、中文（简体/繁体）、日语和西班牙语。内置 i18n 让每个人都能得心应手。
+**2 种语言** — 英文和简体中文。内置 i18n 保持两套界面一致。
 
 
 <p align="center">
-  <img src="docs/images/screenshot/cc-connect-lark.JPG" alt="飞书" width="32%" />
-  <img src="docs/images/screenshot/cc-connect-telegram.JPG" alt="Telegram" width="32%" />
-  <img src="docs/images/screenshot/cc-connect-wechat.JPG" alt="微信" width="32%" />
+  <img src="docs/images/screenshot/cc-connect-lark.JPG" alt="飞书" width="60%" />
 </p>
 <p align="center">
-  <em>左：飞书 &nbsp;|&nbsp; Telegram &nbsp;|&nbsp; 右：微信</em>
+  <em>飞书 / Lark</em>
 </p>
 
 
@@ -353,17 +327,7 @@ cc-connect update --pre     # 含预发布版本
 | Agent | Goose (Block) | 🔜 计划中 |
 | Agent | Aider | 🔜 计划中 |
 | Platform | 飞书 (Lark) | ✅ WebSocket — 无需公网 IP |
-| Platform | 钉钉 | ✅ Stream — 无需公网 IP |
-| Platform | WPS 协作 | ✅ WebSocket — 无需公网 IP |
-| Platform | Telegram | ✅ Long Polling — 无需公网 IP |
-| Platform | Slack | ✅ Socket Mode — 无需公网 IP |
-| Platform | Discord | ✅ Gateway — 无需公网 IP |
-| Platform | 微博 | ✅ WebSocket — 无需公网 IP |
-| Platform | LINE | ✅ Webhook — 需要公网 URL |
 | Platform | 企业微信 | ✅ WebSocket / Webhook |
-| Platform | 微信个人号（ilink） | ✅— HTTP 长轮询 — 无需公网 IP |
-| Platform | QQ (NapCat/OneBot) | ✅ WebSocket |
-| Platform | QQ 官方机器人 | ✅ WebSocket — 无需公网 IP |
 
 
 ## 📖 平台接入指南
@@ -371,15 +335,7 @@ cc-connect update --pre     # 含预发布版本
 | 平台 | 指南 | 连接方式 | 需要公网 IP? |
 |------|------|---------|-------------|
 | 飞书 (Lark) | [docs/feishu.md](docs/feishu.md) | WebSocket | 不需要 |
-| 钉钉 | [docs/dingtalk.md](docs/dingtalk.md) | Stream | 不需要 |
-| WPS 协作 | [docs/wps-xiezuo.md](docs/wps-xiezuo.md) | WebSocket | 不需要 |
-| Telegram | [docs/telegram.md](docs/telegram.md) | Long Polling | 不需要 |
-| Slack | [docs/slack.md](docs/slack.md) | Socket Mode | 不需要 |
-| Discord | [docs/discord.md](docs/discord.md) | Gateway | 不需要 |
-| 微博 | [docs/weibo.md](docs/weibo.md) | WebSocket | 不需要 |
 | 企业微信 | [docs/wecom.md](docs/wecom.md) | WebSocket / Webhook | 不需要 (WS) / 需要 (Webhook) |
-| 微信个人号（ilink） | [docs/weixin.md](docs/weixin.md) | HTTP 长轮询（ilink） | 不需要 |
-| QQ / QQ 机器人 | [docs/qq.md](docs/qq.md) | WebSocket | 不需要 |
 
 
 ## 🎯 核心功能
@@ -475,7 +431,6 @@ cc-connect doctor user-isolation
 
 首版支持：
 - 飞书
-- Telegram
 
 如果当前 Agent 不是原生注入 system prompt 的类型，升级后请先在聊天里执行一次：
 
@@ -563,7 +518,7 @@ cc-connect send --file /absolute/path/to/report.pdf --image /absolute/path/to/ch
 
 我们接受以下商业合作：
 
-- **企业定制**：为企业定制内部 AI 工具入口（飞书、钉钉、企业微信、Slack 等）
+- **企业定制**：为企业定制内部 AI 工具入口（飞书、企业微信等）
 - **技术咨询**：AI agent 集成方案设计与架构咨询
 - **外包项目**：AI 相关系统开发
 

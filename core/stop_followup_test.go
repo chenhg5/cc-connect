@@ -46,10 +46,10 @@ func (s *stopTestSession) Interrupt(string) error {
 }
 
 func (s *stopTestSession) RespondPermission(string, PermissionResult) error { return nil }
-func (s *stopTestSession) Events() <-chan Event                            { return s.events }
-func (s *stopTestSession) CurrentSessionID() string                        { return "stop-test" }
-func (s *stopTestSession) Alive() bool                                     { return s.alive.Load() }
-func (s *stopTestSession) Close() error                                    { s.alive.Store(false); return nil }
+func (s *stopTestSession) Events() <-chan Event                             { return s.events }
+func (s *stopTestSession) CurrentSessionID() string                         { return "stop-test" }
+func (s *stopTestSession) Alive() bool                                      { return s.alive.Load() }
+func (s *stopTestSession) Close() error                                     { s.alive.Store(false); return nil }
 
 func (s *stopTestSession) promptCount() int {
 	s.mu.Lock()

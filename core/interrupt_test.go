@@ -79,7 +79,6 @@ func TestInterruptInteractiveTurn_RejectsIdleAndUnsupported(t *testing.T) {
 	}
 }
 
-
 // stop_wait_secs = 0 must end the session immediately instead of sending an
 // interrupt and walking away.
 func TestStopWithZeroWaitEndsSession(t *testing.T) {

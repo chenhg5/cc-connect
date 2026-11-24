@@ -56,12 +56,12 @@ func TestTransformLocalReferences_PreservesWebMarkdownLinks(t *testing.T) {
 func TestTransformLocalReferences_PreservesInlineCodePathRange(t *testing.T) {
 	cfg := ReferenceRenderCfg{
 		NormalizeAgents: []string{"claudecode"},
-		RenderPlatforms: []string{"weixin"},
+		RenderPlatforms: []string{"feishu"},
 		DisplayPath:     "dirname_basename",
 		MarkerStyle:     "ascii",
 		EnclosureStyle:  "code",
 	}
-	got := TransformLocalReferences("Inspect `/root/.claude/settings.json:5-10` next.", cfg, "claudecode", "weixin", "/root")
+	got := TransformLocalReferences("Inspect `/root/.claude/settings.json:5-10` next.", cfg, "claudecode", "feishu", "/root")
 	want := "[FILE] `.claude/settings.json:5-10`"
 	if !strings.Contains(got, want) {
 		t.Fatalf("TransformLocalReferences() = %q, want substring %q", got, want)

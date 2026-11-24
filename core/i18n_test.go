@@ -59,21 +59,16 @@ func TestI18n_AllKeysHaveEnglish(t *testing.T) {
 
 func TestDetectLanguage(t *testing.T) {
 	tests := []struct {
-		text    string
+		text     string
 		wantLang Language
 	}{
-		// Japanese Hiragana
-		{"こんにちは", LangJapanese},
-		{"あいうえお", LangJapanese},
-		// Japanese Katakana
-		{"カタカナ", LangJapanese},
-		// Chinese
+		// Only Chinese and English remain: non-CJK text defaults to English.
+		{"こんにちは", LangEnglish},
+		{"¿Cómo estás?", LangEnglish},
+		// Chinese (simplified and traditional both map to LangChinese)
 		{"你好", LangChinese},
 		{"中文测试", LangChinese},
-		// Spanish
-		{"¿Cómo estás?", LangSpanish},
-		{"Niño español", LangSpanish},
-		{"¡Hola!", LangSpanish},
+		{"繁體中文", LangChinese},
 		// English (default)
 		{"Hello world", LangEnglish},
 		{"Just normal text", LangEnglish},
@@ -146,24 +141,20 @@ func TestI18n_ConcurrentAccess(t *testing.T) {
 	wg.Wait()
 }
 
-func TestIsJapanese(t *testing.T) {
-	// Hiragana
-	if !isJapanese('あ') {
-		t.Error("Hiragana 'あ' should be Japanese")
-	}
-	// Katakana
-	if !isJapanese('ア') {
-		t.Error("Katakana 'ア' should be Japanese")
-	}
-	// Half-width Katakana
-	if !isJapanese('ﾟ') {
-		t.Error("Half-width Katakana should be Japanese")
-	}
-	// Not Japanese
-	if isJapanese('中') {
-		t.Error("Chinese should not be Japanese")
-	}
-	if isJapanese('a') {
-		t.Error("ASCII 'a' should not be Japanese")
+// cc-connect only ships Simplified Chinese and English. Every key must have
+// both, and no other language entries may creep back in.
+func TestI18n_OnlyEnglishAndChinese(t *testing.T) {
+	for key, langs := range messages {
+		if _, ok := langs[LangEnglish]; !ok {
+			t.Errorf("message key %q missing English translation", key)
+		}
+		if _, ok := langs[LangChinese]; !ok {
+			t.Errorf("message key %q missing Chinese translation", key)
+		}
+		for lang := range langs {
+			if lang != LangEnglish && lang != LangChinese {
+				t.Errorf("message key %q has unsupported language %q", key, lang)
+			}
+		}
 	}
 }
