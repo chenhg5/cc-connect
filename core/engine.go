@@ -4756,6 +4756,17 @@ func (e *Engine) cleanupInteractiveState(sessionKey string, expected ...*interac
 	e.cleanupInteractiveStateWithPolicy(sessionKey, false, expected...)
 }
 
+// cleanupInteractiveStateForNew preserves the observed-state guard when /new
+// saw a state, while still cleaning up a state created just after an empty
+// snapshot. A nil snapshot is not an assertion that the map must stay empty.
+func (e *Engine) cleanupInteractiveStateForNew(sessionKey string, observed *interactiveState) {
+	if observed == nil {
+		e.cleanupInteractiveState(sessionKey)
+		return
+	}
+	e.cleanupInteractiveState(sessionKey, observed)
+}
+
 // cleanupInteractiveStateForRestart preserves queued turns when a dead agent
 // process is being replaced. Explicit resets and shutdown still drop them.
 func (e *Engine) cleanupInteractiveStateForRestart(sessionKey string, expected *interactiveState) {
@@ -7931,7 +7942,7 @@ func (e *Engine) cmdNew(p Platform, msg *Message, args []string) {
 	e.interactiveMu.Lock()
 	expected := e.interactiveStates[interactiveKey]
 	e.interactiveMu.Unlock()
-	e.cleanupInteractiveState(interactiveKey, expected)
+	e.cleanupInteractiveStateForNew(interactiveKey, expected)
 	slog.Info("cmdNew: cleanup done, creating new session", "session_key", msg.SessionKey)
 
 	// Clear old session's agent session ID so it cannot be resumed

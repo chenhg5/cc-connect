@@ -294,3 +294,38 @@ func TestExplicitCleanupDropsQueuedMessages(t *testing.T) {
 		t.Fatalf("queued message was not notified of reset: %v", sent)
 	}
 }
+
+// TestCmdNewNilSnapshotCleansConcurrentState forces the /new interleaving
+// where it observes no state, then a concurrent message starts a session
+// before /new performs cleanup. The new process must not survive the reset.
+func TestCmdNewNilSnapshotCleansConcurrentState(t *testing.T) {
+	e := newTestEngine()
+	key := "test:new-start-race"
+	e.interactiveMu.Lock()
+	observed := e.interactiveStates[key]
+	e.interactiveMu.Unlock()
+	if observed != nil {
+		t.Fatal("expected an empty initial state")
+	}
+	backend := newControllableSession("concurrent-start")
+	started := make(chan struct{})
+	go func() {
+		e.interactiveMu.Lock()
+		e.interactiveStates[key] = &interactiveState{agentSession: backend}
+		e.interactiveMu.Unlock()
+		close(started)
+	}()
+	<-started
+	e.cleanupInteractiveStateForNew(key, observed)
+	select {
+	case <-backend.closed:
+	default:
+		t.Fatal("/new left the concurrently started agent process alive")
+	}
+	e.interactiveMu.Lock()
+	_, exists := e.interactiveStates[key]
+	e.interactiveMu.Unlock()
+	if exists {
+		t.Fatal("/new left the concurrently created interactive state behind")
+	}
+}
