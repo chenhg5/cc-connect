@@ -39,6 +39,7 @@ type opencodeSession struct {
 	alive             atomic.Bool
 	expectingContinue atomic.Bool // true when compaction_continue received, waiting for next step
 	resultSent        atomic.Bool // true when EventResult has been sent for this turn
+	errorSent         atomic.Bool // true when an explicit agent error has been sent for this turn
 }
 
 func newOpencodeSession(ctx context.Context, cmd string, extraArgs []string, workDir, model, mode, agentName, resumeID string, extraEnv []string) (*opencodeSession, error) {
@@ -79,6 +80,7 @@ func (s *opencodeSession) Send(prompt string, messageID string, images []core.Im
 	}
 
 	s.resultSent.Store(false)
+	s.errorSent.Store(false)
 	s.expectingContinue.Store(false)
 
 	chatID := s.CurrentSessionID()
@@ -242,6 +244,10 @@ func (s *opencodeSession) readLoop(cmd *exec.Cmd, stdout io.ReadCloser, stderrBu
 	}
 
 	if err := scanner.Err(); err != nil {
+		if !s.alive.Load() || s.ctx.Err() != nil {
+			return
+		}
+		s.alive.Store(false)
 		slog.Error("opencodeSession: scanner error", "error", err)
 		evt := core.Event{Type: core.EventError, Error: fmt.Errorf("read stdout: %w", err)}
 		select {
@@ -254,11 +260,15 @@ func (s *opencodeSession) readLoop(cmd *exec.Cmd, stdout io.ReadCloser, stderrBu
 
 	// exec copies stderr into stderrBuf from its own goroutine until Wait
 	// returns, so the buffer is only safe to read after that.
-	_ = cmd.Wait()
+	waitErr := cmd.Wait()
 	waited = true
+	if !s.alive.Load() || s.ctx.Err() != nil {
+		return
+	}
 
 	stderrMsg := stderrBuf.String()
 	if stderrMsg != "" {
+		s.alive.Store(false)
 		slog.Error("opencodeSession: process error", "stderr", truncate(stderrMsg, 500))
 		if strings.Contains(stderrMsg, "Session not found") {
 			s.chatID.Store("")
@@ -281,8 +291,22 @@ func (s *opencodeSession) readLoop(cmd *exec.Cmd, stdout io.ReadCloser, stderrBu
 		return
 	}
 
-	slog.Debug("opencodeSession: readLoop complete, sending fallback EventResult", "session_id", s.CurrentSessionID())
-	s.sendEventResult()
+	if s.resultSent.Load() {
+		return
+	}
+	s.alive.Store(false)
+	if s.errorSent.Load() {
+		return
+	}
+	err := fmt.Errorf("opencode exited without a result")
+	if waitErr != nil {
+		err = fmt.Errorf("opencode exited without a result: %w", waitErr)
+	}
+	slog.Error("opencodeSession: turn ended without a result", "error", err, "session_id", s.CurrentSessionID())
+	select {
+	case s.events <- core.Event{Type: core.EventError, Error: err}:
+	case <-s.ctx.Done():
+	}
 }
 
 // OpenCode NDJSON event structure:
@@ -447,6 +471,7 @@ func (s *opencodeSession) handleReasoning(raw map[string]any) {
 func (s *opencodeSession) handleError(raw map[string]any) {
 	errMsg := extractErrorMessage(raw)
 	slog.Error("opencodeSession: agent error", "error", errMsg)
+	s.errorSent.Store(true)
 	evt := core.Event{Type: core.EventError, Error: fmt.Errorf("%s", errMsg)}
 	select {
 	case s.events <- evt:

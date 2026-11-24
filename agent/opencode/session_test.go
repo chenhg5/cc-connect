@@ -156,6 +156,7 @@ func TestOpencodeSessionSendRunsInWorkDir(t *testing.T) {
 			os.Exit(2)
 		}
 		_, _ = os.Stdout.WriteString(`{"type":"text","part":{"text":"cwd recorded"}}` + "\n")
+		_, _ = os.Stdout.WriteString(`{"type":"step_finish","part":{"reason":"stop"}}` + "\n")
 		os.Exit(0)
 	}
 
