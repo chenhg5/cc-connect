@@ -2442,6 +2442,68 @@ func TestProcessInteractiveEvents_RichCard_NoReplyChunked(t *testing.T) {
 	}
 }
 
+func TestProcessInteractiveEvents_RichCard_NoReplyAfterRejectedDraftKeepsCard(t *testing.T) {
+	p := &stubRichCardSilentPlatform{stubPlatformEngine: stubPlatformEngine{n: "feishu"}}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	e.SetDisplayConfig(DisplayCfg{Mode: "full", CardMode: "rich", ThinkingMessages: true, ToolMessages: true})
+	key := "feishu:thinking-then-silent"
+	session := e.sessions.GetOrCreateActive(key)
+	as := newControllableSession("s-thinking-then-silent")
+	state := &interactiveState{agentSession: as, platform: p, replyCtx: "ctx-thinking-then-silent"}
+	e.interactiveStates[key] = state
+	as.events <- Event{Type: EventText, Content: "rejected draft"}
+	as.events <- Event{Type: EventHookRejected}
+	as.events <- Event{Type: EventText, Content: "NO_REPLY"}
+	as.events <- Event{Type: EventResult, Content: "NO_REPLY", Done: true}
+	e.processInteractiveEvents(state, session, e.sessions, key, "m-thinking-then-silent", time.Now(), nil, nil, state.replyCtx, 0)
+	starts, _, updates, deletes := p.snapshot()
+	if len(starts) == 0 {
+		t.Fatal("expected a rich card before the silent result")
+	}
+	if deletes != 0 {
+		t.Fatalf("expected no recall gray bar, got %d deletes", deletes)
+	}
+	if len(updates) == 0 || !strings.Contains(updates[len(updates)-1], "status=done") {
+		t.Fatalf("expected final Done card, got %v", updates)
+	}
+}
+
+type richSilentNoUpdaterPlatform struct {
+	stubPlatformEngine
+	starts, deletes int
+}
+
+func (p *richSilentNoUpdaterPlatform) BuildRichCard(_ CardStatus, _ string, _ []ToolStep, _ string, _ bool, _ string) string {
+	return "card"
+}
+func (p *richSilentNoUpdaterPlatform) SendPreviewStart(_ context.Context, _ any, _ string) (any, error) {
+	p.starts++
+	return "handle", nil
+}
+func (p *richSilentNoUpdaterPlatform) DeletePreviewMessage(_ context.Context, _ any) error {
+	p.deletes++
+	return nil
+}
+
+func TestProcessInteractiveEvents_RichCard_NoUpdaterStillDeletesSilentCard(t *testing.T) {
+	p := &richSilentNoUpdaterPlatform{stubPlatformEngine: stubPlatformEngine{n: "feishu"}}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	e.SetDisplayConfig(DisplayCfg{Mode: "full", CardMode: "rich", ToolMessages: true})
+	key := "feishu:no-updater-silent"
+	session := e.sessions.GetOrCreateActive(key)
+	as := newControllableSession("s-no-updater-silent")
+	state := &interactiveState{agentSession: as, platform: p, replyCtx: "ctx-no-updater-silent"}
+	e.interactiveStates[key] = state
+	as.events <- Event{Type: EventText, Content: "rejected draft"}
+	as.events <- Event{Type: EventHookRejected}
+	as.events <- Event{Type: EventText, Content: "NO_REPLY"}
+	as.events <- Event{Type: EventResult, Content: "NO_REPLY", Done: true}
+	e.processInteractiveEvents(state, session, e.sessions, key, "m-no-updater-silent", time.Now(), nil, nil, state.replyCtx, 0)
+	if p.starts != 1 || p.deletes != 1 {
+		t.Fatalf("starts=%d deletes=%d, want one of each", p.starts, p.deletes)
+	}
+}
+
 // TestProcessInteractiveEvents_RichCard_PrefixThenContent verifies that a
 // stream which starts with a NO_REPLY prefix ("N") but continues into real
 // content ("ote that...") releases the silentHold and lazily creates the
