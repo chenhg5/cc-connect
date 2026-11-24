@@ -1812,16 +1812,9 @@ func ListProjects() ([]string, error) {
 func AddCommand(cmd CommandConfig) error {
 	configMu.Lock()
 	defer configMu.Unlock()
-	if ConfigPath == "" {
-		return fmt.Errorf("config path not set")
-	}
-	data, err := os.ReadFile(ConfigPath)
+	data, cfg, err := loadDocumentConfigLocked()
 	if err != nil {
-		return fmt.Errorf("read config: %w", err)
-	}
-	cfg := &Config{}
-	if err := toml.Unmarshal(data, cfg); err != nil {
-		return fmt.Errorf("parse config: %w", err)
+		return err
 	}
 	for _, c := range cfg.Commands {
 		if c.Name == cmd.Name {
@@ -1829,94 +1822,99 @@ func AddCommand(cmd CommandConfig) error {
 		}
 	}
 	cfg.Commands = append(cfg.Commands, cmd)
-	return saveConfig(cfg)
+	block, err := serializeCommandBlock(cmd)
+	if err != nil {
+		return err
+	}
+	return saveDocumentPatch(data, cfg, func(raw string) (string, error) { return appendCommandAliasBlock(raw, block), nil })
 }
 
 // RemoveCommand removes a global custom command and persists to config.
 func RemoveCommand(name string) error {
 	configMu.Lock()
 	defer configMu.Unlock()
-	if ConfigPath == "" {
-		return fmt.Errorf("config path not set")
-	}
-	data, err := os.ReadFile(ConfigPath)
+	data, cfg, err := loadDocumentConfigLocked()
 	if err != nil {
-		return fmt.Errorf("read config: %w", err)
+		return err
 	}
-	cfg := &Config{}
-	if err := toml.Unmarshal(data, cfg); err != nil {
-		return fmt.Errorf("parse config: %w", err)
-	}
-	found := false
+	var indexes []int
 	var remaining []CommandConfig
-	for _, c := range cfg.Commands {
+	for i, c := range cfg.Commands {
 		if c.Name == name {
-			found = true
+			indexes = append(indexes, i)
 		} else {
 			remaining = append(remaining, c)
 		}
 	}
-	if !found {
+	if len(indexes) == 0 {
 		return fmt.Errorf("command %q not found", name)
 	}
 	cfg.Commands = remaining
-	return saveConfig(cfg)
+	return saveDocumentPatch(data, cfg, func(raw string) (string, error) {
+		for i := len(indexes) - 1; i >= 0; i-- {
+			var err error
+			raw, err = removeCommandAliasBlock(raw, "commands", indexes[i])
+			if err != nil {
+				return "", err
+			}
+		}
+		return raw, nil
+	})
 }
 
 // AddAlias adds a global alias and persists to config.
 func AddAlias(alias AliasConfig) error {
 	configMu.Lock()
 	defer configMu.Unlock()
-	if ConfigPath == "" {
-		return fmt.Errorf("config path not set")
-	}
-	data, err := os.ReadFile(ConfigPath)
+	data, cfg, err := loadDocumentConfigLocked()
 	if err != nil {
-		return fmt.Errorf("read config: %w", err)
-	}
-	cfg := &Config{}
-	if err := toml.Unmarshal(data, cfg); err != nil {
-		return fmt.Errorf("parse config: %w", err)
+		return err
 	}
 	for i, a := range cfg.Aliases {
 		if a.Name == alias.Name {
 			cfg.Aliases[i] = alias
-			return saveConfig(cfg)
+			return saveDocumentPatch(data, cfg, func(raw string) (string, error) { return patchAliasCommand(raw, i, alias.Command) })
 		}
 	}
 	cfg.Aliases = append(cfg.Aliases, alias)
-	return saveConfig(cfg)
+	block, err := serializeAliasBlock(alias)
+	if err != nil {
+		return err
+	}
+	return saveDocumentPatch(data, cfg, func(raw string) (string, error) { return appendCommandAliasBlock(raw, block), nil })
 }
 
 // RemoveAlias removes a global alias and persists to config.
 func RemoveAlias(name string) error {
 	configMu.Lock()
 	defer configMu.Unlock()
-	if ConfigPath == "" {
-		return fmt.Errorf("config path not set")
-	}
-	data, err := os.ReadFile(ConfigPath)
+	data, cfg, err := loadDocumentConfigLocked()
 	if err != nil {
-		return fmt.Errorf("read config: %w", err)
+		return err
 	}
-	cfg := &Config{}
-	if err := toml.Unmarshal(data, cfg); err != nil {
-		return fmt.Errorf("parse config: %w", err)
-	}
-	found := false
+	var indexes []int
 	var remaining []AliasConfig
-	for _, a := range cfg.Aliases {
+	for i, a := range cfg.Aliases {
 		if a.Name == name {
-			found = true
+			indexes = append(indexes, i)
 		} else {
 			remaining = append(remaining, a)
 		}
 	}
-	if !found {
+	if len(indexes) == 0 {
 		return fmt.Errorf("alias %q not found", name)
 	}
 	cfg.Aliases = remaining
-	return saveConfig(cfg)
+	return saveDocumentPatch(data, cfg, func(raw string) (string, error) {
+		for i := len(indexes) - 1; i >= 0; i-- {
+			var err error
+			raw, err = removeCommandAliasBlock(raw, "aliases", indexes[i])
+			if err != nil {
+				return "", err
+			}
+		}
+		return raw, nil
+	})
 }
 
 // SaveDisplayConfig persists the display settings to the config file.
