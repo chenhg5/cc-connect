@@ -946,7 +946,7 @@ mode = "default" # "default" | "acceptEdits" (edit) | "plan" | "auto" | "bypassP
 # 保留 Claude 默认系统提示，并在其后追加本内容（通过 --append-system-prompt）。
 # 想在不丢弃默认提示的前提下补充指令时用它；可与 system_prompt 同时使用。
 # append_system_prompt = "Always respond in Chinese and prefer concise answers."
-
+#
 # Optional: specify a model / 可选：指定模型
 # model = "claude-sonnet-4-20250514"
 
@@ -1856,6 +1856,13 @@ app_secret = "your-feishu-app-secret"
 # 追加在 system_prompt 之后，包含在同一段注入的前导内容中。可单独使用，也可与
 # system_prompt 同时使用。
 # append_system_prompt = "Always respond in Chinese and prefer concise answers."
+#
+# Optional: additional prefixes for internal Codex sessions hidden from /list
+# and filtered from /history. Built-in internal prompt prefixes always apply.
+# 可选：额外的内部 Codex 提示前缀；匹配的会话不出现在 /list，提示不出现在 /history。
+# 内置的内部提示前缀始终生效。
+# [projects.agent.options.session_filter]
+# ignore_summary_prefixes = ["Private workflow:"]
 #
 # # Active provider / 当前激活的 provider
 # # provider = "openai"
