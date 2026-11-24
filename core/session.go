@@ -243,7 +243,10 @@ type sessionSnapshot struct {
 // SessionManager supports multiple named sessions per user with active-session tracking.
 // It can persist state to a JSON file and reload on startup.
 type SessionManager struct {
-	mu            sync.RWMutex
+	mu sync.RWMutex
+	// saveMu serialises the actual disk write. Save() takes mu.RLock, so
+	// concurrent callers would otherwise race on the same temp file/rename.
+	saveMu        sync.Mutex
 	sessions      map[string]*Session
 	activeSession map[string]string
 	userSessions  map[string][]string
@@ -589,6 +592,8 @@ func (sm *SessionManager) saveLocked() {
 	if sm.storePath == "" {
 		return
 	}
+	sm.saveMu.Lock()
+	defer sm.saveMu.Unlock()
 
 	// Build a deep-copy snapshot to avoid racing with concurrent Session mutations.
 	snapSessions := make(map[string]*Session, len(sm.sessions))

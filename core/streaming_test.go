@@ -40,6 +40,28 @@ func (m *mockUpdaterPlatform) getMessages() []string {
 	return out
 }
 
+func TestStreamPreview_DisabledPlatformSkipsLoadingAndFinish(t *testing.T) {
+	mp := &mockUpdaterPlatform{stubPlatformEngine: stubPlatformEngine{n: "feishu"}}
+	cfg := StreamPreviewCfg{
+		Enabled:           true,
+		DisabledPlatforms: []string{"feishu"},
+		IntervalMs:        1,
+		MinDeltaChars:     1,
+		MaxChars:          100,
+	}
+	sp := newStreamPreview(cfg, mp, "ctx", context.Background(), nil)
+
+	sp.startLoading(func(int) string { return "⠋ Thinking..." }, time.Millisecond)()
+	sp.appendText("hello")
+
+	if sp.finish("hello") {
+		t.Fatal("finish reported preview delivery for a disabled platform")
+	}
+	if msgs := mp.getMessages(); len(msgs) != 0 {
+		t.Fatalf("platform disabled for previews received messages: %#v", msgs)
+	}
+}
+
 func TestStreamPreview_BasicFlow(t *testing.T) {
 	mp := &mockUpdaterPlatform{}
 	cfg := StreamPreviewCfg{

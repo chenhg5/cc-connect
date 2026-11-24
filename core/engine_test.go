@@ -1094,6 +1094,11 @@ func TestProcessInteractiveEvents_DoesNotSuppressDifferentFinalText(t *testing.T
 func TestProcessInteractiveEvents_AppendsReplyFooterWhenEnabled(t *testing.T) {
 	homeDir := t.TempDir()
 	t.Setenv("HOME", homeDir)
+	// The footer abbreviates a real path under HOME back to "~/…"; on macOS a
+	// non-existent path does not survive EvalSymlinks and falls back to "…/".
+	if err := os.MkdirAll(filepath.Join(homeDir, "codes", "cc-connect"), 0o755); err != nil {
+		t.Fatalf("mkdir workdir: %v", err)
+	}
 
 	agent := &stubReplyFooterAgent{
 		stubModelModeAgent: stubModelModeAgent{
@@ -1133,7 +1138,7 @@ func TestProcessInteractiveEvents_AppendsReplyFooterWhenEnabled(t *testing.T) {
 	if len(sent) != 1 {
 		t.Fatalf("sent = %#v, want one final reply", sent)
 	}
-	want := "answer\n\n*gpt-5.4 · xhigh · 100% left · ~/codes/cc-connect*"
+	want := "answer\n\n*gpt-5.4 · xhigh · 100% left · ~/codes/cc-connect · ⏱ <1s*"
 	if sent[0] != want {
 		t.Fatalf("final reply = %q, want %q", sent[0], want)
 	}
@@ -1142,6 +1147,9 @@ func TestProcessInteractiveEvents_AppendsReplyFooterWhenEnabled(t *testing.T) {
 func TestProcessInteractiveEvents_AppendsContextIndicatorInsideReplyFooter(t *testing.T) {
 	homeDir := t.TempDir()
 	t.Setenv("HOME", homeDir)
+	if err := os.MkdirAll(filepath.Join(homeDir, "code", "TechStudio", "projects", "core", "agents", "ceo"), 0o755); err != nil {
+		t.Fatalf("mkdir workdir: %v", err)
+	}
 
 	agent := &stubReplyFooterAgent{
 		stubModelModeAgent: stubModelModeAgent{model: "glm-5.1"},
@@ -1169,7 +1177,7 @@ func TestProcessInteractiveEvents_AppendsContextIndicatorInsideReplyFooter(t *te
 	if len(sent) != 1 {
 		t.Fatalf("sent = %#v, want one final reply", sent)
 	}
-	want := "answer\n\n*[ctx: ~14%] · glm-5.1 · ~/code/TechStudio/projects/core/agents/ceo*"
+	want := "answer\n\n*[ctx: ~14%] · glm-5.1 · ~/code/TechStudio/projects/core/agents/ceo · ⏱ <1s*"
 	if sent[0] != want {
 		t.Fatalf("final reply = %q, want %q", sent[0], want)
 	}
@@ -1178,6 +1186,9 @@ func TestProcessInteractiveEvents_AppendsContextIndicatorInsideReplyFooter(t *te
 func TestProcessInteractiveEvents_ToolSegmentsKeepFinalFooter(t *testing.T) {
 	homeDir := t.TempDir()
 	t.Setenv("HOME", homeDir)
+	if err := os.MkdirAll(filepath.Join(homeDir, "code", "TechStudio", "projects", "core", "agents", "ceo"), 0o755); err != nil {
+		t.Fatalf("mkdir workdir: %v", err)
+	}
 
 	agent := &stubReplyFooterAgent{
 		stubModelModeAgent: stubModelModeAgent{model: "glm-5.1"},
@@ -1210,7 +1221,7 @@ func TestProcessInteractiveEvents_ToolSegmentsKeepFinalFooter(t *testing.T) {
 		t.Fatal("sent = nil, want final reply")
 	}
 	final := sent[len(sent)-1]
-	want := "已处理完成。\n\n*[ctx: ~14%] · glm-5.1 · ~/code/TechStudio/projects/core/agents/ceo*"
+	want := "已处理完成。\n\n*[ctx: ~14%] · glm-5.1 · ~/code/TechStudio/projects/core/agents/ceo · ⏱ <1s*"
 	if final != want {
 		t.Fatalf("final reply = %q, want %q\nall sent = %#v", final, want, sent)
 	}
@@ -1292,6 +1303,11 @@ func TestProcessInteractiveEvents_DoesNotAppendReplyFooterWhenDisabled(t *testin
 func TestProcessInteractiveEvents_ReplyFooterPrefersSessionRuntimeState(t *testing.T) {
 	homeDir := t.TempDir()
 	t.Setenv("HOME", homeDir)
+	for _, dir := range []string{"codes/cc-connect", "codes/agent-default"} {
+		if err := os.MkdirAll(filepath.Join(homeDir, dir), 0o755); err != nil {
+			t.Fatalf("mkdir workdir: %v", err)
+		}
+	}
 
 	agent := &stubReplyFooterAgent{
 		stubModelModeAgent: stubModelModeAgent{
@@ -1351,7 +1367,7 @@ func TestProcessInteractiveEvents_ReplyFooterPrefersSessionRuntimeState(t *testi
 	if len(sent) != 1 {
 		t.Fatalf("sent = %#v, want one final reply", sent)
 	}
-	want := "answer\n\n*gpt-5.4 · xhigh · 31% left · ~/codes/cc-connect*"
+	want := "answer\n\n*gpt-5.4 · xhigh · 31% left · ~/codes/cc-connect · ⏱ <1s*"
 	if sent[0] != want {
 		t.Fatalf("final reply = %q, want %q", sent[0], want)
 	}
@@ -5276,85 +5292,6 @@ func TestCmdSkills_UsesLegacyTextOnPlatformWithoutCardSupport(t *testing.T) {
 	}
 }
 
-func TestCmdSkills_UsesTelegramSafeNamesOnTelegramPlatform(t *testing.T) {
-	p := &stubPlatformEngine{n: "telegram"}
-	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
-	temp := t.TempDir()
-	skillDir := temp + "/telegram-codex-bot"
-	if err := os.Mkdir(skillDir, 0o755); err != nil {
-		t.Fatalf("mkdir skill dir: %v", err)
-	}
-	if err := os.WriteFile(skillDir+"/SKILL.md", []byte("---\ndescription: Demo skill\n---\nDo demo"), 0o644); err != nil {
-		t.Fatalf("write skill file: %v", err)
-	}
-	e.skills.SetDirs([]string{temp})
-
-	e.cmdSkills(p, &Message{SessionKey: "telegram:user1", ReplyCtx: "ctx"})
-
-	if len(p.sent) != 1 {
-		t.Fatalf("sent messages = %d, want 1", len(p.sent))
-	}
-	if !strings.Contains(p.sent[0], "/telegram_codex_bot") {
-		t.Fatalf("skills text = %q, want Telegram-safe skill command", p.sent[0])
-	}
-	if strings.Contains(p.sent[0], "/telegram-codex-bot") {
-		t.Fatalf("skills text = %q, should not show raw hyphenated command", p.sent[0])
-	}
-}
-
-func TestMenuCommandsForPlatform_TelegramOmitsAllSkillsWhenMenuWouldOverflow(t *testing.T) {
-	e := NewEngine("test", &stubAgent{}, nil, "", LangEnglish)
-	temp := t.TempDir()
-	for i := 0; i < 80; i++ {
-		name := fmt.Sprintf("skill-%02d", i)
-		skillDir := filepath.Join(temp, name)
-		if err := os.MkdirAll(skillDir, 0o755); err != nil {
-			t.Fatalf("mkdir skill dir: %v", err)
-		}
-		if err := os.WriteFile(filepath.Join(skillDir, "SKILL.md"), []byte("---\ndescription: Demo skill\n---\nDo demo"), 0o644); err != nil {
-			t.Fatalf("write skill file: %v", err)
-		}
-	}
-	e.skills.SetDirs([]string{temp})
-
-	commands, skillsOmitted := e.menuCommandsForPlatform("telegram")
-
-	if !skillsOmitted {
-		t.Fatalf("expected Telegram menu planner to omit skill commands when command menu overflows")
-	}
-	for _, cmd := range commands {
-		if cmd.IsSkill {
-			t.Fatalf("menu commands should omit skills when overflowed, got %+v", cmd)
-		}
-	}
-}
-
-func TestCmdSkills_TelegramShowsManualInvocationHintWhenSkillsAreOmittedFromMenu(t *testing.T) {
-	p := &stubPlatformEngine{n: "telegram"}
-	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
-	temp := t.TempDir()
-	for i := 0; i < 80; i++ {
-		name := fmt.Sprintf("skill-%02d", i)
-		skillDir := filepath.Join(temp, name)
-		if err := os.MkdirAll(skillDir, 0o755); err != nil {
-			t.Fatalf("mkdir skill dir: %v", err)
-		}
-		if err := os.WriteFile(filepath.Join(skillDir, "SKILL.md"), []byte("---\ndescription: Demo skill\n---\nDo demo"), 0o644); err != nil {
-			t.Fatalf("write skill file: %v", err)
-		}
-	}
-	e.skills.SetDirs([]string{temp})
-
-	e.cmdSkills(p, &Message{SessionKey: "telegram:user1", ReplyCtx: "ctx"})
-
-	if len(p.sent) != 1 {
-		t.Fatalf("sent messages = %d, want 1", len(p.sent))
-	}
-	if !strings.Contains(p.sent[0], "command menu is full") {
-		t.Fatalf("skills text = %q, want Telegram overflow hint", p.sent[0])
-	}
-}
-
 func TestRenderListCard_MakesEveryVisibleSessionClickable(t *testing.T) {
 	sessions := make([]AgentSessionInfo, 0, 7)
 	base := time.Date(2026, 3, 9, 10, 0, 0, 0, time.UTC)
@@ -8700,6 +8637,11 @@ func TestResolveLocalDirPath_AcceptsSubdir(t *testing.T) {
 	base := t.TempDir()
 	sub := filepath.Join(base, "project")
 	os.MkdirAll(sub, 0755)
+	// resolveLocalDirPath evaluates symlinks; on macOS t.TempDir() is under
+	// /var, which resolves to /private/var.
+	if resolved, err := filepath.EvalSymlinks(sub); err == nil {
+		sub = resolved
+	}
 	got, err := resolveLocalDirPath("project", base)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)

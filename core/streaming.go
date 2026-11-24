@@ -123,20 +123,30 @@ func newStreamPreview(cfg StreamPreviewCfg, p Platform, replyCtx any, ctx contex
 // canPreview returns true if the platform supports message updating and is not disabled.
 func (sp *streamPreview) canPreview() bool {
 	sp.mu.Lock()
-	degraded := sp.degraded
-	sp.mu.Unlock()
-	if degraded || !sp.cfg.Enabled {
+	defer sp.mu.Unlock()
+	return sp.previewAllowedLocked()
+}
+
+// previewAllowedLocked reports whether previews may be used at all for this
+// platform. Must hold sp.mu. Config-level disabling (DisabledPlatforms) must be
+// honoured by every preview entry point, including the loading card and the
+// finish path, otherwise a platform opted out of previews still gets them.
+func (sp *streamPreview) previewAllowedLocked() bool {
+	if sp.degraded || !sp.cfg.Enabled || sp.disabledPlatformLocked() {
 		return false
-	}
-	// Check if platform is in disabled list
-	platformName := sp.platform.Name()
-	for _, disabled := range sp.cfg.DisabledPlatforms {
-		if strings.EqualFold(disabled, platformName) {
-			return false
-		}
 	}
 	_, ok := sp.platform.(MessageUpdater)
 	return ok
+}
+
+func (sp *streamPreview) disabledPlatformLocked() bool {
+	platformName := sp.platform.Name()
+	for _, disabled := range sp.cfg.DisabledPlatforms {
+		if strings.EqualFold(disabled, platformName) {
+			return true
+		}
+	}
+	return false
 }
 
 // appendText adds new text content and triggers a throttled flush if needed.
@@ -144,7 +154,7 @@ func (sp *streamPreview) appendText(text string) {
 	sp.mu.Lock()
 	defer sp.mu.Unlock()
 
-	if sp.degraded || !sp.cfg.Enabled {
+	if sp.degraded || !sp.cfg.Enabled || sp.disabledPlatformLocked() {
 		return
 	}
 
@@ -326,6 +336,10 @@ func (sp *streamPreview) finish(finalText string) bool {
 		close(sp.timerStop)
 	}
 
+	if sp.disabledPlatformLocked() {
+		return false
+	}
+
 	if sp.transform != nil {
 		finalText = sp.transform(finalText)
 	}
@@ -488,7 +502,7 @@ func (sp *streamPreview) startLoading(frameText func(frame int) string, interval
 	stop = func() { stopOnce.Do(func() { close(stopCh) }) }
 
 	sp.mu.Lock()
-	if sp.degraded || !sp.cfg.Enabled {
+	if sp.degraded || !sp.cfg.Enabled || sp.disabledPlatformLocked() {
 		sp.mu.Unlock()
 		stop()
 		return stop

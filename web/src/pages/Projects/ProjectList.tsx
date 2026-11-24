@@ -22,16 +22,7 @@ const AGENT_OPTIONS = [
 
 const PLATFORM_OPTIONS: { key: string; label: string; color: string; qr?: boolean }[] = [
   { key: 'feishu', label: 'Feishu / Lark', color: 'bg-blue-50 dark:bg-blue-900/30 text-blue-600 dark:text-blue-400', qr: true },
-  { key: 'weixin', label: 'WeChat', color: 'bg-green-50 dark:bg-green-900/30 text-green-600 dark:text-green-400', qr: true },
-  { key: 'telegram', label: 'Telegram', color: 'bg-sky-50 dark:bg-sky-900/30 text-sky-600 dark:text-sky-400' },
-  { key: 'discord', label: 'Discord', color: 'bg-indigo-50 dark:bg-indigo-900/30 text-indigo-600 dark:text-indigo-400' },
-  { key: 'slack', label: 'Slack', color: 'bg-purple-50 dark:bg-purple-900/30 text-purple-600 dark:text-purple-400' },
-  { key: 'dingtalk', label: 'DingTalk', color: 'bg-orange-50 dark:bg-orange-900/30 text-orange-600 dark:text-orange-400' },
-  { key: 'wecom', label: 'WeChat Work', color: 'bg-emerald-50 dark:bg-emerald-900/30 text-emerald-600 dark:text-emerald-400' },
-  { key: 'qq', label: 'QQ (OneBot)', color: 'bg-cyan-50 dark:bg-cyan-900/30 text-cyan-600 dark:text-cyan-400' },
-  { key: 'qqbot', label: 'QQ Bot (Official)', color: 'bg-cyan-50 dark:bg-cyan-900/30 text-cyan-600 dark:text-cyan-400' },
-  { key: 'line', label: 'LINE', color: 'bg-lime-50 dark:bg-lime-900/30 text-lime-600 dark:text-lime-400' },
-  { key: 'weibo', label: 'Weibo (微博)', color: 'bg-red-50 dark:bg-red-900/30 text-red-600 dark:text-red-400' },
+  { key: 'wecom', label: 'WeCom (企业微信)', color: 'bg-emerald-50 dark:bg-emerald-900/30 text-emerald-600 dark:text-emerald-400' },
 ];
 
 export default function ProjectList() {
@@ -74,7 +65,7 @@ export default function ProjectList() {
     setSelectedPlat('');
   };
 
-  const isQRPlatform = (type: string) => type === 'feishu' || type === 'lark' || type === 'weixin';
+  const isQRPlatform = (type: string) => type === 'feishu' || type === 'lark';
 
   const handlePlatformSelect = (key: string) => {
     setSelectedPlat(key);
@@ -225,7 +216,7 @@ export default function ProjectList() {
 
         {wizStep === 'qr' && isQRPlatform(selectedPlat) && (
           <PlatformSetupQR
-            platformType={selectedPlat as 'feishu' | 'weixin'}
+            platformType={selectedPlat as 'feishu'}
             projectName={newProjName}
             workDir={newWorkDir}
             agentType={newAgentType}

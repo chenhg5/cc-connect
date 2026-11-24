@@ -274,6 +274,8 @@ func TestAttachmentOnlyMessageReachesAgent(t *testing.T) {
 
 func TestQueuedMessagePreservesFiles(t *testing.T) {
 	engine, agent, platform := newMediaEngine(t)
+	// This test covers the queue path explicitly; the engine default is steer.
+	engine.SetBusyMode("queue")
 	agent.session.blockFirstResult()
 
 	first := mediaMessage("start long task")

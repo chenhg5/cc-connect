@@ -662,14 +662,19 @@ func TestStreamingPreviewMaxCharsOnlyTruncatesIntermediatePreview(t *testing.T) 
 
 	body := strings.Repeat("full final body ", 30)
 	agent.session.emit(core.Event{Type: core.EventText, Content: body})
-	platform.waitPreviewStarts(t, 1)
-	agent.session.releaseFirstResult(core.Event{Type: core.EventResult, Content: body, InputTokens: 52000, Done: true})
+	// The loading card already owns the preview start, so the intermediate
+	// content goes out as an UpdateMessage. Wait for it before finishing.
 	platform.waitPreviewUpdates(t, 1)
 
-	_, starts, updates, _ := platform.snapshotPreviewLifecycle()
-	if !strings.Contains(starts[0], "…") {
-		t.Fatalf("initial preview = %q, want max_chars truncation marker", starts[0])
+	_, _, updates, _ := platform.snapshotPreviewLifecycle()
+	if first := updates[0]; !strings.Contains(first, "…") || strings.Contains(first, strings.TrimSpace(body)) {
+		t.Fatalf("intermediate preview = %q, want max_chars-truncated body", first)
 	}
+
+	agent.session.releaseFirstResult(core.Event{Type: core.EventResult, Content: body, InputTokens: 52000, Done: true})
+	platform.waitPreviewUpdates(t, 2)
+
+	_, _, updates, _ = platform.snapshotPreviewLifecycle()
 	final := updates[len(updates)-1]
 	if !strings.Contains(final, strings.TrimSpace(body)) {
 		t.Fatalf("final preview update = %q, want full untruncated final body", final)
@@ -688,13 +693,13 @@ func TestReplyMetadataConfigurationMatrix(t *testing.T) {
 			name:       "context_and_footer_on_share_one_line",
 			showCtx:    true,
 			showFooter: true,
-			want:       []string{"answer", "*[ctx: ~14%] · glm-5.1 · …/tmp/release-agent*"},
+			want:       []string{"answer", "*[ctx: ~14%] · glm-5.1 · …/tmp/release-agent · ⏱ <1s*"},
 		},
 		{
 			name:       "context_off_footer_on_keeps_model_footer",
 			showCtx:    false,
 			showFooter: true,
-			want:       []string{"answer", "*glm-5.1 · …/tmp/release-agent*"},
+			want:       []string{"answer", "*glm-5.1 · …/tmp/release-agent · ⏱ <1s*"},
 			forbid:     []string{"[ctx:"},
 		},
 		{

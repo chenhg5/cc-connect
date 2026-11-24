@@ -17,19 +17,13 @@ import { platformMeta } from '@/lib/platformMeta';
 
 const PLATFORM_OPTIONS: { key: string; label: string; color: string; abbr: string; qr?: boolean }[] = [
   { key: 'feishu', label: 'Feishu / Lark', abbr: 'FS', color: 'bg-blue-50 dark:bg-blue-900/30 text-blue-600 dark:text-blue-400', qr: true },
-  { key: 'weixin', label: 'WeChat', abbr: 'WX', color: 'bg-green-50 dark:bg-green-900/30 text-green-600 dark:text-green-400', qr: true },
-  { key: 'telegram', label: 'Telegram', abbr: 'TG', color: 'bg-sky-50 dark:bg-sky-900/30 text-sky-600 dark:text-sky-400' },
-  { key: 'discord', label: 'Discord', abbr: 'DC', color: 'bg-indigo-50 dark:bg-indigo-900/30 text-indigo-600 dark:text-indigo-400' },
-  { key: 'slack', label: 'Slack', abbr: 'SK', color: 'bg-purple-50 dark:bg-purple-900/30 text-purple-600 dark:text-purple-400' },
-  { key: 'dingtalk', label: 'DingTalk', abbr: 'DT', color: 'bg-orange-50 dark:bg-orange-900/30 text-orange-600 dark:text-orange-400' },
-  { key: 'wecom', label: 'WeChat Work', abbr: 'WC', color: 'bg-emerald-50 dark:bg-emerald-900/30 text-emerald-600 dark:text-emerald-400' },
-  { key: 'qq', label: 'QQ (OneBot)', abbr: 'QQ', color: 'bg-cyan-50 dark:bg-cyan-900/30 text-cyan-600 dark:text-cyan-400' },
-  { key: 'qqbot', label: 'QQ Bot (Official)', abbr: 'QB', color: 'bg-cyan-50 dark:bg-cyan-900/30 text-cyan-600 dark:text-cyan-400' },
-  { key: 'line', label: 'LINE', abbr: 'LN', color: 'bg-lime-50 dark:bg-lime-900/30 text-lime-600 dark:text-lime-400' },
-  { key: 'weibo', label: 'Weibo (微博)', abbr: 'WB', color: 'bg-red-50 dark:bg-red-900/30 text-red-600 dark:text-red-400' },
+  { key: 'wecom', label: 'WeCom (企业微信)', abbr: 'WC', color: 'bg-emerald-50 dark:bg-emerald-900/30 text-emerald-600 dark:text-emerald-400' },
 ];
 
-const isQRPlatform = (type: string) => type === 'feishu' || type === 'lark' || type === 'weixin';
+const isQRPlatform = (type: string) => type === 'feishu' || type === 'lark';
+const supportsPlatform = (type: string) => type === 'feishu' || type === 'lark' || type === 'wecom';
+const platformDisplayName = (type: string) =>
+  type === 'feishu' || type === 'lark' ? 'Feishu / Lark' : type === 'wecom' ? 'WeCom (企业微信)' : type;
 
 type Tab = 'overview' | 'providers' | 'heartbeat' | 'settings';
 
@@ -266,9 +260,15 @@ export default function ProjectDetail() {
             </div>
             <div className="flex flex-wrap gap-2">
               {project.platforms?.map((p) => (
-                <Badge key={p.type} variant={p.connected ? 'success' : 'danger'}>
-                  <Plug size={12} className="mr-1" /> {p.type} {p.connected ? '✓' : '✗'}
-                </Badge>
+                supportsPlatform(p.type) ? (
+                  <Badge key={p.type} variant={p.connected ? 'success' : 'danger'}>
+                    <Plug size={12} className="mr-1" /> {platformDisplayName(p.type)} {p.connected ? '✓' : '✗'}
+                  </Badge>
+                ) : (
+                  <Badge key={p.type} variant="danger">
+                    <Plug size={12} className="mr-1" /> {t('projects.unsupportedPlatform', { type: p.type })}
+                  </Badge>
+                )
               ))}
             </div>
           </Card>
@@ -652,7 +652,7 @@ export default function ProjectDetail() {
           </div>
         ) : isQRPlatform(addPlatType) ? (
           <PlatformSetupQR
-            platformType={addPlatType as 'feishu' | 'weixin'}
+            platformType={addPlatType as 'feishu'}
             projectName={name!}
             onComplete={() => {
               setShowAddPlatform(false);

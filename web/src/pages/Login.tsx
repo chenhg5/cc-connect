@@ -9,10 +9,7 @@ import { getStatus } from '@/api/status';
 
 const languages = [
   { code: 'en', label: 'EN' },
-  { code: 'zh', label: '中' },
-  { code: 'zh-TW', label: '繁' },
-  { code: 'ja', label: '日' },
-  { code: 'es', label: 'ES' },
+  { code: 'zh', label: '中文' },
 ];
 
 export default function Login() {

@@ -10,9 +10,6 @@ import { useAuthStore } from '@/store/auth';
 const languages = [
   { code: 'en', label: 'EN' },
   { code: 'zh', label: '中文' },
-  { code: 'zh-TW', label: '繁體' },
-  { code: 'ja', label: '日本語' },
-  { code: 'es', label: 'ES' },
 ];
 
 export default function Header() {

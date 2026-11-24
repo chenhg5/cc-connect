@@ -5,11 +5,10 @@ import { Loader2, CheckCircle2, XCircle, RefreshCw, Smartphone, RotateCcw } from
 import { Button } from '@/components/ui';
 import {
   setupFeishuBegin, setupFeishuPoll, setupFeishuSave,
-  setupWeixinBegin, setupWeixinPoll, setupWeixinSave,
 } from '@/api/setup';
 import { restartSystem } from '@/api/status';
 
-type PlatformKind = 'feishu' | 'lark' | 'weixin';
+type PlatformKind = 'feishu' | 'lark';
 type Phase = 'idle' | 'loading' | 'scanning' | 'scanned' | 'completed' | 'expired' | 'denied' | 'error' | 'saving';
 
 interface Props {
@@ -31,14 +30,10 @@ export default function PlatformSetupQR({ platformType, projectName, workDir, ag
 
   // Feishu state
   const feishuRef = useRef({ deviceCode: '', baseUrl: '', interval: 5 });
-  // Weixin state
-  const weixinRef = useRef({ qrKey: '' });
 
   useEffect(() => {
     return () => { cancelledRef.current = true; };
   }, []);
-
-  const isFeishu = platformType === 'feishu' || platformType === 'lark';
 
   const startFeishuFlow = useCallback(async () => {
     setPhase('loading');
@@ -116,70 +111,7 @@ export default function PlatformSetupQR({ platformType, projectName, workDir, ag
     poll();
   }, [projectName]);
 
-  const startWeixinFlow = useCallback(async () => {
-    setPhase('loading');
-    setError('');
-    cancelledRef.current = false;
-    pollingRef.current = false;
-    try {
-      const res = await setupWeixinBegin();
-      console.log('[weixin-setup] begin response:', { qr_key: res.qr_key, qr_url_len: res.qr_url?.length, qr_url_prefix: res.qr_url?.slice(0, 80) });
-      const qrKey = res.qr_key;
-      weixinRef.current.qrKey = qrKey;
-      setQrUrl(res.qr_url);
-      setPhase('scanning');
-
-      console.log('[weixin-setup] starting poll loop, qrKey=', qrKey, 'cancelledRef=', cancelledRef.current);
-      let consecutiveErrors = 0;
-      while (!cancelledRef.current) {
-        try {
-          console.log('[weixin-setup] sending poll request, qrKey=', qrKey);
-          const pollRes = await setupWeixinPoll(qrKey);
-          console.log('[weixin-setup] poll response:', pollRes);
-          consecutiveErrors = 0;
-          if (cancelledRef.current) break;
-
-          switch (pollRes.status) {
-            case 'scaned':
-              setPhase('scanned');
-              break;
-            case 'confirmed':
-              setPhase('saving');
-              await setupWeixinSave({
-                project: projectName,
-                token: pollRes.bot_token!,
-                base_url: pollRes.base_url,
-                ilink_bot_id: pollRes.ilink_bot_id,
-                ilink_user_id: pollRes.ilink_user_id,
-                work_dir: workDir,
-                agent_type: agentType,
-              });
-              setPhase('completed');
-              return;
-            case 'expired':
-              setPhase('expired');
-              return;
-          }
-        } catch (e: any) {
-          console.error('[weixin-setup] poll error:', e);
-          if (cancelledRef.current) break;
-          consecutiveErrors++;
-          if (consecutiveErrors >= 5) {
-            setError(e?.message || String(e));
-            setPhase('error');
-            return;
-          }
-        }
-        await sleep(500);
-      }
-    } catch (e: any) {
-      console.error('[weixin-setup] begin error:', e);
-      setError(e?.message || String(e));
-      setPhase('error');
-    }
-  }, [projectName]);
-
-  const startFlow = isFeishu ? startFeishuFlow : startWeixinFlow;
+  const startFlow = startFeishuFlow;
 
   const handleRetry = () => {
     cancelledRef.current = false;
@@ -187,13 +119,8 @@ export default function PlatformSetupQR({ platformType, projectName, workDir, ag
     startFlow();
   };
 
-  const platformLabel = isFeishu
-    ? t('setup.feishuLabel', 'Feishu / Lark')
-    : t('setup.weixinLabel', 'WeChat (ilink)');
-
-  const scanHint = isFeishu
-    ? t('setup.scanFeishu', 'Open the Feishu / Lark app and scan the QR code')
-    : t('setup.scanWeixin', 'Open WeChat and scan the QR code');
+  const platformLabel = t('setup.feishuLabel', 'Feishu / Lark');
+  const scanHint = t('setup.scanFeishu', 'Open the Feishu / Lark app and scan the QR code');
 
   return (
     <div className="flex flex-col items-center gap-4 py-4">

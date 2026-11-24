@@ -163,6 +163,11 @@ type Platform struct {
 	client           *lark.Client
 	replayClient     *lark.Client
 	replayClientMu   sync.Mutex
+	// Fresh-token single-flight: concurrent 401 retries share one refresh
+	// instead of each hitting Feishu's token endpoint.
+	tokenRefreshMu    sync.Mutex
+	tokenRefreshToken string
+	tokenRefreshAt    time.Time
 	wsClient         *larkws.Client
 	handler          core.MessageHandler
 	cardNavHandler   core.CardNavigationHandler
@@ -186,7 +191,8 @@ type Platform struct {
 	// cardActionMessageIDs tracks the most recent card-action messageID per
 	// session key, enabling async card refreshes via the Patch API.
 	cardActionMsgMu  sync.Mutex
-	cardActionMsgIDs map[string]string // sessionKey → messageID
+	cardActionMsgIDs map[string]string    // sessionKey → messageID
+	cardActionMsgAt  map[string]time.Time // sessionKey → last tracked time, for TTL pruning
 
 	// imageCache avoids re-downloading the same image when a user quotes it
 	// repeatedly. Bounded by count/bytes; entries expire after imageCacheTTL.
@@ -200,6 +206,13 @@ const (
 	imageCacheMaxBytes    = 32 << 20 // 32 MiB
 	imageCacheTTL         = 30 * time.Minute
 	feishuResourceTimeout = 20 * time.Second
+
+	// freshTenantTokenTTL bounds how long a refreshed tenant token is reused.
+	freshTenantTokenTTL = 5 * time.Minute
+	// cardActionMsgTTL bounds how long a tracked card message stays eligible
+	// for in-place RefreshCard patches; cardActionMsgMax caps the map size.
+	cardActionMsgTTL = time.Hour
+	cardActionMsgMax = 1024
 )
 
 type feishuImageCacheEntry struct {
@@ -609,12 +622,7 @@ func (p *Platform) onCardAction(event *callback.CardActionTriggerEvent) (*callba
 	// nav: / act: — synchronous card update
 	if strings.HasPrefix(actionVal, "nav:") || strings.HasPrefix(actionVal, "act:") {
 		if messageID != "" {
-			p.cardActionMsgMu.Lock()
-			if p.cardActionMsgIDs == nil {
-				p.cardActionMsgIDs = make(map[string]string)
-			}
-			p.cardActionMsgIDs[sessionKey] = messageID
-			p.cardActionMsgMu.Unlock()
+			p.trackCardActionMsg(sessionKey, messageID)
 		}
 		// Feishu uses native form checker for delete-mode toggle,
 		// so return a toast without calling cardNavHandler to avoid a full card refresh.
@@ -3707,6 +3715,14 @@ func (p *Platform) withFreshTenantAccessTokenRetry(ctx context.Context, operatio
 }
 
 func (p *Platform) fetchFreshTenantAccessToken(ctx context.Context) (string, error) {
+	// Serialise refreshes so a burst of concurrent 401s results in exactly one
+	// token fetch; waiters take the cached token as soon as the leader finishes.
+	p.tokenRefreshMu.Lock()
+	defer p.tokenRefreshMu.Unlock()
+	if p.tokenRefreshToken != "" && time.Since(p.tokenRefreshAt) < freshTenantTokenTTL {
+		return p.tokenRefreshToken, nil
+	}
+
 	resp, err := p.replayAPIClient().GetTenantAccessTokenBySelfBuiltApp(ctx, &larkcore.SelfBuiltTenantAccessTokenReq{
 		AppID:     p.appID,
 		AppSecret: p.appSecret,
@@ -3720,6 +3736,8 @@ func (p *Platform) fetchFreshTenantAccessToken(ctx context.Context) (string, err
 	if strings.TrimSpace(resp.TenantAccessToken) == "" {
 		return "", fmt.Errorf("%s: fetch tenant access token returned empty token", p.tag())
 	}
+	p.tokenRefreshToken = resp.TenantAccessToken
+	p.tokenRefreshAt = time.Now()
 	return resp.TenantAccessToken, nil
 }
 

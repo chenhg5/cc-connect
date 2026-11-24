@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"strings"
+	"time"
 
 	"github.com/chenhg5/cc-connect/core"
 	lark "github.com/larksuite/oapi-sdk-go/v3"
@@ -13,8 +14,50 @@ import (
 	larkim "github.com/larksuite/oapi-sdk-go/v3/service/im/v1"
 )
 
+// Compile-time assertion: the task-card ticker relies on this optional
+// interface. If the method signature ever drifts, the ticker silently degrades
+// to full retries (the bug that froze cards), so fail the build instead.
+var _ core.TaskCardTickerSender = (*interactivePlatform)(nil)
+
 func plainText(content string) map[string]any {
 	return map[string]any{"tag": "plain_text", "content": content}
+}
+
+// trackCardActionMsg remembers the card message for a session so RefreshCard
+// can patch it in place. Expired entries are pruned on every write and the map
+// is capped so a long-running process cannot grow it without bound.
+func (p *Platform) trackCardActionMsg(sessionKey, messageID string) {
+	now := time.Now()
+	p.cardActionMsgMu.Lock()
+	defer p.cardActionMsgMu.Unlock()
+	if p.cardActionMsgIDs == nil {
+		p.cardActionMsgIDs = make(map[string]string)
+	}
+	if p.cardActionMsgAt == nil {
+		p.cardActionMsgAt = make(map[string]time.Time)
+	}
+	for key, at := range p.cardActionMsgAt {
+		if now.Sub(at) > cardActionMsgTTL {
+			delete(p.cardActionMsgAt, key)
+			delete(p.cardActionMsgIDs, key)
+		}
+	}
+	for len(p.cardActionMsgIDs) >= cardActionMsgMax {
+		oldestKey := ""
+		var oldestAt time.Time
+		for key, at := range p.cardActionMsgAt {
+			if oldestKey == "" || at.Before(oldestAt) {
+				oldestKey, oldestAt = key, at
+			}
+		}
+		if oldestKey == "" {
+			break
+		}
+		delete(p.cardActionMsgAt, oldestKey)
+		delete(p.cardActionMsgIDs, oldestKey)
+	}
+	p.cardActionMsgIDs[sessionKey] = messageID
+	p.cardActionMsgAt[sessionKey] = now
 }
 
 // ReplyCard sends a structured card as a reply to the original message.
@@ -58,6 +101,10 @@ func (p *interactivePlatform) SendCard(ctx context.Context, rctx any, card *core
 func (p *interactivePlatform) RefreshCard(ctx context.Context, sessionKey string, card *core.Card) error {
 	p.cardActionMsgMu.Lock()
 	msgID := p.cardActionMsgIDs[sessionKey]
+	if msgID != "" && p.cardActionMsgAt != nil {
+		// Touch the entry so an actively refreshed card does not expire.
+		p.cardActionMsgAt[sessionKey] = time.Now()
+	}
 	p.cardActionMsgMu.Unlock()
 
 	if msgID == "" {

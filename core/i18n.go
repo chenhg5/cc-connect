@@ -427,10 +427,9 @@ const (
 	MsgCommandExecError   MsgKey = "command_exec_error"
 	MsgCommandExecSuccess MsgKey = "command_exec_success"
 
-	MsgSkillsTitle            MsgKey = "skills_title"
-	MsgSkillsEmpty            MsgKey = "skills_empty"
-	MsgSkillsHint             MsgKey = "skills_hint"
-	MsgSkillsTelegramMenuHint MsgKey = "skills_telegram_menu_hint"
+	MsgSkillsTitle MsgKey = "skills_title"
+	MsgSkillsEmpty MsgKey = "skills_empty"
+	MsgSkillsHint  MsgKey = "skills_hint"
 
 	MsgConfigTitle       MsgKey = "config_title"
 	MsgConfigHint        MsgKey = "config_hint"
@@ -1930,10 +1929,6 @@ var messages = map[MsgKey]map[Language]string{
 	MsgSkillsHint: {
 		LangEnglish: "Usage: /<skill-name> [args...] to invoke a skill.",
 		LangChinese: "用法：/<skill名称> [参数...] 来调用 Skill。",
-	},
-	MsgSkillsTelegramMenuHint: {
-		LangEnglish: "Telegram's command menu is full, so skill commands are not listed there. You can still invoke them by typing /<skill-name> manually.",
-		LangChinese: "Telegram 的命令菜单已满，因此 Skill 不会显示在那里。你仍然可以手动输入 /<skill名称> 来调用它们。",
 	},
 
 	MsgConfigTitle: {
