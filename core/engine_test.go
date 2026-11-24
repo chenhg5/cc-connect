@@ -11338,47 +11338,6 @@ func TestExtractSessionKeyParts(t *testing.T) {
 	}
 }
 
-func TestSetObserveConfig(t *testing.T) {
-	e := NewEngine("test", &stubAgent{}, nil, "", LangEnglish)
-	e.SetObserveConfig("/tmp/test-project", "slack:C123:U456")
-	if !e.observeEnabled {
-		t.Fatal("observe should be enabled")
-	}
-	if e.observeProjectDir != "/tmp/test-project" {
-		t.Fatalf("unexpected project dir: %s", e.observeProjectDir)
-	}
-}
-
-func TestObserveStartsOnlyWithSlack(t *testing.T) {
-	stub := &stubPlatformWithObserve{stubPlatform: stubPlatform{n: "slack"}}
-	e := NewEngine("test", &stubAgent{}, []Platform{stub}, "", LangEnglish)
-	e.SetObserveConfig("/tmp/fake-project", "slack:C123:U456")
-
-	target := e.findObserverTarget()
-	if target == nil {
-		t.Fatal("expected to find observer target for Slack")
-	}
-}
-
-func TestObserveNoTargetWithoutSlack(t *testing.T) {
-	stub := &stubPlatform{n: "telegram"}
-	e := NewEngine("test", &stubAgent{}, []Platform{stub}, "", LangEnglish)
-	e.SetObserveConfig("/tmp/fake-project", "slack:C123:U456")
-
-	target := e.findObserverTarget()
-	if target != nil {
-		t.Fatal("expected no observer target without Slack")
-	}
-}
-
-type stubPlatformWithObserve struct {
-	stubPlatform
-}
-
-func (s *stubPlatformWithObserve) SendObservation(_ context.Context, _, _ string) error {
-	return nil
-}
-
 // --- Instant Reply tests ---
 
 // stubStreamingCardPlatform simulates a platform that supports StreamingCardPlatform

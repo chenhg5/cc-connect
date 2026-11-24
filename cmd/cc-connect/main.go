@@ -55,16 +55,28 @@ func resolveResetOnIdle(configured *int) (time.Duration, bool) {
 }
 
 // cardTickInterval returns the configured [display] card_tick_ms, defaulting
-// to 5s. A value <= 0 disables the progress-card ticker.
+// to 5s. A value <= 0 disables the progress-card ticker; positive values are
+// clamped to [1s, 60s] so a bad config cannot hammer the platform API.
 func cardTickInterval(cfg *config.Config) time.Duration {
-	const defaultCardTick = 5 * time.Second
+	const (
+		defaultCardTick = 5 * time.Second
+		minCardTick     = time.Second
+		maxCardTick     = 60 * time.Second
+	)
 	if cfg.Display.CardTickMs == nil {
 		return defaultCardTick
 	}
 	if *cfg.Display.CardTickMs <= 0 {
 		return 0
 	}
-	return time.Duration(*cfg.Display.CardTickMs) * time.Millisecond
+	d := time.Duration(*cfg.Display.CardTickMs) * time.Millisecond
+	if d < minCardTick {
+		return minCardTick
+	}
+	if d > maxCardTick {
+		return maxCardTick
+	}
+	return d
 }
 
 type initialModelRefreshStarter interface {
@@ -150,8 +162,6 @@ func main() {
 
 	configFlag := flag.String("config", "", "path to config file (default: ./config.toml or ~/.cc-connect/config.toml)")
 	showVersion := flag.Bool("version", false, "print version and exit")
-	observeFlag := flag.Bool("observe", false, "observe native terminal Claude Code sessions and forward to Slack")
-	observeChannel := flag.String("observe-channel", "", "Slack channel ID to forward terminal observations to (requires --observe)")
 	forceFlag := flag.Bool("force", false, "kill any existing instance with the same config before starting")
 	flag.Usage = printUsage
 	flag.Parse()
@@ -339,40 +349,11 @@ func main() {
 			slog.Info("multi-workspace mode enabled", "project", proj.Name, "base_dir", baseDir)
 		}
 
-		// Wire terminal observation (--observe / [projects.observe])
-		observeEnabled := *observeFlag
-		obsChan := *observeChannel
+		// Terminal observation was Slack-only; warn instead of silently ignoring
+		// a stale [projects.observe] block.
 		if proj.Observe != nil {
-			if !observeEnabled && proj.Observe.Enabled {
-				observeEnabled = true
-			}
-			if obsChan == "" && proj.Observe.Channel != "" {
-				obsChan = proj.Observe.Channel
-			}
-		}
-		if observeEnabled {
-			if obsChan == "" {
-				slog.Error("observe: channel is required (use --observe-channel or set channel in [projects.observe])")
-				os.Exit(1)
-			}
-			hasSlack := false
-			for _, p := range platforms {
-				if p.Name() == "slack" {
-					hasSlack = true
-					break
-				}
-			}
-			if !hasSlack {
-				slog.Warn("observe requires a Slack platform; ignoring")
-			} else {
-				projectDir := resolveClaudeProjectDir(workDir)
-				if projectDir == "" {
-					slog.Warn("observe: could not find Claude Code project directory", "workDir", workDir)
-				} else {
-					sessionKey := fmt.Sprintf("slack:%s", obsChan)
-					engine.SetObserveConfig(projectDir, sessionKey)
-				}
-			}
+			slog.Warn("config: [projects.observe] is no longer supported (Slack-only feature); ignoring",
+				"project", proj.Name)
 		}
 
 		// Wire global custom commands
@@ -1240,23 +1221,6 @@ func applyProjectStateOverride(projectName string, agent core.Agent, configuredW
 	switcher.SetWorkDir(override)
 	slog.Info("project_state: applied work_dir override", "project", projectName, "work_dir", override)
 	return override
-}
-
-// resolveClaudeProjectDir returns the Claude Code project directory for a given
-// work directory, or "" if it doesn't exist.
-func resolveClaudeProjectDir(workDir string) string {
-	homeDir, err := os.UserHomeDir()
-	if err != nil {
-		return ""
-	}
-	// Claude Code encodes paths by replacing os.PathSeparator with "-"
-	// e.g. /home/leigh/workspace/cc-connect -> -home-leigh-workspace-cc-connect
-	encoded := strings.ReplaceAll(workDir, string(os.PathSeparator), "-")
-	dir := filepath.Join(homeDir, ".claude", "projects", encoded)
-	if info, err := os.Stat(dir); err != nil || !info.IsDir() {
-		return ""
-	}
-	return dir
 }
 
 // resolveConfigPath determines which config file to use.

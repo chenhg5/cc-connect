@@ -485,6 +485,30 @@ func TestLoad_DefaultsDataDir(t *testing.T) {
 	}
 }
 
+func TestLoad_ParsesLegacyObserveBlockForWarning(t *testing.T) {
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "config.toml")
+	data := baseConfigTOML + `
+[projects.observe]
+enabled = true
+channel = "C123"
+`
+	if err := os.WriteFile(cfgPath, []byte(data), 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	cfg, err := Load(cfgPath)
+	if err != nil {
+		t.Fatalf("Load() error: %v", err)
+	}
+	if len(cfg.Projects) != 1 || cfg.Projects[0].Observe == nil {
+		t.Fatalf("legacy [projects.observe] block was not parsed for warning: %#v", cfg.Projects)
+	}
+	if got := cfg.Projects[0].Observe["enabled"]; got != true {
+		t.Fatalf("observe.enabled = %#v, want true", got)
+	}
+}
+
 func TestLoad_ResolvesEnvPlaceholders(t *testing.T) {
 
 	root := t.TempDir()

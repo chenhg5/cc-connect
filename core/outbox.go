@@ -158,10 +158,17 @@ func (e *Engine) sweepIdleOutboxes(now time.Time) {
 	e.outboxMu.Lock()
 	var retired []*outbox
 	for key, o := range e.outboxes {
-		if o.idleFor(now) >= outboxIdleTimeout {
-			delete(e.outboxes, key)
-			retired = append(retired, o)
+		if o.idleFor(now) < outboxIdleTimeout {
+			continue
 		}
+		if len(o.ch) > 0 {
+			// Never retire an outbox with queued work; give it a fresh idle
+			// window so the queue can drain undisturbed.
+			o.lastUsed.Store(now.UnixNano())
+			continue
+		}
+		delete(e.outboxes, key)
+		retired = append(retired, o)
 	}
 	e.outboxMu.Unlock()
 	for _, o := range retired {

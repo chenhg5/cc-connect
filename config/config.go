@@ -323,12 +323,6 @@ type AutoCompressConfig struct {
 	MinGapMins *int  `toml:"min_gap_mins,omitempty"` // minimum minutes between auto-compress runs (default 30)
 }
 
-// ObserveConfig controls forwarding of native terminal Claude Code sessions to a messaging platform.
-type ObserveConfig struct {
-	Enabled bool   `toml:"enabled"`
-	Channel string `toml:"channel"`
-}
-
 // ReferenceConfig controls local file reference normalization and rendering.
 type ReferenceConfig struct {
 	NormalizeAgents []string `toml:"normalize_agents,omitempty"`
@@ -404,8 +398,10 @@ type ProjectConfig struct {
 	//   [projects.display]
 	//   thinking_messages = false
 	//   tool_messages = false
-	Display    *DisplayConfig  `toml:"display,omitempty"`
-	Observe    *ObserveConfig  `toml:"observe,omitempty"`
+	Display *DisplayConfig `toml:"display,omitempty"`
+	// Observe is the removed Slack-only terminal-observation block. It is still
+	// parsed so startup can warn instead of silently ignoring a stale entry.
+	Observe    map[string]any  `toml:"observe,omitempty"`
 	References ReferenceConfig `toml:"references,omitempty"`
 	// FilterExternalSessions: when true, /list only shows sessions created by
 	// cc-connect, hiding sessions created by direct CLI usage in the same work_dir.

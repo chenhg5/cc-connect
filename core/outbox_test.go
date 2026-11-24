@@ -22,6 +22,46 @@ func TestOutboxPushAfterCloseRunsOutOfBand(t *testing.T) {
 	}
 }
 
+func TestSweepIdleOutboxesKeepsQueuedWork(t *testing.T) {
+	prev := outboxInline
+	outboxInline = false
+	t.Cleanup(func() { outboxInline = prev })
+
+	e := NewEngine("test", &resultAgent{session: newResultAgentSession("ok")}, nil, "", LangEnglish)
+	t.Cleanup(e.cancel)
+
+	o := e.outboxFor("busy")
+
+	started := make(chan struct{})
+	block := make(chan struct{})
+	o.push(func() {
+		close(started)
+		<-block
+	})
+	<-started
+
+	// The worker is blocked on the first task, so this one stays queued.
+	queuedDone := make(chan struct{})
+	o.push(func() { close(queuedDone) })
+
+	o.lastUsed.Store(time.Now().Add(-11 * time.Minute).UnixNano())
+	e.sweepIdleOutboxes(time.Now())
+
+	e.outboxMu.Lock()
+	_, exists := e.outboxes["busy"]
+	e.outboxMu.Unlock()
+	if !exists {
+		t.Fatal("outbox with queued work was retired")
+	}
+
+	close(block)
+	select {
+	case <-queuedDone:
+	case <-time.After(time.Second):
+		t.Fatal("queued task did not run after unblocking")
+	}
+}
+
 func TestSweepIdleOutboxesRetiresOnlyIdleSessions(t *testing.T) {
 	e := NewEngine("test", &resultAgent{session: newResultAgentSession("ok")}, nil, "", LangEnglish)
 	t.Cleanup(e.cancel)
