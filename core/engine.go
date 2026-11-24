@@ -6819,10 +6819,9 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				// accumulates every EventText chunk this turn, so it captures any
 				// pre-NO_REPLY content the user already saw streaming (e.g. when the
 				// agent wrote "Hello\nNO_REPLY"). Strip the trailing NO_REPLY marker
-				// before rendering. If there is neither body nor tool history, the
-				// card has nothing visible worth keeping; delete to avoid an
-				// orphaned shell. Finalizing-in-place avoids the "撤回了一条消息"
-				// gray bar that DeletePreviewMessage would leave in Lark.
+				// before rendering. Even an empty card is finalized in place when
+				// updates are supported: deleting it leaves a "撤回了一条消息" gray bar
+				// in Lark. Platforms without updates keep the old delete fallback.
 				if hasRichCard && cardMessageID != nil {
 					silentBody := partialText
 					if stripped, ok := stripTrailingSilent(partialText); ok {
@@ -6835,11 +6834,14 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 								slog.Debug("rich card: failed to finalize card on silent reply", "platform", p.Name(), "error", err)
 							}
 						}
-					} else {
-						if cleaner, ok := p.(PreviewCleaner); ok {
-							if err := cleaner.DeletePreviewMessage(e.ctx, cardMessageID); err != nil {
-								slog.Debug("rich card: failed to delete card on silent reply", "platform", p.Name(), "error", err)
-							}
+					} else if updater, ok := p.(MessageUpdater); ok {
+						card := buildResolvedRichCard(CardStatusDone, "", nil, "", false, e.composeRichStatusFooter(false, turnStart, e.agent, state.agentSession, state.workspaceDir))
+						if err := updater.UpdateMessage(e.ctx, cardMessageID, card); err != nil {
+							slog.Debug("rich card: failed to finalize empty card on silent reply", "platform", p.Name(), "error", err)
+						}
+					} else if cleaner, ok := p.(PreviewCleaner); ok {
+						if err := cleaner.DeletePreviewMessage(e.ctx, cardMessageID); err != nil {
+							slog.Debug("rich card: failed to delete card on silent reply", "platform", p.Name(), "error", err)
 						}
 					}
 					cardMessageID = nil
