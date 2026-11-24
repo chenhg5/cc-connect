@@ -130,8 +130,10 @@ func (tc *turnCard) EnsureStarted() {
 		tc.render(true)
 	}
 	if interval > 0 {
-		slog.Debug("task card ticker started",
-			"platform", tc.senderName(), "interval", interval)
+		// Info level on purpose: two lines per turn that make ticker lifecycle
+		// visible without enabling debug (the cadence itself stays at debug).
+		slog.Info("task card ticker started",
+			"platform", tc.senderName(), "interval", interval, "session", tc.key)
 		go tc.heartbeat(interval)
 	}
 }
@@ -144,7 +146,7 @@ func (tc *turnCard) heartbeat(interval time.Duration) {
 	ticker := time.NewTicker(interval)
 	defer func() {
 		ticker.Stop()
-		slog.Debug("task card ticker stopped", "platform", tc.senderName())
+		slog.Info("task card ticker stopped", "platform", tc.senderName(), "session", tc.key)
 	}()
 	for {
 		select {
