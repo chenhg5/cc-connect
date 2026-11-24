@@ -432,6 +432,30 @@ func TestMgmt_SessionDetail(t *testing.T) {
 	}
 }
 
+func TestMgmt_SessionIdentityAvailableInListAndDetail(t *testing.T) {
+	_, ts, e := testManagementServer(t, "tok")
+	const key = "wecom:group-7:user-9"
+	s := e.sessions.NewSession(key, "default")
+	s.SetAgentSessionID("agent-123", "codex")
+	e.sessions.UpdateUserIdentity(key, UserMeta{UserID: "user-9", UserName: "Ada", ChatID: "group-7", ChatName: "Team", ChatType: "group"})
+
+	for _, path := range []string{
+		"/api/v1/projects/test-project/sessions",
+		"/api/v1/projects/test-project/sessions/" + s.ID,
+	} {
+		r := mgmtGet(t, ts.URL+path, "tok")
+		if !r.OK {
+			t.Fatalf("GET %s: %s", path, r.Error)
+		}
+		if !strings.Contains(string(r.Data), `"user_id":"user-9"`) ||
+			!strings.Contains(string(r.Data), `"chat_id":"group-7"`) ||
+			!strings.Contains(string(r.Data), `"chat_type":"group"`) ||
+			!strings.Contains(string(r.Data), `"agent_session_id":"agent-123"`) {
+			t.Fatalf("GET %s missing session identity: %s", path, r.Data)
+		}
+	}
+}
+
 // TestMgmt_SessionsConcurrentNameWriteAndList pins the bug where the
 // POST /sessions handler wrote s.Name = body.Name directly without
 // holding s.mu, while the GET handler reads s.Name through s.mu.Lock().

@@ -3302,7 +3302,14 @@ func (e *Engine) handleMessage(p Platform, msg *Message) {
 	}
 
 	session := sessions.GetOrCreateActive(msg.SessionKey)
-	sessions.UpdateUserMeta(msg.SessionKey, msg.UserName, msg.ChatName)
+	chatID := msg.ChatID
+	if chatID == "" {
+		chatID = msg.ChannelID
+	}
+	sessions.UpdateUserIdentity(msg.SessionKey, UserMeta{
+		UserID: msg.UserID, UserName: msg.UserName, ChatID: chatID,
+		ChatName: msg.ChatName, ChatType: msg.ChatType,
+	})
 	// Ensure an interactiveState entry exists before taking the session lock.
 	// Without this, concurrent messages can observe the session as busy during
 	// startup but still find no state to queue into.

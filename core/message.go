@@ -412,7 +412,9 @@ type Message struct {
 	ChannelID    string
 	UserID       string
 	UserName     string
+	ChatID       string // source chat ID, when distinct from ChannelID
 	ChatName     string // human-readable chat/group name (optional)
+	ChatType     string // source chat type, when supplied by the platform
 	Content      string
 	Images       []ImageAttachment   // attached images (if any)
 	Files        []FileAttachment    // attached files (if any)

@@ -409,10 +409,13 @@ func (s *Session) MarkHistoryBootstrapped(agentType string) {
 	s.mu.Unlock()
 }
 
-// UserMeta stores human-readable display info for a session key.
+// UserMeta stores the identity and display info for a session key.
 type UserMeta struct {
+	UserID   string `json:"user_id,omitempty"`
 	UserName string `json:"user_name,omitempty"`
+	ChatID   string `json:"chat_id,omitempty"`
 	ChatName string `json:"chat_name,omitempty"`
+	ChatType string `json:"chat_type,omitempty"`
 }
 
 // snapshotVersion tracks the schema version so we can detect data saved by
@@ -624,7 +627,12 @@ func (sm *SessionManager) GetSessionName(agentSessionID string) string {
 // UpdateUserMeta updates the human-readable metadata for a session key.
 // Only non-empty fields are applied (merge behavior).
 func (sm *SessionManager) UpdateUserMeta(sessionKey, userName, chatName string) {
-	if userName == "" && chatName == "" {
+	sm.UpdateUserIdentity(sessionKey, UserMeta{UserName: userName, ChatName: chatName})
+}
+
+// UpdateUserIdentity merges non-empty identity fields from an incoming message.
+func (sm *SessionManager) UpdateUserIdentity(sessionKey string, incoming UserMeta) {
+	if incoming == (UserMeta{}) {
 		return
 	}
 	sm.mu.Lock()
@@ -634,11 +642,20 @@ func (sm *SessionManager) UpdateUserMeta(sessionKey, userName, chatName string) 
 		meta = &UserMeta{}
 		sm.userMeta[sessionKey] = meta
 	}
-	if userName != "" {
-		meta.UserName = userName
+	if incoming.UserID != "" {
+		meta.UserID = incoming.UserID
 	}
-	if chatName != "" {
-		meta.ChatName = chatName
+	if incoming.UserName != "" {
+		meta.UserName = incoming.UserName
+	}
+	if incoming.ChatID != "" {
+		meta.ChatID = incoming.ChatID
+	}
+	if incoming.ChatName != "" {
+		meta.ChatName = incoming.ChatName
+	}
+	if incoming.ChatType != "" {
+		meta.ChatType = incoming.ChatType
 	}
 }
 

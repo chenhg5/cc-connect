@@ -1190,15 +1190,16 @@ func (m *ManagementServer) handleProjectSessions(w http.ResponseWriter, r *http.
 				}
 			}
 			info := map[string]any{
-				"id":            s.ID,
-				"name":          s.Name,
-				"session_key":   idToKey[s.ID],
-				"agent_type":    s.AgentType,
-				"active":        activeIDs[s.ID],
-				"history_count": histCount,
-				"created_at":    s.CreatedAt,
-				"updated_at":    s.UpdatedAt,
-				"last_message":  lastMsg,
+				"id":               s.ID,
+				"name":             s.Name,
+				"session_key":      idToKey[s.ID],
+				"agent_session_id": s.AgentSessionID,
+				"agent_type":       s.AgentType,
+				"active":           activeIDs[s.ID],
+				"history_count":    histCount,
+				"created_at":       s.CreatedAt,
+				"updated_at":       s.UpdatedAt,
+				"last_message":     lastMsg,
 			}
 			s.mu.Unlock()
 
@@ -1215,8 +1216,11 @@ func (m *ManagementServer) handleProjectSessions(w http.ResponseWriter, r *http.
 			}
 
 			if meta := e.sessions.GetUserMeta(sessionKey); meta != nil {
+				info["user_id"] = meta.UserID
 				info["user_name"] = meta.UserName
+				info["chat_id"] = meta.ChatID
 				info["chat_name"] = meta.ChatName
+				info["chat_type"] = meta.ChatType
 			}
 
 			sessions = append(sessions, info)
@@ -1310,6 +1314,13 @@ func (m *ManagementServer) handleProjectSessionDetail(w http.ResponseWriter, r *
 			if len(parts) > 0 {
 				data["platform"] = parts[0]
 			}
+		}
+		if meta := e.sessions.GetUserMeta(sessionKey); meta != nil {
+			data["user_id"] = meta.UserID
+			data["user_name"] = meta.UserName
+			data["chat_id"] = meta.ChatID
+			data["chat_name"] = meta.ChatName
+			data["chat_type"] = meta.ChatType
 		}
 
 		mgmtJSON(w, http.StatusOK, data)
