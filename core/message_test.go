@@ -113,6 +113,10 @@ func testPNG(t *testing.T, w, h int) []byte {
 }
 
 func TestImageDimensionsAndOversizedDetection(t *testing.T) {
+	// Lock the public limit so CHANGELOG/docs and code cannot drift.
+	if MaxModelImageDimension != 8000 {
+		t.Fatalf("MaxModelImageDimension = %d, want the documented 8000 px limit", MaxModelImageDimension)
+	}
 	small := ImageAttachment{MimeType: "image/png", Data: testPNG(t, 100, 100)}
 	if w, h, ok := ImageDimensions(small); !ok || w != 100 || h != 100 {
 		t.Fatalf("ImageDimensions(small) = %d,%d,%v; want 100,100,true", w, h, ok)

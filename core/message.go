@@ -78,7 +78,7 @@ type ImageAttachment struct {
 
 // MaxModelImageDimension is the maximum width/height (in pixels) accepted by
 // the model API. The documented vision limit is 8000 px per side; we stay at
-// that conservative bound rather than the gateway's looser 8192 so an image
+// that conservative bound rather than the gateway's looser limit so an image
 // that slips through can never poison the transcript. An image with either
 // side above this limit makes every request that replays it fail with HTTP 400,
 // so it must be rejected before it reaches the agent.

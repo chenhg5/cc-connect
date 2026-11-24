@@ -9167,7 +9167,7 @@ func (e *Engine) redispatchAfterReset(session *Session, p Platform, msg *Message
 		// an endless reset → redispatch → fail loop.
 		slog.Warn("auto-redispatch skipped: message is already a redispatch",
 			"session", msg.SessionKey, "msg_id", msg.MessageID)
-		e.send(p, msg.ReplyCtx, e.i18n.T(MsgRedispatchFailed))
+		e.send(p, msg.ReplyCtx, e.i18n.Tf(MsgRedispatchFailed, e.messageSnippet(msg)))
 		return
 	}
 	if session != nil {
@@ -9183,7 +9183,7 @@ func (e *Engine) redispatchAfterReset(session *Session, p Platform, msg *Message
 			slog.Warn("auto-redispatch skipped: session still busy after reset",
 				"session", msg.SessionKey)
 			// Do not leave the user waiting after promising a re-dispatch.
-			e.send(p, msg.ReplyCtx, e.i18n.T(MsgRedispatchFailed))
+			e.send(p, msg.ReplyCtx, e.i18n.Tf(MsgRedispatchFailed, e.messageSnippet(msg)))
 			return
 		}
 	}

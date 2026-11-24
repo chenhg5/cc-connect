@@ -13473,8 +13473,8 @@ func TestRedispatchGuardPreventsLoop(t *testing.T) {
 	e.redispatchAfterReset(session, p, msg, false)
 
 	sent := p.getSent()
-	if len(sent) == 0 || !strings.Contains(sent[len(sent)-1], "请重新发送") {
-		t.Fatalf("sent = %v, want the resend prompt", sent)
+	if len(sent) == 0 || !strings.Contains(sent[len(sent)-1], "手动重发") {
+		t.Fatalf("sent = %v, want the manual-resend prompt", sent)
 	}
 	if len(sess.sentPrompts) != 0 {
 		t.Fatalf("redispatch loop ran the agent again: %v", sess.sentPrompts)
