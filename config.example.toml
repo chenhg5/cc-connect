@@ -334,6 +334,13 @@ level = "info" # debug, info, warn, error
 # burst = 1
 
 # =============================================================================
+# Message Deduplication / 消息去重
+# =============================================================================
+# [dedup]
+# enabled = true       # Drop repeated MessageIDs in the same platform session / 同一平台会话内按消息 ID 去重
+# window_secs = 30     # Retry window in seconds / 重传去重时间窗（秒）
+
+# =============================================================================
 # Relay Settings / Relay 设置
 # =============================================================================
 # Bot-to-bot relay settings. timeout_secs controls how long cc-connect waits for

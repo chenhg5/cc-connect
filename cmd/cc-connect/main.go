@@ -640,6 +640,7 @@ func main() {
 				})
 			}
 		}
+		applyDedupConfig(cfg, engine)
 		// Wire outgoing rate limiting
 		{
 			var maxPS float64
@@ -1793,6 +1794,15 @@ func setupLogger(level string, w io.Writer) {
 
 // reloadConfig re-reads config.toml and applies hot-reloadable settings
 // (display, providers, commands) to the given engine.
+func applyDedupConfig(cfg *config.Config, engine *core.Engine) {
+	enabled := cfg.Dedup.Enabled == nil || *cfg.Dedup.Enabled
+	windowSecs := 30
+	if cfg.Dedup.WindowSecs != nil && *cfg.Dedup.WindowSecs > 0 {
+		windowSecs = *cfg.Dedup.WindowSecs
+	}
+	engine.SetDedupConfig(enabled, time.Duration(windowSecs)*time.Second)
+}
+
 func reloadConfig(configPath, projName string, engine *core.Engine) (*core.ConfigReloadResult, error) {
 	cfg, err := config.Load(configPath)
 	if err != nil {
@@ -1900,6 +1910,7 @@ func reloadConfig(configPath, projName string, engine *core.Engine) (*core.Confi
 	// Reload attachment send-back switch
 	engine.SetAttachmentSendEnabled(cfg.AttachmentSend != "off")
 
+	applyDedupConfig(cfg, engine)
 	// Reload filter_external_sessions
 	engine.SetFilterExternalSessions(proj.FilterExternalSessions != nil && *proj.FilterExternalSessions)
 
