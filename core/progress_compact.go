@@ -503,6 +503,20 @@ func (w *compactProgressWriter) AppendStructured(item ProgressCardEntry, fallbac
 	return true
 }
 
+// reanchor retargets the writer at a new reply context (e.g. a mid-turn
+// /ps supplement). The already-sent progress message keeps its position in
+// the chat; the next append opens a fresh progress message under the new
+// context while the entries accumulated so far carry over.
+func (w *compactProgressWriter) reanchor(replyCtx any) {
+	w.replyCtx = replyCtx
+	w.handle = nil
+	w.state = ProgressCardStateRunning
+	// lastSent is the dedupe gate in Append — reset it so the next flush
+	// writes the carried-over content to the fresh message instead of
+	// being suppressed as unchanged.
+	w.lastSent = ""
+}
+
 // Finalize updates card progress state (running/completed/failed) without
 // appending a new progress entry.
 func (w *compactProgressWriter) Finalize(state ProgressCardState) bool {
