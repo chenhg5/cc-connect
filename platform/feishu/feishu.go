@@ -187,6 +187,25 @@ type Platform struct {
 	// session key, enabling async card refreshes via the Patch API.
 	cardActionMsgMu  sync.Mutex
 	cardActionMsgIDs map[string]string // sessionKey → messageID
+
+	// imageCache avoids re-downloading the same image when a user quotes it
+	// repeatedly. Bounded by count/bytes; entries expire after imageCacheTTL.
+	imageCacheMu    sync.Mutex
+	imageCache      map[string]feishuImageCacheEntry
+	imageCacheBytes int
+}
+
+const (
+	imageCacheMaxEntries  = 16
+	imageCacheMaxBytes    = 32 << 20 // 32 MiB
+	imageCacheTTL         = 30 * time.Minute
+	feishuResourceTimeout = 20 * time.Second
+)
+
+type feishuImageCacheEntry struct {
+	data []byte
+	mime string
+	at   time.Time
 }
 
 type interactivePlatform struct {
@@ -2854,7 +2873,15 @@ func detectFeishuFileType(mimeType, fileName string) string {
 }
 
 func (p *Platform) downloadImage(messageID, imageKey string) ([]byte, string, error) {
-	resp, err := p.client.Im.MessageResource.Get(context.Background(),
+	cacheKey := messageID + "\x00" + imageKey
+	if data, mime, ok := p.getCachedImage(cacheKey); ok {
+		slog.Debug(p.tag()+": image cache hit", "key", imageKey, "size", len(data))
+		return data, mime, nil
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), feishuResourceTimeout)
+	defer cancel()
+	resp, err := p.client.Im.MessageResource.Get(ctx,
 		larkim.NewGetMessageResourceReqBuilder().
 			MessageId(messageID).
 			FileKey(imageKey).
@@ -2876,11 +2903,61 @@ func (p *Platform) downloadImage(messageID, imageKey string) ([]byte, string, er
 
 	mimeType := detectMimeType(data)
 	slog.Debug(p.tag()+": downloaded image", "key", imageKey, "size", len(data), "mime", mimeType)
+	p.storeCachedImage(cacheKey, data, mimeType)
 	return data, mimeType, nil
 }
 
+// getCachedImage returns the cached bytes. The slice is shared with other
+// callers and must be treated as read-only (current callers only hash, base64
+// encode or write it).
+func (p *Platform) getCachedImage(key string) ([]byte, string, bool) {
+	p.imageCacheMu.Lock()
+	defer p.imageCacheMu.Unlock()
+	entry, ok := p.imageCache[key]
+	if !ok {
+		return nil, "", false
+	}
+	if time.Since(entry.at) > imageCacheTTL {
+		delete(p.imageCache, key)
+		p.imageCacheBytes -= len(entry.data)
+		return nil, "", false
+	}
+	return entry.data, entry.mime, true
+}
+
+func (p *Platform) storeCachedImage(key string, data []byte, mime string) {
+	if len(data) == 0 || len(data) > imageCacheMaxBytes {
+		return
+	}
+	p.imageCacheMu.Lock()
+	defer p.imageCacheMu.Unlock()
+	if p.imageCache == nil {
+		p.imageCache = make(map[string]feishuImageCacheEntry)
+	}
+	if old, ok := p.imageCache[key]; ok {
+		p.imageCacheBytes -= len(old.data)
+		delete(p.imageCache, key)
+	}
+	for len(p.imageCache) > 0 &&
+		(len(p.imageCache) >= imageCacheMaxEntries || p.imageCacheBytes+len(data) > imageCacheMaxBytes) {
+		var oldestKey string
+		var oldestAt time.Time
+		for k, entry := range p.imageCache {
+			if oldestKey == "" || entry.at.Before(oldestAt) {
+				oldestKey, oldestAt = k, entry.at
+			}
+		}
+		p.imageCacheBytes -= len(p.imageCache[oldestKey].data)
+		delete(p.imageCache, oldestKey)
+	}
+	p.imageCache[key] = feishuImageCacheEntry{data: data, mime: mime, at: time.Now()}
+	p.imageCacheBytes += len(data)
+}
+
 func (p *Platform) downloadResource(messageID, fileKey, resType string) ([]byte, error) {
-	resp, err := p.client.Im.MessageResource.Get(context.Background(),
+	ctx, cancel := context.WithTimeout(context.Background(), feishuResourceTimeout)
+	defer cancel()
+	resp, err := p.client.Im.MessageResource.Get(ctx,
 		larkim.NewGetMessageResourceReqBuilder().
 			MessageId(messageID).
 			FileKey(fileKey).

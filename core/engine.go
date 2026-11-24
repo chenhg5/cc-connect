@@ -76,9 +76,26 @@ const (
 	// only way back without waiting for the user to discover /new.
 	sessionFailureResetThreshold = 3
 	// turnProgressNoticeMax caps how many "still working" nudges one turn may
-	// send, so a genuinely long task does not spam the chat.
-	turnProgressNoticeMax = 3
+	// send. The interval doubles after each nudge (base, 2×, 4×, … capped at
+	// turnProgressMaxDelay), so a >3-minute turn is never silent for long.
+	turnProgressNoticeMax = 8
+	turnProgressMaxDelay  = 15 * time.Minute
 )
+
+// nextTurnProgressDelay doubles the nudge interval, capped at max.
+func nextTurnProgressDelay(prev, base, max time.Duration) time.Duration {
+	if base <= 0 {
+		return 0
+	}
+	if prev <= 0 {
+		prev = base
+	}
+	next := prev * 2
+	if next > max {
+		next = max
+	}
+	return next
+}
 
 // VersionInfo is set by main at startup so that /version works.
 var VersionInfo string
@@ -3916,10 +3933,50 @@ var agentErrorRules = []agentErrorRule{
 	{"deadline exceeded", agentErrorClass{Kind: "timeout", MsgKey: MsgAgentErrorTimeout, Transient: true}},
 }
 
+// HTTP status detection keeps classification stable when the model/CLI changes
+// its prose. Prose rules below are the fallback for errors without a status.
+var (
+	agentHTTPStatusRe = regexp.MustCompile(`(?i)\b(?:http(?:\s+status)?|status|status_code|api\s+error)\s*[:=]?\s*(\d{3})\b`)
+	agentCodeStatusRe = regexp.MustCompile(`(?i)["']?code["']?\s*[:=]\s*(\d{3})\b`)
+)
+
+func detectAgentHTTPStatus(raw string) int {
+	for _, re := range []*regexp.Regexp{agentHTTPStatusRe, agentCodeStatusRe} {
+		if m := re.FindStringSubmatch(raw); len(m) == 2 {
+			if n, err := strconv.Atoi(m[1]); err == nil {
+				return n
+			}
+		}
+	}
+	return 0
+}
+
 // classifyAgentError maps a raw agent/API error to its user-facing text and
 // automatic-recovery policy. Raw English internals stay in the log.
 func classifyAgentError(raw string) agentErrorClass {
 	lower := strings.ToLower(raw)
+	if status := detectAgentHTTPStatus(lower); status != 0 {
+		switch status {
+		case 401, 403:
+			return agentErrorClass{Kind: "auth", MsgKey: MsgAgentErrorAuth, Transient: true}
+		case 408, 504:
+			return agentErrorClass{Kind: "timeout", MsgKey: MsgAgentErrorTimeout, Transient: true}
+		case 429, 529:
+			return agentErrorClass{Kind: "rate_limit", MsgKey: MsgAgentErrorRateLimit, Transient: true}
+		case 413:
+			if strings.Contains(lower, "image") {
+				return agentErrorClass{Kind: "image", MsgKey: MsgAgentErrorImageTooLarge, SkipImages: true}
+			}
+			return agentErrorClass{Kind: "invalid_request", MsgKey: MsgAgentErrorGeneric}
+		case 400:
+			if strings.Contains(lower, "image") {
+				return agentErrorClass{Kind: "image", MsgKey: MsgAgentErrorImageTooLarge, SkipImages: true}
+			}
+			return agentErrorClass{Kind: "invalid_request", MsgKey: MsgAgentErrorGeneric}
+		case 500, 502, 503:
+			return agentErrorClass{Kind: "server", MsgKey: MsgAgentErrorGeneric, Transient: true}
+		}
+	}
 	for _, rule := range agentErrorRules {
 		if strings.Contains(lower, rule.contains) {
 			return rule.class
@@ -4140,8 +4197,9 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 	state.mu.Unlock()
 	var progressTimer *time.Timer
 	var progressCh <-chan time.Time
+	nextProgressDelay := e.turnProgressInterval
 	if e.turnProgressInterval > 0 && !proactiveTurn {
-		progressTimer = time.NewTimer(e.turnProgressInterval)
+		progressTimer = time.NewTimer(nextProgressDelay)
 		defer progressTimer.Stop()
 		progressCh = progressTimer.C
 	}
@@ -4203,7 +4261,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				// Only nudge when the turn has been quiet: if the agent is
 				// streaming text or tool steps the user already sees progress.
 				quietFor := time.Since(lastVisibleEventAt)
-				if quietFor >= e.turnProgressInterval/2 {
+				if quietFor >= nextProgressDelay/2 {
 					progressNotices++
 					step := ""
 					if tc := stateTaskCard(state); tc != nil {
@@ -4222,14 +4280,24 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 					})
 					slog.Info("long turn progress nudge sent",
 						"session", sessionKey, "elapsed", time.Since(turnStart),
-						"quiet_for", quietFor, "notice", progressNotices)
+						"quiet_for", quietFor, "notice", progressNotices,
+						"next_delay", nextProgressDelay)
+					nextProgressDelay = nextTurnProgressDelay(nextProgressDelay, e.turnProgressInterval, turnProgressMaxDelay)
 				} else {
+					// Recent output is progress already; restart the cadence at
+					// the base interval instead of the escalated one.
+					nextProgressDelay = e.turnProgressInterval
 					slog.Debug("long turn progress nudge skipped: recent output",
 						"session", sessionKey, "quiet_for", quietFor)
 				}
 			}
 			if progressTimer != nil {
-				progressTimer.Reset(e.turnProgressInterval)
+				if progressNotices >= turnProgressNoticeMax {
+					progressTimer.Stop()
+					progressCh = nil
+				} else {
+					progressTimer.Reset(nextProgressDelay)
+				}
 			}
 		case <-idleCh:
 			if tc := stateTaskCard(state); tc != nil {
@@ -5191,6 +5259,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 					idleTimer.Reset(e.eventIdleTimeout)
 				}
 				progressNotices = 0
+				nextProgressDelay = e.turnProgressInterval
 				if progressTimer != nil {
 					if !progressTimer.Stop() {
 						select {
@@ -5198,7 +5267,8 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 						default:
 						}
 					}
-					progressTimer.Reset(e.turnProgressInterval)
+					progressTimer.Reset(nextProgressDelay)
+					progressCh = progressTimer.C
 				}
 				// Each queued turn gets its own delivery-fallback once, so a
 				// failure in t1 does not silence the lost-answer notice for t2.

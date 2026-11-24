@@ -122,9 +122,11 @@ level = "info" # debug, info, warn, error
 # Agent 空闲超时：两次 agent 事件之间的最大等待分钟数，超时则认为会话卡住。设为 0 禁用。
 # idle_timeout_mins = 120  # default: 120 (2 hours) / 默认 120（2 小时）
 
-# Send a "still working" progress line every N minutes during a long turn.
-# The nudge is capped at 3 per turn. 0 disables it. Default: 1.
-# 长回合每 N 分钟补一条「仍在处理」正文进度（每轮最多 3 条）；0 表示关闭。默认 1。
+# Send a "still working" progress line during a long turn. The first nudge is
+# after N minutes, then the interval doubles (N, 2N, 4N, ... capped at 15 min),
+# up to 8 nudges per turn. 0 disables it. Default: 1.
+# 长回合补「仍在处理」正文进度：首条 N 分钟，之后间隔翻倍（N、2N、4N…最长 15 分钟），
+# 每轮最多 8 条；0 表示关闭。默认 1。
 # turn_progress_mins = 1
 
 # Auto-reset the active session after the user has been inactive for a while.

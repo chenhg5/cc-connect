@@ -13337,6 +13337,30 @@ func TestAgentErrorUserMessage(t *testing.T) {
 	if c := classifyAgentError("max turns exceeded the maximum"); c.Kind != "generic" {
 		t.Errorf("unknown classification = %+v, want kind=generic", c)
 	}
+
+	// A structured HTTP status keeps classification stable when prose changes.
+	statusCases := []struct {
+		raw       string
+		kind      string
+		transient bool
+		skip      bool
+	}{
+		{"API Error: 429 Too Many Requests", "rate_limit", true, false},
+		{"status 401 Unauthorized", "auth", true, false},
+		{"HTTP 504 Gateway Timeout", "timeout", true, false},
+		{"status 413 image too large", "image", false, true},
+		{"API Error: 400 messages.3.content.3 image", "image", false, true},
+		{"API Error: 400 invalid request", "invalid_request", false, false},
+		{"HTTP 503 Service Unavailable", "server", true, false},
+		{`{"code": 429}`, "rate_limit", true, false},
+	}
+	for _, tt := range statusCases {
+		c := classifyAgentError(tt.raw)
+		if c.Kind != tt.kind || c.Transient != tt.transient || c.SkipImages != tt.skip {
+			t.Errorf("classifyAgentError(%q) = %+v, want kind=%s transient=%v skip=%v",
+				tt.raw, c, tt.kind, tt.transient, tt.skip)
+		}
+	}
 }
 
 // delayedResultSession keeps a turn silent long enough for the progress nudge.
@@ -13567,5 +13591,21 @@ func TestRedispatchOnlyImagesReportsToUser(t *testing.T) {
 	}
 	if got := sess.getImages(); len(got) != 0 {
 		t.Fatalf("agent received %d images, want none", len(got))
+	}
+}
+
+func TestNextTurnProgressDelay(t *testing.T) {
+	base := time.Minute
+	max := 15 * time.Minute
+	prev := base
+	want := []time.Duration{2, 4, 8, 15, 15}
+	for i, minutes := range want {
+		prev = nextTurnProgressDelay(prev, base, max)
+		if prev != minutes*time.Minute {
+			t.Fatalf("step %d delay = %v, want %v", i+1, prev, minutes*time.Minute)
+		}
+	}
+	if got := nextTurnProgressDelay(0, base, max); got != 2*base {
+		t.Fatalf("initial delay = %v, want %v", got, 2*base)
 	}
 }
