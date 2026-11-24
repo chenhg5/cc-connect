@@ -30,7 +30,7 @@
 </p>
 
 <p align="center">
-  <a href="./README.md">English</a> | <a href="./README.zh-CN.md">中文</a>
+  <a href="./README.md">English</a> | <a href="./README.zh-CN.md">中文</a> | <a href="./README.ru.md">Русский</a>
 </p>
 
 <p align="center">
@@ -649,6 +649,7 @@ Notes:
 ## 📚 Documentation
 
 - [Usage Guide](docs/usage.md) — Complete feature documentation
+- [Codex progress messages](docs/codex-commentary.md) - Standalone updates and how to turn them off
 - [INSTALL.md](INSTALL.md) — AI-agent-friendly installation guide
 - [config.example.toml](config.example.toml) — Configuration template
 - [CONTRIBUTING.md](CONTRIBUTING.md) — How to report issues and contribute pull requests

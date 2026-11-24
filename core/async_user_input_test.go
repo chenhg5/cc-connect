@@ -213,3 +213,48 @@ func TestAsyncUserInput_MultipleQuestionsAndRetryAfterFailure(t *testing.T) {
 		t.Fatalf("answers = %v", s.steered)
 	}
 }
+
+// A card callback whose platform already replaced the original card with the
+// rendered answer must not also post the answer as a plain chat message. The
+// echo stays for paths without a card update (typed answers, Telegram inline
+// buttons), where the confirmation only exists as that message.
+func TestAsyncUserInput_CardAnswerRenderedSuppressesEcho(t *testing.T) {
+	cases := []struct {
+		name      string
+		questions []UserQuestion
+	}{
+		{"single final answer", testQuestions()},
+		{"multi question advance", append(testQuestions(), UserQuestion{Question: "Deployment?"})},
+	}
+	for _, c := range cases {
+		for _, rendered := range []bool{true, false} {
+			p := &stubPlatformEngine{n: "plain"}
+			s := &asyncInputSession{events: make(chan Event, 16), active: true}
+			e := NewEngine("test", &controllableAgent{nextSession: s}, []Platform{p}, "", LangEnglish)
+			key := "plain:user"
+			state := &interactiveState{agentSession: s, platform: p}
+			e.interactiveStates[key] = state
+			e.showAsyncUserInput(state, p, "ctx", Event{RequestID: "q1", Questions: c.questions})
+			p.clearSent()
+
+			msg := &Message{SessionKey: key, ReplyCtx: "ctx", CardAnswerRendered: rendered}
+			if _, handled := e.handleAsyncUserInput(p, msg, "2", key, e.sessions); !handled {
+				t.Fatalf("%s: answer not handled", c.name)
+			}
+			echoes := 0
+			for _, sent := range p.getSent() {
+				if strings.HasPrefix(sent, "✅ ") {
+					echoes++
+				}
+			}
+			want := 1
+			if rendered {
+				want = 0
+			}
+			if echoes != want {
+				t.Errorf("%s: CardAnswerRendered=%v produced %d echo replies, want %d (sent=%v)",
+					c.name, rendered, echoes, want, p.getSent())
+			}
+		}
+	}
+}
