@@ -728,6 +728,7 @@ func main() {
 			}
 			engine.SetAutoCompressConfigWithSource(true, maxTokens, minGap, proj.AutoCompress.AllowHeuristic)
 		}
+		applyHistoryBootstrapConfig(&proj, engine)
 		resetIdle, defaulted := resolveResetOnIdle(proj.ResetOnIdleMins)
 		engine.SetResetOnIdle(resetIdle)
 		if defaulted {
@@ -1799,8 +1800,6 @@ func setupLogger(level string, w io.Writer) {
 	})))
 }
 
-// reloadConfig re-reads config.toml and applies hot-reloadable settings
-// (display, providers, commands) to the given engine.
 func applyDedupConfig(cfg *config.Config, engine *core.Engine) {
 	enabled := cfg.Dedup.Enabled == nil || *cfg.Dedup.Enabled
 	windowSecs := 30
@@ -1810,6 +1809,13 @@ func applyDedupConfig(cfg *config.Config, engine *core.Engine) {
 	engine.SetDedupConfig(enabled, time.Duration(windowSecs)*time.Second)
 }
 
+func applyHistoryBootstrapConfig(proj *config.ProjectConfig, engine *core.Engine) {
+	enabled := proj.HistoryBootstrap.Enabled == nil || *proj.HistoryBootstrap.Enabled
+	engine.SetHistoryBootstrap(enabled, derefInt(proj.HistoryBootstrap.MaxEntries), derefInt(proj.HistoryBootstrap.MaxTokens))
+}
+
+// reloadConfig re-reads config.toml and applies hot-reloadable settings
+// (display, providers, commands) to the given engine.
 func reloadConfig(configPath, projName string, engine *core.Engine) (*core.ConfigReloadResult, error) {
 	cfg, err := config.Load(configPath)
 	if err != nil {
@@ -1873,6 +1879,7 @@ func reloadConfig(configPath, projName string, engine *core.Engine) (*core.Confi
 	} else {
 		engine.SetAutoCompressConfig(false, 0, 0)
 	}
+	applyHistoryBootstrapConfig(proj, engine)
 	resetIdle, defaulted := resolveResetOnIdle(proj.ResetOnIdleMins)
 	engine.SetResetOnIdle(resetIdle)
 	if defaulted {
