@@ -2349,7 +2349,7 @@ func TestCUJ_H2_TwoPlatformsConcurrentNoBleed(t *testing.T) {
 // history entries; the current engine sometimes treats their results as
 // unsolicited events and never drains the remaining queue.
 func TestCUJ_QueueStealsResult(t *testing.T) {
-	t.Skip("known engine bug: unsolicited reader can consume a queued turn's result, leaving later messages undrained; remove after queue ownership is fixed")
+	t.Skip("#2366: unsolicited reader can consume a queued turn's result, leaving later messages undrained; enable after the queue ownership fix lands")
 	const messages = 5 // four queued per session, below the default queue cap
 	dir := t.TempDir()
 	pA := &stubPlatformEngine{n: "platA"}
