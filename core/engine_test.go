@@ -6936,6 +6936,22 @@ func TestSendAskQuestionPrompt_InlineButtonPlatform(t *testing.T) {
 	}
 }
 
+func TestSendAskQuestionPrompt_InlineButtonPlatform_MultiSelectUsesText(t *testing.T) {
+	e := newTestEngine()
+	p := &stubInlineButtonPlatform{stubPlatformEngine: stubPlatformEngine{n: "telegram"}}
+	questions := testQuestions()
+	questions[0].MultiSelect = true
+	e.sendAskQuestionPrompt(p, "ctx", questions, 0)
+
+	if len(p.buttonRows) != 0 {
+		t.Fatalf("multi-select prompt offered single-answer buttons: %v", p.buttonRows)
+	}
+	if len(p.sent) != 1 || !strings.Contains(p.sent[0], "1. **PostgreSQL**") ||
+		!strings.Contains(p.sent[0], e.i18n.T(MsgAskQuestionNoteMulti)) {
+		t.Fatalf("multi-select prompt lacks numbered choices or comma-separated reply hint: %q", p.sent)
+	}
+}
+
 func TestSendAskQuestionPrompt_PlainPlatform(t *testing.T) {
 	e := newTestEngine()
 	p := &stubPlatformEngine{n: "plain"}
