@@ -6754,6 +6754,17 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 					statusFooter = footer
 					legacyStatusFooter = footer
 				}
+				footerReason := "built"
+				switch {
+				case !e.replyFooterEnabled:
+					footerReason = "disabled"
+				case statusFooter == "":
+					footerReason = "no_status_segments"
+				case contextUsage == nil:
+					footerReason = "no_usage"
+				}
+				slog.Debug("reply footer status", "built", statusFooter != "", "reason", footerReason,
+					"usage_available", contextUsage != nil, "platform", p.Name())
 			}
 			fullResponse = cleanResponse
 
@@ -8366,6 +8377,8 @@ func (e *Engine) buildReplyFooter(agent Agent, session AgentSession, workspaceDi
 		} else if usage := e.replyFooterUsageText(session, agent); usage != "" {
 			parts = append(parts, usage)
 			hasStatus = true
+		} else if hasStatus {
+			parts = append(parts, "ctx: ?")
 		}
 	}
 	if e.showWorkdirIndicator {
@@ -8455,6 +8468,7 @@ func buildClaudeStatusLineFooter(model, effort string, usage *ContextUsage) stri
 	if effort != "" {
 		parts = append(parts, effort)
 	}
+	hasContext := false
 	if usage != nil {
 		var counts []string
 		if usage.OutputTokens > 0 {
@@ -8483,8 +8497,12 @@ func buildClaudeStatusLineFooter(model, effort string, usage *ContextUsage) stri
 					pct = 100
 				}
 				parts = append(parts, fmt.Sprintf("ctx %d%%", pct))
+				hasContext = true
 			}
 		}
+	}
+	if len(parts) > 0 && !hasContext {
+		parts = append(parts, "ctx: ?")
 	}
 	return strings.Join(parts, " · ")
 }
