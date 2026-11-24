@@ -10760,6 +10760,102 @@ func TestAutoCompress_AgentWithoutReporter_StillUsesHeuristic(t *testing.T) {
 	}
 }
 
+func TestAutoCompress_NoReporterIncludesConfiguredOverhead(t *testing.T) {
+	p := &stubPlatformEngine{n: "test"}
+	inner := newQueuingSession("overhead")
+	sess := &noReporterSession{AgentSession: inner, inner: inner}
+	agent := &stubCompressorAgent{cmd: "/compact"}
+	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+	e.SetAutoCompressConfig(true, 15_000, 0)
+	e.SetAutoCompressOverheadTokens(20_000)
+	key := "test:overhead"
+	state := &interactiveState{agentSession: sess, platform: p, replyCtx: "ctx"}
+	e.interactiveStates[key] = state
+	session := e.sessions.GetOrCreateActive(key)
+	session.AddHistory("user", "short history")
+	go e.processInteractiveEvents(state, session, e.sessions, key, "msg1", time.Now(), func() {}, nil, nil, 0)
+	inner.events <- Event{Type: EventResult, Content: "response", Done: true}
+	deadline := time.After(2 * time.Second)
+	for {
+		inner.sendMu.Lock()
+		n := len(inner.sendCalls)
+		inner.sendMu.Unlock()
+		if n > 0 {
+			return
+		}
+		select {
+		case <-deadline:
+			t.Fatal("expected configured fixed overhead to cross the auto-compress threshold")
+		default:
+			time.Sleep(10 * time.Millisecond)
+		}
+	}
+}
+
+func TestAutoCompress_UnconfiguredOverheadPreservesHeuristic(t *testing.T) {
+	p := &stubPlatformEngine{n: "test"}
+	inner := newQueuingSession("unconfigured-overhead")
+	sess := &noReporterSession{AgentSession: inner, inner: inner}
+	e := NewEngine("test", &stubCompressorAgent{cmd: "/compact"}, []Platform{p}, "", LangEnglish)
+	e.SetAutoCompressConfig(true, 15_000, 0)
+	key := "test:unconfigured-overhead"
+	state := &interactiveState{agentSession: sess, platform: p, replyCtx: "ctx"}
+	e.interactiveStates[key] = state
+	session := e.sessions.GetOrCreateActive(key)
+	session.AddHistory("user", "short history")
+	go e.processInteractiveEvents(state, session, e.sessions, key, "msg1", time.Now(), func() {}, nil, nil, 0)
+	inner.events <- Event{Type: EventResult, Content: "response", Done: true}
+	time.Sleep(300 * time.Millisecond)
+	inner.sendMu.Lock()
+	defer inner.sendMu.Unlock()
+	if len(inner.sendCalls) != 0 {
+		t.Fatalf("unconfigured overhead must preserve the old estimate, got sends %v", inner.sendCalls)
+	}
+}
+
+func TestAutoCompress_ExplicitZeroOverheadPreservesHeuristic(t *testing.T) {
+	p := &stubPlatformEngine{n: "test"}
+	inner := newQueuingSession("zero-overhead")
+	sess := &noReporterSession{AgentSession: inner, inner: inner}
+	e := NewEngine("test", &stubCompressorAgent{cmd: "/compact"}, []Platform{p}, "", LangEnglish)
+	e.SetAutoCompressConfig(true, 15_000, 0)
+	e.SetAutoCompressOverheadTokens(0)
+	key := "test:zero-overhead"
+	state := &interactiveState{agentSession: sess, platform: p, replyCtx: "ctx"}
+	e.interactiveStates[key] = state
+	session := e.sessions.GetOrCreateActive(key)
+	session.AddHistory("user", "short history")
+	go e.processInteractiveEvents(state, session, e.sessions, key, "msg1", time.Now(), func() {}, nil, nil, 0)
+	inner.events <- Event{Type: EventResult, Content: "response", Done: true}
+	time.Sleep(100 * time.Millisecond)
+	inner.sendMu.Lock()
+	defer inner.sendMu.Unlock()
+	if len(inner.sendCalls) != 0 {
+		t.Fatalf("zero overhead must preserve the old estimate, got sends %v", inner.sendCalls)
+	}
+}
+
+func TestAutoCompress_ExactUsageIgnoresOverhead(t *testing.T) {
+	p := &stubPlatformEngine{n: "test"}
+	sess := newQueuingSession("exact-overhead")
+	sess.contextUsage = &ContextUsage{UsedTokens: 100, ContextWindow: 200_000}
+	e := NewEngine("test", &stubCompressorAgent{cmd: "/compact"}, []Platform{p}, "", LangEnglish)
+	e.SetAutoCompressConfig(true, 15_000, 0)
+	key := "test:exact-overhead"
+	state := &interactiveState{agentSession: sess, platform: p, replyCtx: "ctx"}
+	e.interactiveStates[key] = state
+	session := e.sessions.GetOrCreateActive(key)
+	session.AddHistory("user", "short history")
+	go e.processInteractiveEvents(state, session, e.sessions, key, "msg1", time.Now(), func() {}, nil, nil, 0)
+	sess.events <- Event{Type: EventResult, Content: "response", Done: true}
+	time.Sleep(100 * time.Millisecond)
+	sess.sendMu.Lock()
+	defer sess.sendMu.Unlock()
+	if len(sess.sendCalls) != 0 {
+		t.Fatalf("exact usage must ignore overhead, got sends %v", sess.sendCalls)
+	}
+}
+
 func TestCmdCompress_SessionBusy_RepliesPreviousProcessing(t *testing.T) {
 	p := &stubPlatformEngine{n: "test"}
 	sess := newQueuingSession("compress-busy")

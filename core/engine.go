@@ -436,6 +436,7 @@ type Engine struct {
 	autoCompressEnabled        bool
 	autoCompressMaxTokens      int
 	autoCompressMinGap         time.Duration
+	autoCompressOverheadTokens int
 	historyBootstrapMu         sync.RWMutex
 	historyBootstrapEnabled    bool
 	historyBootstrapMaxEntries int
@@ -443,8 +444,8 @@ type Engine struct {
 	// autoCompressAllowHeuristic permits a trigger decision built from the
 	// text-length heuristic (1 token / 4 runes of cc-connect's own history) on a
 	// turn where an agent that CAN report exact usage has not reported it yet.
-	// The heuristic ignores tool_use/tool_result blocks and the fixed
-	// system-prompt+tools overhead, so it is routinely several times off in
+	// The heuristic ignores tool_use/tool_result blocks and only approximates
+	// system-prompt+tools overhead, so it can be several times off in
 	// either direction — measured at 574,797 while the same session never
 	// exceeded 229,783 real tokens.
 	//
@@ -534,6 +535,10 @@ type Engine struct {
 	// Data directory for socket path injection
 	dataDir string
 }
+
+// DefaultAutoCompressOverheadTokens preserves the historical text-only
+// estimate until an operator opts into a fixed prompt/tool allowance.
+const DefaultAutoCompressOverheadTokens = 0
 
 // workspaceInitFlow tracks a channel that is being onboarded to a workspace.
 type workspaceInitFlow struct {
@@ -831,6 +836,7 @@ func NewEngine(name string, ag Agent, platforms []Platform, sessionStorePath str
 		historyBootstrapEnabled:    true,
 		historyBootstrapMaxEntries: 20,
 		historyBootstrapMaxTokens:  4000,
+		autoCompressOverheadTokens: DefaultAutoCompressOverheadTokens,
 	}
 
 	if ag != nil {
@@ -1008,6 +1014,12 @@ func (e *Engine) SetAutoCompressConfigWithSource(enabled bool, maxTokens int, mi
 		minGap = 30 * time.Minute
 	}
 	e.autoCompressMinGap = minGap
+}
+
+// SetAutoCompressOverheadTokens sets the fixed prompt/tool allowance used only
+// when the auto-compress decision relies on a text-length estimate.
+func (e *Engine) SetAutoCompressOverheadTokens(tokens int) {
+	e.autoCompressOverheadTokens = max(0, tokens)
 }
 
 // SetResetOnIdle configures automatic session rotation after prolonged inactivity.
@@ -6592,8 +6604,8 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			//
 			// Prefer the agent's actual API-reported input tokens when the session
 			// implements ContextUsageReporter — the text-only heuristic misses
-			// tool_use/tool_result blocks (~70-85% of context) and the fixed overhead
-			// of system prompt + tools + skills (issue #1115). The real number is the
+			// tool_use/tool_result blocks (~70-85% of context) and only approximates
+			// system prompt + tools + skills via a configured allowance (issue #1115). The real number is the
 			// size of the last assistant event's prompt: input + cache_creation +
 			// cache_read (the three are disjoint subsets that sum to the full prompt,
 			// per Anthropic's usage semantics), which already includes everything
@@ -6609,7 +6621,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				if src, ok := state.agentSession.(UsageSourceReporter); ok {
 					usageSource = src.GetUsageSource()
 				}
-				estimate := contextEstimate
+				estimate := contextEstimate + e.autoCompressOverheadTokens
 				// Every branch below assigns; declared (not initialised) so the
 				// switch is the single place that decides the source.
 				var estimateSource string
@@ -6651,6 +6663,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 						"estimate_source", estimateSource,
 						"usage_source", usageSource,
 						"heuristic_estimate", contextEstimate,
+						"overhead_tokens", e.autoCompressOverheadTokens,
 						"max_tokens", e.autoCompressMaxTokens,
 						"triggered", triggered,
 					)
@@ -6666,6 +6679,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 					slog.Debug("auto-compress: skipped, waiting for exact usage",
 						"reason", estimateSource,
 						"heuristic_estimate", contextEstimate,
+						"overhead_tokens", e.autoCompressOverheadTokens,
 						"max_tokens", e.autoCompressMaxTokens,
 						"session_key", sessionKey,
 					)
