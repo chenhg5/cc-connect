@@ -8020,7 +8020,17 @@ func (e *Engine) cmdSwitch(p Platform, msg *Message, args []string) {
 	// original conversation; wiping it makes /history return empty after a
 	// /switch round-trip. When SwitchToAgentSession creates a fresh Session
 	// (no prior match), History is already nil, so preserving is a no-op.
-	_ = sessions.SwitchToAgentSession(msg.SessionKey, matched.ID, agent.Name(), matched.Summary)
+	switched := sessions.SwitchToAgentSession(msg.SessionKey, matched.ID, agent.Name(), matched.Summary)
+	if switched != nil && switched.HistoryLen() == 0 && matched.MessageCount > 0 {
+		if hp, ok := agent.(HistoryProvider); ok {
+			entries, err := hp.GetSessionHistory(e.ctx, matched.ID, 0)
+			if err != nil {
+				slog.Warn("switch: agent transcript read failed", "session_id", matched.ID, "error", err)
+			} else if switched.SeedHistoryIfEmpty(entries) {
+				sessions.Save()
+			}
+		}
+	}
 
 	shortID := matched.ID
 	if len(shortID) > 12 {
