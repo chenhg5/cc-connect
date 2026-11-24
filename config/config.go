@@ -492,6 +492,13 @@ type AutoCompressConfig struct {
 	AllowHeuristic bool `toml:"allow_heuristic,omitempty"`
 }
 
+// HistoryBootstrapConfig bounds the prior conversation sent after an agent switch.
+type HistoryBootstrapConfig struct {
+	Enabled    *bool `toml:"enabled,omitempty"`
+	MaxEntries *int  `toml:"max_entries,omitempty"`
+	MaxTokens  *int  `toml:"max_tokens,omitempty"`
+}
+
 // ObserveConfig controls forwarding of native terminal Claude Code sessions to a messaging platform.
 type ObserveConfig struct {
 	Enabled bool   `toml:"enabled"`
@@ -517,11 +524,12 @@ type ProjectConfig struct {
 	// init flow to bind existing local directories. Default false keeps init
 	// limited to git URLs; use /workspace bind or /workspace route for explicit
 	// local bindings.
-	WorkspaceInitAllowLocalPaths *bool              `toml:"workspace_init_allow_local_paths,omitempty"`
-	Agent                        AgentConfig        `toml:"agent"`
-	Platforms                    []PlatformConfig   `toml:"platforms"`
-	Heartbeat                    HeartbeatConfig    `toml:"heartbeat"`
-	AutoCompress                 AutoCompressConfig `toml:"auto_compress"`
+	WorkspaceInitAllowLocalPaths *bool                  `toml:"workspace_init_allow_local_paths,omitempty"`
+	Agent                        AgentConfig            `toml:"agent"`
+	Platforms                    []PlatformConfig       `toml:"platforms"`
+	Heartbeat                    HeartbeatConfig        `toml:"heartbeat"`
+	AutoCompress                 AutoCompressConfig     `toml:"auto_compress"`
+	HistoryBootstrap             HistoryBootstrapConfig `toml:"history_bootstrap"`
 	// ResetOnIdleMins automatically rotates to a new cc-connect session after
 	// the current session has been inactive for the specified number of minutes.
 	// 0 or nil disables the behavior.

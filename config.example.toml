@@ -394,6 +394,11 @@ level = "info" # debug, info, warn, error
 #                          # 工具定义的固定开销，误差常达数倍。完全没有用量上报能力的
 #                          # agent 始终使用启发式——那是它们唯一的机制，本开关对其无效。
 
+# [projects.history_bootstrap]
+# enabled = true       # Send recent chat history on the first turn after switching agent type / 切换 agent 类型后的首轮传入近期聊天历史
+# max_entries = 20     # Maximum prior messages / 最多传入的历史消息数
+# max_tokens = 4000    # Approximate token budget for the history block / 历史片段的估算 token 上限
+
 # [projects.observe]
 # enabled = true                    # Forward native terminal sessions to Slack
 # channel = "C0AL13PN4BG"           # Slack channel ID to post observations to

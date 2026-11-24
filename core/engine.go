@@ -433,9 +433,13 @@ type Engine struct {
 	projectState                 *ProjectStateStore
 
 	// Auto-compress settings
-	autoCompressEnabled   bool
-	autoCompressMaxTokens int
-	autoCompressMinGap    time.Duration
+	autoCompressEnabled        bool
+	autoCompressMaxTokens      int
+	autoCompressMinGap         time.Duration
+	historyBootstrapMu         sync.RWMutex
+	historyBootstrapEnabled    bool
+	historyBootstrapMaxEntries int
+	historyBootstrapMaxTokens  int
 	// autoCompressAllowHeuristic permits a trigger decision built from the
 	// text-length heuristic (1 token / 4 runes of cc-connect's own history) on a
 	// turn where an agent that CAN report exact usage has not reported it yet.
@@ -791,34 +795,37 @@ func (pp *pendingPermission) resolve() {
 func NewEngine(name string, ag Agent, platforms []Platform, sessionStorePath string, lang Language) *Engine {
 	ctx, cancel := context.WithCancel(context.Background())
 	e := &Engine{
-		name:                  name,
-		agent:                 ag,
-		platforms:             platforms,
-		sessions:              NewSessionManager(sessionStorePath),
-		ctx:                   ctx,
-		cancel:                cancel,
-		i18n:                  NewI18n(lang),
-		attachmentSendEnabled: true,
-		display:               DisplayCfg{Mode: "full", ThinkingMessages: true, ThinkingMaxLen: defaultThinkingMaxLen, ToolMaxLen: defaultToolMaxLen, ToolMessages: true, CardMode: "legacy"},
-		commands:              NewCommandRegistry(),
-		skills:                NewSkillRegistry(),
-		aliases:               make(map[string]string),
-		interactiveStates:     make(map[string]*interactiveState),
-		closingSessions:       make(map[string]chan struct{}),
-		unsafeResume:          make(map[string]bool),
-		sendWorkDirs:          make(map[string]string),
-		platformReady:         make(map[Platform]bool),
-		startedAt:             time.Now(),
-		streamPreview:         DefaultStreamPreviewCfg(),
-		references:            DefaultReferenceRenderCfg(),
-		eventIdleTimeout:      defaultEventIdleTimeout,
-		staleLockBreakAfter:   busyStaleLockMaxHeld,
-		maxQueuedMessages:     defaultMaxQueuedMessages,
-		showContextIndicator:  true,
-		showWorkdirIndicator:  true,
-		shell:                 defaultShell(),
-		shellFlag:             defaultShellFlag(),
-		pendingRestartTimeout: defaultPendingRestartTimeout,
+		name:                       name,
+		agent:                      ag,
+		platforms:                  platforms,
+		sessions:                   NewSessionManager(sessionStorePath),
+		ctx:                        ctx,
+		cancel:                     cancel,
+		i18n:                       NewI18n(lang),
+		attachmentSendEnabled:      true,
+		display:                    DisplayCfg{Mode: "full", ThinkingMessages: true, ThinkingMaxLen: defaultThinkingMaxLen, ToolMaxLen: defaultToolMaxLen, ToolMessages: true, CardMode: "legacy"},
+		commands:                   NewCommandRegistry(),
+		skills:                     NewSkillRegistry(),
+		aliases:                    make(map[string]string),
+		interactiveStates:          make(map[string]*interactiveState),
+		closingSessions:            make(map[string]chan struct{}),
+		unsafeResume:               make(map[string]bool),
+		sendWorkDirs:               make(map[string]string),
+		platformReady:              make(map[Platform]bool),
+		startedAt:                  time.Now(),
+		streamPreview:              DefaultStreamPreviewCfg(),
+		references:                 DefaultReferenceRenderCfg(),
+		eventIdleTimeout:           defaultEventIdleTimeout,
+		staleLockBreakAfter:        busyStaleLockMaxHeld,
+		maxQueuedMessages:          defaultMaxQueuedMessages,
+		showContextIndicator:       true,
+		showWorkdirIndicator:       true,
+		shell:                      defaultShell(),
+		shellFlag:                  defaultShellFlag(),
+		pendingRestartTimeout:      defaultPendingRestartTimeout,
+		historyBootstrapEnabled:    true,
+		historyBootstrapMaxEntries: 20,
+		historyBootstrapMaxTokens:  4000,
 	}
 
 	if ag != nil {
@@ -4234,6 +4241,7 @@ func (e *Engine) processInteractiveMessageWith(p Platform, msg *Message, session
 	}
 
 	promptContent := e.buildSenderPrompt(msg.Content, msg.UserID, msg.UserName, msg.Platform, msg.SessionKey, msg.ChannelKey)
+	promptContent, bootstrapHistory := e.historyBootstrapPrompt(session, agent.Name(), promptContent)
 
 	sendStart := time.Now()
 	state.mu.Lock()
@@ -4252,7 +4260,12 @@ func (e *Engine) processInteractiveMessageWith(p Platform, msg *Message, session
 			sendDone <- fmt.Errorf("agent session became nil")
 			return
 		}
-		sendDone <- as.Send(promptContent, msg.MessageID, msg.Images, msg.Files)
+		err := as.Send(promptContent, msg.MessageID, msg.Images, msg.Files)
+		if err == nil && bootstrapHistory {
+			session.MarkHistoryBootstrapped(agent.Name())
+			sessions.Save()
+		}
+		sendDone <- err
 	}()
 
 	e.processInteractiveEvents(state, session, sessions, interactiveKey, msg.MessageID, turnStart, stopTyping, sendDone, msg.ReplyCtx, lockGen)
