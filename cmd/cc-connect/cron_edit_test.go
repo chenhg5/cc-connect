@@ -1,6 +1,9 @@
 package main
 
 import (
+	"io"
+	"os"
+	"strings"
 	"testing"
 )
 
@@ -40,6 +43,8 @@ func TestParseCronEditValue(t *testing.T) {
 		{"cron_expr string", "cron_expr", "0 6 * * *", "0 6 * * *", false},
 		{"description string", "description", "Daily standup", "Daily standup", false},
 		{"session_mode string", "session_mode", "reuse", "reuse", false},
+		{"model string", "model", "haiku", "haiku", false},
+		{"model empty clears", "model", "", "", false},
 		{"unknown field defaults to string", "made_up_field", "anything", "anything", false},
 	}
 
@@ -60,5 +65,33 @@ func TestParseCronEditValue(t *testing.T) {
 					tt.field, tt.input, got, got, tt.want, tt.want)
 			}
 		})
+	}
+}
+
+// TestPrintCronEditUsage_DocumentsModel guards that the editable model field
+// (handled by core updateJobField) is discoverable, including how to clear it.
+func TestPrintCronEditUsage_DocumentsModel(t *testing.T) {
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("os.Pipe: %v", err)
+	}
+	origStdout := os.Stdout
+	os.Stdout = w
+	defer func() { os.Stdout = origStdout }()
+
+	printCronEditUsage()
+
+	if err := w.Close(); err != nil {
+		t.Fatalf("close pipe writer: %v", err)
+	}
+	out, err := io.ReadAll(r)
+	if err != nil {
+		t.Fatalf("read pipe: %v", err)
+	}
+	help := string(out)
+	for _, want := range []string{"  model ", `cron edit abc123 model ""`} {
+		if !strings.Contains(help, want) {
+			t.Errorf("printCronEditUsage missing %q; got:\n%s", want, help)
+		}
 	}
 }

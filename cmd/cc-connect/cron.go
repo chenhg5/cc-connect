@@ -57,7 +57,7 @@ func closeCronResponseBody(body io.Closer) {
 }
 
 func runCronAdd(args []string) {
-	var project, sessionKey, cronExpr, prompt, execCmd, desc, dataDir, sessionMode string
+	var project, sessionKey, cronExpr, prompt, execCmd, desc, dataDir, sessionMode, model string
 	var timeoutMins *int
 	var silent bool
 
@@ -104,6 +104,13 @@ func runCronAdd(args []string) {
 				i++
 				sessionMode = args[i]
 			}
+		case "--model":
+			if i+1 >= len(args) {
+				fmt.Fprintln(os.Stderr, "Error: --model requires a value")
+				os.Exit(1)
+			}
+			i++
+			model = args[i]
 		case "--timeout-mins":
 			if i+1 < len(args) {
 				i++
@@ -171,6 +178,9 @@ func runCronAdd(args []string) {
 	}
 	if sessionMode != "" {
 		body["session_mode"] = sessionMode
+	}
+	if model != "" {
+		body["model"] = model
 	}
 	if timeoutMins != nil {
 		body["timeout_mins"] = *timeoutMins
@@ -482,6 +492,7 @@ func runCronEdit(args []string) {
 	var dataDir string
 	var id, field string
 	var valueStr string
+	var hasValue bool
 
 	for i := 0; i < len(args); i++ {
 		switch args[i] {
@@ -498,8 +509,8 @@ func runCronEdit(args []string) {
 				id = args[i]
 			} else if field == "" {
 				field = args[i]
-			} else if valueStr == "" {
-				valueStr = args[i]
+			} else if !hasValue {
+				valueStr, hasValue = args[i], true
 			}
 		}
 	}
@@ -514,7 +525,8 @@ func runCronEdit(args []string) {
 		fmt.Fprintln(os.Stderr, "Run 'cc-connect cron edit --help' for usage.")
 		os.Exit(1)
 	}
-	if valueStr == "" {
+	// An explicit empty model ("") clears the override; other fields need a value.
+	if !hasValue || (valueStr == "" && field != "model") {
 		fmt.Fprintln(os.Stderr, "Error: value is required")
 		fmt.Fprintln(os.Stderr, "Run 'cc-connect cron edit --help' for usage.")
 		os.Exit(1)
@@ -583,7 +595,7 @@ func parseCronEditValue(field, valueStr string) (any, error) {
 		return v, nil
 	default:
 		// String fields: project, session_key, cron_expr, prompt, exec,
-		// work_dir, description, session_mode, mode
+		// work_dir, description, session_mode, mode, model
 		return valueStr, nil
 	}
 }
@@ -627,6 +639,10 @@ Options:
       --exec <command>       Shell command (runs directly, mutually exclusive with --prompt)
       --desc <text>          Short description
       --session-mode <mode>  reuse (default) or new-per-run — fresh agent session each run
+      --model <model>        Model override (e.g. haiku, sonnet, or a provider model ID). Each run
+                             then uses a fresh isolated session (overrides --session-mode reuse;
+                             no chat context, same workspace files). Agent must support it
+                             (currently claudecode); otherwise the run fails. Not for --exec
       --timeout-mins <n>     Max minutes to wait per run (0 = no limit; default 30 if omitted)
       --silent               Suppress cron start notification
       --data-dir <path>      Data directory (default: ~/.cc-connect)
@@ -636,6 +652,7 @@ Examples:
   cc-connect cron add --cron "0 6 * * *" --prompt "Collect GitHub trending data" --desc "Daily Trending"
   cc-connect cron add --cron "*/30 * * * *" --exec "df -h" --desc "Disk usage check"
   cc-connect cron add --cron "0 9 * * *" --prompt "Daily standup reminder" --silent
+  cc-connect cron add --cron "*/15 * * * *" --prompt "Triage new issues" --model haiku
   cc-connect cron add 0 6 * * * Collect GitHub trending data and send me a summary`)
 }
 
@@ -667,6 +684,8 @@ Editable Fields (string):
   work_dir      Working directory for exec
   description   Short description
   session_mode  reuse or new_per_run
+  model         Model override; "" clears it (a model forces a fresh session per run;
+                session_mode is kept and applies again once the model is cleared)
 
 Editable Fields (bool: true/false):
   enabled       Enable or disable the task
@@ -688,5 +707,7 @@ Examples:
   cc-connect cron edit abc123 enabled false
   cc-connect cron edit abc123 description "Daily standup reminder"
   cc-connect cron edit abc123 timeout_mins 60
-  cc-connect cron edit abc123 mute true`)
+  cc-connect cron edit abc123 mute true
+  cc-connect cron edit abc123 model haiku
+  cc-connect cron edit abc123 model ""`)
 }
