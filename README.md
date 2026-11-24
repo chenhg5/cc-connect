@@ -505,10 +505,38 @@ cc-connect update --pre     # Include pre-releases
 ```
 /new [name]       Start a new session
 /list             List all sessions
+/tasks [keyword]  Find recent sessions across work directories (supported agents)
+/goto <number>    Resume a session from the most recent /tasks list
 /switch <id>      Switch session
 /current          Show current session
 /dir [path|reset] Show, switch, or reset work directory
 ```
+
+`/list` and `/switch` remain scoped to the current work directory. Cross-directory
+routing is disabled by default and is restricted to users in `admin_from`. For
+agents that support global session discovery (currently Codex), enable it with
+an explicit root allowlist:
+
+```toml
+[[projects]]
+admin_from = "your-user-id"
+global_session_routing = true
+global_session_roots = ["/path/to/projects"]
+```
+
+`/tasks` then shows the 15 most recent sessions whose canonical work directory
+is inside an allowed root. Use `/tasks <keyword>` to search by title, directory,
+or ID, then `/goto <number>` to resume that session in a per-chat workspace
+context. It does not change the project's global work directory or another
+chat's context, including other direct chats with the same user. Commands in
+that chat also use the selected workspace; this does not change command routing
+for existing `send --cwd` bindings. The success reply shows only the directory
+basename. Numbered results are isolated by chat and user. Both the numbered
+results and the chat's directory binding are kept only in memory: after a
+restart, the chat returns to the configured project directory and session.
+Run `/tasks` and `/goto` again to resume the task. These commands are
+unavailable in multi-workspace mode, where workspace routing is managed
+separately.
 
 Project configs rotate to a fresh session automatically after long inactivity. This prevents "context drift" where stale chat history (failed commands, debugging noise) is repeatedly re-ingested via `--continue` and starts to dominate the model's attention. The previous session is preserved and remains accessible via `/list` and `/switch`.
 
