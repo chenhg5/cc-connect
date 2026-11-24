@@ -909,6 +909,22 @@ type maxUser struct {
 
 type maxRecipient struct {
 	ChatID int64 `json:"chat_id"`
+	// ChatType is "dialog" for a private dialog and "chat"/"channel" for a
+	// group or channel. MAX sends callbacks from private dialogs without a
+	// usable chat_id, so only a dialog chat_id may be cached for them.
+	ChatType string `json:"chat_type"`
+}
+
+// isGroupChatType reports whether a MAX recipient chat_type names a group or
+// channel rather than a private dialog. MAX uses "dialog" for DMs and
+// "chat"/"channel" for shared chats; an unknown or empty value is treated as a
+// dialog so payloads without the field keep the callback fallback working.
+func isGroupChatType(chatType string) bool {
+	switch strings.ToLower(strings.TrimSpace(chatType)) {
+	case "chat", "group", "channel":
+		return true
+	}
+	return false
 }
 
 type maxCallback struct {
@@ -1059,9 +1075,12 @@ func (p *Platform) handleMessage(ctx context.Context, msg *maxMessage) {
 	}
 
 	chatID := strconv.FormatInt(msg.Recipient.ChatID, 10)
-	if chatID != "0" && chatID != "" {
-		// Remember the dialog so callbacks (which arrive without recipient.chat_id)
-		// can be routed to the same session instead of spawning "max:0:<user>".
+	// Remember the private dialog so callbacks (which arrive without
+	// recipient.chat_id) can be routed to the same session instead of spawning
+	// "max:0:<user>". Group and channel chats must not be cached: a group post
+	// would overwrite the dialog chat_id and a later button press in the DM
+	// would be answered in the group session instead.
+	if chatID != "0" && chatID != "" && !isGroupChatType(msg.Recipient.ChatType) {
 		p.chatOfUser.Store(userID, chatID)
 	}
 	sessionKey := fmt.Sprintf("max:%s:%s", chatID, userID)

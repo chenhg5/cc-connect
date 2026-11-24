@@ -362,11 +362,13 @@ func (p *stubCardPlatform) getRefreshedCards() []*Card {
 
 type stubCompactProgressPlatform struct {
 	stubPlatformEngine
-	style          string
-	supportPayload bool
-	previewMu      sync.Mutex
-	previewStarts  []string
-	previewEdits   []string
+	style           string
+	supportPayload  bool
+	updateErr       error
+	previewStartErr error
+	previewMu       sync.Mutex
+	previewStarts   []string
+	previewEdits    []string
 }
 
 func (p *stubCompactProgressPlatform) ProgressStyle() string {
@@ -384,6 +386,9 @@ func (p *stubCompactProgressPlatform) SendPreviewStart(_ context.Context, _ any,
 	p.previewMu.Lock()
 	p.previewStarts = append(p.previewStarts, content)
 	p.previewMu.Unlock()
+	if p.previewStartErr != nil {
+		return nil, p.previewStartErr
+	}
 	return "preview-handle", nil
 }
 
@@ -391,7 +396,7 @@ func (p *stubCompactProgressPlatform) UpdateMessage(_ context.Context, _ any, co
 	p.previewMu.Lock()
 	p.previewEdits = append(p.previewEdits, content)
 	p.previewMu.Unlock()
-	return nil
+	return p.updateErr
 }
 
 func (p *stubCompactProgressPlatform) BuildRichCard(status CardStatus, title string, steps []ToolStep, markdown string, streaming bool, statusFooter string) string {
@@ -1764,6 +1769,68 @@ func TestProcessInteractiveEvents_CardProgressUsesCardTemplate(t *testing.T) {
 	}
 	if !strings.Contains(edits[0], "echo hi") {
 		t.Fatalf("updated preview should contain tool command, got %q", edits[0])
+	}
+}
+
+func TestProcessInteractiveEvents_CardProgressDoesNotSpamFallbackWhenCardFails(t *testing.T) {
+	for _, tt := range []struct {
+		name       string
+		style      string
+		previewErr error
+		updateErr  error
+	}{
+		{
+			name:       "compact-create-failure",
+			style:      "compact",
+			previewErr: errors.New("simulated progress card creation failure"),
+		},
+		{
+			name:       "card-create-failure",
+			style:      "card",
+			previewErr: errors.New("simulated progress card creation failure"),
+		},
+		{
+			name:      "compact-update-failure",
+			style:     "compact",
+			updateErr: errors.New("simulated progress update failure"),
+		},
+		{
+			name:      "card-update-failure",
+			style:     "card",
+			updateErr: errors.New("simulated progress update failure"),
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			p := &stubCompactProgressPlatform{
+				stubPlatformEngine: stubPlatformEngine{n: "feishu"},
+				style:              tt.style,
+				previewStartErr:    tt.previewErr,
+				updateErr:          tt.updateErr,
+			}
+			e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+			sessionKey := "feishu:user-fallback"
+			session := e.sessions.GetOrCreateActive(sessionKey)
+			agentSession := newControllableSession("s-fallback")
+			state := &interactiveState{
+				agentSession: agentSession,
+				platform:     p,
+				replyCtx:     "ctx-fallback",
+			}
+			e.interactiveStates[sessionKey] = state
+
+			agentSession.events <- Event{Type: EventThinking, Content: "Plan first"}
+			agentSession.events <- Event{Type: EventToolUse, ToolName: "Bash", ToolInput: "echo hi"}
+			agentSession.events <- Event{Type: EventToolResult, ToolName: "Bash", ToolResult: "hi"}
+			agentSession.events <- Event{Type: EventText, Content: "done"}
+			agentSession.events <- Event{Type: EventResult, Content: "done", Done: true}
+
+			e.processInteractiveEvents(state, session, e.sessions, sessionKey, "m-fallback", time.Now(), nil, nil, state.replyCtx, 0)
+
+			sent := p.getSent()
+			if len(sent) != 1 || sent[0] != "done" {
+				t.Fatalf("sent = %#v, want only final assistant reply", sent)
+			}
+		})
 	}
 }
 
@@ -7082,6 +7149,60 @@ func TestHandlePendingPermission_AskUserQuestion_SingleQuestion(t *testing.T) {
 	state.mu.Unlock()
 }
 
+// A card click whose answer the platform already rendered in place must not
+// also be echoed as a chat message — the user would see the same answer twice
+// (card swapped to "✅ answer" plus a text reply saying "✅ question: answer").
+func TestHandlePendingPermission_AskUserQuestion_CardAnswerRenderedSuppressesEcho(t *testing.T) {
+	for _, rendered := range []bool{true, false} {
+		e := newTestEngine()
+		p := &stubPlatformEngine{n: "test"}
+		rec := &recordingAgentSession{}
+
+		state := &interactiveState{
+			agentSession: rec,
+			platform:     p,
+			replyCtx:     "ctx",
+			pending: &pendingPermission{
+				RequestID: "req-1",
+				ToolName:  "AskUserQuestion",
+				ToolInput: map[string]any{
+					"questions": []any{map[string]any{"question": "Which?"}},
+				},
+				Questions: testQuestions(),
+				Resolved:  make(chan struct{}),
+			},
+		}
+		key := "test:chat:user1"
+		e.interactiveMu.Lock()
+		e.interactiveStates[key] = state
+		e.interactiveMu.Unlock()
+
+		handled := e.handlePendingPermission(p, &Message{
+			SessionKey:         key,
+			UserID:             "user1",
+			Content:            "2",
+			ReplyCtx:           "ctx",
+			CardAnswerRendered: rendered,
+		}, "2", "")
+		if !handled {
+			t.Fatal("expected handlePendingPermission to return true")
+		}
+		if rec.calls != 1 {
+			t.Fatalf("rendered=%v: expected 1 RespondPermission call, got %d", rendered, rec.calls)
+		}
+
+		p.mu.Lock()
+		sent := append([]string(nil), p.sent...)
+		p.mu.Unlock()
+		if rendered && len(sent) != 0 {
+			t.Errorf("CardAnswerRendered=true produced %d echo message(s): %q", len(sent), sent)
+		}
+		if !rendered && len(sent) != 1 {
+			t.Errorf("CardAnswerRendered=false produced %d echo message(s), want 1 (typed answers still get one)", len(sent))
+		}
+	}
+}
+
 func TestHandlePendingPermission_AskUserQuestion_MultiQuestion_Sequential(t *testing.T) {
 	e := newTestEngine()
 	p := &stubPlatformEngine{n: "test"}
@@ -8490,9 +8611,9 @@ func TestCmdCronExec_TriggersJob(t *testing.T) {
 						if marked {
 							return
 						}
-						time.Sleep(5 * time.Millisecond)
+						time.Sleep(10 * time.Millisecond)
 					}
-					t.Fatal("run output seen but the job was never marked complete")
+					t.Fatalf("timed out waiting for cron persistence, sent=%v", platform.getSent())
 				}
 				time.Sleep(10 * time.Millisecond)
 			}

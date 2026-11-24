@@ -615,6 +615,12 @@ type interactiveState struct {
 	// currentTurnUserMessageTimeMs is the UserMessageTimeMs for the in-flight
 	// foreground turn (including a queued turn after EventResult).
 	currentTurnUserMessageTimeMs int64
+
+	// restartAfterTurn is set by /model when it arrives while a turn is in
+	// flight: instead of killing the running agent process (and losing its
+	// reply), drainPendingMessages restarts the session once the session
+	// goes idle so the next turn picks up the new model.
+	restartAfterTurn bool
 }
 
 // latestUserMessageWatermarkLocked returns the highest UserMessageTimeMs among
@@ -1986,12 +1992,7 @@ func (e *Engine) executeTimerShell(p Platform, replyCtx any, job *TimerJob) erro
 	ctx, cancel := context.WithTimeout(e.ctx, timeout)
 	defer cancel()
 
-	var shellCmd *exec.Cmd
-	if runtime.GOOS == "windows" {
-		shellCmd = exec.CommandContext(ctx, "powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", job.Exec)
-	} else {
-		shellCmd = exec.CommandContext(ctx, "sh", "-c", job.Exec)
-	}
+	shellCmd := shellExecCommand(ctx, e.shell, e.shellFlag, e.shellProfile, job.Exec)
 	shellCmd.Dir = workDir
 
 	stdout, err := shellCmd.StdoutPipe()
@@ -2578,6 +2579,12 @@ func (e *Engine) initPlatformCapabilities(p Platform) {
 
 	if nav, ok := p.(CardNavigable); ok {
 		nav.SetCardNavigationHandler(e.handleCardNav)
+	}
+	if la, ok := p.(LocalizerAware); ok {
+		la.SetLocalizer(e.i18n.T)
+	}
+	if aq, ok := p.(AskQuestionStateAware); ok {
+		aq.SetAskQuestionLiveCheck(e.askQuestionCallbackLive)
 	}
 }
 
@@ -3721,7 +3728,12 @@ found:
 		// More questions remaining — advance to next and send new card
 		if curIdx+1 < len(pending.Questions) {
 			pending.CurrentQuestion = curIdx + 1
-			e.reply(p, msg.ReplyCtx, fmt.Sprintf("✅ %s: **%s**", q.Question, answer))
+			// A card click already had its card replaced in place by the
+			// platform's callback response, so echoing the answer as a chat
+			// message would show the same answer twice.
+			if !msg.CardAnswerRendered {
+				e.reply(p, msg.ReplyCtx, fmt.Sprintf("✅ %s: **%s**", q.Question, answer))
+			}
 			e.sendAskQuestionPrompt(p, msg.ReplyCtx, pending.Questions, curIdx+1)
 			return true
 		}
@@ -3735,7 +3747,7 @@ found:
 		}); err != nil {
 			slog.Error("failed to send AskUserQuestion response", "error", err)
 			e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgError), err))
-		} else {
+		} else if !msg.CardAnswerRendered {
 			e.reply(p, msg.ReplyCtx, fmt.Sprintf("✅ %s: **%s**", q.Question, answer))
 		}
 
@@ -3834,6 +3846,39 @@ func parseAskQuestionCallback(content string) (qIdx int, hasQIdx bool, ok bool) 
 		return qIdx, true, true
 	}
 	return 0, false, false
+}
+
+// askQuestionCallbackLive reports whether an AskUserQuestion option click
+// would answer the question that is waiting now. It applies the same rules
+// as handlePendingPermission, so a platform can avoid rendering an answer
+// that the engine is about to drop. Content that is not an option click is
+// reported live.
+func (e *Engine) askQuestionCallbackLive(sessionKey, content string) bool {
+	qIdx, hasQIdx, ok := parseAskQuestionCallback(content)
+	if !ok {
+		return true
+	}
+	iKey := e.interactiveKeyForSessionKey(sessionKey)
+	_, pending := e.lookupPending(iKey)
+	if pending == nil {
+		e.interactiveMu.Lock()
+		var cronKeys []string
+		for k := range e.interactiveStates {
+			if strings.HasPrefix(k, iKey+"#cron:") {
+				cronKeys = append(cronKeys, k)
+			}
+		}
+		e.interactiveMu.Unlock()
+		for _, k := range cronKeys {
+			if _, pending = e.lookupPending(k); pending != nil {
+				break
+			}
+		}
+	}
+	if pending == nil || len(pending.Questions) == 0 {
+		return false
+	}
+	return !hasQIdx || qIdx == pending.CurrentQuestion
 }
 
 // dropStaleAskQuestionCallback tells the user that an option click arrived
@@ -5813,7 +5858,9 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				preview := truncateIf(event.Content, e.display.ThinkingMaxLen)
 				thinkingMsg := fmt.Sprintf(e.i18n.T(MsgThinking), preview)
 				if !cp.AppendEvent(ProgressEntryThinking, preview, "", thinkingMsg) {
-					sendWorkspace(p, replyCtx, thinkingMsg)
+					if progressStyleForTarget(p, replyCtx) == progressStyleLegacy {
+						sendWorkspace(p, replyCtx, thinkingMsg)
+					}
 				}
 			}
 
@@ -5941,8 +5988,13 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				// the rich-card path. event.ToolInput itself is left untouched.
 				cardToolInput := truncateIf(toolInput, e.display.ToolMaxLen)
 				if !cp.AppendEvent(ProgressEntryToolUse, cardToolInput, event.ToolName, toolMsg) {
-					for _, chunk := range SplitMessageCodeFenceAware(toolMsg, maxPlatformMessageLen) {
-						sendWorkspace(p, replyCtx, chunk)
+					// Compact/card progress is best-effort. If its editable card
+					// fails, do not turn every subsequent tool event into a new
+					// chat message; the final answer remains authoritative.
+					if progressStyleForTarget(p, replyCtx) == progressStyleLegacy {
+						for _, chunk := range SplitMessageCodeFenceAware(toolMsg, maxPlatformMessageLen) {
+							sendWorkspace(p, replyCtx, chunk)
+						}
 					}
 				}
 			}
@@ -5987,7 +6039,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 						Success:  event.ToolSuccess,
 					}
 					if !cp.AppendStructured(entry, resultMsg) {
-						if !SuppressStandaloneToolResultEvent(p) {
+						if progressStyleForTarget(p, replyCtx) == progressStyleLegacy && !SuppressStandaloneToolResultEvent(p) {
 							e.sendRaw(p, replyCtx, resultMsg)
 						}
 					}
@@ -7028,6 +7080,16 @@ func (e *Engine) notifyDroppedQueuedMessages(state *interactiveState, reason err
 func (e *Engine) drainPendingMessages(state *interactiveState, session *Session, sessions *SessionManager, sessionKey string, lockGen uint64) bool {
 	for {
 		state.mu.Lock()
+		if len(state.pendingMessages) == 0 && state.restartAfterTurn {
+			// A /model switch was deferred while the turn ran. Its reply has
+			// been delivered, so restart the agent session now, while the
+			// session lock still keeps new turns off the old process.
+			state.restartAfterTurn = false
+			state.mu.Unlock()
+			slog.Info("applying model switch deferred until turn completion", "session", sessionKey)
+			e.cleanupInteractiveState(sessionKey, state)
+			continue
+		}
 		if len(state.pendingMessages) == 0 {
 			session.Unlock(lockGen)
 			state.mu.Unlock()
@@ -7045,9 +7107,9 @@ func (e *Engine) drainPendingMessages(state *interactiveState, session *Session,
 			)
 		}
 		if len(state.pendingMessages) == 0 {
-			session.Unlock(lockGen)
+			// Re-check from the top so a deferred restart is not skipped.
 			state.mu.Unlock()
-			return true
+			continue
 		}
 		queued := state.pendingMessages[0]
 		state.pendingMessages = state.pendingMessages[1:]
@@ -10525,14 +10587,45 @@ func (e *Engine) cmdModel(p Platform, msg *Message, args []string) {
 		return
 	}
 	e.persistWorkspaceModelOverride(interactiveKey, msg.SessionKey, agent, target)
-	e.cleanupInteractiveState(interactiveKey)
+	deferred := e.deferRestartIfTurnInFlight(interactiveKey)
+	if !deferred {
+		e.cleanupInteractiveState(interactiveKey)
+	}
 
 	// Keep the existing agent session ID so the next StartSession uses
 	// --resume <id> --model <new>, which lets the CLI agent restore context
 	// natively without replaying history (no extra token cost).
 	sessions.Save()
 
+	if deferred {
+		e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgModelChangeQueued, target))
+		return
+	}
 	e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgModelChanged, target))
+}
+
+// deferRestartIfTurnInFlight reports whether a turn is running on the live
+// agent session for interactiveKey and, if so, marks the state so that
+// drainPendingMessages restarts the session once the turn (and any queued
+// messages) finish. Closing the session mid-turn would drop the reply.
+// The busy check and the flag are both made under state.mu, which
+// drainPendingMessages also holds when it releases the session lock, so a
+// flag set here is always seen by the drain loop.
+func (e *Engine) deferRestartIfTurnInFlight(interactiveKey string) bool {
+	e.interactiveMu.Lock()
+	state := e.interactiveStates[interactiveKey]
+	e.interactiveMu.Unlock()
+	if state == nil {
+		return false
+	}
+	state.mu.Lock()
+	defer state.mu.Unlock()
+	if state.stopped || state.agentSession == nil || !state.agentSession.Alive() ||
+		state.busySession == nil || !state.busySession.Busy() {
+		return false
+	}
+	state.restartAfterTurn = true
+	return true
 }
 
 // resolveModelAlias resolves a user-supplied string to a model name.
@@ -14722,7 +14815,7 @@ func (e *Engine) renderSkillsCard(registry *SkillRegistry) *Card {
 }
 
 func (e *Engine) renderDoctorCard() *Card {
-	results := RunDoctorChecks(e.ctx, e.agent, e.platforms)
+	results := RunDoctorChecks(e.ctx, e.agent, e.platforms, e.dataDir)
 	report := FormatDoctorResults(results, e.i18n)
 	return NewCard().
 		Title(e.i18n.T(MsgCardTitleDoctor), "orange").
@@ -16174,7 +16267,7 @@ func (e *Engine) renderWhoamiCard(msg *Message) *Card {
 // ── /doctor command ─────────────────────────────────────────
 
 func (e *Engine) cmdDoctor(p Platform, msg *Message) {
-	results := RunDoctorChecks(e.ctx, e.agent, e.platforms)
+	results := RunDoctorChecks(e.ctx, e.agent, e.platforms, e.dataDir)
 	report := FormatDoctorResults(results, e.i18n)
 	e.reply(p, msg.ReplyCtx, report)
 }

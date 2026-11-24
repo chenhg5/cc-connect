@@ -1137,7 +1137,9 @@ app_secret = "your-feishu-app-secret"
 # reply_to_trigger = true   # Default: bot uses “reply to message” API (quotes the user’s message). Set false to post plain chat messages instead.
 #                           # 默认 true：用「回复消息」API（引用用户消息）。设为 false 则在会话里发普通消息、不引用触发消息。
 # progress_style = "legacy" # Progress rendering style: legacy | compact | card
+#                           # In compact/card mode the progress card is edited at most once per 1.5s.
 #                           # 进度消息展示风格：legacy（逐条消息）| compact（单消息持续更新）| card（结构化卡片）
+#                           # compact/card 下同一张进度卡片最多每 1.5 秒更新一次；最终回复不受节流影响。
 # resolve_mentions = false  # Auto-resolve @name in outgoing messages to Feishu at tags by matching group member names
 #                           # 自动将发出消息中的 @显示名 替换为飞书 at 标签（通过匹配群成员名称）
 # mention_map = { BOT-A = "ou_bot_a_open_id", BOT-B = "ou_bot_b_open_id" }
@@ -1162,6 +1164,16 @@ app_secret = "your-feishu-app-secret"
 #                               # Applies after image batching; include image_batch_window_ms when considering total delay.
 #                               # 普通文字和图片的可选合批窗口，默认关闭；开启后普通文字也会等待，图片另计上面的合批延迟。
 #                               # 命令、权限回复及引用消息不等待此窗口。
+# attachment_wait = "off"   # With thread_isolation, how unmentioned attachments (image/file/video) in an
+#                           # active topic are handled. "off" (default): dispatch at once, as today.
+#                           # "mention": hold them per topic and sender; the same sender's next @bot message
+#                           # in that topic is dispatched with them attached. Unmentioned text never releases them.
+#                           # 开启 thread_isolation 时，已活跃话题里未 @ 的附件（图片/文件/视频）怎么处理。
+#                           # "off"（默认）：立即分发，与现在一致；"mention"：按话题 + 发送人暂存，等同一发送人
+#                           # 在该话题下一次 @机器人 时一起分发。未 @ 的文字不会放行。
+# attachment_wait_secs = 1800 # "mention" only: staged attachments are dropped after this many seconds (1–86400),
+#                             # and a topic stops counting as active after this long without an @bot message.
+#                             # 仅 "mention" 生效：暂存超过该秒数即丢弃；话题超过该时长没有 @机器人 也不再算活跃。
 
 # Lark (International Version) / Lark 国际版
 # Lark now supports WebSocket long-connection too; webhook mode is only needed
@@ -1216,6 +1228,8 @@ app_secret = "your-feishu-app-secret"
 #                                 # Agent 完成回复后添加的表情回复（如 "🥳Done"）；设为 "none" 可禁用
 # card_final_preview_message = false # After an AI Card turn, send a separate Markdown summary
 #                                    # AI 卡片完成后额外发送一条普通 Markdown 摘要，用于刷新会话列表预览
+# at_mention_groups = false # Use text msgtype for group replies so @userId mentions are clickable (DingTalk only highlights @ in text); default false keeps markdown/card behavior
+#                           # 群回复改用 text 消息类型以携带可点击的 @ 提及（DingTalk 仅在 text msgtype 中高亮 @），默认 false 保持原有 markdown/卡片行为
 
 # WPS Xiezuo / WPS 协作 (uncomment to enable / 取消注释以启用)
 # 1. Create a WPS Open Platform app and enable event WebSocket delivery
@@ -1778,6 +1792,12 @@ app_secret = "your-feishu-app-secret"
 # Requires a Codex version that confirms activePermissionProfile; see docs/usage.md.
 # 需要支持 activePermissionProfile 的 Codex 版本；详见 docs/usage.zh-CN.md。
 #
+# Optional (app_server only): minutes to wait for an AskUserQuestion answer
+# before declining it. Default 5; values <= 0 or invalid fall back to 5.
+# 可选（仅 app_server）：等待 AskUserQuestion 回答的分钟数，超时后拒绝。
+# 默认 5；<= 0 或无效值回退为 5。
+# request_user_input_timeout_mins = 5
+#
 # Mode options / 模式说明:
 # - "suggest":   read-only; app_server requests approval when needed, exec cannot prompt / 只读；app_server 按需请求审批，exec 无交互审批
 # - "auto-edit": workspace-write with no approval prompts (same as full-auto) / 工作区可写，无审批提示（等同 full-auto）
@@ -1896,6 +1916,9 @@ app_secret = "your-feishu-app-secret"
 # http_url = ""                    # optional: OneBot HTTP API URL for file operations, e.g. "http://127.0.0.1:3000"
 #                                  # Required for SendFile. Useful when OneBot runs in WSL/Docker.
 #                                  # 可选：OneBot HTTP API 地址，用于文件发送。OneBot 在 WSL/Docker 中时必须配置。
+# send_via_http = false            # optional: send text replies via http_url instead of WebSocket (requires http_url).
+#                                  # Enable if long replies fail with "qq: API send_group_msg timeout" (WS has a 15s limit).
+#                                  # 可选：文本回复改走 HTTP API（需配置 http_url）。长回复出现 WS 15 秒超时时开启。
 # allow_from = "*"                 # allowed QQ user IDs, e.g. "12345,67890" or "*" for all
 #                                  # 允许的 QQ 号，如 "12345,67890"，"*" 表示所有
 # share_session_in_channel = false  # If true, all users in a group share one agent session / 群聊共享会话
