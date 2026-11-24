@@ -146,3 +146,14 @@ func toolCallID(event Event) string {
 	id, _ := event.Metadata["tool_use_id"].(string)
 	return strings.TrimSpace(id)
 }
+
+// setRichProgressStepID attaches the call ID
+// after the progress list has inserted or replaced the tool's row.
+func setRichProgressStepID(steps []ToolStep, event Event) {
+	for i := len(steps) - 1; i >= 0; i-- {
+		if steps[i].Kind == ToolStepKindTool && strings.EqualFold(steps[i].Name, event.ToolName) {
+			steps[i].ToolCallID = toolCallID(event)
+			return
+		}
+	}
+}

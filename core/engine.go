@@ -5887,17 +5887,14 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 		case EventToolUse:
 			toolCount++
 			if hasRichCard {
+				event.ToolInput = toolInputPreview(formatToolInput(event.ToolName, event.ToolInput), e.display.ToolMaxLen)
 				// When tool messages are suppressed, skip card updates on tool events.
 				if !e.display.ToolMessages {
 					break
 				}
-				toolSteps = append(toolSteps, ToolStep{
-					Kind:       ToolStepKindTool,
-					Name:       event.ToolName,
-					ToolCallID: toolCallID(event),
-					Summary:    toolInputPreview(event.ToolInput, e.display.ToolMaxLen),
-				})
+				toolSteps = appendToolStep(toolSteps, event.ToolName, truncateIf(formatToolInput(event.ToolName, event.ToolInput), e.display.ToolMaxLen))
 				if cardMessageID == nil {
+					setRichProgressStepID(toolSteps, event)
 					card := buildResolvedRichCard(CardStatusWorking, "", toolSteps, partialText, true, e.composeRichStatusFooter(true, turnStart, e.agent, state.agentSession, state.workspaceDir))
 					if starter, ok := p.(PreviewStarter); ok {
 						handle, err := starter.SendPreviewStart(e.ctx, replyCtx, card)
@@ -5908,11 +5905,13 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 						}
 					}
 				} else if updater, ok := p.(MessageUpdater); ok {
+					setRichProgressStepID(toolSteps, event)
 					card := buildResolvedRichCard(CardStatusWorking, "", toolSteps, partialText, true, e.composeRichStatusFooter(true, turnStart, e.agent, state.agentSession, state.workspaceDir))
 					if err := updater.UpdateMessage(e.ctx, cardMessageID, card); err != nil {
 						slog.Debug("rich card: failed to update tool card", "platform", p.Name(), "error", err)
 					}
 				}
+				setRichProgressStepID(toolSteps, event)
 				break
 			}
 			// When tool messages are hidden, behavior depends on display mode:
@@ -7086,14 +7085,18 @@ func mergeRichToolResult(steps []ToolStep, event Event, result string, maxLen in
 	if steps[idx].Kind == "" {
 		steps[idx].Kind = ToolStepKindTool
 	}
+	needsRichPreview := strings.TrimSpace(steps[idx].Summary) == "" && strings.TrimSpace(event.ToolInput) != ""
 	if strings.TrimSpace(steps[idx].Summary) == "" && strings.TrimSpace(event.ToolInput) != "" {
-		steps[idx].Summary = toolInputPreview(strings.TrimSpace(event.ToolInput), maxLen)
+		steps[idx].Summary = truncateIf(strings.TrimSpace(formatToolInput(toolName, event.ToolInput)), maxLen)
 	}
 	steps[idx].Result = result
 	steps[idx].Status = strings.TrimSpace(event.ToolStatus)
 	steps[idx].ExitCode = event.ToolExitCode
 	steps[idx].Success = event.ToolSuccess
 	steps[idx].Done = true
+	if needsRichPreview {
+		steps[idx].Summary = toolInputPreview(strings.TrimSpace(formatToolInput(toolName, event.ToolInput)), maxLen)
+	}
 	return steps
 }
 
