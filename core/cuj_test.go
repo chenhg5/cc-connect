@@ -2164,7 +2164,45 @@ func TestCUJ_H3_SharedSessionLinkedToIntegration(t *testing.T) {
 // CUJ-I1 · Rich card mode produces valid card JSON for the platform.
 // Covered by platform/feishu/card_test.go and release-gate TestCC_CARD_01_rich.
 func TestCUJ_I1_RichCardLinkedToPlatformAndIntegration(t *testing.T) {
-	t.Log("CUJ-I1: covered by platform/feishu/card_test.go + release-gate TestCC_CARD_01_rich")
+	t.Run("tool output tail survives summary truncation and the next turn", func(t *testing.T) {
+		p := &toolTailJourneyPlatform{stubPlatformEngine: stubPlatformEngine{n: "test"}}
+		session := &toolTailJourneySession{controllableAgentSession: newControllableSession("tail-session")}
+		e := NewEngine("test", &controllableAgent{nextSession: session}, []Platform{p}, "", LangEnglish)
+		e.SetDisplayConfig(DisplayCfg{Mode: "full", CardMode: "rich", ToolMessages: true, ToolMaxLen: 20})
+		t.Cleanup(func() {
+			if err := e.Stop(); err != nil {
+				t.Error(err)
+			}
+		})
+		send := func(content string) {
+			e.ReceiveMessage(p, &Message{SessionKey: "test:user", Platform: "test", UserID: "user", Content: content, ReplyCtx: "chat"})
+		}
+		await := func(want string) string {
+			t.Helper()
+			deadline := time.Now().Add(3 * time.Second)
+			for time.Now().Before(deadline) {
+				sent := p.getSent()
+				if len(sent) > 0 && strings.Contains(sent[len(sent)-1], want) {
+					return sent[len(sent)-1]
+				}
+				time.Sleep(5 * time.Millisecond)
+			}
+			t.Fatalf("missing %q in %v", want, p.getSent())
+			return ""
+		}
+		send("first task")
+		if got := await("first-final"); !strings.Contains(got, "FIRST_TAIL") {
+			t.Fatalf("first tail lost: %s", got)
+		}
+		send("second task")
+		if got := await("second-final"); !strings.Contains(got, "SECOND_TAIL") || strings.Contains(got, "FIRST_TAIL") {
+			t.Fatalf("preview retained previous turn: %s", got)
+		}
+		send("/history")
+		if got := await("History"); !strings.Contains(got, "first-final") || !strings.Contains(got, "second-final") {
+			t.Fatalf("history lost final answers: %s", got)
+		}
+	})
 }
 
 // CUJ-I2 · Legacy card mode for backwards-compatibility.
@@ -2795,4 +2833,34 @@ type reasoningJourneyPlatform struct {
 
 func (p *reasoningJourneyPlatform) SetCardNavigationHandler(h CardNavigationHandler) {
 	p.navigation = h
+}
+
+// The mock platform exposes the same latest-tool tail as a rich preview.
+// The actual Feishu JSON renderer is covered by tests/release_local/tool_preview.
+type toolTailJourneyPlatform struct{ stubPlatformEngine }
+
+func (p *toolTailJourneyPlatform) BuildRichCard(_ CardStatus, _ string, steps []ToolStep, markdown string, _ bool, _ string) string {
+	if len(steps) > 0 {
+		return steps[len(steps)-1].ResultTail + "\n" + markdown
+	}
+	return markdown
+}
+func (p *toolTailJourneyPlatform) SendPreviewStart(ctx context.Context, reply any, content string) (any, error) {
+	return "preview", p.Reply(ctx, reply, content)
+}
+func (p *toolTailJourneyPlatform) UpdateMessage(ctx context.Context, reply any, content string) error {
+	return p.Reply(ctx, reply, content)
+}
+
+type toolTailJourneySession struct{ *controllableAgentSession }
+
+func (s *toolTailJourneySession) Send(prompt, _ string, _ []ImageAttachment, _ []FileAttachment) error {
+	tail, answer := "FIRST_TAIL", "first-final"
+	if strings.Contains(prompt, "second task") {
+		tail, answer = "SECOND_TAIL", "second-final"
+	}
+	s.events <- Event{Type: EventToolUse, ToolName: "shell", ToolInput: "test command"}
+	s.events <- Event{Type: EventToolResult, ToolName: "shell", ToolResult: "head summary...", ToolResultTail: tail, ToolStatus: "completed"}
+	s.events <- Event{Type: EventResult, Content: answer, Done: true}
+	return nil
 }

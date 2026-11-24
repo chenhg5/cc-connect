@@ -63,14 +63,15 @@ const (
 
 // ToolStep is one summarized progress row shown in rich progress cards.
 type ToolStep struct {
-	Kind     ToolStepKind // progress row kind; empty means tool for backward compatibility
-	Name     string       // tool name (e.g. "Bash", "Edit")
-	Summary  string       // human-readable summary shown in the card
-	Result   string       // optional tool output/result summary
-	Status   string       // optional tool status (e.g. completed/failed)
-	ExitCode *int         // optional process exit code
-	Success  *bool        // optional success flag
-	Done     bool         // true once a tool result has been observed
+	Kind       ToolStepKind // progress row kind; empty means tool for backward compatibility
+	Name       string       // tool name (e.g. "Bash", "Edit")
+	Summary    string       // human-readable summary shown in the card
+	Result     string       // optional tool output/result summary
+	ResultTail string       // bounded recent output preserved before summary truncation
+	Status     string       // optional tool status (e.g. completed/failed)
+	ExitCode   *int         // optional process exit code
+	Success    *bool        // optional success flag
+	Done       bool         // true once a tool result has been observed
 }
 
 // RichCardSupporter is an optional interface for platforms that can build

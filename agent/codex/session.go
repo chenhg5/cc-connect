@@ -644,12 +644,13 @@ func (cs *codexSession) handleItemCompleted(raw map[string]any) {
 			"output_len", len(output),
 		)
 		evt := core.Event{
-			Type:         core.EventToolResult,
-			ToolName:     "Bash",
-			ToolResult:   truncate(strings.TrimSpace(output), 500),
-			ToolStatus:   strings.TrimSpace(status),
-			ToolExitCode: &code,
-			ToolSuccess:  &success,
+			Type:           core.EventToolResult,
+			ToolName:       "Bash",
+			ToolResult:     truncate(strings.TrimSpace(output), 500),
+			ToolResultTail: core.ToolOutputTail(output),
+			ToolStatus:     strings.TrimSpace(status),
+			ToolExitCode:   &code,
+			ToolSuccess:    &success,
 		}
 		select {
 		case cs.events <- evt:
@@ -666,11 +667,12 @@ func (cs *codexSession) handleItemCompleted(raw map[string]any) {
 			"name", name, "status", status, "output_len", len(output),
 		)
 		evt := core.Event{
-			Type:        core.EventToolResult,
-			ToolName:    name,
-			ToolResult:  truncate(strings.TrimSpace(output), 500),
-			ToolStatus:  strings.TrimSpace(status),
-			ToolSuccess: &success,
+			Type:           core.EventToolResult,
+			ToolName:       name,
+			ToolResult:     truncate(strings.TrimSpace(output), 500),
+			ToolResultTail: core.ToolOutputTail(output),
+			ToolStatus:     strings.TrimSpace(status),
+			ToolSuccess:    &success,
 		}
 		select {
 		case cs.events <- evt:
