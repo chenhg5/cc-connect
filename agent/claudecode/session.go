@@ -28,15 +28,6 @@ import (
 // In "auto" mode, permission requests are auto-approved internally
 // (avoiding --dangerously-skip-permissions which fails under root).
 type claudeSession struct {
-	// Mid-turn input (SendMidTurn): messages not yet folded or run, and a
-	// turn's result held or merged while a follow-up turn may start.
-	midTurnMu      sync.Mutex
-	midTurnPending []uint64
-	midTurnNextID  uint64
-	heldResult     *core.Event
-	heldTimer      *time.Timer
-	mergedResult   *core.Event
-
 	cmd             *exec.Cmd
 	stdin           io.WriteCloser
 	stdinMu         sync.Mutex
@@ -158,6 +149,15 @@ type claudeSession struct {
 	// when the session reuses the shared file (the common 99% case)
 	// or when there is nothing to append.
 	promptFilePath string
+
+	// Mid-turn input (SendMidTurn): messages not yet folded or run, and a
+	// turn's result held or merged while a follow-up turn may start.
+	midTurnMu      sync.Mutex
+	midTurnPending []uint64
+	midTurnNextID  uint64
+	heldResult     *core.Event
+	heldTimer      *time.Timer
+	mergedResult   *core.Event
 }
 
 // StartupWarning implements core.StartupWarner. Returns a non-empty string
