@@ -548,6 +548,7 @@ type queuedMessage struct {
 	images            []ImageAttachment
 	files             []FileAttachment
 	fromVoice         bool
+	silentEmpty       bool
 	userID            string
 	userName          string // sender's display name for sender injection
 	msgPlatform       string // platform name for sender injection
@@ -581,6 +582,7 @@ type interactiveState struct {
 	approveAll               bool            // when true, auto-approve all permission requests for this session
 	fromVoice                bool            // true if current turn originated from voice transcription
 	sideText                 string
+	silentEmpty              bool // suppress fallback reply for an empty synthetic turn
 	deleteMode               *deleteModeState
 	modelSwitch              *modelSwitchState
 	pendingProviderAdd       *pendingProviderAddState
@@ -1622,14 +1624,15 @@ func (e *Engine) ExecuteCronJob(job *CronJob) error {
 		effectivePlatform = &mutePlatform{targetPlatform}
 	}
 
+	silent := job.Silent != nil && *job.Silent
+	if e.cronScheduler != nil {
+		silent = e.cronScheduler.IsSilent(job)
+	}
+
 	// Notify user that a cron job is executing (unless silent/muted)
 	// Note: this notification uses targetPlatform directly, not the tracking wrapper,
 	// so it won't count as a "meaningful delivery" for empty response detection.
 	if !job.Mute {
-		silent := false
-		if e.cronScheduler != nil {
-			silent = e.cronScheduler.IsSilent(job)
-		}
 		if !silent {
 			desc := job.Description
 			if desc == "" {
@@ -1656,6 +1659,7 @@ func (e *Engine) ExecuteCronJob(job *CronJob) error {
 		UserName:     "cron",
 		Content:      content,
 		ReplyCtx:     replyCtx,
+		SilentEmpty:  silent,
 		ModeOverride: job.Mode,
 	}
 
@@ -2381,12 +2385,13 @@ func (e *Engine) ExecuteHeartbeat(sessionKey, prompt string, silent bool) error 
 	}
 
 	msg := &Message{
-		SessionKey: sessionKey,
-		Platform:   platformName,
-		UserID:     "heartbeat",
-		UserName:   "heartbeat",
-		Content:    prompt,
-		ReplyCtx:   replyCtx,
+		SessionKey:  sessionKey,
+		Platform:    platformName,
+		UserID:      "heartbeat",
+		UserName:    "heartbeat",
+		Content:     prompt,
+		ReplyCtx:    replyCtx,
+		SilentEmpty: silent,
 	}
 
 	session := e.sessions.GetOrCreateActive(sessionKey)
@@ -3485,6 +3490,7 @@ func (e *Engine) queueMessageForBusySession(p Platform, msg *Message, interactiv
 		images:            msg.Images,
 		files:             msg.Files,
 		fromVoice:         msg.FromVoice,
+		silentEmpty:       msg.SilentEmpty,
 		userID:            msg.UserID,
 		userName:          msg.UserName,
 		msgPlatform:       msg.Platform,
@@ -4209,6 +4215,7 @@ func (e *Engine) processInteractiveMessageWith(p Platform, msg *Message, session
 	state.mu.Lock()
 	state.currentMessageID = msg.MessageID
 	state.fromVoice = msg.FromVoice
+	state.silentEmpty = msg.SilentEmpty
 	state.sideText = ""
 	as := state.agentSession // capture under lock to avoid race with cleanup
 	state.mu.Unlock()
@@ -6322,8 +6329,9 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				cancelled := state.turnCancelled
 				state.turnCancelled = false // read-and-clear
 				stopped := state.stopped
+				silentEmpty := state.silentEmpty
 				state.mu.Unlock()
-				if cancelled || stopped {
+				if cancelled || stopped || silentEmpty {
 					// User-aborted/cancelled mid-turn with no agent output: stay silent —
 					// the /stop ack already told the user. Reuses the NO_REPLY
 					// silent-delivery path so no "(empty response)" noise is sent.
@@ -6738,6 +6746,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				state.replyCtx = queued.replyCtx
 				state.currentMessageID = queued.messageID
 				state.fromVoice = queued.fromVoice
+				state.silentEmpty = queued.silentEmpty
 				state.currentTurnUserMessageTimeMs = queued.userMessageTimeMs
 				state.mu.Unlock()
 
@@ -7102,6 +7111,7 @@ func (e *Engine) drainPendingMessages(state *interactiveState, session *Session,
 		state.replyCtx = queued.replyCtx
 		state.currentMessageID = queued.messageID
 		state.fromVoice = queued.fromVoice
+		state.silentEmpty = queued.silentEmpty
 		state.currentTurnUserMessageTimeMs = queued.userMessageTimeMs
 		state.mu.Unlock()
 
