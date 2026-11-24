@@ -338,6 +338,10 @@ type DisplayCfg struct {
 	ToolMessages     bool
 	HistoryMaxLen    *int // max runes for /history entries; nil = default, 0 = no truncation
 	HideAgentFooter  bool // strip model/token footer lines emitted as agent text
+	// RichThrottleChars and RichThrottleMs bound how often a rich card pushes
+	// a text update. Previously hard-coded per platform; see config.DisplayConfig.
+	RichThrottleChars int
+	RichThrottleMs    int
 }
 
 // InstantReplyCfg controls the immediate confirmation reply sent when a message
@@ -797,7 +801,7 @@ func NewEngine(name string, ag Agent, platforms []Platform, sessionStorePath str
 		cancel:                cancel,
 		i18n:                  NewI18n(lang),
 		attachmentSendEnabled: true,
-		display:               DisplayCfg{Mode: "full", ThinkingMessages: true, ThinkingMaxLen: defaultThinkingMaxLen, ToolMaxLen: defaultToolMaxLen, ToolMessages: true, CardMode: "legacy"},
+		display:               DisplayCfg{Mode: "full", ThinkingMessages: true, ThinkingMaxLen: defaultThinkingMaxLen, ToolMaxLen: defaultToolMaxLen, ToolMessages: true, CardMode: "legacy", RichThrottleChars: 20, RichThrottleMs: 200},
 		commands:              NewCommandRegistry(),
 		skills:                NewSkillRegistry(),
 		aliases:               make(map[string]string),
@@ -6093,14 +6097,23 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 									}
 								}
 							}
-							// Throttle: cardkit-v1 streaming text path uses tighter limits (200ms / 20 chars)
-							// for smoother typewriter UX; full-card Patch fallback keeps the original 1500ms / 30 chars.
+							// Throttle: cardkit-v1 streaming text path defaults to tighter limits
+							// (200ms / 20 chars) for smoother typewriter UX; full-card Patch
+							// fallback keeps the original 1500ms / 30 chars. Both are overridable
+							// via [display] rich_throttle_chars / rich_throttle_ms because the tight
+							// defaults cost one HTTP round-trip per 20 characters.
 							streamer, hasStreamer := p.(RichCardTextStreamer)
 							throttleDur := 1500 * time.Millisecond
 							throttleChars := 30
 							if hasStreamer && cardMessageID != nil {
 								throttleDur = 200 * time.Millisecond
 								throttleChars = 20
+								if e.display.RichThrottleChars > 0 {
+									throttleChars = e.display.RichThrottleChars
+								}
+								if e.display.RichThrottleMs > 0 {
+									throttleDur = time.Duration(e.display.RichThrottleMs) * time.Millisecond
+								}
 							}
 							if cardMessageID != nil && (time.Since(lastRichCardUpdate) > throttleDur || len(partialText)-lastRichCardLen > throttleChars) {
 								// Prefer per-element streaming text update (cardkit-v1) when available;
