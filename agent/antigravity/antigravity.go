@@ -30,6 +30,7 @@ func init() {
 //   - "yolo":      auto-approve all tools (--dangerously-skip-permissions)
 //   - "plan":      read-only plan mode with terminal sandbox constraints (--sandbox)
 type Agent struct {
+	effort       string
 	workDir      string
 	model        string
 	mode         string
@@ -49,6 +50,7 @@ func New(opts map[string]any) (core.Agent, error) {
 		workDir = "."
 	}
 	model, _ := opts["model"].(string)
+	effort, _ := opts["reasoning_effort"].(string)
 	mode, _ := opts["mode"].(string)
 	mode = normalizeMode(mode)
 	cmd, extraArgs := core.ParseCmdOpts(opts, "agy")
@@ -76,6 +78,7 @@ func New(opts map[string]any) (core.Agent, error) {
 	}
 
 	return &Agent{
+		effort:       effort,
 		workDir:      workDir,
 		model:        model,
 		mode:         mode,
@@ -205,6 +208,7 @@ func (a *Agent) SetSessionEnv(env []string) {
 func (a *Agent) StartSession(ctx context.Context, sessionID string) (core.AgentSession, error) {
 	a.mu.Lock()
 	model := a.model
+	effort := a.effort
 	mode := a.mode
 	cmd := a.cmd
 	extraArgs := append([]string{}, a.cliExtraArgs...)
@@ -220,6 +224,9 @@ func (a *Agent) StartSession(ctx context.Context, sessionID string) (core.AgentS
 	}
 	a.mu.Unlock()
 
+	if supportsAgyACP(ctx, cmd, extraArgs, workDir, extraEnv) {
+		return newAgyACPSession(ctx, cmd, extraArgs, workDir, model, effort, mode, sessionID, extraEnv, timeout, 0)
+	}
 	return newAntigravitySession(ctx, cmd, extraArgs, workDir, model, mode, sessionID, extraEnv, timeout)
 }
 
