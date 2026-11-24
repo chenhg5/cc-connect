@@ -28,20 +28,20 @@ type codexSession struct {
 	model         string
 	effort        string
 	mode          string
-	baseURL       string // provider base URL; passed as -c openai_base_url=<url>
-	modelProvider string // Codex model_provider name; passed as -c model_provider=<name>
+	baseURL       string   // provider base URL; passed as -c openai_base_url=<url>
+	modelProvider string   // Codex model_provider name; passed as -c model_provider=<name>
 	cliBin        string   // CLI binary, default "codex"
 	cliExtraArgs  []string // extra args from cli_path, prepended before exec args
 	extraEnv      []string
 	events        chan core.Event
-	threadID  atomic.Value // stores string — Codex thread_id
-	ctx       context.Context
-	cancel    context.CancelFunc
-	wg        sync.WaitGroup
-	alive     atomic.Bool
-	closeOnce sync.Once
-	cmdMu     sync.Mutex
-	cmds      map[*exec.Cmd]struct{}
+	threadID      atomic.Value // stores string — Codex thread_id
+	ctx           context.Context
+	cancel        context.CancelFunc
+	wg            sync.WaitGroup
+	alive         atomic.Bool
+	closeOnce     sync.Once
+	cmdMu         sync.Mutex
+	cmds          map[*exec.Cmd]struct{}
 
 	pendingMsgs []string // buffered agent_message texts awaiting classification
 
@@ -50,6 +50,9 @@ type codexSession struct {
 	runtimeCfgEffort   string
 	runtimeCfgFetched  time.Time
 	runtimeCfgFetchErr error
+	// runtimeConfigTimeout is this session's budget for the config/read
+	// round-trip; defaults to codexRuntimeConfigTimeout.
+	runtimeConfigTimeout time.Duration
 
 	contextMu    sync.RWMutex
 	contextUsage *core.ContextUsage
@@ -67,19 +70,20 @@ func newCodexSession(ctx context.Context, cliBin string, cliExtraArgs []string, 
 	sessionCtx, cancel := context.WithCancel(ctx)
 
 	cs := &codexSession{
-		workDir:       workDir,
-		model:         model,
-		effort:        effort,
-		mode:          mode,
-		baseURL:       baseURL,
-		modelProvider: modelProvider,
-		cliBin:        cliBin,
-		cliExtraArgs:  cliExtraArgs,
-		extraEnv:      extraEnv,
-		events:        make(chan core.Event, 64),
-		ctx:           sessionCtx,
-		cancel:        cancel,
-		cmds:          make(map[*exec.Cmd]struct{}),
+		workDir:              workDir,
+		model:                model,
+		effort:               effort,
+		mode:                 mode,
+		baseURL:              baseURL,
+		modelProvider:        modelProvider,
+		cliBin:               cliBin,
+		cliExtraArgs:         cliExtraArgs,
+		extraEnv:             extraEnv,
+		events:               make(chan core.Event, 64),
+		ctx:                  sessionCtx,
+		cancel:               cancel,
+		cmds:                 make(map[*exec.Cmd]struct{}),
+		runtimeConfigTimeout: codexRuntimeConfigTimeout,
 	}
 	cs.alive.Store(true)
 
@@ -778,7 +782,7 @@ func (cs *codexSession) runtimeConfig() (string, string) {
 		return cs.runtimeCfgModel, cs.runtimeCfgEffort
 	}
 
-	ctx, cancel := context.WithTimeout(cs.ctx, codexRuntimeConfigTimeout)
+	ctx, cancel := context.WithTimeout(cs.ctx, cs.runtimeConfigTimeout)
 	defer cancel()
 
 	model, effort, err := loadCodexRuntimeConfig(ctx, cs.workDir, cs.extraEnv)

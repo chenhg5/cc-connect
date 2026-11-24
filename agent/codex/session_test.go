@@ -157,6 +157,11 @@ while (($line = [Console]::In.ReadLine()) -ne $null) {
 	}
 	defer cs.Close()
 
+	// The fake app-server must start and complete two JSON-RPC round-trips.
+	// The default 1.5s budget flakes under full-suite/CI load, so widen this
+	// session's budget without touching production defaults.
+	cs.runtimeConfigTimeout = 10 * time.Second
+
 	if got := cs.GetModel(); got != "gpt-5.4" {
 		t.Fatalf("GetModel() = %q, want gpt-5.4", got)
 	}
