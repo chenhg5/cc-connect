@@ -728,6 +728,9 @@ func main() {
 				maxTokens = 12000
 			}
 			engine.SetAutoCompressConfigWithSource(true, maxTokens, minGap, proj.AutoCompress.AllowHeuristic)
+			if proj.AutoCompress.OverheadTokens != nil {
+				engine.SetAutoCompressOverheadTokens(*proj.AutoCompress.OverheadTokens)
+			}
 		}
 		applyHistoryBootstrapConfig(&proj, engine)
 		resetIdle, defaulted := resolveResetOnIdle(proj.ResetOnIdleMins)
@@ -1877,6 +1880,11 @@ func reloadConfig(configPath, projName string, engine *core.Engine) (*core.Confi
 			maxTokens = 12000
 		}
 		engine.SetAutoCompressConfigWithSource(true, maxTokens, minGap, proj.AutoCompress.AllowHeuristic)
+		if proj.AutoCompress.OverheadTokens != nil {
+			engine.SetAutoCompressOverheadTokens(*proj.AutoCompress.OverheadTokens)
+		} else {
+			engine.SetAutoCompressOverheadTokens(20_000)
+		}
 	} else {
 		engine.SetAutoCompressConfig(false, 0, 0)
 	}

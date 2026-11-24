@@ -476,14 +476,15 @@ type HeartbeatConfig struct {
 // for agents that have no such mechanism, or for users who want compaction at a
 // visible, predictable turn boundary.
 type AutoCompressConfig struct {
-	Enabled    *bool `toml:"enabled,omitempty"`      // default false
-	MaxTokens  *int  `toml:"max_tokens,omitempty"`   // estimated token threshold to trigger /compress
-	MinGapMins *int  `toml:"min_gap_mins,omitempty"` // minimum minutes between auto-compress runs (default 30)
+	Enabled        *bool `toml:"enabled,omitempty"`         // default false
+	MaxTokens      *int  `toml:"max_tokens,omitempty"`      // estimated token threshold to trigger /compress
+	MinGapMins     *int  `toml:"min_gap_mins,omitempty"`    // minimum minutes between auto-compress runs (default 30)
+	OverheadTokens *int  `toml:"overhead_tokens,omitempty"` // fixed prompt/tool allowance for heuristic estimates (default 20000; 0 disables)
 	// AllowHeuristic restores deciding from the text-length heuristic when an
 	// agent that CAN report exact usage has not reported it yet. Default false:
 	// such turns make no decision and wait for the next turn, which carries the
-	// exact number. The heuristic ignores tool results and the fixed
-	// system-prompt+tools overhead, so it was measured 2.5x off (574,797
+	// exact number. The heuristic ignores tool results and can only approximate
+	// system-prompt+tools overhead via OverheadTokens, so it was measured 2.5x off (574,797
 	// estimated vs 229,783 real).
 	//
 	// This does not apply to agents with no usage reporting at all: for them the
