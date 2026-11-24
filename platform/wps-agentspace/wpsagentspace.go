@@ -53,15 +53,15 @@ type Platform struct {
 	// (USER_NO_APP_PERMISSION in handleFrame) is an org-wide gate, not a
 	// per-user one; wps-xiezuo's docs explicitly say not to rely on that
 	// alone ("Always set allow_from for production deployments").
-	allowFrom  string
-	handler    core.MessageHandler
-	cancel     context.CancelFunc
-	conn       *websocket.Conn
-	mu         sync.Mutex
-	writeCh    chan any
-	dedup      core.MessageDedup
-	stopOnce   sync.Once
-	stopped    atomic.Bool
+	allowFrom string
+	handler   core.MessageHandler
+	cancel    context.CancelFunc
+	conn      *websocket.Conn
+	mu        sync.Mutex
+	writeCh   chan any
+	dedup     core.MessageDedup
+	stopOnce  sync.Once
+	stopped   atomic.Bool
 }
 
 // replyContext holds the context needed to reply to a specific message.
@@ -488,7 +488,7 @@ func (p *Platform) readLoop(conn *websocket.Conn, ctx context.Context) error {
 
 // handleFrame dispatches incoming frames.
 func (p *Platform) handleFrame(frame wsFrame) error {
-	slog.Debug("wps-agentspace: received frame", "event", frame.Event, "data", string(frame.Data))
+	slog.Debug("wps-agentspace: received frame", "event", frame.Event, "data_bytes", len(frame.Data))
 
 	switch frame.Event {
 	case "pong":
@@ -598,7 +598,7 @@ func (p *Platform) handleUserMessage(data messageData) error {
 		content = content + "\n\n[附件]\n" + strings.Join(mediaURLs, "\n")
 	}
 
-	slog.Info("wps-agentspace: received message", "chat_id", chatID, "content", truncate(content, 100), "media_count", len(mediaURLs))
+	slog.Info("wps-agentspace: received message", "chat_id", chatID, "content_bytes", len(content), "media_count", len(mediaURLs))
 
 	// Send typing indicator
 	p.sendTyping(chatID)

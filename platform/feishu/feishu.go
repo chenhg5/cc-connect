@@ -6392,7 +6392,7 @@ func (p *Platform) parsePostBody(raw string) *postLang {
 	}
 	var langMap map[string]postLang
 	if err := json.Unmarshal([]byte(raw), &langMap); err != nil || len(langMap) == 0 {
-		slog.Error(p.tag()+": failed to parse post content", "raw", raw)
+		slog.Error(p.tag()+": failed to parse post content", "raw_bytes", len(raw))
 		return nil
 	}
 	keys := make([]string, 0, len(langMap))
