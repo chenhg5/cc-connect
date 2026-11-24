@@ -100,7 +100,9 @@
     "bridgeConnected": "接続済み",
     "bridgeConnecting": "接続中...",
     "bridgeDisconnected": "未接続",
-    "bridgeNotAvailable": "ブリッジが利用できません。config.toml で [bridge] を有効にしてください。"
+    "bridgeNotAvailable": "ブリッジが利用できません。config.toml で [bridge] を有効にしてください。",
+    "managementUnavailable": "管理 API に接続できないか、認証に失敗しました。接続とトークンを確認してください。",
+    "bridgeStartFailed": "ブリッジの起動に失敗しました{{detail}}。サーバーログを確認してください。"
   },
   "providers": {
     "title": "プロバイダー",

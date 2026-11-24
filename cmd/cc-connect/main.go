@@ -1096,7 +1096,9 @@ func main() {
 			bridgeSrv.RegisterEngine(cfg.Projects[i].Name, e, bp)
 			e.AddPlatform(bp)
 		}
-		bridgeSrv.Start()
+		if err := bridgeSrv.Start(); err != nil {
+			slog.Error("bridge: failed to start server", "addr", fmt.Sprintf(":%d", port), "error", err)
+		}
 	}
 
 	// Start webhook server if enabled
