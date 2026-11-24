@@ -14,9 +14,10 @@ import (
 )
 
 const (
-	feishuAccountsBaseURL = "https://accounts.feishu.cn"
-	larkAccountsBaseURL   = "https://accounts.larksuite.com"
-	weixinDefaultAPIURL   = "https://ilinkai.weixin.qq.com"
+	feishuAccountsBaseURL    = "https://accounts.feishu.cn"
+	larkAccountsBaseURL      = "https://accounts.larksuite.com"
+	weixinDefaultAPIURL      = "https://ilinkai.weixin.qq.com"
+	weixinSetupClientVersion = "1"
 )
 
 // ── Request types for setup save callbacks ──────────────────
@@ -289,6 +290,7 @@ func (m *ManagementServer) handleSetupWeixinBegin(w http.ResponseWriter, r *http
 		mgmtError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
+	httpReq.Header.Set("iLink-App-ClientVersion", weixinSetupClientVersion)
 
 	client := &http.Client{Timeout: 15 * time.Second}
 	resp, err := client.Do(httpReq)
@@ -377,7 +379,7 @@ func (m *ManagementServer) handleSetupWeixinPoll(w http.ResponseWriter, r *http.
 		mgmtError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	httpReq.Header.Set("iLink-App-ClientVersion", "1")
+	httpReq.Header.Set("iLink-App-ClientVersion", weixinSetupClientVersion)
 
 	slog.Info("weixin poll: calling ilink", "url", u.String(), "qr_key", req.QRKey)
 

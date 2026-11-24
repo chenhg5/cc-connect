@@ -25,10 +25,11 @@ const (
 	weixinSetupModeNew  = "new"
 	weixinSetupModeBind = "bind"
 
-	defaultWeixinAPIURL  = "https://ilinkai.weixin.qq.com"
-	defaultWeixinBotType = "3"
-	weixinQRPollTimeout  = 35 * time.Second
-	weixinMaxQRRefresh   = 3
+	defaultWeixinAPIURL      = "https://ilinkai.weixin.qq.com"
+	defaultWeixinBotType     = "3"
+	weixinIlinkClientVersion = "1"
+	weixinQRPollTimeout      = 35 * time.Second
+	weixinMaxQRRefresh       = 3
 
 	// 微信 ilink QR 码有效期约 120 秒，在预估过期前 30 秒主动刷新，
 	// 避免用户正在扫码时 QR 码过期导致的糟糕体验。
@@ -43,6 +44,8 @@ type weixinBotQRResponse struct {
 
 type weixinQRStatusResponse struct {
 	Status      string `json:"status"`
+	Ret         int    `json:"ret"`
+	ErrMsg      string `json:"errmsg"`
 	BotToken    string `json:"bot_token"`
 	IlinkBotID  string `json:"ilink_bot_id"`
 	BaseURL     string `json:"baseurl"`
@@ -288,6 +291,9 @@ func runWeixinQRLoginFlow(opts weixinQRLoginOptions) (*weixinQRLoginResult, erro
 		if err != nil {
 			return nil, err
 		}
+		if status.Ret != 0 || strings.TrimSpace(status.ErrMsg) != "" || status.Status == "need_upgrade" {
+			return nil, fmt.Errorf("ilink 拒绝扫码（可能需要升级微信接口）: ret=%d status=%s msg=%s", status.Ret, status.Status, weixinTruncateBody([]byte(status.ErrMsg), 256))
+		}
 
 		switch status.Status {
 		case "wait", "":
@@ -390,6 +396,7 @@ func weixinHTTPGet(ctx context.Context, fullURL, routeTag string, debug bool) ([
 	if routeTag != "" {
 		req.Header.Set("SKRouteTag", routeTag)
 	}
+	req.Header.Set("iLink-App-ClientVersion", weixinIlinkClientVersion)
 	client := &http.Client{Timeout: weixinQRPollTimeout + 5*time.Second}
 	resp, err := client.Do(req)
 	if err != nil {
@@ -461,7 +468,7 @@ func weixinPollQRStatus(ctx context.Context, apiBase, qrKey, routeTag string, de
 	if err != nil {
 		return nil, err
 	}
-	req.Header.Set("iLink-App-ClientVersion", "1")
+	req.Header.Set("iLink-App-ClientVersion", weixinIlinkClientVersion)
 	if routeTag != "" {
 		req.Header.Set("SKRouteTag", routeTag)
 	}

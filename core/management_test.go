@@ -2980,6 +2980,25 @@ func TestMgmt_CCSwitchProviders_MethodNotAllowed(t *testing.T) {
 	}
 }
 
+func TestMgmt_SetupWeixinBeginSendsClientVersion(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/ilink/bot/get_bot_qrcode" {
+			t.Errorf("unexpected path %q", r.URL.Path)
+		}
+		if got := r.Header.Get("iLink-App-ClientVersion"); got != "1" {
+			t.Errorf("web setup QR request client version = %q, want 1", got)
+		}
+		_, _ = w.Write([]byte(`{"qrcode":"test-key","qrcode_img_content":"https://example.invalid/qr"}`))
+	}))
+	defer server.Close()
+
+	mgmt := NewManagementServer(0, "tok", nil)
+	result, code := mgmtPostHandler(t, mgmt.handleSetupWeixinBegin, "/api/v1/setup/weixin/begin", map[string]any{"api_url": server.URL})
+	if code != http.StatusOK || !result.OK {
+		t.Fatalf("web setup QR request failed: status=%d error=%q", code, result.Error)
+	}
+}
+
 // TestMgmt_SetupWeixinPoll_RejectsMalformedAPIURL is a regression test for a
 // nil-pointer panic in handleSetupWeixinPoll. The handler did
 // `u, _ := url.Parse(apiBase + "/")` and then immediately called
