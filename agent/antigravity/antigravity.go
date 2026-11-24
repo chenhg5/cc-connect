@@ -314,6 +314,8 @@ func (a *Agent) SetSessionEnv(env []string) {
 func (a *Agent) StartSession(ctx context.Context, sessionID string) (core.AgentSession, error) {
 	a.mu.Lock()
 	model := a.model
+	effort := a.effort
+	planner, executor := a.planner, a.executor
 	mode := a.mode
 	cmd := a.cmd
 	extraArgs := append([]string{}, a.cliExtraArgs...)
@@ -327,26 +329,35 @@ func (a *Agent) StartSession(ctx context.Context, sessionID string) (core.AgentS
 			model = m
 		}
 	}
-	if a.effort != "" && supportsEffort(model) {
-		extraArgs = append(extraArgs, "--effort", a.effort)
+	a.mu.Unlock()
+	if !supportsEffort(model) {
+		effort = ""
 	}
-	if a.planner != "" || a.executor != "" {
+
+	// Probe with the base wrapper arguments, not flags for a specific session.
+	useACP := supportsAgyACP(ctx, cmd, extraArgs, workDir, extraEnv)
+	if planner != "" || executor != "" {
 		orchestrator := map[string]string{}
-		if a.planner != "" {
-			orchestrator["planner"] = a.planner
+		if planner != "" {
+			orchestrator["planner"] = planner
 		}
-		if a.executor != "" {
-			orchestrator["executor"] = a.executor
+		if executor != "" {
+			orchestrator["executor"] = executor
 		}
 		settings, err := json.Marshal(map[string]any{"orchestrator": orchestrator})
 		if err != nil {
-			a.mu.Unlock()
 			return nil, err
 		}
 		extraArgs = append(extraArgs, "--settings", string(settings))
 	}
-	a.mu.Unlock()
 
+	if useACP {
+		// ACP sets thought_level through the protocol, not the print-mode flag.
+		return newAgyACPSession(ctx, cmd, extraArgs, workDir, model, effort, mode, sessionID, extraEnv, timeout, 0)
+	}
+	if effort != "" {
+		extraArgs = append(extraArgs, "--effort", effort)
+	}
 	return newAntigravitySession(ctx, cmd, extraArgs, workDir, model, mode, sessionID, extraEnv, timeout)
 }
 

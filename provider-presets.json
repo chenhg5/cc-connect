@@ -899,6 +899,33 @@
           "models": ["claude-sonnet-5-5", "gpt-6.2-astra", "gemini-4-hydrogen", "deepseek-v4-pro"]
         }
       }
+    },
+    {
+      "name": "onomeo",
+      "display_name": "onomeo",
+      "description": "AI gateway with Claude, GPT, Gemini and DeepSeek models behind one key, through Anthropic Messages, OpenAI Responses and Chat Completions APIs, plus free models.",
+      "description_zh": "AI 网关，一个密钥即可通过 Anthropic Messages、OpenAI Responses 和 Chat Completions 接口使用 Claude、GPT、Gemini、DeepSeek 等模型，另有免费模型。",
+      "features": ["OpenAI Compatible", "Anthropic Compatible", "Responses API", "Free Models"],
+      "tier": 3,
+      "website": "https://onomeo.com",
+      "agents": {
+        "claudecode": {
+          "base_url": "https://onomeo.com",
+          "model": "claude-sonnet-5.5",
+          "models": ["claude-sonnet-5.5", "claude-opus-5.5", "claude-haiku-5.5"]
+        },
+        "codex": {
+          "base_url": "https://onomeo.com/v1",
+          "model": "gpt-6.2-sol",
+          "models": ["gpt-6.2-sol", "gpt-6.1-sol", "gpt-6.1-terra"],
+          "codex_config": { "wire_api": "responses" }
+        },
+        "opencode": {
+          "base_url": "https://onomeo.com/v1",
+          "model": "deepseek-v4.1-flash",
+          "models": ["deepseek-v4.1-flash", "claude-sonnet-5.5", "gpt-6.2-sol", "gemini-4-neon"]
+        }
+      }
     }
   ]
 }
