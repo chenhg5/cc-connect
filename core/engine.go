@@ -8149,6 +8149,33 @@ func filterOwnedSessions(sessions []AgentSessionInfo, known map[string]struct{})
 
 const listPageSize = 20
 
+const localSessionPrefix = "local-session:"
+
+// listCommandSessions includes named sessions created by /new before the agent
+// has produced a transcript. The agent cannot list those sessions yet.
+func (e *Engine) listCommandSessions(agent Agent, sessions *SessionManager, sessionKey string) ([]AgentSessionInfo, error) {
+	agentSessions, err := agent.ListSessions(e.ctx)
+	if err != nil {
+		return nil, err
+	}
+	agentSessions = e.applySessionFilter(agentSessions, sessions, sessionKey)
+	for _, local := range sessions.ListSessions(sessionKey) {
+		local.mu.Lock()
+		id, name, agentID := local.ID, local.Name, local.AgentSessionID
+		hadTranscript := len(local.PastAgentSessionIDs) > 0
+		count, modified := len(local.History), local.UpdatedAt
+		local.mu.Unlock()
+		if agentID != "" || hadTranscript || (name == "default" && count == 0) {
+			continue
+		}
+		agentSessions = append(agentSessions, AgentSessionInfo{
+			ID: localSessionPrefix + id, Summary: name,
+			MessageCount: count, ModifiedAt: modified,
+		})
+	}
+	return agentSessions, nil
+}
+
 // dirCardPageSize is the max directory history rows per card page (Feishu / other card UIs).
 const dirCardPageSize = 20
 
@@ -8160,12 +8187,11 @@ func (e *Engine) cmdList(p Platform, msg *Message, args []string) {
 	}
 
 	if !supportsCards(p) {
-		agentSessions, err := agent.ListSessions(e.ctx)
+		agentSessions, err := e.listCommandSessions(agent, sessions, msg.SessionKey)
 		if err != nil {
 			e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgListError), err))
 			return
 		}
-		agentSessions = e.applySessionFilter(agentSessions, sessions, msg.SessionKey)
 		if len(agentSessions) == 0 {
 			e.reply(p, msg.ReplyCtx, e.i18n.T(MsgListEmpty))
 			return
@@ -8203,7 +8229,7 @@ func (e *Engine) cmdList(p Platform, msg *Message, args []string) {
 		for i := start; i < end; i++ {
 			s := agentSessions[i]
 			marker := "◻"
-			if s.ID == activeAgentID {
+			if s.ID == activeAgentID && activeAgentID != "" || s.ID == localSessionPrefix+activeSession.ID {
 				marker = "▶"
 			}
 			displayName := sessions.GetSessionName(s.ID)
@@ -8257,13 +8283,11 @@ func (e *Engine) cmdSwitch(p Platform, msg *Message, args []string) {
 		e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgWsResolutionError, err))
 		return
 	}
-	agentSessions, err := agent.ListSessions(e.ctx)
+	agentSessions, err := e.listCommandSessions(agent, sessions, msg.SessionKey)
 	if err != nil {
 		e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgError, err))
 		return
 	}
-	agentSessions = e.applySessionFilter(agentSessions, sessions, msg.SessionKey)
-
 	matched := e.matchSession(agentSessions, sessions, query)
 	if matched == nil {
 		e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgSwitchNoMatch), query))
@@ -8273,6 +8297,14 @@ func (e *Engine) cmdSwitch(p Platform, msg *Message, args []string) {
 	slog.Info("cmdSwitch: cleaning up old session", "session_key", msg.SessionKey)
 	e.cleanupInteractiveState(interactiveKey)
 	slog.Info("cmdSwitch: cleanup done", "session_key", msg.SessionKey)
+	if localID, local := strings.CutPrefix(matched.ID, localSessionPrefix); local {
+		if _, err := sessions.SwitchSession(msg.SessionKey, localID); err != nil {
+			e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgError, err))
+			return
+		}
+		e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgSwitchSuccess, matched.Summary, localID, matched.MessageCount))
+		return
+	}
 
 	// NOTE: Do NOT call session.ClearHistory() on the returned Session.
 	// When switching back to a known agent_session_id, SwitchToAgentSession
@@ -8329,10 +8361,19 @@ func (e *Engine) matchSession(sessions []AgentSessionInfo, manager *SessionManag
 			return &sessions[i]
 		}
 	}
+	for i := range sessions {
+		if strings.HasPrefix(sessions[i].ID, localSessionPrefix) && strings.EqualFold(sessions[i].Summary, query) {
+			return &sessions[i]
+		}
+	}
 
 	// 3. Session ID prefix match
 	for i := range sessions {
-		if strings.HasPrefix(sessions[i].ID, query) {
+		id := sessions[i].ID
+		if localID, local := strings.CutPrefix(id, localSessionPrefix); local {
+			id = localID
+		}
+		if strings.HasPrefix(id, query) {
 			return &sessions[i]
 		}
 	}
@@ -14475,11 +14516,10 @@ func (e *Engine) renderModeCard() *Card {
 
 func (e *Engine) renderListCard(sessionKey string, page int) (*Card, error) {
 	agent, sessions := e.sessionContextForKey(sessionKey)
-	agentSessions, err := agent.ListSessions(e.ctx)
+	agentSessions, err := e.listCommandSessions(agent, sessions, sessionKey)
 	if err != nil {
 		return nil, fmt.Errorf(e.i18n.T(MsgListError), err)
 	}
-	agentSessions = e.applySessionFilter(agentSessions, sessions, sessionKey)
 	if len(agentSessions) == 0 {
 		return e.simpleCard(e.i18n.Tf(MsgCardTitleSessions, agent.Name(), 0), "turquoise", e.i18n.T(MsgListEmpty)), nil
 	}
@@ -14511,7 +14551,7 @@ func (e *Engine) renderListCard(sessionKey string, page int) (*Card, error) {
 	for i := start; i < end; i++ {
 		s := agentSessions[i]
 		marker := "◻"
-		if s.ID == activeAgentID {
+		if s.ID == activeAgentID && activeAgentID != "" || s.ID == localSessionPrefix+activeSession.ID {
 			marker = "▶"
 		}
 		displayName := sessions.GetSessionName(s.ID)
@@ -14528,7 +14568,7 @@ func (e *Engine) renderListCard(sessionKey string, page int) (*Card, error) {
 			}
 		}
 		btnType := "default"
-		if s.ID == activeAgentID {
+		if s.ID == activeAgentID && activeAgentID != "" || s.ID == localSessionPrefix+activeSession.ID {
 			btnType = "primary"
 		}
 		cb.ListItemBtn(
