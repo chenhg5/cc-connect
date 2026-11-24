@@ -222,12 +222,22 @@ func (p *Platform) Send(ctx context.Context, replyCtx any, content string) error
 	}
 
 	chunks := core.SplitMessageCodeFenceAware(content, messageMaxLen)
+	var firstErr error
 	for _, chunk := range chunks {
 		if err := p.sendMessage(rctx, chunk); err != nil {
-			return err
+			// The chunk is lost. Log what was lost and why — a silent drop
+			// is what made issue #2216 invisible — and keep going: the
+			// remaining chunks may still fit into the passive quota, and the
+			// final answer of the turn must not be swallowed by an earlier
+			// failure.
+			slog.Error("qqbot: message chunk dropped",
+				"error", err, "code", qqCodeOf(err), "content", truncateChunk(chunk))
+			if firstErr == nil {
+				firstErr = err
+			}
 		}
 	}
-	return nil
+	return firstErr
 }
 
 // SendImage uploads and sends an image via QQ Bot rich media API.
@@ -253,16 +263,17 @@ func (p *Platform) SendImage(ctx context.Context, replyCtx any, img core.ImageAt
 		return fmt.Errorf("qqbot: unknown message type %q", rctx.messageType)
 	}
 
-	body := map[string]any{
-		"msg_type": 7,
-		"media":    map[string]any{"file_info": fileInfo},
-	}
-	if rctx.eventMsgID != "" {
-		body["msg_id"] = rctx.eventMsgID
-		body["msg_seq"] = p.nextMsgSeq(rctx.eventMsgID)
-	}
-
-	return p.apiRequest("POST", url, body)
+	return p.sendWithActiveFallback(rctx, func(r *replyContext) error {
+		body := map[string]any{
+			"msg_type": 7,
+			"media":    map[string]any{"file_info": fileInfo},
+		}
+		if r.eventMsgID != "" {
+			body["msg_id"] = r.eventMsgID
+			body["msg_seq"] = p.nextMsgSeq(r.eventMsgID)
+		}
+		return p.apiRequest("POST", url, body)
+	})
 }
 
 // uploadRichMedia uploads a file to QQ Bot rich media API and returns the file_info.
@@ -302,75 +313,15 @@ func (p *Platform) uploadRichMedia(rctx *replyContext, fileType int, data []byte
 
 // apiRequestJSON is like apiRequest but also decodes the response body into result.
 func (p *Platform) apiRequestJSON(method, url string, body any, result any) error {
-	var bodyReader io.Reader
-	if body != nil {
-		data, err := json.Marshal(body)
-		if err != nil {
-			return fmt.Errorf("qqbot: marshal body: %w", err)
-		}
-		bodyReader = bytes.NewReader(data)
-	}
-
-	token, err := p.getAccessToken()
-	if err != nil {
-		return fmt.Errorf("qqbot: get token: %w", err)
-	}
-
-	req, err := http.NewRequest(method, url, bodyReader)
+	raw, err := p.doAPIRequest(method, url, body)
 	if err != nil {
 		return err
 	}
-	req.Header.Set("Authorization", "QQBot "+token)
-	req.Header.Set("Content-Type", "application/json")
-
-	resp, err := core.HTTPClient.Do(req)
-	if err != nil {
-		return fmt.Errorf("qqbot: api request failed: %w", err)
-	}
-	defer resp.Body.Close()
-
-	// Retry once on 401
-	if resp.StatusCode == http.StatusUnauthorized {
-		if err := p.refreshToken(); err != nil {
-			return fmt.Errorf("qqbot: token refresh on 401: %w", err)
-		}
-		token, _ = p.getAccessToken()
-
-		if body != nil {
-			data, _ := json.Marshal(body)
-			bodyReader = bytes.NewReader(data)
-		}
-		req2, err := http.NewRequest(method, url, bodyReader)
-		if err != nil {
-			return fmt.Errorf("qqbot: build retry request: %w", err)
-		}
-		req2.Header.Set("Authorization", "QQBot "+token)
-		req2.Header.Set("Content-Type", "application/json")
-
-		resp2, err := core.HTTPClient.Do(req2)
-		if err != nil {
-			return fmt.Errorf("qqbot: api retry failed: %w", err)
-		}
-		defer resp2.Body.Close()
-
-		if resp2.StatusCode >= 300 {
-			raw, _ := io.ReadAll(resp2.Body)
-			return fmt.Errorf("qqbot: api %s %s returned %d (after retry): %s", method, url, resp2.StatusCode, raw)
-		}
-		if result != nil {
-			if err := json.NewDecoder(resp2.Body).Decode(result); err != nil {
-				return fmt.Errorf("qqbot: decode response: %w", err)
-			}
-		}
-		return nil
-	}
-
-	if resp.StatusCode >= 300 {
-		raw, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("qqbot: api %s %s returned %d: %s", method, url, resp.StatusCode, raw)
+	if err := checkQQResponseCode(raw); err != nil {
+		return err
 	}
 	if result != nil {
-		if err := json.NewDecoder(resp.Body).Decode(result); err != nil {
+		if err := json.NewDecoder(bytes.NewReader(raw)).Decode(result); err != nil {
 			return fmt.Errorf("qqbot: decode response: %w", err)
 		}
 	}
@@ -406,16 +357,17 @@ func (p *Platform) SendFile(ctx context.Context, replyCtx any, file core.FileAtt
 		return fmt.Errorf("qqbot: unknown message type %q", rctx.messageType)
 	}
 
-	body := map[string]any{
-		"msg_type": 7,
-		"media":    map[string]any{"file_info": fileInfo},
-	}
-	if rctx.eventMsgID != "" {
-		body["msg_id"] = rctx.eventMsgID
-		body["msg_seq"] = p.nextMsgSeq(rctx.eventMsgID)
-	}
-
-	return p.apiRequest("POST", url, body)
+	return p.sendWithActiveFallback(rctx, func(r *replyContext) error {
+		body := map[string]any{
+			"msg_type": 7,
+			"media":    map[string]any{"file_info": fileInfo},
+		}
+		if r.eventMsgID != "" {
+			body["msg_id"] = r.eventMsgID
+			body["msg_seq"] = p.nextMsgSeq(r.eventMsgID)
+		}
+		return p.apiRequest("POST", url, body)
+	})
 }
 
 var _ core.FileSender = (*Platform)(nil)
@@ -488,20 +440,6 @@ func (p *Platform) SendWithButtons(ctx context.Context, replyCtx any, content st
 	if p.markdownSupport {
 		msgType = 2
 	}
-	body := map[string]any{
-		"msg_type": msgType,
-		"keyboard": keyboard,
-	}
-	if p.markdownSupport {
-		body["markdown"] = map[string]any{"content": sendContent}
-	} else {
-		body["content"] = sendContent
-	}
-	if rctx.eventMsgID != "" {
-		body["msg_id"] = rctx.eventMsgID
-		body["msg_seq"] = p.nextMsgSeq(rctx.eventMsgID)
-	}
-
 	var url string
 	switch rctx.messageType {
 	case "group":
@@ -516,7 +454,22 @@ func (p *Platform) SendWithButtons(ctx context.Context, replyCtx any, content st
 		"type", rctx.messageType, "session_key", sessionKey,
 		"num_buttons", len(rows), "content_len", len(content))
 
-	return p.apiRequest("POST", url, body)
+	return p.sendWithActiveFallback(rctx, func(r *replyContext) error {
+		body := map[string]any{
+			"msg_type": msgType,
+			"keyboard": keyboard,
+		}
+		if p.markdownSupport {
+			body["markdown"] = map[string]any{"content": sendContent}
+		} else {
+			body["content"] = sendContent
+		}
+		if r.eventMsgID != "" {
+			body["msg_id"] = r.eventMsgID
+			body["msg_seq"] = p.nextMsgSeq(r.eventMsgID)
+		}
+		return p.apiRequest("POST", url, body)
+	})
 }
 
 // Stop shuts down the platform.
@@ -1325,7 +1278,19 @@ func (p *Platform) handleC2CMessage(data json.RawMessage) {
 // Message Sending
 // ---------------------------------------------------------------------------
 
+// sendMessage sends one message chunk.
+//
+// It goes out as a passive reply when the incoming event is known, and falls
+// back to an active message when the passive-reply quota of that event is
+// exhausted (issue #2216).
 func (p *Platform) sendMessage(rctx *replyContext, content string) error {
+	return p.sendWithActiveFallback(rctx, func(r *replyContext) error {
+		return p.postMessage(r, content)
+	})
+}
+
+// postMessage sends one message chunk on the channel described by rctx.
+func (p *Platform) postMessage(rctx *replyContext, content string) error {
 	var url string
 	switch rctx.messageType {
 	case "group":
@@ -1414,37 +1379,51 @@ func (p *Platform) apiBase() string {
 }
 
 func (p *Platform) apiRequest(method, url string, body any) error {
+	raw, err := p.doAPIRequest(method, url, body)
+	if err != nil {
+		return err
+	}
+	return checkQQResponseCode(raw)
+}
+
+// doAPIRequest performs an API request and returns the raw response body.
+//
+// It retries once on 401 (the access token may have expired). A non-2xx
+// status is turned into an error here; a 2xx response is returned as-is —
+// the QQ business code inside the body is inspected by the caller, because
+// the API reports most failures with a 2xx status.
+func (p *Platform) doAPIRequest(method, url string, body any) ([]byte, error) {
 	var bodyReader io.Reader
 	if body != nil {
 		data, err := json.Marshal(body)
 		if err != nil {
-			return fmt.Errorf("qqbot: marshal body: %w", err)
+			return nil, fmt.Errorf("qqbot: marshal body: %w", err)
 		}
 		bodyReader = bytes.NewReader(data)
 	}
 
 	token, err := p.getAccessToken()
 	if err != nil {
-		return fmt.Errorf("qqbot: get token: %w", err)
+		return nil, fmt.Errorf("qqbot: get token: %w", err)
 	}
 
 	req, err := http.NewRequest(method, url, bodyReader)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	req.Header.Set("Authorization", "QQBot "+token)
 	req.Header.Set("Content-Type", "application/json")
 
 	resp, err := core.HTTPClient.Do(req)
 	if err != nil {
-		return fmt.Errorf("qqbot: api request failed: %w", err)
+		return nil, fmt.Errorf("qqbot: api request failed: %w", err)
 	}
 	defer resp.Body.Close()
 
 	// Retry once on 401 (token may have expired)
 	if resp.StatusCode == http.StatusUnauthorized {
 		if err := p.refreshToken(); err != nil {
-			return fmt.Errorf("qqbot: token refresh on 401: %w", err)
+			return nil, fmt.Errorf("qqbot: token refresh on 401: %w", err)
 		}
 		token, _ = p.getAccessToken()
 
@@ -1455,29 +1434,38 @@ func (p *Platform) apiRequest(method, url string, body any) error {
 		}
 		req2, err := http.NewRequest(method, url, bodyReader)
 		if err != nil {
-			return fmt.Errorf("qqbot: build retry request: %w", err)
+			return nil, fmt.Errorf("qqbot: build retry request: %w", err)
 		}
 		req2.Header.Set("Authorization", "QQBot "+token)
 		req2.Header.Set("Content-Type", "application/json")
 
 		resp2, err := core.HTTPClient.Do(req2)
 		if err != nil {
-			return fmt.Errorf("qqbot: api retry failed: %w", err)
+			return nil, fmt.Errorf("qqbot: api retry failed: %w", err)
 		}
 		defer resp2.Body.Close()
 
 		if resp2.StatusCode >= 300 {
 			raw, _ := io.ReadAll(resp2.Body)
-			return fmt.Errorf("qqbot: api %s %s returned %d (after retry): %s", method, url, resp2.StatusCode, raw)
+			return nil, fmt.Errorf("qqbot: api %s %s returned %d (after retry): %s", method, url, resp2.StatusCode, raw)
 		}
-		return nil
+		return readResponseBody(resp2)
 	}
 
 	if resp.StatusCode >= 300 {
 		raw, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("qqbot: api %s %s returned %d: %s", method, url, resp.StatusCode, raw)
+		return nil, fmt.Errorf("qqbot: api %s %s returned %d: %s", method, url, resp.StatusCode, raw)
 	}
-	return nil
+	return readResponseBody(resp)
+}
+
+// readResponseBody reads the response body of a successful API call.
+func readResponseBody(resp *http.Response) ([]byte, error) {
+	raw, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("qqbot: read response body: %w", err)
+	}
+	return raw, nil
 }
 
 // attachment represents an image/file attachment in the QQ Bot API event payload.
