@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"math"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -145,8 +146,30 @@ func New(opts map[string]any) (core.Platform, error) {
 
 	// Build HTTP client with optional proxy support.
 	// Timeout must exceed the server-side long-poll duration (pollTimeout − 1s = 59s)
-	// to avoid the HTTP client racing with Telegram's response. 90s gives 30s headroom.
-	httpClient := &http.Client{Timeout: 90 * time.Second}
+	// to avoid the HTTP client racing with Telegram's response. 90s gives 30s
+	// headroom; larger uploads may need more time on slower connections (#539).
+	httpTimeout := 90 * time.Second
+	if raw, ok := opts["http_timeout_secs"]; ok {
+		var seconds int64
+		switch value := raw.(type) {
+		case int:
+			seconds = int64(value)
+		case int64:
+			seconds = value
+		case float64:
+			if value != math.Trunc(value) {
+				return nil, fmt.Errorf("telegram: http_timeout_secs must be an integer between 61 and 3600")
+			}
+			seconds = int64(value)
+		default:
+			return nil, fmt.Errorf("telegram: http_timeout_secs must be an integer between 61 and 3600")
+		}
+		if seconds < 61 || seconds > 3600 {
+			return nil, fmt.Errorf("telegram: http_timeout_secs must be between 61 and 3600")
+		}
+		httpTimeout = time.Duration(seconds) * time.Second
+	}
+	httpClient := &http.Client{Timeout: httpTimeout}
 	if proxyURL, _ := opts["proxy"].(string); proxyURL != "" {
 		u, err := url.Parse(proxyURL)
 		if err != nil {
