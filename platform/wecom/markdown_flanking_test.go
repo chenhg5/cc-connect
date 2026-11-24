@@ -32,31 +32,43 @@ func TestRepairBoldFlanking(t *testing.T) {
 		// The exact card_content pattern emitted by the writing agent.
 		{"label_colon", "**标题：**某文章", "**标题**：某文章"},
 		{"originality_line", "**是否可标注原创：**建议人工审核后决定", "**是否可标注原创**：建议人工审核后决定"},
-		{"exclamation", "**注意！！**", "**注意**！！"},
+		{"exclamation", "**注意！！**马上", "**注意**！！马上"},
 		{"mixed_trailing_punct", "**要点：，。**下一句", "**要点**：，。下一句"},
 		{"multiple_spans_one_line", "**标题：**A\n**时段：**B", "**标题**：A\n**时段**：B"},
-		{"ascii_colon", "**note:** rest", "**note**: rest"},
+		{"ascii_colon_followed_by_text", "**note:**rest", "**note**:rest"},
 		// Paired closer with the opener inside the span: keep the pair inside
 		// and append a space so the closing ** stays flanking-valid.
-		{"paired_paren_inside", "**字段（值）**", "**字段（值）** "},
 		{"paired_paren_then_text", "**说明（附录）**内容", "**说明（附录）** 内容"},
 		{"paired_book_title", "**读《三体》**有感", "**读《三体》** 有感"},
 		// Opener OUTSIDE the span → the closer is a normal stray, move it out.
 		{"paren_outside", "**注**（值）", "**注**（值）"},
 
-		// Already-correct forms must be untouched.
+		// Already-correct forms must be untouched. A closing delimiter at EOL
+		// or before whitespace is already right-flanking.
 		{"correct_colon_outside", "**标题**：内容", "**标题**：内容"},
 		{"official_example", "**广州**今日天气：29度", "**广州**今日天气：29度"},
 		{"colon_inside_bold", "**a：b**", "**a：b**"},
 		{"bold_then_ascii", "**bold** normal", "**bold** normal"},
 		{"no_bold", "plain text 没有星号", "plain text 没有星号"},
 		{"single_star_italic", "*斜体* 不动", "*斜体* 不动"},
-		{"link_untouched", "[点击预览](https://mp.weixin.qq.com/x) 与 **标题：**", "[点击预览](https://mp.weixin.qq.com/x) 与 **标题**："},
+		{"already_valid_eol", "**Note.**", "**Note.**"},
+		{"already_valid_space", "**Note.** next", "**Note.** next"},
+		{"paired_paren_eol", "**字段（值）**", "**字段（值）**"},
+		{"ascii_colon_before_space", "**note:** rest", "**note:** rest"},
+		{"link_then_repair", "[点击预览](https://mp.weixin.qq.com/x) 与 **标题：**内容", "[点击预览](https://mp.weixin.qq.com/x) 与 **标题**：内容"},
+		{"triple_asterisk", "***粗斜体：***", "***粗斜体：***"},
 
 		// Code contexts must never be rewritten — inside code, ** is literal
 		// by design and mutating it changes the displayed code sample.
-		{"inline_code", "`代码 **x：**` 和 **标题：**", "`代码 **x：**` 和 **标题**："},
-		{"fenced_block", "```\n**x：**\n```\n**y：**", "```\n**x：**\n```\n**y**："},
+		{"inline_code", "`代码 **x：**` 和 **标题：**内容", "`代码 **x：**` 和 **标题**：内容"},
+		{"inline_code_only", "`代码 **x：**`", "`代码 **x：**`"},
+		{"fenced_block", "```\n**x：**\n```\n**y：**尾", "```\n**x：**\n```\n**y**：尾"},
+		{"tilde_fence", "~~~\n**x：**\n~~~\n**y：**尾", "~~~\n**x：**\n~~~\n**y**：尾"},
+		{"single_line_triple_backtick", "```code```\n**标题：**内容", "```code```\n**标题**：内容"},
+
+		// A bold span may cross an inline code span; the code text itself must
+		// stay byte-identical.
+		{"bold_crosses_inline_code", "**标题 `code` 内容：**下一句", "**标题 `code` 内容**：下一句"},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -70,6 +82,53 @@ func TestRepairBoldFlanking(t *testing.T) {
 func TestRepairBoldFlanking_FastPath(t *testing.T) {
 	if repairBoldFlanking("没有双星号的文本") != "没有双星号的文本" {
 		t.Fatal("fast path should return input unchanged")
+	}
+}
+
+// TestCallbackReply_RepairsBoldFlanking covers the default (callback) WeCom
+// platform. It uses the same markdown payload as the WebSocket path, so the
+// repair must run there too.
+func TestCallbackReply_RepairsBoldFlanking(t *testing.T) {
+	payloads := make(chan map[string]any, 1)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		payloads <- body
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"errcode":0,"errmsg":"ok"}`))
+	}))
+	defer server.Close()
+
+	p := &Platform{
+		apiBaseURL:     server.URL,
+		apiClient:      server.Client(),
+		agentID:        "1",
+		enableMarkdown: true,
+	}
+	p.tokenCache.token = "test-token"
+	p.tokenCache.expiresAt = time.Now().Add(time.Hour)
+
+	if err := p.Reply(context.Background(), replyContext{userID: "u1"}, "**标题：**内容"); err != nil {
+		t.Fatalf("Reply: %v", err)
+	}
+
+	select {
+	case body := <-payloads:
+		if body["msgtype"] != "markdown" {
+			t.Fatalf("msgtype = %v, want markdown", body["msgtype"])
+		}
+		markdown, ok := body["markdown"].(map[string]any)
+		if !ok {
+			t.Fatalf("markdown payload = %#v, want object", body["markdown"])
+		}
+		if markdown["content"] != "**标题**：内容" {
+			t.Fatalf("markdown.content = %q, want repaired content", markdown["content"])
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for callback payload")
 	}
 }
 
