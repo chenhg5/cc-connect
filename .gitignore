@@ -67,6 +67,8 @@ release/
 # Keep web/dist directory (for embedded admin UI) but ignore build artifacts
 web/dist/*
 !web/dist/.keep
+# TypeScript incremental build cache
+*.tsbuildinfo
 
 # ============================================================================
 # Testing & temporary files
