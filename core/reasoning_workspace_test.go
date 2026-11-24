@@ -154,19 +154,42 @@ func TestReasoningPreservesLongSessionAndSupportsClear(t *testing.T) {
 }
 
 func TestReasoningSaveFailurePreservesSelectionAndSession(t *testing.T) {
-	a := &workspaceEffortAgent{levels: []string{"low", "high"}, effort: "low"}
-	p := &stubPlatformEngine{n: "test"}
-	e := NewEngine("test", a, []Platform{p}, "", LangEnglish)
-	e.SetReasoningSaveFunc(func(string) error { return fmt.Errorf("read-only config") })
-	key := "test:save-failure"
-	s := e.sessions.GetOrCreateActive(key)
-	s.SetAgentSessionID("original", "test")
-	s.AddHistory("user", "keep")
-	e.cmdReasoning(p, &Message{SessionKey: key, ReplyCtx: "ctx"}, []string{"high"})
-	if a.GetReasoningEffort() != "low" || s.GetAgentSessionID() != "original" || len(s.GetHistory(10)) != 1 {
-		t.Fatal("failed save changed state")
-	}
-	if !strings.Contains(strings.Join(p.getSent(), "\n"), "read-only config") {
-		t.Fatal("save error was hidden")
+	for _, tc := range []struct {
+		name   string
+		lang   Language
+		args   []string
+		target string
+		want   string
+	}{
+		{"change_en", LangEnglish, []string{"high"}, "high", "❌ Failed to save reasoning effort: read-only config"},
+		{"clear_zh", LangChinese, []string{"clear"}, "", "❌ 保存推理强度失败: read-only config"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			a := &workspaceEffortAgent{levels: []string{"low", "high"}, effort: "low"}
+			p := &stubPlatformEngine{n: "test"}
+			e := NewEngine("test", a, []Platform{p}, "", tc.lang)
+			calls := 0
+			e.SetReasoningSaveFunc(func(effort string) error {
+				calls++
+				if effort != tc.target {
+					t.Errorf("save effort = %q, want %q", effort, tc.target)
+				}
+				return fmt.Errorf("read-only config")
+			})
+			key := "test:save-failure"
+			s := e.sessions.GetOrCreateActive(key)
+			s.SetAgentSessionID("original", "test")
+			s.AddHistory("user", "keep")
+			e.cmdReasoning(p, &Message{SessionKey: key, ReplyCtx: "ctx"}, tc.args)
+			if calls != 1 {
+				t.Errorf("save calls = %d, want 1", calls)
+			}
+			if a.GetReasoningEffort() != "low" || s.GetAgentSessionID() != "original" || len(s.GetHistory(10)) != 1 {
+				t.Fatal("failed save changed state")
+			}
+			if replies := p.getSent(); len(replies) != 1 || replies[0] != tc.want {
+				t.Errorf("replies = %q, want exactly %q", replies, tc.want)
+			}
+		})
 	}
 }

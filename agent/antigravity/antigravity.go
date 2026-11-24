@@ -189,6 +189,8 @@ func (a *Agent) AvailableModels(ctx context.Context) []core.ModelOption {
 	defer cancel()
 	a.mu.RLock()
 	cmd := exec.CommandContext(cmdCtx, a.cmd, append(append([]string{}, a.cliExtraArgs...), "models")...)
+	// Bound stdout draining even if a descendant survives the CLI and keeps the pipe open.
+	cmd.WaitDelay = time.Second
 	cmd.Dir = a.workDir
 	cmd.Env = core.MergeEnv(os.Environ(), append(append([]string{}, a.configEnv...), a.providerEnvLocked()...))
 	a.mu.RUnlock()

@@ -10816,7 +10816,7 @@ func (e *Engine) cmdReasoning(p Platform, msg *Message, args []string) {
 
 	if agent == e.agent && e.reasoningSaveFunc != nil {
 		if err := e.reasoningSaveFunc(target); err != nil {
-			e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgModelChangeFailed, err))
+			e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgReasoningSaveFailed, err))
 			return
 		}
 	}
@@ -11678,7 +11678,7 @@ func (e *Engine) cmdProviderAdd(p Platform, msg *Message, switcher ProviderSwitc
 	raw = strings.TrimSpace(raw)
 
 	if strings.HasPrefix(raw, "{") {
-		// JSON format: /provider add {"name":"relay","api_key":"sk-xxx",...}
+		// JSON format: /provider add {"name":"relay","api_key":"<your API key>",...}
 		var jp struct {
 			Name    string            `json:"name"`
 			APIKey  string            `json:"api_key"`

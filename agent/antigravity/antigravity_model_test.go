@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 	"time"
 
@@ -217,5 +218,89 @@ func TestValidateModelSlowCatalogDoesNotConsumeSwitchDeadline(t *testing.T) {
 	}
 	if err := ctx.Err(); err != nil {
 		t.Fatalf("catalog consumed caller's deadline: %v", err)
+	}
+}
+
+// The wrapper waits for a child that inherits stdout. Killing the wrapper
+// leaves the child's descriptor open, unlike a wrapper that execs sleep.
+func TestValidateModelBoundsDescendantHeldCatalogPipe(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("test requires a POSIX shell")
+	}
+	t.Setenv("GEMINI_API_KEY", "")
+	t.Setenv("GOOGLE_API_KEY", "")
+
+	for _, tc := range []struct {
+		name   string
+		cancel bool
+	}{
+		{name: "manual switch after catalog timeout"},
+		{name: "caller cancellation", cancel: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			cmd := filepath.Join(dir, "agy")
+			script := `#!/bin/sh
+(
+	: > child-ready
+	i=0
+	while [ ! -f release-child ] && [ "$i" -lt 120 ]; do
+		sleep 0.05
+		i=$((i+1))
+	done
+	: > child-done
+) &
+printf 'some-other-model\tOther Model\n'
+wait
+`
+			if err := os.WriteFile(cmd, []byte(script), 0700); err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() {
+				if err := os.WriteFile(filepath.Join(dir, "release-child"), nil, 0600); err != nil {
+					t.Error(err)
+					return
+				}
+				awaitCatalogFixtureFile(t, dir, "child-done")
+			})
+
+			a := &Agent{cmd: cmd, activeIdx: -1, workDir: dir}
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+			result := make(chan error, 1)
+			start := time.Now()
+			go func() { result <- a.ValidateModel(ctx, "manual-model") }()
+			awaitCatalogFixtureFile(t, dir, "child-ready")
+			if tc.cancel {
+				cancel()
+			}
+			err := <-result
+			if tc.cancel {
+				if err != context.Canceled {
+					t.Fatalf("canceled validation = %v, want context.Canceled", err)
+				}
+			} else if err != nil || ctx.Err() != nil {
+				t.Fatalf("catalog blocked manual switching: validation = %v, caller = %v", err, ctx.Err())
+			}
+			if elapsed := time.Since(start); elapsed >= 5*time.Second {
+				t.Fatalf("catalog waited %v for a descendant to close stdout", elapsed)
+			}
+		})
+	}
+}
+
+func awaitCatalogFixtureFile(t *testing.T, dir, name string) {
+	t.Helper()
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		if _, err := os.Stat(filepath.Join(dir, name)); err == nil {
+			return
+		} else if !os.IsNotExist(err) {
+			t.Fatal(err)
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("fixture did not create %s", name)
+		}
+		time.Sleep(10 * time.Millisecond)
 	}
 }
