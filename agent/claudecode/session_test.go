@@ -927,7 +927,7 @@ func TestHandleUserToolResultPreservesUTF8AtTruncation(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	cs := &claudeSession{events: make(chan core.Event, 1), ctx: ctx}
+	cs := &claudeSession{events: make(chan core.Event, 1), ctx: ctx, toolResultMaxLen: 500}
 	cs.alive.Store(true)
 	// A 500-byte cut lands inside the three-byte character.
 	result := strings.Repeat("a", 499) + "中" + "tail"
@@ -947,11 +947,44 @@ func TestHandleUserToolResultPreservesUTF8AtTruncation(t *testing.T) {
 		if !utf8.ValidString(event.ToolResult) {
 			t.Fatalf("tool result is not valid UTF-8: %q", event.ToolResult)
 		}
-		if want := strings.Repeat("a", 499) + "..."; event.ToolResult != want {
-			t.Fatalf("tool result = %q, want %q", event.ToolResult, want)
+		if len(event.ToolResult) > 500 || !strings.HasPrefix(event.ToolResult, strings.Repeat("a", 400)) || !strings.Contains(event.ToolResult, "truncated") {
+			t.Fatalf("tool result = %q, want UTF-8 prefix and notice within 500 bytes", event.ToolResult)
 		}
 	case <-time.After(time.Second):
 		t.Fatal("timeout waiting for tool result")
+	}
+}
+
+func TestHandleUserToolResultUsesReadableDefaultBudget(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	cs := &claudeSession{events: make(chan core.Event, 1), ctx: ctx}
+	cs.alive.Store(true)
+	result := strings.Repeat("中文😀", 1200)
+	cs.handleUser(map[string]any{"message": map[string]any{"content": []any{map[string]any{"type": "tool_result", "content": result}}}})
+	select {
+	case event := <-cs.events:
+		if !utf8.ValidString(event.ToolResult) || len(event.ToolResult) > 4000 || len(event.ToolResult) < 3000 {
+			t.Fatalf("tool result length=%d valid=%v, want readable UTF-8 within 4000 bytes", len(event.ToolResult), utf8.ValidString(event.ToolResult))
+		}
+		if !strings.Contains(event.ToolResult, "truncated") || !strings.HasPrefix(event.ToolResult, "中文😀") {
+			t.Fatalf("tool result lost content or truncation notice: %q", event.ToolResult)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timeout waiting for tool result")
+	}
+}
+
+func TestHandleUserToolResultHonorsConfiguredBudget(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	cs := &claudeSession{events: make(chan core.Event, 1), ctx: ctx, toolResultMaxLen: 800}
+	cs.alive.Store(true)
+	result := strings.Repeat("中文😀", 1200)
+	cs.handleUser(map[string]any{"message": map[string]any{"content": []any{map[string]any{"type": "tool_result", "content": result}}}})
+	event := <-cs.events
+	if !utf8.ValidString(event.ToolResult) || len(event.ToolResult) > 800 || len(event.ToolResult) < 700 || !strings.Contains(event.ToolResult, "truncated") {
+		t.Fatalf("configured result length=%d valid=%v text=%q", len(event.ToolResult), utf8.ValidString(event.ToolResult), event.ToolResult)
 	}
 }
 
