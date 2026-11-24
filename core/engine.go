@@ -1761,7 +1761,7 @@ func (e *Engine) ExecuteCronJob(job *CronJob) error {
 		// delivery modes (plain text, cards, rich cards, DingTalk AI streaming) because
 		// AddHistory("assistant",...) is called before any platform-specific rendering path.
 		if !job.Mute && session.HistoryLen() < prevHistLen+2 {
-			return fmt.Errorf("cron job %q produced an empty response", job.ID)
+			return fmt.Errorf("cron job %q %w", job.ID, ErrCronEmptyResponse)
 		}
 		return nil
 	}
@@ -1780,7 +1780,7 @@ func (e *Engine) ExecuteCronJob(job *CronJob) error {
 	e.processInteractiveMessageWith(effectivePlatform, msg, session, agent, sessions, iKey, workspaceDir, sessionKey, lockGen)
 	// Same empty-response detection as the useNewSession path above.
 	if !job.Mute && session.HistoryLen() < prevHistLen+2 {
-		return fmt.Errorf("cron job %q produced an empty response", job.ID)
+		return fmt.Errorf("cron job %q %w", job.ID, ErrCronEmptyResponse)
 	}
 	return nil
 }
