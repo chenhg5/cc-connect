@@ -1495,7 +1495,7 @@ func containsMarkdownLine(content string, want string) bool {
 	return false
 }
 
-func TestBuildCardJSONWithStatusFooter_SharesCardTableBudget(t *testing.T) {
+func TestBuildCardJSONWithStatusFooter_BodyRowsLeaveFooterTableBudget(t *testing.T) {
 	body := strings.Join([]string{
 		"| A |",
 		"|---|",
@@ -1516,11 +1516,11 @@ func TestBuildCardJSONWithStatusFooter_SharesCardTableBudget(t *testing.T) {
 	}, "\n")
 
 	content := strings.Join(collectCardMarkdownContents(t, buildCardJSONWithStatusFooter(body, footer)), "\n")
-	if !strings.Contains(content, "| C |\n|---|\n| 3 |") {
-		t.Fatalf("third table should remain renderable, got %q", content)
+	if !strings.Contains(content, "| C |\n|---|\n| 3 |") || !strings.Contains(content, "| D |\n|---|\n| 4 |") {
+		t.Fatalf("footer tables should remain renderable after body uses row components, got %q", content)
 	}
-	if !strings.Contains(content, "```\n| D |\n|---|\n| 4 |\n```") {
-		t.Fatalf("fourth table across card elements should be downgraded, got %q", content)
+	if strings.Contains(content, "```\n| D |") {
+		t.Fatalf("footer table was unnecessarily downgraded, got %q", content)
 	}
 }
 
