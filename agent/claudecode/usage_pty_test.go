@@ -3,16 +3,24 @@ package claudecode
 import (
 	"bufio"
 	"context"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"runtime"
 	"strings"
 	"testing"
 	"time"
 )
 
-const fakeClaudeUsageEnv = "CC_CONNECT_FAKE_CLAUDE_USAGE"
+const (
+	fakeClaudeUsageEnv = "CC_CONNECT_FAKE_CLAUDE_USAGE"
+	// fakeClaudeUsageArgsEnv names the file the fake claude writes its
+	// arguments to, as a JSON array.
+	fakeClaudeUsageArgsEnv = "CC_CONNECT_FAKE_CLAUDE_USAGE_ARGS"
+)
 
 // TestRunClaudeUsageProbe_StartsOnWindows runs the whole /usage probe against
 // a fake claude on a real pseudo-terminal. On Windows the probe used to fail
@@ -20,27 +28,39 @@ const fakeClaudeUsageEnv = "CC_CONNECT_FAKE_CLAUDE_USAGE"
 // github.com/creack/pty cannot start processes there (#2299). Windows now uses
 // ConPTY. The test runs on every OS so the Unix PTY path stays covered too.
 //
-// On Windows the fake is a .cmd file, like the shim npm installs for claude.
+// On Windows the fake is a .cmd file that forwards its arguments with %*, like
+// the shim npm installs for claude. cmd.exe parses a command line differently
+// from the CommandLineToArgvW rules Go composes it for, so the fake records the
+// arguments it receives and the test checks that they arrive intact, the empty
+// --tools value included. The fake lives in a directory with a space in its
+// name, as an npm prefix inside a user profile can have.
 func TestRunClaudeUsageProbe_StartsOnWindows(t *testing.T) {
 	exe, err := os.Executable()
 	if err != nil {
 		t.Fatalf("os.Executable: %v", err)
 	}
-	binDir := t.TempDir()
+	binDir := filepath.Join(t.TempDir(), "fake bin")
+	if err := os.Mkdir(binDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// The test binary's flag parsing stops at "--", so the probe's arguments
+	// after it reach the helper untouched.
 	runHelper := "-test.run=^TestFakeClaudeUsageHelperProcess$"
 	if runtime.GOOS == "windows" {
-		script := fmt.Sprintf("@\"%s\" \"%s\"\r\n", exe, runHelper)
+		script := fmt.Sprintf("@\"%s\" \"%s\" -- %%*\r\n", exe, runHelper)
 		if err := os.WriteFile(filepath.Join(binDir, "claude.cmd"), []byte(script), 0o755); err != nil {
 			t.Fatal(err)
 		}
 	} else {
-		script := fmt.Sprintf("#!/bin/sh\nexec '%s' '%s'\n", exe, runHelper)
+		script := fmt.Sprintf("#!/bin/sh\nexec '%s' '%s' -- \"$@\"\n", exe, runHelper)
 		if err := os.WriteFile(filepath.Join(binDir, "claude"), []byte(script), 0o755); err != nil {
 			t.Fatal(err)
 		}
 	}
+	argsFile := filepath.Join(t.TempDir(), "args.json")
 	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 	t.Setenv(fakeClaudeUsageEnv, "1")
+	t.Setenv(fakeClaudeUsageArgsEnv, argsFile)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
@@ -57,12 +77,26 @@ func TestRunClaudeUsageProbe_StartsOnWindows(t *testing.T) {
 	if windows[0].UsedPercent != 12 || windows[1].UsedPercent != 34 {
 		t.Fatalf("used percent = %d/%d, want 12/34\nscreen:\n%s", windows[0].UsedPercent, windows[1].UsedPercent, screen)
 	}
+
+	rawArgs, err := os.ReadFile(argsFile)
+	if err != nil {
+		t.Fatalf("read the fake claude's arguments: %v", err)
+	}
+	var gotArgs []string
+	if err := json.Unmarshal(rawArgs, &gotArgs); err != nil {
+		t.Fatalf("decode the fake claude's arguments %q: %v", rawArgs, err)
+	}
+	wantArgs := []string{"--tools", "", "--permission-mode", "plan", "--no-chrome"}
+	if !reflect.DeepEqual(gotArgs, wantArgs) {
+		t.Fatalf("claude received arguments %q, want %q", gotArgs, wantArgs)
+	}
 }
 
 // TestFakeClaudeUsageHelperProcess is not a real test. It acts as the fake
-// claude for TestRunClaudeUsageProbe_StartsOnWindows: it waits for /usage on
-// stdin, then draws a usage panel below enough lines to scroll a 40-row
-// screen, and stays alive until the terminal goes away.
+// claude for TestRunClaudeUsageProbe_StartsOnWindows: it records its
+// arguments, waits for /usage on stdin, then draws a usage panel below enough
+// lines to scroll a 40-row screen, and stays alive until the terminal goes
+// away.
 func TestFakeClaudeUsageHelperProcess(t *testing.T) {
 	if os.Getenv(fakeClaudeUsageEnv) != "1" {
 		t.Skip("helper process for TestRunClaudeUsageProbe_StartsOnWindows")
@@ -71,6 +105,24 @@ func TestFakeClaudeUsageHelperProcess(t *testing.T) {
 		time.Sleep(30 * time.Second)
 		os.Exit(3)
 	}()
+
+	if argsFile := os.Getenv(fakeClaudeUsageArgsEnv); argsFile != "" {
+		args := []string{}
+		for i, arg := range os.Args {
+			if arg == "--" {
+				args = append(args, os.Args[i+1:]...)
+				break
+			}
+		}
+		encoded, err := json.Marshal(args)
+		if err == nil {
+			err = os.WriteFile(argsFile, encoded, 0o600)
+		}
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "fake claude: record arguments: %v\n", err)
+			os.Exit(4)
+		}
+	}
 
 	fmt.Print("\x1b[2J\x1b[HFake Claude Code\r\n> ")
 	in := bufio.NewReader(os.Stdin)
@@ -150,6 +202,69 @@ func TestClaudeUsageScreenTerminal_ClampsCursorAndErasesChars(t *testing.T) {
 	want := "ab    ghij\n         Y\n         Z"
 	if got := term.String(); got != want {
 		t.Fatalf("screen = %q, want %q", got, want)
+	}
+}
+
+// VPA (CSI n d) moves to a row and keeps the column. Like every cursor move it
+// cancels a pending wrap, and it is clamped to the screen.
+func TestClaudeUsageScreenTerminal_MovesToRow(t *testing.T) {
+	term := newClaudeUsageScreenTerminal(3, 10)
+	term.Write([]byte("abc\x1b[3dX\x1b[1dY\x1b[99dZ"))
+	if got, want := term.String(), "abc Y\n\n   X Z"; got != want {
+		t.Fatalf("screen = %q, want %q", got, want)
+	}
+
+	term = newClaudeUsageScreenTerminal(3, 10)
+	// The cursor stays in the last column after a full row. Moving to row 2
+	// must drop the pending wrap, so Z lands in that column, not on row 3.
+	term.Write([]byte("abcdefghij\x1b[2dZ"))
+	if got, want := term.String(), "abcdefghij\n         Z"; got != want {
+		t.Fatalf("after a full row = %q, want %q", got, want)
+	}
+}
+
+// The cleanup waits for the PTY reader, but only for a bounded time: a Read
+// that never returns must not hang the probe.
+func TestWaitClaudeUsageReader_IsBounded(t *testing.T) {
+	exited := make(chan struct{})
+	close(exited)
+	if !waitClaudeUsageReader(exited, time.Minute) {
+		t.Fatal("reader that already exited was reported as still running")
+	}
+
+	start := time.Now()
+	if waitClaudeUsageReader(make(chan struct{}), 20*time.Millisecond) {
+		t.Fatal("reader that never exits was reported as exited")
+	}
+	if elapsed := time.Since(start); elapsed > 5*time.Second {
+		t.Fatalf("wait took %v, want it to stop at the timeout", elapsed)
+	}
+}
+
+// Windows cannot remove the probe's temp dir while a killed process still
+// holds it as its working directory, so the removal is retried.
+func TestRemoveAllWithRetry(t *testing.T) {
+	busy := errors.New("directory is in use")
+
+	calls := 0
+	err := removeAllWithRetry("dir", func(string) error {
+		calls++
+		if calls < 3 {
+			return busy
+		}
+		return nil
+	}, 5, time.Millisecond)
+	if err != nil || calls != 3 {
+		t.Fatalf("err = %v after %d calls, want success on the 3rd call", err, calls)
+	}
+
+	calls = 0
+	err = removeAllWithRetry("dir", func(string) error {
+		calls++
+		return busy
+	}, 4, time.Millisecond)
+	if !errors.Is(err, busy) || calls != 4 {
+		t.Fatalf("err = %v after %d calls, want the last error after 4 calls", err, calls)
 	}
 }
 

@@ -132,6 +132,36 @@ jobs:
           files: ./coverage.out
           fail_ci_if_error: false
 
+  windows-test:
+    # The other jobs run on Linux, where files with a windows build constraint
+    # are not compiled. Build and vet them here, and run the tests that
+    # exercise Windows-only code. The whole test suite does not pass on
+    # Windows yet, so it is not run here.
+    runs-on: windows-latest
+    needs: lint
+    defaults:
+      run:
+        shell: bash
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: 'go.mod'
+          cache: true
+
+      - name: Build
+        run: go build -tags no_web ./...
+
+      - name: Vet
+        run: go vet -tags no_web ./...
+
+      # The /usage probe starts claude on a ConPTY (usage_pty_windows.go).
+      - name: Run Claude Code usage probe tests
+        run: go test -v -tags no_web ./agent/claudecode/ -run 'TestRunClaudeUsageProbe_StartsOnWindows|TestClaudeUsageScreenTerminal|TestClaudeUsageTerminal'
+
   smoke-test:
     runs-on: ubuntu-latest
     needs: unit-test

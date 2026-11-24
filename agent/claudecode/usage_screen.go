@@ -5,7 +5,8 @@ import "strings"
 // newClaudeUsageScreenTerminal returns a terminal that emulates a fixed
 // rows x cols screen: text auto-wraps at the right margin (with the usual
 // deferred wrap), a line feed on the bottom row scrolls the screen up, cursor
-// moves are clamped to the screen, and ECH (CSI n X) erases characters.
+// moves are clamped to the screen, ECH (CSI n X) erases characters, and VPA
+// (CSI n d) moves the cursor to a row.
 //
 // The default terminal from newClaudeUsageTerminal grows without bound, which
 // works for output that is written as a stream. Windows ConPTY sends a
@@ -72,6 +73,16 @@ func (t *claudeUsageTerminal) eraseScreenChars(n int) {
 	}
 }
 
+// setScreenRow implements VPA (CSI n d) on a fixed-size screen: it moves the
+// cursor to the given row and keeps its column. The caller clamps the row to
+// the screen.
+func (t *claudeUsageTerminal) setScreenRow(row int) {
+	if t.width <= 0 {
+		return
+	}
+	t.row = row
+}
+
 // clampCursorToScreen keeps the cursor inside a fixed-size screen.
 func (t *claudeUsageTerminal) clampCursorToScreen() {
 	if t.width <= 0 {
@@ -90,5 +101,5 @@ func (t *claudeUsageTerminal) clampCursorToScreen() {
 // edits the line, which cancels a pending wrap. SGR (colors) and mode changes
 // do not, so a colored character after a full-width line still wraps.
 func csiCancelsPendingWrap(final byte) bool {
-	return strings.IndexByte("ABCDGHfJKX", final) >= 0
+	return strings.IndexByte("ABCDGHdfJKX", final) >= 0
 }

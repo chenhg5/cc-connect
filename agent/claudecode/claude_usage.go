@@ -27,6 +27,15 @@ const (
 	claudeUsageActionGap            = 250 * time.Millisecond
 	claudeUsageRows                 = 40
 	claudeUsageCols                 = 120
+
+	// claudeUsageReaderExitTimeout bounds how long the probe's cleanup waits
+	// for the PTY reader after closing the terminal.
+	claudeUsageReaderExitTimeout = 2 * time.Second
+	// The probe's temp dir is removed in up to claudeUsageWorkDirRemoveAttempts
+	// tries. The delay between tries starts at claudeUsageWorkDirRemoveDelay
+	// and doubles, about 1.5 seconds in total.
+	claudeUsageWorkDirRemoveAttempts = 5
+	claudeUsageWorkDirRemoveDelay    = 100 * time.Millisecond
 )
 
 var (
@@ -87,7 +96,7 @@ func (a *Agent) runClaudeUsageProbe(ctx context.Context) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("claudecode: create usage temp dir: %w", err)
 	}
-	defer os.RemoveAll(workDir)
+	defer removeClaudeUsageWorkDir(workDir)
 
 	args := []string{
 		"--tools", "",
@@ -150,8 +159,15 @@ func (a *Agent) runClaudeUsageProbe(ctx context.Context) (string, error) {
 			slog.Warn("claudeSession: close ptmx", "error", err)
 		}
 		cancel()
-		// Wait for reader goroutine to finish so it is never leaked.
-		<-readerExited
+		// Closing the terminal ends the reader's blocked Read, so wait for the
+		// reader instead of leaking it. The wait is bounded because a Read
+		// that never returns must not hang the probe: this cleanup also runs
+		// when the context times out. A reader that is still blocked exits on
+		// its own once its Read returns.
+		if !waitClaudeUsageReader(readerExited, claudeUsageReaderExitTimeout) {
+			slog.Warn("claudecode: usage probe reader did not exit after the terminal was closed",
+				"timeout", claudeUsageReaderExitTimeout)
+		}
 		select {
 		case <-processDone:
 		case <-time.After(2 * time.Second):
@@ -479,6 +495,48 @@ func detectClaudeUsageOutputError(screen, stderr string) error {
 	}
 }
 
+// waitClaudeUsageReader waits up to timeout for the probe's PTY reader to
+// exit and reports whether it did.
+func waitClaudeUsageReader(readerExited <-chan struct{}, timeout time.Duration) bool {
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+	select {
+	case <-readerExited:
+		return true
+	case <-timer.C:
+		return false
+	}
+}
+
+// removeClaudeUsageWorkDir removes the probe's temp dir and logs a failure,
+// so a leaked directory is visible.
+func removeClaudeUsageWorkDir(dir string) {
+	err := removeAllWithRetry(dir, os.RemoveAll, claudeUsageWorkDirRemoveAttempts, claudeUsageWorkDirRemoveDelay)
+	if err != nil {
+		slog.Warn("claudecode: remove usage probe temp dir", "dir", dir, "error", err)
+	}
+}
+
+// removeAllWithRetry calls remove(path) up to attempts times and returns the
+// last error. It sleeps between tries, starting at delay and doubling.
+//
+// One try is enough on Unix. Windows cannot remove a directory that a process
+// still uses as its working directory, and a killed process releases it only
+// some time after the kill returns.
+func removeAllWithRetry(path string, remove func(string) error, attempts int, delay time.Duration) error {
+	var err error
+	for i := 0; i < attempts; i++ {
+		if i > 0 {
+			time.Sleep(delay)
+			delay *= 2
+		}
+		if err = remove(path); err == nil {
+			return nil
+		}
+	}
+	return err
+}
+
 type claudeUsageTerminal struct {
 	mu    sync.RWMutex
 	lines [][]rune
@@ -639,6 +697,8 @@ func (t *claudeUsageTerminal) applyCSI(params string, final byte) {
 		}
 	case 'X':
 		t.eraseScreenChars(parseCSIInt(params, 1))
+	case 'd':
+		t.setScreenRow(parseCSIInt(params, 1) - 1)
 	default:
 	}
 }
