@@ -19,6 +19,7 @@ import (
 
 	"github.com/chenhg5/cc-connect/agent/internal/skillroots"
 	"github.com/chenhg5/cc-connect/core"
+	"golang.org/x/text/unicode/norm"
 )
 
 func init() {
@@ -1557,8 +1558,15 @@ func boolVal(m map[string]any, key string) bool {
 //     "/Users/x/Library/Mobile Documents/com~apple~CloudDocs/...")
 //  5. Replacing all non-ASCII characters with "-"
 func encodeClaudeProjectKey(absPath string) string {
-	// First, normalize to forward slashes for consistent processing
-	normalized := strings.ReplaceAll(absPath, "\\", "/")
+	// Normalize only the key input; keep the original path when launching Claude.
+	if absPath == "" {
+		return ""
+	}
+	normalized := filepath.Clean(strings.ReplaceAll(absPath, "\\", "/"))
+	if len(normalized) >= 2 && normalized[1] == ':' && normalized[0] >= 'a' && normalized[0] <= 'z' {
+		normalized = strings.ToUpper(normalized[:1]) + normalized[1:]
+	}
+	normalized = norm.NFC.String(normalized)
 
 	// Build the encoded key character by character.
 	// Claude Code replaces path separators, special punctuation, and non-ASCII
