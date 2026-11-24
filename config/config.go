@@ -225,6 +225,7 @@ type StreamPreviewConfig struct {
 	IntervalMs        *int     `toml:"interval_ms"`                  // min ms between updates; default 1500
 	MinDeltaChars     *int     `toml:"min_delta_chars"`              // min new chars before update; default 30
 	MaxChars          *int     `toml:"max_chars"`                    // max preview length; default 2000
+	StopBehavior      *string  `toml:"stop_behavior,omitempty"`      // "discard" (default) or "freeze" on /stop
 }
 
 // InstantReplyConfig controls the immediate confirmation reply sent when a message
