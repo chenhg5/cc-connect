@@ -13,6 +13,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"github.com/chenhg5/cc-connect/core"
 )
@@ -268,6 +269,10 @@ func convertSessionList(entries []acpSessionListEntry, cwdFilter string) []core.
 func truncateForLog(s string, n int) string {
 	if len(s) <= n {
 		return s
+	}
+	// Keep the byte limit without splitting a multi-byte rune.
+	for n > 0 && !utf8.RuneStart(s[n]) {
+		n--
 	}
 	return s[:n] + "…"
 }

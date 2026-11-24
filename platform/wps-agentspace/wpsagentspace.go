@@ -20,6 +20,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+	"unicode/utf8"
 
 	"github.com/BurntSushi/toml"
 	"github.com/chenhg5/cc-connect/config"
@@ -1174,10 +1175,13 @@ func generateUUID() string {
 	return uuid.NewString()
 }
 
-// truncate truncates a string to maxLen characters.
+// truncate truncates a string to maxLen bytes without splitting a rune.
 func truncate(s string, maxLen int) string {
 	if len(s) <= maxLen {
 		return s
+	}
+	for maxLen > 0 && !utf8.RuneStart(s[maxLen]) {
+		maxLen--
 	}
 	return s[:maxLen] + "..."
 }
