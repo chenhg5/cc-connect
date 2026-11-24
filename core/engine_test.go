@@ -2055,6 +2055,31 @@ func TestProcessInteractiveEvents_CardProgressTruncatesToolInputByToolMaxLen(t *
 	}
 }
 
+func TestProcessInteractiveEvents_QuietModeUsesOneGapAcrossToolCalls(t *testing.T) {
+	p := &stubCompactProgressPlatform{stubPlatformEngine: stubPlatformEngine{n: "telegram"}}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	e.SetDisplayConfig(DisplayCfg{Mode: "quiet", CardMode: "legacy", ThinkingMessages: false, ToolMessages: false})
+	sessionKey := "telegram:user-quiet-tools"
+	session := e.sessions.GetOrCreateActive(sessionKey)
+	agentSession := newControllableSession("s-quiet-tools")
+	state := &interactiveState{agentSession: agentSession, platform: p, replyCtx: "ctx-quiet-tools"}
+	e.interactiveStates[sessionKey] = state
+
+	agentSession.events <- Event{Type: EventText, Content: "Checking. "}
+	for i := 0; i < 3; i++ {
+		agentSession.events <- Event{Type: EventToolUse, ToolName: "Bash", ToolInput: "echo ok"}
+	}
+	agentSession.events <- Event{Type: EventText, Content: "Done."}
+	agentSession.events <- Event{Type: EventResult, Content: "Done.", Done: true}
+
+	e.processInteractiveEvents(state, session, e.sessions, sessionKey, "m-quiet-tools", time.Now(), nil, nil, state.replyCtx, 0)
+	edits := p.getPreviewEdits()
+	if len(edits) == 0 || !strings.Contains(edits[len(edits)-1], "Checking. \n\nDone.") ||
+		strings.Contains(edits[len(edits)-1], "\n\n\n") {
+		t.Fatalf("quiet preview has repeated tool gaps: edits=%q", edits)
+	}
+}
+
 func TestProcessInteractiveEvents_RichCardShowsThinkingContent(t *testing.T) {
 	p := &stubCompactProgressPlatform{
 		stubPlatformEngine: stubPlatformEngine{n: "feishu"},
