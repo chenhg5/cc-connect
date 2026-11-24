@@ -600,8 +600,10 @@ type interactiveState struct {
 	// events between user-initiated turns (e.g. background task completions).
 	// Cancel unsolicitedCancel to stop the reader; wait on unsolicitedDone
 	// to confirm it has exited before starting a new foreground turn.
-	unsolicitedCancel context.CancelFunc // nil when no reader is running
-	unsolicitedDone   chan struct{}      // closed when the reader goroutine exits
+	unsolicitedCancel            context.CancelFunc // nil when no reader is running
+	unsolicitedDone              chan struct{}      // closed when the reader goroutine exits
+	unsolicitedTimedOutDone      chan struct{}      // reader that did not stop within the bounded wait
+	unsolicitedRecoveryScheduled bool
 	// unsolicitedFlushDone is closed once any partial-turn text flushed by
 	// the exiting reader has been handed to the platform (or immediately on
 	// exit when there was nothing to flush). stopUnsolicitedReader waits on
@@ -4350,6 +4352,8 @@ func (e *Engine) processInteractiveMessageWith(p Platform, msg *Message, session
 	state.mu.Unlock()
 	if alive {
 		e.scheduleAgentSessionIdleClose(interactiveKey, state)
+	} else {
+		e.scheduleUnsolicitedReaderRecovery(state, session, sessions, interactiveKey, workspaceDir)
 	}
 
 	// Guard against a narrow race: a message may have been queued between
@@ -5255,6 +5259,7 @@ func (e *Engine) stopUnsolicitedReader(state *interactiveState) {
 		// silently steal foreground events.
 		state.mu.Lock()
 		state.eventsNeedResync = true
+		state.unsolicitedTimedOutDone = done
 		state.mu.Unlock()
 	}
 }
@@ -5283,6 +5288,8 @@ func (e *Engine) startUnsolicitedReader(state *interactiveState, session *Sessio
 	flushDone := make(chan struct{})
 
 	state.mu.Lock()
+	state.unsolicitedTimedOutDone = nil
+	state.unsolicitedRecoveryScheduled = false
 	state.unsolicitedCancel = cancel
 	state.unsolicitedDone = done
 	state.unsolicitedFlushDone = flushDone
@@ -5299,7 +5306,65 @@ func (e *Engine) startIdleUnsolicitedReader(state *interactiveState, session *Se
 	state.mu.Unlock()
 	if alive {
 		e.startUnsolicitedReader(state, session, sessions, sessionKey, workspaceDir)
+	} else {
+		e.scheduleUnsolicitedReaderRecovery(state, session, sessions, sessionKey, workspaceDir)
 	}
+}
+
+// scheduleUnsolicitedReaderRecovery waits for a reader that missed the stop
+// deadline to actually exit. It then takes the session lock, discards stale
+// buffered events, and resumes background delivery. A still-busy foreground
+// turn keeps ownership of Events until it releases the lock.
+func (e *Engine) scheduleUnsolicitedReaderRecovery(state *interactiveState, session *Session, sessions *SessionManager, sessionKey, workspaceDir string) {
+	state.mu.Lock()
+	done := state.unsolicitedTimedOutDone
+	if done == nil || state.unsolicitedRecoveryScheduled {
+		state.mu.Unlock()
+		return
+	}
+	state.unsolicitedRecoveryScheduled = true
+	state.mu.Unlock()
+	go func() {
+		select {
+		case <-done:
+		case <-e.ctx.Done():
+			return
+		}
+		ticker := time.NewTicker(50 * time.Millisecond)
+		defer ticker.Stop()
+		for {
+			if gen, ok := session.TryLock(); ok {
+				e.interactiveMu.Lock()
+				current := e.interactiveStates[sessionKey]
+				e.interactiveMu.Unlock()
+				state.mu.Lock()
+				as := state.agentSession
+				valid := current == state && state.unsolicitedTimedOutDone == done &&
+					as != nil && as.Alive() && !state.stopped && state.eventsNeedResync &&
+					state.unsolicitedCancel == nil && len(state.pendingMessages) == 0
+				if valid {
+					// The old reader has exited and this goroutine owns the
+					// session lock, so no foreground consumer can race with resync.
+					drainEvents(as.Events())
+					state.eventsNeedResync = false
+					state.unsolicitedTimedOutDone = nil
+				}
+				state.unsolicitedRecoveryScheduled = false
+				state.mu.Unlock()
+				if valid {
+					e.startUnsolicitedReader(state, session, sessions, sessionKey, workspaceDir)
+					e.scheduleAgentSessionIdleClose(sessionKey, state)
+				}
+				session.Unlock(gen)
+				return
+			}
+			select {
+			case <-ticker.C:
+			case <-e.ctx.Done():
+				return
+			}
+		}
+	}()
 }
 
 // runUnsolicitedReader is the goroutine body for the unsolicited event reader.
