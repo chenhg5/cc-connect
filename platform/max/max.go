@@ -1557,8 +1557,9 @@ func (p *Platform) postMessage(ctx context.Context, rctx replyContext, body *max
 			backoff *= 2
 			continue
 		}
-		slog.Warn("max: send message failed", "status", resp.StatusCode, target, targetValue, "body", string(respBody))
-		return fmt.Errorf("max: send message: HTTP %d: %s", resp.StatusCode, respBody)
+		failure := core.HTTPError("max: send message", resp.StatusCode, respBody, p.token, body.Text)
+		slog.Warn("max: send message failed", "error", failure, target, targetValue)
+		return failure
 	}
 	return fmt.Errorf("max: send message: attachment not ready after %d retries", attachmentReadyRetries)
 }
