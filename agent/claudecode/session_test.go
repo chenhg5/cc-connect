@@ -3,9 +3,12 @@ package claudecode
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"io"
 	"os"
 	"os/exec"
+	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -281,5 +284,102 @@ func TestHelperProcess(t *testing.T) {
 		os.Exit(0)
 	default:
 		os.Exit(2)
+	}
+}
+
+func TestHandleResultMarksError(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	cs := &claudeSession{events: make(chan core.Event, 8), ctx: ctx}
+	cs.sessionID.Store("test-session")
+	cs.alive.Store(true)
+
+	cs.handleResult(map[string]any{
+		"type":     "result",
+		"result":   "API Error: 400 messages.3.content.3: The image is too large",
+		"is_error": true,
+	})
+
+	evt := <-cs.events
+	if !evt.IsError {
+		t.Fatal("IsError = false, want true for an error result")
+	}
+	if !strings.Contains(evt.Content, "400") {
+		t.Fatalf("content = %q, want the API error text", evt.Content)
+	}
+}
+
+func TestSanitizeAgentStderrDropsModelRegistryNoise(t *testing.T) {
+	raw := "[claude-code:unrecognized_model] {\"model\":\"deepseek-flash[1m]\",\"query_source\":\"sdk\"}\n" +
+		"API Error: 400 messages.3.content.3: The image is too large to process"
+
+	got := sanitizeAgentStderr(raw)
+	if strings.Contains(got, "unrecognized_model") {
+		t.Fatalf("sanitized stderr still contains the model-registry noise: %q", got)
+	}
+	if !strings.Contains(got, "400") || !strings.Contains(got, "too large") {
+		t.Fatalf("sanitized stderr = %q, want the real API error", got)
+	}
+
+	if got := sanitizeAgentStderr("[claude-code:unrecognized_model] {\"model\":\"x\"}"); got != "" {
+		t.Fatalf("noise-only stderr = %q, want empty", got)
+	}
+}
+
+type bufferWriteCloser struct{ buf *bytes.Buffer }
+
+func (w bufferWriteCloser) Write(p []byte) (int, error) { return w.buf.Write(p) }
+func (w bufferWriteCloser) Close() error                { return nil }
+
+func TestSendDeduplicatesIdenticalImages(t *testing.T) {
+	workDir := t.TempDir()
+	var buf bytes.Buffer
+	cs := &claudeSession{
+		stdin:      bufferWriteCloser{buf: &buf},
+		workDir:    workDir,
+		events:     make(chan core.Event, 1),
+		ctx:        context.Background(),
+		sentImages: make(map[string]string),
+	}
+	cs.alive.Store(true)
+
+	img := core.ImageAttachment{MimeType: "image/png", Data: []byte("same-image-bytes")}
+	if err := cs.Send("look twice", []core.ImageAttachment{img, img}, nil); err != nil {
+		t.Fatalf("Send() error: %v", err)
+	}
+
+	var payload struct {
+		Message struct {
+			Content []map[string]any `json:"content"`
+		} `json:"message"`
+	}
+	if err := json.Unmarshal(bytes.TrimSpace(buf.Bytes()), &payload); err != nil {
+		t.Fatalf("parse stdin JSON: %v (raw=%q)", err, buf.String())
+	}
+	imageParts, textParts := 0, ""
+	for _, part := range payload.Message.Content {
+		switch part["type"] {
+		case "image":
+			imageParts++
+		case "text":
+			if s, ok := part["text"].(string); ok {
+				textParts += s
+			}
+		}
+	}
+	if imageParts != 1 {
+		t.Fatalf("image parts = %d, want 1 (duplicate must be omitted)", imageParts)
+	}
+	if !strings.Contains(textParts, "omitted") {
+		t.Fatalf("text part = %q, want a note that the duplicate was omitted", textParts)
+	}
+
+	entries, err := os.ReadDir(filepath.Join(workDir, ".cc-connect", "attachments"))
+	if err != nil {
+		t.Fatalf("read attachments dir: %v", err)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("attachment files = %d, want 1", len(entries))
 	}
 }

@@ -126,3 +126,62 @@ func TestSteerRewritesExistingAck(t *testing.T) {
 		t.Fatalf("reactions = %v, want exactly one emoji reaction too", updated)
 	}
 }
+
+// blockingSendSession holds Send open so a test can flip turnActive while the
+// steer write is in flight.
+type blockingSendSession struct {
+	events  chan Event
+	started chan struct{}
+	release chan struct{}
+}
+
+func (s *blockingSendSession) Send(_ string, _ []ImageAttachment, _ []FileAttachment) error {
+	close(s.started)
+	<-s.release
+	return nil
+}
+func (s *blockingSendSession) RespondPermission(_ string, _ PermissionResult) error { return nil }
+func (s *blockingSendSession) Events() <-chan Event                                 { return s.events }
+func (s *blockingSendSession) CurrentSessionID() string                             { return "blocking-session" }
+func (s *blockingSendSession) Alive() bool                                          { return true }
+func (s *blockingSendSession) Close() error                                         { return nil }
+
+func TestSteerBusySession_RoutesReplyAfterTurnEnd(t *testing.T) {
+	e, p := steerTestEngine(t)
+	sess := &blockingSendSession{
+		events:  make(chan Event),
+		started: make(chan struct{}),
+		release: make(chan struct{}),
+	}
+	state := &interactiveState{
+		agentSession: sess, platform: p,
+		replyCtx: "old-ctx", currentMessageID: "m1", turnActive: true,
+	}
+	e.interactiveStates["k"] = state
+	sessions := e.sessions
+	session := sessions.GetOrCreateActive("k")
+
+	msg := &Message{SessionKey: "k", Platform: "test", MessageID: "m2", Content: "after end", ReplyCtx: "new-ctx"}
+	result := make(chan bool, 1)
+	go func() { result <- e.steerBusySession(p, msg, "k", session, sessions) }()
+
+	<-sess.started
+	state.mu.Lock()
+	state.turnActive = false
+	state.mu.Unlock()
+	close(sess.release)
+
+	if !<-result {
+		t.Fatal("steerBusySession() = false, want true")
+	}
+	state.mu.Lock()
+	gotCtx, gotMsgID, gotPlatform := state.replyCtx, state.currentMessageID, state.platform
+	state.mu.Unlock()
+	if gotCtx != "new-ctx" || gotMsgID != "m2" || gotPlatform != Platform(p) {
+		t.Fatalf("reply routing = (%v,%v,%v), want the steered message context", gotCtx, gotMsgID, gotPlatform)
+	}
+	sent := p.getSent()
+	if len(sent) == 0 || !strings.Contains(sent[len(sent)-1], "作为新一轮处理") {
+		t.Fatalf("sent = %v, want the after-turn-end steer ack", sent)
+	}
+}

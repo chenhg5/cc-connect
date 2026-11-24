@@ -1,6 +1,9 @@
 package core
 
 import (
+	"bytes"
+	"image"
+	"image/png"
 	"os"
 	"path/filepath"
 	"strings"
@@ -95,5 +98,35 @@ func TestSaveFilesToDisk_RejectsPathTraversal(t *testing.T) {
 	okPath := filepath.Join(attachDir, "ok.txt")
 	if _, err := os.Stat(okPath); err != nil {
 		t.Errorf("legitimate ok.txt not saved: %v", err)
+	}
+}
+
+// testPNG builds a valid PNG of the requested size for image-dimension tests.
+func testPNG(t *testing.T, w, h int) []byte {
+	t.Helper()
+	img := image.NewRGBA(image.Rect(0, 0, w, h))
+	var buf bytes.Buffer
+	if err := png.Encode(&buf, img); err != nil {
+		t.Fatalf("encode png: %v", err)
+	}
+	return buf.Bytes()
+}
+
+func TestImageDimensionsAndOversizedDetection(t *testing.T) {
+	small := ImageAttachment{MimeType: "image/png", Data: testPNG(t, 100, 100)}
+	if w, h, ok := ImageDimensions(small); !ok || w != 100 || h != 100 {
+		t.Fatalf("ImageDimensions(small) = %d,%d,%v; want 100,100,true", w, h, ok)
+	}
+
+	wide := ImageAttachment{MimeType: "image/png", Data: testPNG(t, MaxModelImageDimension+1, 2)}
+	idx, w, h, found := FindOversizedImage([]ImageAttachment{small, wide})
+	if !found || idx != 1 || w != MaxModelImageDimension+1 || h != 2 {
+		t.Fatalf("FindOversizedImage = %d,%d,%d,%v; want 1,%d,2,true", idx, w, h, found, MaxModelImageDimension+1)
+	}
+	if _, _, _, found := FindOversizedImage([]ImageAttachment{small}); found {
+		t.Fatal("FindOversizedImage flagged a normal image")
+	}
+	if _, _, ok := ImageDimensions(ImageAttachment{Data: []byte("not an image")}); ok {
+		t.Fatal("ImageDimensions accepted non-image bytes")
 	}
 }

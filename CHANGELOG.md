@@ -1,5 +1,19 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+- **Turn failures are always visible**: process exits with no output, `EventError`, send failures and idle timeouts now always produce a localized, actionable message; raw English internals stay in the log and `[claude-code:unrecognized_model]` noise is filtered.
+- **Poisoned sessions self-heal**: after 3 consecutive non-transient failures the agent session is reset and the failed message is re-processed automatically (quoted context kept once, no rate-limit token, oversized/problem images stripped with a user-visible notice). Rate-limit/timeout/auth failures no longer wipe a healthy conversation.
+- **Commands in quoted replies**: a leading `/` command runs even when the message carries quoted images; permission responses are handled before image validation so `allow`/`deny` can never be swallowed by a bad attachment.
+- **Image safety**: images above 8000 px per side are rejected before reaching the model, and identical images are de-duplicated per agent process.
+- **Final reply delivery**: chunks are delivered in order with retries; partial or complete loss is reported to the user instead of silently dropped.
+- **Progress card terminal state**: rate-limit-aware retries (230429/99991400), terminal backoff with plain-text fallback, and a visible notice when card updates are disabled.
+- **Error text**: one classification table drives localized user text, reset policy and redispatch image policy for agent/API errors.
+
+### Added
+- `turn_progress_mins` config (default 1 minute, 0 disables) for a quiet-turn "still working" progress line.
+
 ## v1.3.3-beta.2 (2026-05-09)
 
 Beta release with Slack Assistant API, DingTalk improvements, MAX platform webhook mode, and numerous platform fixes. No breaking changes.

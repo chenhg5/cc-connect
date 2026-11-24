@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
@@ -50,6 +51,17 @@ type claudeSession struct {
 	cancel          context.CancelFunc
 	done            chan struct{}
 	alive           atomic.Bool
+	// stopping is set before a deliberate shutdown (Close / /new / model
+	// switch). It suppresses the otherwise-visible "process exited" error: a
+	// kill we asked for is not a turn failure.
+	stopping atomic.Bool
+
+	// sentImages deduplicates image payloads by content hash for the lifetime
+	// of this process. Quoting a picture re-attaches it on every reply; without
+	// dedup the same base64 block is appended to the transcript repeatedly and
+	// bloats (or poisons) the conversation history.
+	sentImagesMu sync.Mutex
+	sentImages   map[string]string // sha256 -> saved path
 
 	// gracefulStopTimeout is how long Close() waits for a clean exit
 	// (stdin close → Stop hooks → process exit) before escalating to
@@ -219,6 +231,7 @@ func newClaudeSession(ctx context.Context, workDir, cliBin string, cliExtraArgs 
 		ctx:                 sessionCtx,
 		cancel:              cancel,
 		done:                make(chan struct{}),
+		sentImages:          make(map[string]string),
 		gracefulStopTimeout: 120 * time.Second,
 	}
 	cs.setPermissionMode(mode)
@@ -280,25 +293,54 @@ func (cs *claudeSession) finishReadLoop(waitErrCh <-chan error, stderrBuf *bytes
 	err := <-waitErrCh
 
 	cs.alive.Store(false)
-	if err != nil {
-		stderrMsg := ""
-		if stderrBuf != nil {
-			stderrMsg = strings.TrimSpace(stderrBuf.String())
+	stderrRaw := ""
+	if stderrBuf != nil {
+		stderrRaw = strings.TrimSpace(stderrBuf.String())
+	}
+	if err != nil && !cs.stopping.Load() {
+		// Report every unexpected exit, even when stderr is empty. Silently
+		// closing the event channel used to look like "the turn finished with
+		// no output" to the engine, which then replied with nothing at all.
+		stderrMsg := sanitizeAgentStderr(stderrRaw)
+		if stderrMsg == "" {
+			stderrMsg = fmt.Sprintf("agent process exited: %v", err)
 		}
-		if stderrMsg != "" {
-			slog.Error("claudeSession: process failed", "error", err, "stderr", stderrMsg)
-			evt := core.Event{Type: core.EventError, Error: fmt.Errorf("%s", stderrMsg)}
-			select {
-			case cs.events <- evt:
-			case <-cs.ctx.Done():
-				// INVARIANT: readLoop must close cs.events and cs.done exactly once
-				// on every termination path. Callers (engine event loop) rely on
-				// these closures to observe session end.
-			}
+		slog.Error("claudeSession: process failed",
+			"error", err, "stderr", stderrRaw, "reported", stderrMsg)
+		evt := core.Event{Type: core.EventError, Error: fmt.Errorf("%s", stderrMsg)}
+		select {
+		case cs.events <- evt:
+		case <-cs.ctx.Done():
+			// INVARIANT: readLoop must close cs.events and cs.done exactly once
+			// on every termination path. Callers (engine event loop) rely on
+			// these closures to observe session end.
 		}
 	}
 	close(cs.events)
 	close(cs.done)
+}
+
+// sanitizeAgentStderr drops diagnostics that are non-fatal noise. Claude Code
+// prints "[claude-code:unrecognized_model] {...}" once per process when the
+// configured model is not in its local registry; it does not mean the request
+// failed. In an incident it was the *only* stderr line, so surfacing it
+// verbatim hid the real API error from the user and from RCA.
+func sanitizeAgentStderr(raw string) string {
+	if strings.TrimSpace(raw) == "" {
+		return ""
+	}
+	lines := strings.Split(raw, "\n")
+	kept := make([]string, 0, len(lines))
+	for _, line := range lines {
+		if strings.Contains(line, "[claude-code:unrecognized_model]") {
+			continue
+		}
+		if strings.TrimSpace(line) == "" {
+			continue
+		}
+		kept = append(kept, line)
+	}
+	return strings.TrimSpace(strings.Join(kept, "\n"))
 }
 
 func (cs *claudeSession) handleReadLoopScanErr(err error, waitDone <-chan struct{}) {
@@ -521,12 +563,14 @@ func (cs *claudeSession) handleResult(raw map[string]any) {
 			outputTokens = int(v)
 		}
 	}
+	isError, _ := raw["is_error"].(bool)
 
 	evt := core.Event{
 		Type:         core.EventResult,
 		Content:      content,
 		SessionID:    cs.CurrentSessionID(),
 		Done:         true,
+		IsError:      isError,
 		InputTokens:  inputTokens,
 		OutputTokens: outputTokens,
 	}
@@ -620,17 +664,58 @@ func (cs *claudeSession) Send(prompt string, images []core.ImageAttachment, file
 
 	var parts []map[string]any
 	var savedPaths []string
+	var omittedNotes []string
 
-	// Save and encode images
+	// Save and encode images. Two guards here:
+	//   1. oversized images are never sent (they would poison every later
+	//      request with a 400);
+	//   2. identical images already sent earlier in this process are not
+	//      re-attached (quoting a picture otherwise appends the same base64
+	//      block to the transcript on every turn).
 	for i, img := range images {
+		if w, h, ok := core.ImageDimensions(img); ok &&
+			(w > core.MaxModelImageDimension || h > core.MaxModelImageDimension) {
+			slog.Warn("claudeSession: oversized image dropped",
+				"index", i, "width", w, "height", h, "limit", core.MaxModelImageDimension)
+			omittedNotes = append(omittedNotes, fmt.Sprintf(
+				"(Image %d omitted: %d×%d exceeds the %d px limit. Ask the user to split it.)",
+				i+1, w, h, core.MaxModelImageDimension))
+			continue
+		}
+
+		sum := sha256.Sum256(img.Data)
+		hash := fmt.Sprintf("%x", sum)
+		cs.sentImagesMu.Lock()
+		prevPath, seen := cs.sentImages[hash]
+		if !seen {
+			if len(cs.sentImages) >= 512 {
+				cs.sentImages = make(map[string]string)
+			}
+			cs.sentImages[hash] = "" // reserve; filled in after a successful save
+		}
+		cs.sentImagesMu.Unlock()
+		if seen {
+			slog.Info("claudeSession: duplicate image omitted", "hash", hash[:12], "previous_path", prevPath)
+			omittedNotes = append(omittedNotes, fmt.Sprintf(
+				"(Image %d omitted: the same image was already sent earlier%s.)",
+				i+1, pathSuffix(prevPath)))
+			continue
+		}
+
 		ext := extFromMime(img.MimeType)
 		fname := fmt.Sprintf("img_%d_%d%s", time.Now().UnixMilli(), i, ext)
 		fpath := filepath.Join(attachDir, fname)
 		if err := os.WriteFile(fpath, img.Data, 0o644); err != nil {
 			slog.Error("claudeSession: save image failed", "error", err)
+			cs.sentImagesMu.Lock()
+			delete(cs.sentImages, hash)
+			cs.sentImagesMu.Unlock()
 			continue
 		}
 		savedPaths = append(savedPaths, fpath)
+		cs.sentImagesMu.Lock()
+		cs.sentImages[hash] = fpath
+		cs.sentImagesMu.Unlock()
 		slog.Debug("claudeSession: image saved", "path", fpath, "size", len(img.Data))
 
 		mimeType := img.MimeType
@@ -660,6 +745,9 @@ func (cs *claudeSession) Send(prompt string, images []core.ImageAttachment, file
 	if len(savedPaths) > 0 {
 		textPart += "\n\n(Images also saved locally: " + strings.Join(savedPaths, ", ") + ")"
 	}
+	if len(omittedNotes) > 0 {
+		textPart += "\n\n" + strings.Join(omittedNotes, "\n")
+	}
 	if len(filePaths) > 0 {
 		textPart += "\n\n(Files saved locally, please read them: " + strings.Join(filePaths, ", ") + ")"
 	}
@@ -682,6 +770,15 @@ func extFromMime(mime string) string {
 	default:
 		return ".png"
 	}
+}
+
+// pathSuffix renders a duplicate-image note without leaking the full local
+// path into the model prompt.
+func pathSuffix(path string) string {
+	if path == "" {
+		return ""
+	}
+	return " (" + filepath.Base(path) + ")"
 }
 
 // Interrupt asks Claude Code to abandon the in-flight turn through the
@@ -808,6 +905,10 @@ func (cs *claudeSession) Alive() bool {
 }
 
 func (cs *claudeSession) Close() error {
+	// Deliberate shutdown: a non-zero exit from the signal/EOF we send is
+	// expected and must not be reported as a failed turn.
+	cs.stopping.Store(true)
+
 	// Phase 1: Close stdin to signal EOF. Claude Code exits cleanly on
 	// stdin close, running Stop hooks (e.g. claude-mem session summary).
 	cs.stdinMu.Lock()

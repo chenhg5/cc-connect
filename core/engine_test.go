@@ -11877,17 +11877,18 @@ func TestUnsolicitedReader_SetsResyncOnEventError(t *testing.T) {
 		t.Error("expected eventsNeedResync=true after EventError")
 	}
 
-	// Verify error was relayed to platform.
+	// Verify the failure was relayed to the platform. The raw internal error is
+	// intentionally not echoed; users get a localized, actionable message.
 	sent := p.getSent()
 	found := false
 	for _, s := range sent {
-		if strings.Contains(s, "something broke") {
+		if strings.Contains(s, "turn failed") {
 			found = true
 			break
 		}
 	}
 	if !found {
-		t.Errorf("expected error to be relayed to platform, got %v", sent)
+		t.Errorf("expected a failure notice to be relayed to platform, got %v", sent)
 	}
 }
 
@@ -13067,5 +13068,504 @@ func TestBtwAlias_ResolvesToPs(t *testing.T) {
 	id2 := matchPrefix("ps", builtinCommands)
 	if id2 != "ps" {
 		t.Fatalf("matchPrefix(\"ps\") = %q, want \"ps\"", id2)
+	}
+}
+
+// TestHandleMessageRejectsOversizedImage verifies an image beyond the model's
+// per-side limit is stopped before the agent sees it: once such an image is in
+// the transcript every later request fails and the session is poisoned.
+func TestHandleMessageRejectsOversizedImage(t *testing.T) {
+	p := &stubPlatformEngine{n: "test"}
+	agent := &resultAgent{session: newResultAgentSession("should not run")}
+	e := NewEngine("test", agent, []Platform{p}, "", LangChinese)
+	t.Cleanup(e.cancel)
+
+	msg := &Message{
+		SessionKey: "test:u1",
+		Platform:   "test",
+		UserID:     "u1",
+		Content:    "看下这张图",
+		Images: []ImageAttachment{{
+			MimeType: "image/png",
+			Data:     testPNG(t, 1200, MaxModelImageDimension+1),
+		}},
+		ReplyCtx: "ctx",
+	}
+	e.handleMessage(p, msg)
+
+	sent := p.getSent()
+	if len(sent) == 0 || !strings.Contains(sent[0], "图片过大") {
+		t.Fatalf("sent = %v, want an image-too-large notice", sent)
+	}
+}
+
+// TestHandleMessageQuotedImagesDoNotBlockCommand covers the incident where a
+// user quoted an image and typed /new: the quoted image was merged into
+// msg.Images, so command parsing was skipped and the rescue command vanished.
+func TestHandleMessageQuotedImagesDoNotBlockCommand(t *testing.T) {
+	p := &stubPlatformEngine{n: "test"}
+	agent := &resultAgent{session: newResultAgentSession("should not run")}
+	e := NewEngine("test", agent, []Platform{p}, "", LangChinese)
+	t.Cleanup(e.cancel)
+
+	key := "test:u1"
+	old := e.sessions.GetOrCreateActive(key)
+	old.SetAgentSessionID("old-agent-session", "claudecode")
+	old.AddHistory("user", "previous context")
+
+	quoted := []ImageAttachment{{MimeType: "image/png", Data: testPNG(t, 10, 10)}}
+	msg := &Message{
+		SessionKey:   key,
+		Platform:     "test",
+		UserID:       "u1",
+		Content:      "/new",
+		ExtraContent: "[Quoted message from user]:\n[image]\n\n",
+		Images:       quoted,
+		QuotedImages: quoted,
+		ReplyCtx:     "ctx",
+	}
+	e.handleMessage(p, msg)
+
+	sent := p.getSent()
+	if len(sent) == 0 || !strings.Contains(sent[0], "新会话") {
+		t.Fatalf("sent = %v, want a new-session confirmation", sent)
+	}
+	if got := e.sessions.GetOrCreateActive(key).GetAgentSessionID(); got != "" {
+		t.Fatalf("agent session id = %q, want cleared by /new", got)
+	}
+}
+
+func TestRecordTurnFailureResetsSessionAfterThreshold(t *testing.T) {
+	p := &stubPlatformEngine{n: "test"}
+	e := NewEngine("test", &resultAgent{session: newResultAgentSession("ok")}, []Platform{p}, "", LangChinese)
+	t.Cleanup(e.cancel)
+
+	key := "test:u1"
+	session := e.sessions.GetOrCreateActive(key)
+	session.SetAgentSessionID("poisoned-session", "claudecode")
+	session.AddHistory("user", "bad turn")
+
+	for i := 1; i < sessionFailureResetThreshold; i++ {
+		e.recordTurnFailure(nil, p, "ctx", key, session, e.sessions, "API Error: 400 image too large")
+		if got := session.GetAgentSessionID(); got != "poisoned-session" {
+			t.Fatalf("after %d failures agent session id = %q, want still poisoned-session", i, got)
+		}
+	}
+	e.recordTurnFailure(nil, p, "ctx", key, session, e.sessions, "API Error: 400 image too large")
+
+	if got := session.GetAgentSessionID(); got != "" {
+		t.Fatalf("agent session id = %q, want cleared after %d failures", got, sessionFailureResetThreshold)
+	}
+	if got := session.HistoryLen(); got != 0 {
+		t.Fatalf("history len = %d, want 0 after auto-reset", got)
+	}
+	// The state==nil path (getOrCreate holds interactiveMu) sends the notice
+	// off-lock, so poll for it instead of assuming it is synchronous.
+	deadline := time.After(2 * time.Second)
+	for {
+		sent := p.getSent()
+		if len(sent) > 0 && strings.Contains(sent[len(sent)-1], "自动重置") {
+			return
+		}
+		select {
+		case <-deadline:
+			t.Fatalf("sent = %v, want an auto-reset notice", sent)
+		default:
+			time.Sleep(10 * time.Millisecond)
+		}
+	}
+}
+
+func TestDrainEventsKeepsLastErrorText(t *testing.T) {
+	ch := make(chan Event, 3)
+	ch <- Event{Type: EventText, Content: "partial output"}
+	ch <- Event{Type: EventError, Error: fmt.Errorf("API Error: 400 image too large")}
+	close(ch)
+
+	got := drainEvents(ch)
+	if !strings.Contains(got, "400") || !strings.Contains(got, "image too large") {
+		t.Fatalf("drainEvents() = %q, want the buffered error text", got)
+	}
+}
+
+// closingAgentSession simulates a process that exits before emitting any
+// event: the events channel closes and the session reports itself dead.
+type closingAgentSession struct {
+	events    chan Event
+	closeOnce sync.Once
+}
+
+func (s *closingAgentSession) Send(_ string, _ []ImageAttachment, _ []FileAttachment) error {
+	s.closeOnce.Do(func() { close(s.events) })
+	return nil
+}
+func (s *closingAgentSession) RespondPermission(_ string, _ PermissionResult) error { return nil }
+func (s *closingAgentSession) Events() <-chan Event                                 { return s.events }
+func (s *closingAgentSession) CurrentSessionID() string                             { return "closing-session" }
+func (s *closingAgentSession) Alive() bool                                          { return false }
+func (s *closingAgentSession) Close() error                                         { return nil }
+
+// A turn whose process exits before producing any text used to end in complete
+// silence. The user must always get a failure message.
+func TestTurnFailureWithoutOutputIsVisible(t *testing.T) {
+	p := &stubPlatformEngine{n: "test"}
+	sess := &closingAgentSession{events: make(chan Event)}
+	e := NewEngine("test", &resultAgent{session: sess}, []Platform{p}, "", LangChinese)
+	t.Cleanup(e.cancel)
+
+	e.handleMessage(p, &Message{
+		SessionKey: "test:u1",
+		Platform:   "test",
+		UserID:     "u1",
+		Content:    "hello",
+		ReplyCtx:   "ctx",
+	})
+
+	deadline := time.After(3 * time.Second)
+	for {
+		sent := p.getSent()
+		if len(sent) > 0 {
+			if !strings.Contains(sent[0], "本轮处理失败") {
+				t.Fatalf("sent = %v, want a turn-failure notice", sent)
+			}
+			return
+		}
+		select {
+		case <-deadline:
+			t.Fatal("no failure message was sent for a process that exited with no output")
+		default:
+			time.Sleep(10 * time.Millisecond)
+		}
+	}
+}
+
+// After a poisoned session is reset, the failed message is processed again
+// automatically — the user should not have to retype a long prompt.
+func TestSessionAutoResetRedispatchesMessage(t *testing.T) {
+	p := &stubPlatformEngine{n: "test"}
+	sess := newResultAgentSession("recovered answer")
+	agent := &resultAgent{session: sess}
+	e := NewEngine("test", agent, []Platform{p}, "", LangChinese)
+	t.Cleanup(e.cancel)
+
+	key := "test:u1"
+	session := e.sessions.GetOrCreateActive(key)
+	session.SetAgentSessionID("poisoned-session", "claudecode")
+	quoted := "[Quoted message from user]:\n原始问题\n\n"
+	state := &interactiveState{
+		currentMsg: &Message{
+			SessionKey: key,
+			Platform:   "test",
+			UserID:     "u1",
+			// By failure time handleMessage has already merged ExtraContent
+			// into Content; the clone must not prepend it a second time.
+			Content:      quoted + "帮我分析一下这个很长的需求，不要让我重打一遍",
+			ExtraContent: quoted,
+			ReplyCtx:     "ctx",
+		},
+	}
+
+	for i := 0; i < sessionFailureResetThreshold; i++ {
+		state.mu.Lock()
+		state.failureCounted = false // one failure per simulated turn
+		state.mu.Unlock()
+		e.recordTurnFailure(state, p, "ctx", key, session, e.sessions, "API Error: 400 image too large")
+	}
+
+	deadline := time.After(3 * time.Second)
+	for {
+		sent := p.getSent()
+		foundNotice, foundAnswer := false, false
+		for _, s := range sent {
+			if strings.Contains(s, "无需重发") {
+				foundNotice = true
+			}
+			if strings.Contains(s, "recovered answer") {
+				foundAnswer = true
+			}
+		}
+		if foundNotice && foundAnswer {
+			prompts := sess.sentPrompts
+			if len(prompts) == 0 {
+				t.Fatal("no prompt reached the agent after reset")
+			}
+			if n := strings.Count(prompts[0], "[Quoted message from user]"); n != 1 {
+				t.Fatalf("quoted context appears %d times in the redispatch prompt, want 1: %q", n, prompts[0])
+			}
+			if !strings.Contains(prompts[0], "不要让我重打一遍") {
+				t.Fatalf("redispatch prompt lost the user's message: %q", prompts[0])
+			}
+			return
+		}
+		select {
+		case <-deadline:
+			t.Fatalf("timed out waiting for reset notice + redispatch answer, sent=%v", sent)
+		default:
+			time.Sleep(10 * time.Millisecond)
+		}
+	}
+}
+
+func TestAgentErrorUserMessage(t *testing.T) {
+	e := NewEngine("test", &resultAgent{session: newResultAgentSession("ok")}, []Platform{&stubPlatformEngine{n: "test"}}, "", LangChinese)
+	t.Cleanup(e.cancel)
+
+	cases := []struct{ raw, want string }{
+		{"API Error: 400 messages.3.content.3: The image is too large to process", "图片超出模型尺寸上限"},
+		{"max turns exceeded the maximum", "本轮处理失败"}, // must NOT be misread as an image error
+		{"rate limit exceeded", "限流"},
+		{"request timed out", "超时"},
+		{"[claude-code:unrecognized_model] {\"model\":\"x\"}", "本轮处理失败"},
+	}
+	for _, tt := range cases {
+		got := e.agentErrorUserMessage(tt.raw)
+		if !strings.Contains(got, tt.want) {
+			t.Errorf("agentErrorUserMessage(%q) = %q, want substring %q", tt.raw, got, tt.want)
+		}
+	}
+
+	// The same table must drive the recovery policy, not just the text.
+	if c := classifyAgentError("API Error: the image is too large to process"); c.Kind != "image" || !c.SkipImages || c.Transient {
+		t.Errorf("image classification = %+v, want kind=image, SkipImages=true, Transient=false", c)
+	}
+	if c := classifyAgentError("429 rate limit exceeded"); c.Kind != "rate_limit" || !c.Transient || c.SkipImages {
+		t.Errorf("rate-limit classification = %+v, want kind=rate_limit, Transient=true", c)
+	}
+	if c := classifyAgentError("context length exceeded"); c.Kind != "context" || c.Transient || c.SkipImages {
+		t.Errorf("context classification = %+v, want non-transient, no image skip", c)
+	}
+	if c := classifyAgentError("max turns exceeded the maximum"); c.Kind != "generic" {
+		t.Errorf("unknown classification = %+v, want kind=generic", c)
+	}
+}
+
+// delayedResultSession keeps a turn silent long enough for the progress nudge.
+type delayedResultSession struct {
+	events chan Event
+	delay  time.Duration
+}
+
+func (s *delayedResultSession) Send(_ string, _ []ImageAttachment, _ []FileAttachment) error {
+	go func() {
+		time.Sleep(s.delay)
+		s.events <- Event{Type: EventResult, Content: "done", Done: true}
+		close(s.events)
+	}()
+	return nil
+}
+func (s *delayedResultSession) RespondPermission(_ string, _ PermissionResult) error { return nil }
+func (s *delayedResultSession) Events() <-chan Event                                 { return s.events }
+func (s *delayedResultSession) CurrentSessionID() string                             { return "delayed-session" }
+func (s *delayedResultSession) Alive() bool                                          { return true }
+func (s *delayedResultSession) Close() error                                         { return nil }
+
+func TestLongTurnProgressNudge(t *testing.T) {
+	p := &stubPlatformEngine{n: "test"}
+	sess := &delayedResultSession{events: make(chan Event, 1), delay: 250 * time.Millisecond}
+	e := NewEngine("test", &resultAgent{session: sess}, []Platform{p}, "", LangChinese)
+	e.SetTurnProgressInterval(50 * time.Millisecond)
+	t.Cleanup(e.cancel)
+
+	e.handleMessage(p, &Message{
+		SessionKey: "test:u1", Platform: "test", UserID: "u1",
+		Content: "跑一个很久的任务", ReplyCtx: "ctx",
+	})
+
+	deadline := time.After(3 * time.Second)
+	sawNudge, sawDone := false, false
+	for !sawNudge || !sawDone {
+		for _, s := range p.getSent() {
+			if strings.Contains(s, "仍在处理") {
+				sawNudge = true
+			}
+			if strings.Contains(s, "done") {
+				sawDone = true
+			}
+		}
+		select {
+		case <-deadline:
+			t.Fatalf("timed out: nudge=%v done=%v sent=%v", sawNudge, sawDone, p.getSent())
+		default:
+			time.Sleep(10 * time.Millisecond)
+		}
+	}
+}
+
+// A permission response must be honoured even when Feishu attached an
+// oversized quoted image to the reply; otherwise the agent blocks forever on
+// <-pending.Resolved.
+func TestPermissionResponseNotBlockedByOversizedImage(t *testing.T) {
+	p := &stubPlatformEngine{n: "test"}
+	sess := &recordingAgentSession{}
+	e := NewEngine("test", &resultAgent{session: sess}, []Platform{p}, "", LangChinese)
+	t.Cleanup(e.cancel)
+
+	key := "test:u1"
+	state := &interactiveState{
+		agentSession: sess,
+		platform:     p,
+		pending: &pendingPermission{
+			RequestID: "req-1",
+			ToolName:  "Bash",
+			ToolInput: map[string]any{"command": "ls"},
+			Resolved:  make(chan struct{}),
+		},
+	}
+	e.interactiveStates[key] = state
+
+	oversized := ImageAttachment{MimeType: "image/png", Data: testPNG(t, MaxModelImageDimension+1, 2)}
+	msg := &Message{
+		SessionKey: key, Platform: "test", UserID: "u1",
+		Content:      "allow",
+		Images:       []ImageAttachment{oversized},
+		QuotedImages: []ImageAttachment{oversized},
+		ReplyCtx:     "ctx",
+	}
+	e.handleMessage(p, msg)
+
+	if sess.calls != 1 || sess.lastID != "req-1" {
+		t.Fatalf("RespondPermission calls = %d (id=%q), want the pending request resolved", sess.calls, sess.lastID)
+	}
+	for _, s := range p.getSent() {
+		if strings.Contains(s, "图片过大") {
+			t.Fatalf("permission response was rejected by the image gate: %v", p.getSent())
+		}
+	}
+}
+
+// A rate-limit/timeout streak must not be mistaken for a poisoned transcript:
+// dropping the session would silently wipe a healthy conversation.
+func TestTransientFailuresDoNotResetSession(t *testing.T) {
+	p := &stubPlatformEngine{n: "test"}
+	e := NewEngine("test", &resultAgent{session: newResultAgentSession("ok")}, []Platform{p}, "", LangChinese)
+	t.Cleanup(e.cancel)
+
+	key := "test:u1"
+	session := e.sessions.GetOrCreateActive(key)
+	session.SetAgentSessionID("healthy-session", "claudecode")
+	session.AddHistory("user", "important context")
+
+	for i := 0; i < sessionFailureResetThreshold+2; i++ {
+		state := &interactiveState{}
+		e.recordTurnFailure(state, p, "ctx", key, session, e.sessions, "API Error: 429 rate limit exceeded")
+	}
+	if got := session.GetAgentSessionID(); got != "healthy-session" {
+		t.Fatalf("agent session id = %q, want it preserved after transient failures", got)
+	}
+	if got := session.HistoryLen(); got != 1 {
+		t.Fatalf("history len = %d, want the conversation preserved", got)
+	}
+}
+
+// A message that is already an automatic redispatch must not be auto-dispatched
+// again; otherwise a persistently failing prompt loops forever.
+func TestRedispatchGuardPreventsLoop(t *testing.T) {
+	p := &stubPlatformEngine{n: "test"}
+	sess := newResultAgentSession("should not run")
+	e := NewEngine("test", &resultAgent{session: sess}, []Platform{p}, "", LangChinese)
+	t.Cleanup(e.cancel)
+
+	session := e.sessions.GetOrCreateActive("test:u1")
+	msg := &Message{
+		SessionKey: "test:u1", Platform: "test", Content: "bad prompt",
+		ReplyCtx: "ctx", Redispatch: true,
+	}
+	e.redispatchAfterReset(session, p, msg, false)
+
+	sent := p.getSent()
+	if len(sent) == 0 || !strings.Contains(sent[len(sent)-1], "请重新发送") {
+		t.Fatalf("sent = %v, want the resend prompt", sent)
+	}
+	if len(sess.sentPrompts) != 0 {
+		t.Fatalf("redispatch loop ran the agent again: %v", sess.sentPrompts)
+	}
+}
+
+// imageRecordingSession records the images the engine actually hands to the
+// agent, so redispatch filtering can be asserted.
+type imageRecordingSession struct {
+	stubAgentSession
+	mu     sync.Mutex
+	images []ImageAttachment
+	events chan Event
+}
+
+func newImageRecordingSession() *imageRecordingSession {
+	return &imageRecordingSession{events: make(chan Event, 1)}
+}
+func (s *imageRecordingSession) Send(_ string, images []ImageAttachment, _ []FileAttachment) error {
+	s.mu.Lock()
+	s.images = append([]ImageAttachment(nil), images...)
+	s.mu.Unlock()
+	s.events <- Event{Type: EventResult, Content: "redispatch ok", Done: true}
+	return nil
+}
+func (s *imageRecordingSession) Events() <-chan Event { return s.events }
+func (s *imageRecordingSession) getImages() []ImageAttachment {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]ImageAttachment(nil), s.images...)
+}
+
+func TestRedispatchSkipsOversizedImages(t *testing.T) {
+	p := &stubPlatformEngine{n: "test"}
+	sess := newImageRecordingSession()
+	e := NewEngine("test", &resultAgent{session: sess}, []Platform{p}, "", LangChinese)
+	t.Cleanup(e.cancel)
+
+	small := ImageAttachment{MimeType: "image/png", Data: testPNG(t, 10, 10)}
+	big := ImageAttachment{MimeType: "image/png", Data: testPNG(t, MaxModelImageDimension+1, 2)}
+	msg := &Message{
+		SessionKey: "test:u1", Platform: "test", UserID: "u1",
+		Content: "分析这个", Images: []ImageAttachment{small, big}, ReplyCtx: "ctx",
+	}
+	session := e.sessions.GetOrCreateActive("test:u1")
+	e.redispatchAfterReset(session, p, msg, false)
+
+	deadline := time.After(3 * time.Second)
+	for {
+		got := sess.getImages()
+		sent := p.getSent()
+		sawNotice := false
+		for _, s := range sent {
+			if strings.Contains(s, "已跳过") {
+				sawNotice = true
+			}
+		}
+		if len(got) == 1 && sawNotice {
+			if !strings.Contains(sent[len(sent)-1], "redispatch ok") {
+				t.Fatalf("final reply = %v, want the redispatch answer", sent)
+			}
+			return
+		}
+		select {
+		case <-deadline:
+			t.Fatalf("timed out: images=%d sent=%v", len(got), sent)
+		default:
+			time.Sleep(10 * time.Millisecond)
+		}
+	}
+}
+
+func TestRedispatchOnlyImagesReportsToUser(t *testing.T) {
+	p := &stubPlatformEngine{n: "test"}
+	sess := newImageRecordingSession()
+	e := NewEngine("test", &resultAgent{session: sess}, []Platform{p}, "", LangChinese)
+	t.Cleanup(e.cancel)
+
+	big := ImageAttachment{MimeType: "image/png", Data: testPNG(t, MaxModelImageDimension+1, 2)}
+	msg := &Message{
+		SessionKey: "test:u1", Platform: "test", UserID: "u1",
+		Images: []ImageAttachment{big}, ReplyCtx: "ctx",
+	}
+	session := e.sessions.GetOrCreateActive("test:u1")
+	e.redispatchAfterReset(session, p, msg, false)
+
+	sent := p.getSent()
+	if len(sent) == 0 || !strings.Contains(sent[len(sent)-1], "只有") {
+		t.Fatalf("sent = %v, want the image-only skipped notice", sent)
+	}
+	if got := sess.getImages(); len(got) != 0 {
+		t.Fatalf("agent received %d images, want none", len(got))
 	}
 }

@@ -1,7 +1,12 @@
 package core
 
 import (
+	"bytes"
 	"fmt"
+	"image"
+	_ "image/gif"
+	_ "image/jpeg"
+	_ "image/png"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -69,6 +74,61 @@ type ImageAttachment struct {
 	MimeType string // e.g. "image/png", "image/jpeg"
 	Data     []byte // raw image bytes
 	FileName string // original filename (optional)
+}
+
+// MaxModelImageDimension is the maximum width/height (in pixels) accepted by
+// the model API. The documented vision limit is 8000 px per side; we stay at
+// that conservative bound rather than the gateway's looser 8192 so an image
+// that slips through can never poison the transcript. An image with either
+// side above this limit makes every request that replays it fail with HTTP 400,
+// so it must be rejected before it reaches the agent.
+const MaxModelImageDimension = 8000
+
+// ImageDimensions decodes only the image header and returns its width/height.
+// ok is false when the data is empty, corrupt, or in a format the standard
+// library does not register (e.g. WebP), in which case callers should skip the
+// check rather than reject a possibly valid image.
+func ImageDimensions(img ImageAttachment) (width, height int, ok bool) {
+	if len(img.Data) == 0 {
+		return 0, 0, false
+	}
+	cfg, _, err := image.DecodeConfig(bytes.NewReader(img.Data))
+	if err != nil || cfg.Width <= 0 || cfg.Height <= 0 {
+		return 0, 0, false
+	}
+	return cfg.Width, cfg.Height, true
+}
+
+// FindOversizedImage returns the 0-based index and dimensions of the first
+// image whose width or height exceeds MaxModelImageDimension. Images with an
+// undecodable header are ignored.
+func FindOversizedImage(images []ImageAttachment) (index, width, height int, found bool) {
+	for i, img := range images {
+		w, h, ok := ImageDimensions(img)
+		if !ok {
+			continue
+		}
+		if w > MaxModelImageDimension || h > MaxModelImageDimension {
+			return i, w, h, true
+		}
+	}
+	return 0, 0, 0, false
+}
+
+// FilterOversizedImages returns the images that pass the dimension gate and
+// the number that were dropped. Used when re-dispatching a failed message so a
+// bad image cannot block the user's text from being retried.
+func FilterOversizedImages(images []ImageAttachment) (kept []ImageAttachment, dropped int) {
+	kept = make([]ImageAttachment, 0, len(images))
+	for _, img := range images {
+		if w, h, ok := ImageDimensions(img); ok &&
+			(w > MaxModelImageDimension || h > MaxModelImageDimension) {
+			dropped++
+			continue
+		}
+		kept = append(kept, img)
+	}
+	return kept, dropped
 }
 
 // FileAttachment represents a file (PDF, doc, spreadsheet, etc.) sent by the user.
@@ -171,6 +231,7 @@ type Message struct {
 	ChatName     string // human-readable chat/group name (optional)
 	Content      string
 	Images       []ImageAttachment   // attached images (if any)
+	QuotedImages []ImageAttachment   // subset of Images pulled in from a quoted reply (not sent with this message)
 	Files        []FileAttachment    // attached files (if any)
 	Audio        *AudioAttachment    // voice message (if any)
 	Location     *LocationAttachment // geographical location (if any)
@@ -180,6 +241,7 @@ type Message struct {
 	FromVoice    bool                // true if message originated from voice transcription
 	Proactive    bool                // true for scheduler-initiated runs (cron); no interactive UI
 	ModeOverride string              // if set, temporarily override agent permission mode for this message
+	Redispatch   bool                // true when cc-connect itself re-queues the message after a session reset
 }
 
 // EventType distinguishes different kinds of agent output.
@@ -225,7 +287,8 @@ type Event struct {
 	Questions    []UserQuestion // populated when ToolName == "AskUserQuestion"
 	Done         bool
 	Error        error
-	InputTokens  int // token usage from agent result events
+	IsError      bool // result frame reported an error (API failure, max tokens, ...)
+	InputTokens  int  // token usage from agent result events
 	OutputTokens int
 	Metadata     map[string]any // optional metadata from agent (e.g. compaction_continue)
 	Synthetic    bool           // true if this is a synthetic/generated message (not from real user)

@@ -538,6 +538,17 @@ func main() {
 			engine.SetStopWait(d)
 		}
 
+		// Wire long-turn progress nudge (default 1 minute, 0 disables).
+		turnProgressMins := 1
+		if cfg.TurnProgressMins != nil {
+			turnProgressMins = *cfg.TurnProgressMins
+		}
+		if turnProgressMins <= 0 {
+			engine.SetTurnProgressInterval(0)
+		} else {
+			engine.SetTurnProgressInterval(time.Duration(turnProgressMins) * time.Minute)
+		}
+
 		// Wire auto-compress settings
 		if proj.AutoCompress.Enabled != nil && *proj.AutoCompress.Enabled {
 			minGap := 30 * time.Minute

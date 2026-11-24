@@ -22,6 +22,11 @@ const (
 	taskCardRetryGap = 15 * time.Second
 )
 
+// taskCardTerminalRetryDelays is a variable so tests can shorten the wait.
+// Six attempts over ~47s: the terminal update is the only signal that a turn
+// finished, so it is worth outlasting a burst of Feishu 230429 throttling.
+var taskCardTerminalRetryDelays = []time.Duration{0, 2 * time.Second, 5 * time.Second, 10 * time.Second, 15 * time.Second, 15 * time.Second}
+
 // taskCardStatus is the lifecycle state shown on the live task card.
 type taskCardStatus int
 
@@ -135,6 +140,16 @@ func (tc *turnCard) Visible() bool {
 	return tc.visible
 }
 
+// CurrentStep returns the latest step label for progress nudges.
+func (tc *turnCard) CurrentStep() string {
+	if tc == nil {
+		return ""
+	}
+	tc.mu.Lock()
+	defer tc.mu.Unlock()
+	return tc.step
+}
+
 // SetStep records what the agent is doing now and refreshes (throttled).
 func (tc *turnCard) SetStep(step string) {
 	if tc == nil {
@@ -166,6 +181,11 @@ func (tc *turnCard) SetQueue(items []string) {
 }
 
 // Finish renders the terminal state once and stops the heartbeat.
+//
+// The terminal update is the only signal that tells the user the turn is over.
+// Rendering it best-effort left cards frozen at "⏳ 正在处理" forever when a
+// single PATCH failed (typically a 230429 rate limit), which users then read as
+// "still running". Deliver it with retries and fall back to a plain message.
 func (tc *turnCard) Finish(status taskCardStatus, note string) {
 	if tc == nil {
 		return
@@ -180,10 +200,180 @@ func (tc *turnCard) Finish(status taskCardStatus, note string) {
 	if note != "" {
 		tc.step = truncateIf(note, taskCardMaxStepLen)
 	}
+	// creating: the initial card POST is in flight. The terminal task queued
+	// below will run after it (FIFO outbox), so the card must not be treated as
+	// non-existent just because the create has not completed yet.
+	hasCard := tc.visible || tc.handle != nil || tc.creating
+	disabled := tc.disabled
 	tc.mu.Unlock()
 
-	tc.render(true)
 	tc.once.Do(func() { close(tc.done) })
+
+	if !hasCard {
+		// The card was never posted (quick answer / no tool call); there is
+		// nothing to finish and no text fallback is needed.
+		return
+	}
+
+	tc.mu.Lock()
+	card := tc.buildCardLocked()
+	tc.mu.Unlock()
+
+	// First attempt runs on the outbox so it stays ordered with the turn's
+	// final reply. Backoff retries run out of band: a stale card must not delay
+	// the next turn's answer behind ~47s of sleeps.
+	tc.e.outboxFor(tc.key).push(func() {
+		if disabled {
+			// Updates were already failing repeatedly; go straight to the
+			// plain-text fallback instead of hammering the same endpoint.
+			go tc.deliverTerminalFallback(status,
+				fmt.Errorf("task card updates disabled after consecutive failures"))
+			return
+		}
+		err := tc.applyCard(card)
+		if err == nil {
+			slog.Info("task card terminal state delivered",
+				"platform", tc.senderName(), "attempt", 1, "status", status)
+			return
+		}
+		slog.Warn("task card terminal update failed",
+			"platform", tc.senderName(), "attempt", 1,
+			"will_retry", len(taskCardTerminalRetryDelays) > 1, "error", err)
+		go tc.retryTerminal(card, status, 1)
+	})
+}
+
+// retryTerminal applies the final card state with exponential backoff. If the
+// platform keeps rejecting the update it falls back to a plain message so the
+// turn never ends invisibly.
+func (tc *turnCard) retryTerminal(card *Card, status taskCardStatus, startAttempt int) {
+	delays := taskCardTerminalRetryDelays
+	var lastErr error
+	for i := startAttempt; i < len(delays); i++ {
+		if delay := delays[i]; delay > 0 {
+			select {
+			case <-tc.e.ctx.Done():
+				return
+			case <-time.After(delay):
+			}
+		}
+		if err := tc.applyCard(card); err == nil {
+			slog.Info("task card terminal state delivered",
+				"platform", tc.senderName(), "attempt", i+1, "status", status)
+			return
+		} else {
+			lastErr = err
+			slog.Warn("task card terminal update failed",
+				"platform", tc.senderName(), "attempt", i+1,
+				"will_retry", i+1 < len(delays), "error", err)
+		}
+	}
+	tc.deliverTerminalFallback(status, lastErr)
+}
+
+// deliverTerminalFallback is the visible status when every card update failed.
+func (tc *turnCard) deliverTerminalFallback(status taskCardStatus, lastErr error) {
+	slog.Error("task card terminal update failed permanently",
+		"platform", tc.senderName(), "status", status, "error", lastErr)
+	tc.sendTerminalText()
+}
+
+// applyCard performs one card create/update with a bounded network timeout.
+// It runs on the session outbox goroutine (terminal delivery).
+func (tc *turnCard) applyCard(card *Card) error {
+	ctx, cancel := context.WithTimeout(tc.e.ctx, 10*time.Second)
+	defer cancel()
+
+	tc.mu.Lock()
+	handle := tc.handle
+	tc.mu.Unlock()
+
+	var err error
+	if handle == nil {
+		var h any
+		h, err = tc.sender.SendTaskCard(ctx, tc.replyCtx, card)
+		tc.mu.Lock()
+		tc.creating = false
+		if err == nil {
+			tc.handle = h
+			tc.visible = true
+			tc.failCount = 0
+		}
+		tc.mu.Unlock()
+	} else {
+		err = tc.sender.UpdateTaskCard(ctx, handle, card)
+		if err == nil {
+			tc.mu.Lock()
+			tc.failCount = 0
+			tc.mu.Unlock()
+		}
+	}
+	return err
+}
+
+// sendTerminalText is the last-resort visible status when the card itself
+// cannot be updated. It retries a few times too: the same frequency limit that
+// blocked the card PATCH can block a plain send.
+func (tc *turnCard) sendTerminalText() {
+	text := tc.terminalText()
+	if !tc.sendPlainText(text, "terminal fallback") {
+		slog.Error("task card terminal fallback exhausted: user was not notified of the turn result",
+			"platform", tc.senderName(), "text", text)
+	}
+}
+
+// sendPlainText delivers a non-card status message with a few retries. Used for
+// the terminal fallback and for the "card updates are throttled" notice. It
+// runs on the session outbox goroutine.
+func (tc *turnCard) sendPlainText(text, kind string) bool {
+	p, ok := tc.sender.(Platform)
+	if !ok {
+		slog.Error("task card plain-text fallback unavailable: sender is not a Platform",
+			"platform", tc.senderName(), "kind", kind)
+		return false
+	}
+	delays := []time.Duration{0, time.Second, 3 * time.Second}
+	var lastErr error
+	for attempt, delay := range delays {
+		if delay > 0 {
+			select {
+			case <-tc.e.ctx.Done():
+				return false
+			case <-time.After(delay):
+			}
+		}
+		if err := p.Send(tc.e.ctx, tc.replyCtx, text); err != nil {
+			lastErr = err
+			slog.Error("task card plain-text send failed",
+				"platform", tc.senderName(), "kind", kind, "attempt", attempt+1,
+				"will_retry", attempt+1 < len(delays), "error", err, "text", text)
+			continue
+		}
+		slog.Warn("task card plain-text fallback sent",
+			"platform", tc.senderName(), "kind", kind, "attempt", attempt+1, "text", text)
+		return true
+	}
+	slog.Error("task card plain-text send exhausted",
+		"platform", tc.senderName(), "kind", kind, "text", text, "error", lastErr)
+	return false
+}
+
+// terminalText renders the terminal status as plain text. It keeps the last
+// step line too, since a user whose card never updated never saw it.
+func (tc *turnCard) terminalText() string {
+	tc.mu.Lock()
+	defer tc.mu.Unlock()
+	card := tc.buildCardLocked()
+	title := tc.e.i18n.T(MsgTaskCardDone)
+	if card.Header != nil && card.Header.Title != "" {
+		title = card.Header.Title
+	}
+	for _, el := range card.Elements {
+		if md, ok := el.(CardMarkdown); ok && strings.TrimSpace(md.Content) != "" {
+			return title + "\n" + md.Content
+		}
+	}
+	return title
 }
 
 func (tc *turnCard) render(force bool) {
@@ -229,11 +419,23 @@ func (tc *turnCard) render(force bool) {
 	// The network call runs on the session's outbox goroutine so the turn loop
 	// never waits for the platform.
 	tc.e.outboxFor(tc.key).push(func() {
+		// A heartbeat refresh queued before Finish may run after the terminal
+		// state was applied (e.g. the outbox was full and ran out of band).
+		// Never let a stale running-state card overwrite the final one.
+		tc.mu.Lock()
+		if tc.finished {
+			tc.mu.Unlock()
+			return
+		}
+		tc.mu.Unlock()
+
 		ctx, cancel := context.WithTimeout(tc.e.ctx, 10*time.Second)
 		defer cancel()
 
 		var err error
+		op := "update"
 		if handle == nil {
+			op = "create"
 			var h any
 			h, err = tc.sender.SendTaskCard(ctx, tc.replyCtx, card)
 			tc.mu.Lock()
@@ -241,29 +443,49 @@ func (tc *turnCard) render(force bool) {
 			if err == nil {
 				tc.handle = h
 				tc.visible = true
-				tc.failCount = 0
 			}
 			tc.mu.Unlock()
 		} else {
 			err = tc.sender.UpdateTaskCard(ctx, handle, card)
-			if err == nil {
-				tc.mu.Lock()
-				tc.failCount = 0
-				tc.mu.Unlock()
-			}
 		}
+		tc.mu.Lock()
+		prevFails := tc.failCount
 		if err == nil {
+			tc.failCount = 0
+		} else {
+			tc.failCount++
+		}
+		fails := tc.failCount
+		disabled := false
+		if fails >= taskCardMaxFailures {
+			tc.disabled = true
+			disabled = true
+		}
+		finished := tc.finished
+		visible := tc.visible
+		tc.mu.Unlock()
+		if err == nil {
+			if prevFails > 0 {
+				slog.Info("task card refresh recovered",
+					"platform", tc.senderName(), "op", op,
+					"previous_failures", prevFails, "finished", finished)
+			}
 			return
 		}
 
-		tc.mu.Lock()
-		tc.failCount++
-		fails := tc.failCount
-		if fails >= taskCardMaxFailures {
-			tc.disabled = true
+		// Log every failed refresh with enough context to reconstruct the
+		// incident from cc-connect.log alone.
+		slog.Warn("task card refresh failed",
+			"platform", tc.senderName(), "op", op, "consecutive", fails,
+			"disabled", disabled, "finished", finished,
+			"visible", visible, "error", err)
+		if disabled {
+			slog.Error("task card updates disabled after consecutive failures",
+				"platform", tc.senderName(), "failures", fails, "error", err)
+			// Tell the user the card is no longer reliable instead of letting
+			// them infer a frozen card means a dead task.
+			tc.sendPlainText(tc.e.i18n.T(MsgTaskCardDegraded), "degraded notice")
 		}
-		tc.mu.Unlock()
-		slog.Warn("task card refresh failed", "platform", tc.senderName(), "consecutive", fails, "error", err)
 	})
 }
 

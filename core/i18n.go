@@ -159,103 +159,128 @@ func (i *I18n) SetLang(lang Language) {
 type MsgKey string
 
 const (
-	MsgStarting                  MsgKey = "starting"
-	MsgLoading                   MsgKey = "loading"
-	MsgThinking                  MsgKey = "thinking"
-	MsgTool                      MsgKey = "tool"
-	MsgToolResult                MsgKey = "tool_result"
-	MsgToolResultFmtStatus       MsgKey = "tool_result_fmt_status"
-	MsgToolResultFmtExit         MsgKey = "tool_result_fmt_exit"
-	MsgToolResultFmtNoOutput     MsgKey = "tool_result_fmt_no_output"
-	MsgToolResultFmtOk           MsgKey = "tool_result_fmt_ok"
-	MsgToolResultFmtFailed       MsgKey = "tool_result_fmt_failed"
-	MsgExecutionStopped          MsgKey = "execution_stopped"
-	MsgTaskCardRunning           MsgKey = "task_card_running"
-	MsgTaskCardDone              MsgKey = "task_card_done"
-	MsgTaskCardStopped           MsgKey = "task_card_stopped"
-	MsgTaskCardFailed            MsgKey = "task_card_failed"
-	MsgTaskCardPreparing         MsgKey = "task_card_preparing"
-	MsgTaskCardStep              MsgKey = "task_card_step"
-	MsgTaskCardLastStep          MsgKey = "task_card_last_step"
-	MsgTaskCardQueue             MsgKey = "task_card_queue"
-	MsgTaskCardStopBtn           MsgKey = "task_card_stop_btn"
-	MsgTaskCardWaitingConfirm    MsgKey = "task_card_waiting_confirm"
-	MsgSteerAck                  MsgKey = "steer_ack"
-	MsgAckProcessing             MsgKey = "ack_processing"
-	MsgNoExecution               MsgKey = "no_execution"
-	MsgPreviousProcessing        MsgKey = "previous_processing"
-	MsgQueueFull                 MsgKey = "queue_full"
-	MsgMessageQueued             MsgKey = "message_queued"
-	MsgNoToolsAllowed            MsgKey = "no_tools_allowed"
-	MsgCurrentTools              MsgKey = "current_tools"
-	MsgCurrentSession            MsgKey = "current_session"
-	MsgToolAuthNotSupported      MsgKey = "tool_auth_not_supported"
-	MsgToolAllowFailed           MsgKey = "tool_allow_failed"
-	MsgToolAllowedNew            MsgKey = "tool_allowed_new"
-	MsgError                     MsgKey = "error"
-	MsgSessionNotFound           MsgKey = "session_not_found"
-	MsgFailedToStartAgentSession MsgKey = "failed_to_start_agent_session"
-	MsgFailedToDeleteSession     MsgKey = "failed_to_delete_session"
-	MsgEmptyResponse             MsgKey = "empty_response"
-	MsgPermissionPrompt          MsgKey = "permission_prompt"
-	MsgPermissionAllowed         MsgKey = "permission_allowed"
-	MsgPermissionApproveAll      MsgKey = "permission_approve_all"
-	MsgPermissionDenied          MsgKey = "permission_denied_msg"
-	MsgPermissionHint            MsgKey = "permission_hint"
-	MsgQuietOn                   MsgKey = "quiet_on"
-	MsgQuietOff                  MsgKey = "quiet_off"
-	MsgDisplayModeCompact        MsgKey = "display_mode_compact"
-	MsgQuietGlobalOn             MsgKey = "quiet_global_on"
-	MsgQuietGlobalOff            MsgKey = "quiet_global_off"
-	MsgModeChanged               MsgKey = "mode_changed"
-	MsgModeNotSupported          MsgKey = "mode_not_supported"
-	MsgSessionRestarting         MsgKey = "session_restarting"
-	MsgSessionNotStarted         MsgKey = "session_not_started"
-	MsgUntitled                  MsgKey = "untitled"
-	MsgLangChanged               MsgKey = "lang_changed"
-	MsgLangInvalid               MsgKey = "lang_invalid"
-	MsgLangCurrent               MsgKey = "lang_current"
-	MsgUnknownCommand            MsgKey = "unknown_command"
-	MsgWelcome                   MsgKey = "welcome"
-	MsgHelp                      MsgKey = "message_help" // change from "help", which is used now for builtin command help
-	MsgHelpTitle                 MsgKey = "help_title"
-	MsgHelpSessionSection        MsgKey = "help_session_section"
-	MsgHelpAgentSection          MsgKey = "help_agent_section"
-	MsgHelpToolsSection          MsgKey = "help_tools_section"
-	MsgHelpSystemSection         MsgKey = "help_system_section"
-	MsgHelpTip                   MsgKey = "help_tip"
-	MsgListTitle                 MsgKey = "list_title"
-	MsgListTitlePaged            MsgKey = "list_title_paged"
-	MsgListEmpty                 MsgKey = "list_empty"
-	MsgListMore                  MsgKey = "list_more"
-	MsgListPageHint              MsgKey = "list_page_hint"
-	MsgListSwitchHint            MsgKey = "list_switch_hint"
-	MsgListError                 MsgKey = "list_error"
-	MsgHistoryEmpty              MsgKey = "history_empty"
-	MsgNameUsage                 MsgKey = "name_usage"
-	MsgNameSet                   MsgKey = "name_set"
-	MsgNameNoSession             MsgKey = "name_no_session"
-	MsgProviderNotSupported      MsgKey = "provider_not_supported"
-	MsgProviderNone              MsgKey = "provider_none"
-	MsgProviderCurrent           MsgKey = "provider_current"
-	MsgProviderListTitle         MsgKey = "provider_list_title"
-	MsgProviderListEmpty         MsgKey = "provider_list_empty"
-	MsgProviderSwitchHint        MsgKey = "provider_switch_hint"
-	MsgProviderNotFound          MsgKey = "provider_not_found"
-	MsgProviderSwitched          MsgKey = "provider_switched"
-	MsgProviderCleared           MsgKey = "provider_cleared"
-	MsgProviderAdded             MsgKey = "provider_added"
-	MsgProviderAddUsage          MsgKey = "provider_add_usage"
-	MsgProviderAddFailed         MsgKey = "provider_add_failed"
-	MsgProviderRemoved           MsgKey = "provider_removed"
-	MsgProviderRemoveFailed      MsgKey = "provider_remove_failed"
-	MsgCardTitleProviderAdd      MsgKey = "card_title_provider_add"
-	MsgProviderAddPickHint       MsgKey = "provider_add_pick_hint"
-	MsgProviderAddOther          MsgKey = "provider_add_other"
-	MsgProviderAddApiKeyPrompt   MsgKey = "provider_add_api_key_prompt"
-	MsgProviderAddInviteHint     MsgKey = "provider_add_invite_hint"
-	MsgProviderLinkGlobal        MsgKey = "provider_link_global"
-	MsgProviderLinked            MsgKey = "provider_linked"
+	MsgStarting                    MsgKey = "starting"
+	MsgLoading                     MsgKey = "loading"
+	MsgThinking                    MsgKey = "thinking"
+	MsgTool                        MsgKey = "tool"
+	MsgToolResult                  MsgKey = "tool_result"
+	MsgToolResultFmtStatus         MsgKey = "tool_result_fmt_status"
+	MsgToolResultFmtExit           MsgKey = "tool_result_fmt_exit"
+	MsgToolResultFmtNoOutput       MsgKey = "tool_result_fmt_no_output"
+	MsgToolResultFmtOk             MsgKey = "tool_result_fmt_ok"
+	MsgToolResultFmtFailed         MsgKey = "tool_result_fmt_failed"
+	MsgExecutionStopped            MsgKey = "execution_stopped"
+	MsgTaskCardRunning             MsgKey = "task_card_running"
+	MsgTaskCardDone                MsgKey = "task_card_done"
+	MsgTaskCardStopped             MsgKey = "task_card_stopped"
+	MsgTaskCardFailed              MsgKey = "task_card_failed"
+	MsgTaskCardPreparing           MsgKey = "task_card_preparing"
+	MsgTaskCardStep                MsgKey = "task_card_step"
+	MsgTaskCardLastStep            MsgKey = "task_card_last_step"
+	MsgTaskCardQueue               MsgKey = "task_card_queue"
+	MsgTaskCardStopBtn             MsgKey = "task_card_stop_btn"
+	MsgTaskCardWaitingConfirm      MsgKey = "task_card_waiting_confirm"
+	MsgTaskCardDegraded            MsgKey = "task_card_degraded"
+	MsgSteerAck                    MsgKey = "steer_ack"
+	MsgAckProcessing               MsgKey = "ack_processing"
+	MsgNoExecution                 MsgKey = "no_execution"
+	MsgPreviousProcessing          MsgKey = "previous_processing"
+	MsgQueueFull                   MsgKey = "queue_full"
+	MsgMessageQueued               MsgKey = "message_queued"
+	MsgNoToolsAllowed              MsgKey = "no_tools_allowed"
+	MsgCurrentTools                MsgKey = "current_tools"
+	MsgCurrentSession              MsgKey = "current_session"
+	MsgToolAuthNotSupported        MsgKey = "tool_auth_not_supported"
+	MsgToolAllowFailed             MsgKey = "tool_allow_failed"
+	MsgToolAllowedNew              MsgKey = "tool_allowed_new"
+	MsgError                       MsgKey = "error"
+	MsgImageTooLarge               MsgKey = "image_too_large"
+	MsgQuotedImageTooLarge         MsgKey = "quoted_image_too_large"
+	MsgSessionAutoResetError       MsgKey = "session_auto_reset_error"
+	MsgSessionAutoResetRedispatch  MsgKey = "session_auto_reset_redispatch"
+	MsgRedispatchFailed            MsgKey = "redispatch_failed"
+	MsgRedispatchImagesSkipped     MsgKey = "redispatch_images_skipped"
+	MsgRedispatchOnlyImagesSkipped MsgKey = "redispatch_only_images_skipped"
+	MsgSnippetUnknown              MsgKey = "snippet_unknown"
+	MsgSnippetImage                MsgKey = "snippet_image"
+	MsgSnippetFile                 MsgKey = "snippet_file"
+	MsgAgentErrorImageTooLarge     MsgKey = "agent_error_image_too_large"
+	MsgAgentErrorAuth              MsgKey = "agent_error_auth"
+	MsgAgentErrorRateLimit         MsgKey = "agent_error_rate_limit"
+	MsgAgentErrorTimeout           MsgKey = "agent_error_timeout"
+	MsgAgentErrorContext           MsgKey = "agent_error_context"
+	MsgAgentErrorGeneric           MsgKey = "agent_error_generic"
+	MsgAgentSendFailed             MsgKey = "agent_send_failed"
+	MsgQueuedMessageDropped        MsgKey = "queued_message_dropped"
+	MsgFinalDeliveryFailed         MsgKey = "final_delivery_failed"
+	MsgFinalDeliveryPartial        MsgKey = "final_delivery_partial"
+	MsgPreviousTurnFailedRestart   MsgKey = "previous_turn_failed_restart"
+	MsgSteerAfterTurnEnd           MsgKey = "steer_after_turn_end"
+	MsgTurnStillWorking            MsgKey = "turn_still_working"
+	MsgTurnWorkingStep             MsgKey = "turn_working_step"
+	MsgSessionNotFound             MsgKey = "session_not_found"
+	MsgFailedToStartAgentSession   MsgKey = "failed_to_start_agent_session"
+	MsgFailedToDeleteSession       MsgKey = "failed_to_delete_session"
+	MsgEmptyResponse               MsgKey = "empty_response"
+	MsgPermissionPrompt            MsgKey = "permission_prompt"
+	MsgPermissionAllowed           MsgKey = "permission_allowed"
+	MsgPermissionApproveAll        MsgKey = "permission_approve_all"
+	MsgPermissionDenied            MsgKey = "permission_denied_msg"
+	MsgPermissionHint              MsgKey = "permission_hint"
+	MsgQuietOn                     MsgKey = "quiet_on"
+	MsgQuietOff                    MsgKey = "quiet_off"
+	MsgDisplayModeCompact          MsgKey = "display_mode_compact"
+	MsgQuietGlobalOn               MsgKey = "quiet_global_on"
+	MsgQuietGlobalOff              MsgKey = "quiet_global_off"
+	MsgModeChanged                 MsgKey = "mode_changed"
+	MsgModeNotSupported            MsgKey = "mode_not_supported"
+	MsgSessionRestarting           MsgKey = "session_restarting"
+	MsgSessionNotStarted           MsgKey = "session_not_started"
+	MsgUntitled                    MsgKey = "untitled"
+	MsgLangChanged                 MsgKey = "lang_changed"
+	MsgLangInvalid                 MsgKey = "lang_invalid"
+	MsgLangCurrent                 MsgKey = "lang_current"
+	MsgUnknownCommand              MsgKey = "unknown_command"
+	MsgWelcome                     MsgKey = "welcome"
+	MsgHelp                        MsgKey = "message_help" // change from "help", which is used now for builtin command help
+	MsgHelpTitle                   MsgKey = "help_title"
+	MsgHelpSessionSection          MsgKey = "help_session_section"
+	MsgHelpAgentSection            MsgKey = "help_agent_section"
+	MsgHelpToolsSection            MsgKey = "help_tools_section"
+	MsgHelpSystemSection           MsgKey = "help_system_section"
+	MsgHelpTip                     MsgKey = "help_tip"
+	MsgListTitle                   MsgKey = "list_title"
+	MsgListTitlePaged              MsgKey = "list_title_paged"
+	MsgListEmpty                   MsgKey = "list_empty"
+	MsgListMore                    MsgKey = "list_more"
+	MsgListPageHint                MsgKey = "list_page_hint"
+	MsgListSwitchHint              MsgKey = "list_switch_hint"
+	MsgListError                   MsgKey = "list_error"
+	MsgHistoryEmpty                MsgKey = "history_empty"
+	MsgNameUsage                   MsgKey = "name_usage"
+	MsgNameSet                     MsgKey = "name_set"
+	MsgNameNoSession               MsgKey = "name_no_session"
+	MsgProviderNotSupported        MsgKey = "provider_not_supported"
+	MsgProviderNone                MsgKey = "provider_none"
+	MsgProviderCurrent             MsgKey = "provider_current"
+	MsgProviderListTitle           MsgKey = "provider_list_title"
+	MsgProviderListEmpty           MsgKey = "provider_list_empty"
+	MsgProviderSwitchHint          MsgKey = "provider_switch_hint"
+	MsgProviderNotFound            MsgKey = "provider_not_found"
+	MsgProviderSwitched            MsgKey = "provider_switched"
+	MsgProviderCleared             MsgKey = "provider_cleared"
+	MsgProviderAdded               MsgKey = "provider_added"
+	MsgProviderAddUsage            MsgKey = "provider_add_usage"
+	MsgProviderAddFailed           MsgKey = "provider_add_failed"
+	MsgProviderRemoved             MsgKey = "provider_removed"
+	MsgProviderRemoveFailed        MsgKey = "provider_remove_failed"
+	MsgCardTitleProviderAdd        MsgKey = "card_title_provider_add"
+	MsgProviderAddPickHint         MsgKey = "provider_add_pick_hint"
+	MsgProviderAddOther            MsgKey = "provider_add_other"
+	MsgProviderAddApiKeyPrompt     MsgKey = "provider_add_api_key_prompt"
+	MsgProviderAddInviteHint       MsgKey = "provider_add_invite_hint"
+	MsgProviderLinkGlobal          MsgKey = "provider_link_global"
+	MsgProviderLinked              MsgKey = "provider_linked"
 
 	MsgVoiceNotEnabled               MsgKey = "voice_not_enabled"
 	MsgVoiceUsingPlatformRecognition MsgKey = "voice_using_platform_recognition"
@@ -791,6 +816,13 @@ var messages = map[MsgKey]map[Language]string{
 		LangJapanese:           "確認待ち",
 		LangSpanish:            "esperando tu confirmación",
 	},
+	MsgTaskCardDegraded: {
+		LangEnglish:            "⚠️ Progress-card updates are being throttled by the messaging platform. The task is still running; progress may be delayed and the final result will be sent as a normal message.",
+		LangChinese:            "⚠️ 进度卡片更新被消息平台限流，任务仍在继续；后续进度可能延迟，最终结果会以普通消息发送。",
+		LangTraditionalChinese: "⚠️ 進度卡片更新被訊息平台限流，任務仍在繼續；後續進度可能延遲，最終結果會以普通訊息發送。",
+		LangJapanese:           "⚠️ 進捗カードの更新がメッセージプラットフォームにより制限されています。タスクは継続中で、進捗の反映が遅れる場合があります。最終結果は通常メッセージで送信します。",
+		LangSpanish:            "⚠️ Las actualizaciones de la tarjeta de progreso están limitadas por la plataforma de mensajería. La tarea sigue en curso; el progreso puede retrasarse y el resultado final se enviará como mensaje normal.",
+	},
 	MsgNoExecution: {
 		LangEnglish:            "No execution in progress.",
 		LangChinese:            "没有正在执行的任务。",
@@ -888,6 +920,174 @@ var messages = map[MsgKey]map[Language]string{
 		LangTraditionalChinese: "❌ 錯誤: 啟動 Agent 會話失敗",
 		LangJapanese:           "❌ エラー: Agentセッションの起動に失敗しました",
 		LangSpanish:            "❌ Error: error al iniciar la sesión del agente",
+	},
+	MsgImageTooLarge: {
+		LangEnglish:            "⚠️ Image %d is too large (%d×%d). The model limit is %d px per side and an oversized image breaks the whole session. Please split it and resend.",
+		LangChinese:            "⚠️ 第 %d 张图片过大（%d×%d）。模型单边上限 %d px，且超限图片会导致整个会话不可用。请切分后重发。",
+		LangTraditionalChinese: "⚠️ 第 %d 張圖片過大（%d×%d）。模型單邊上限 %d px，且超限圖片會導致整個會話不可用。請切分後重發。",
+		LangJapanese:           "⚠️ %d 枚目の画像が大きすぎます（%d×%d）。モデルの上限は各辺 %d px で、超過するとセッション全体が使用できなくなります。分割して再送信してください。",
+		LangSpanish:            "⚠️ La imagen %d es demasiado grande (%d×%d). El límite del modelo es %d px por lado y una imagen sobredimensionada inutiliza toda la sesión. Divídela y vuelve a enviarla.",
+	},
+	MsgQuotedImageTooLarge: {
+		LangEnglish:            "⚠️ The quoted message contains a %d×%d image, which exceeds the model's %d px per-side limit. Please quote a different message or ask the sender to split the image.",
+		LangChinese:            "⚠️ 引用消息中的图片过大（%d×%d），超过模型单边 %d px 上限。请改为引用其他消息，或让对方切分图片后重发。",
+		LangTraditionalChinese: "⚠️ 引用訊息中的圖片過大（%d×%d），超過模型單邊 %d px 上限。請改為引用其他訊息，或讓對方切分圖片後重發。",
+		LangJapanese:           "⚠️ 引用したメッセージの画像が大きすぎます（%d×%d）。モデルの各辺 %d px の上限を超えています。別のメッセージを引用するか、送信者に画像の分割を依頼してください。",
+		LangSpanish:            "⚠️ El mensaje citado contiene una imagen de %d×%d, que supera el límite de %d px por lado del modelo. Cita otro mensaje o pide al remitente que divida la imagen.",
+	},
+	MsgSessionAutoResetError: {
+		LangEnglish:            "🔄 The session failed %d times in a row and has been reset (same as /new). Last message: “%s”. Please resend it.",
+		LangChinese:            "🔄 会话连续 %d 次处理失败，已自动重置（等同 /new）。上一条消息：『%s』。请重发这条消息。",
+		LangTraditionalChinese: "🔄 會話連續 %d 次處理失敗，已自動重置（等同 /new）。上一條訊息：『%s』。請重發這條訊息。",
+		LangJapanese:           "🔄 セッションで %d 回連続して失敗したため、自動的にリセットしました（/new と同じ）。直前のメッセージ：「%s」。再送信してください。",
+		LangSpanish:            "🔄 La sesión falló %d veces seguidas y se ha restablecido (igual que /new). Último mensaje: «%s». Vuelve a enviarlo.",
+	},
+	MsgSessionAutoResetRedispatch: {
+		LangEnglish:            "🔄 The session failed %d times in a row and has been reset (same as /new). Re-processing your last message: “%s”. No need to resend.",
+		LangChinese:            "🔄 会话连续 %d 次处理失败，已自动重置（等同 /new），正在重新处理你的上一条消息：『%s』，无需重发。",
+		LangTraditionalChinese: "🔄 會話連續 %d 次處理失敗，已自動重置（等同 /new），正在重新處理你的上一條訊息：『%s』，無需重發。",
+		LangJapanese:           "🔄 セッションで %d 回連続して失敗したため、自動的にリセットしました（/new と同じ）。直前のメッセージ「%s」を再処理しています。再送信は不要です。",
+		LangSpanish:            "🔄 La sesión falló %d veces seguidas y se ha restablecido (igual que /new). Reprocesando tu último mensaje: «%s». No hace falta reenviarlo.",
+	},
+	MsgRedispatchFailed: {
+		LangEnglish:            "⚠️ The automatic retry could not start. Please resend your last message.",
+		LangChinese:            "⚠️ 重置后的自动重试未能启动，请重新发送上一条消息。",
+		LangTraditionalChinese: "⚠️ 重置後的自動重試未能啟動，請重新發送上一條訊息。",
+		LangJapanese:           "⚠️ リセット後の自動再試行を開始できませんでした。直前のメッセージを再送信してください。",
+		LangSpanish:            "⚠️ El reintento automático no pudo iniciarse. Vuelve a enviar tu último mensaje.",
+	},
+	MsgRedispatchImagesSkipped: {
+		LangEnglish:            "⚠️ Skipped %d image(s) that would fail the same way. Processing your text now; please split and resend the image separately.",
+		LangChinese:            "⚠️ 已跳过 %d 张会导致同样失败的图片，先重新处理你的文字；图片请切分后单独重发。",
+		LangTraditionalChinese: "⚠️ 已跳過 %d 張會導致同樣失敗的圖片，先重新處理你的文字；圖片請切分後單獨重發。",
+		LangJapanese:           "⚠️ 同じ失敗を引き起こす %d 枚の画像をスキップしました。まず本文を再処理します。画像は分割して別途再送信してください。",
+		LangSpanish:            "⚠️ Se omitieron %d imagen(es) que volverían a fallar. Procesando tu texto ahora; divide y reenvía la imagen por separado.",
+	},
+	MsgRedispatchOnlyImagesSkipped: {
+		LangEnglish:            "⚠️ This message contained only image(s) that would fail again. Please split the image and resend it.",
+		LangChinese:            "⚠️ 这条消息只有会导致同样失败的图片，已跳过；请把图片切分后重新发送。",
+		LangTraditionalChinese: "⚠️ 這條訊息只有會導致同樣失敗的圖片，已跳過；請把圖片切分後重新發送。",
+		LangJapanese:           "⚠️ このメッセージは同じ失敗を引き起こす画像のみでした。画像を分割して再送信してください。",
+		LangSpanish:            "⚠️ Este mensaje solo contenía imagen(es) que volverían a fallar. Divide la imagen y vuelve a enviarla.",
+	},
+	MsgSnippetUnknown: {
+		LangEnglish:            "(unknown content)",
+		LangChinese:            "（内容未知）",
+		LangTraditionalChinese: "（內容未知）",
+		LangJapanese:           "（内容不明）",
+		LangSpanish:            "(contenido desconocido)",
+	},
+	MsgSnippetImage: {
+		LangEnglish:            "[image]",
+		LangChinese:            "[图片]",
+		LangTraditionalChinese: "[圖片]",
+		LangJapanese:           "[画像]",
+		LangSpanish:            "[imagen]",
+	},
+	MsgSnippetFile: {
+		LangEnglish:            "[file]",
+		LangChinese:            "[文件]",
+		LangTraditionalChinese: "[檔案]",
+		LangJapanese:           "[ファイル]",
+		LangSpanish:            "[archivo]",
+	},
+	MsgAgentErrorImageTooLarge: {
+		LangEnglish:            "⚠️ The image exceeds the model's size limit and this session may be unusable. Send /new to start a fresh session, then split the image and resend it.",
+		LangChinese:            "⚠️ 图片超出模型尺寸上限，本会话可能已不可用。请发送 /new 重开会话，并把图片切分后重发。",
+		LangTraditionalChinese: "⚠️ 圖片超出模型尺寸上限，本會話可能已不可用。請發送 /new 重開會話，並把圖片切分後重發。",
+		LangJapanese:           "⚠️ 画像がモデルのサイズ上限を超えているため、このセッションは使用できない可能性があります。/new で新しいセッションを開始し、画像を分割して再送信してください。",
+		LangSpanish:            "⚠️ La imagen supera el límite de tamaño del modelo y esta sesión puede quedar inutilizable. Envía /new para iniciar una sesión nueva y vuelve a enviar la imagen dividida.",
+	},
+	MsgAgentErrorAuth: {
+		LangEnglish:            "⚠️ Model authentication failed. Please retry; if it keeps happening, ask the administrator to check the model configuration.",
+		LangChinese:            "⚠️ 模型鉴权失败，请重试；若持续失败请联系管理员检查模型配置。",
+		LangTraditionalChinese: "⚠️ 模型鑑權失敗，請重試；若持續失敗請聯繫管理員檢查模型設定。",
+		LangJapanese:           "⚠️ モデルの認証に失敗しました。再試行し、繰り返す場合は管理者にモデル設定の確認を依頼してください。",
+		LangSpanish:            "⚠️ La autenticación del modelo falló. Reinténtalo; si sigue ocurriendo, pide al administrador que revise la configuración del modelo.",
+	},
+	MsgAgentErrorRateLimit: {
+		LangEnglish:            "⚠️ The model request was throttled. Please retry in a moment.",
+		LangChinese:            "⚠️ 模型请求被限流，请稍后重试。",
+		LangTraditionalChinese: "⚠️ 模型請求被限流，請稍後重試。",
+		LangJapanese:           "⚠️ モデルへのリクエストが制限されました。しばらくしてから再試行してください。",
+		LangSpanish:            "⚠️ La solicitud al modelo ha sido limitada. Reinténtalo en unos momentos.",
+	},
+	MsgAgentErrorTimeout: {
+		LangEnglish:            "⚠️ The model response timed out. Please retry; if it keeps happening, send /new to start a fresh session.",
+		LangChinese:            "⚠️ 模型响应超时，请重试；若持续失败可发送 /new 重开会话。",
+		LangTraditionalChinese: "⚠️ 模型回應逾時，請重試；若持續失敗可發送 /new 重開會話。",
+		LangJapanese:           "⚠️ モデルの応答がタイムアウトしました。再試行し、繰り返す場合は /new で新しいセッションを開始してください。",
+		LangSpanish:            "⚠️ La respuesta del modelo agotó el tiempo de espera. Reinténtalo; si sigue ocurriendo, envía /new para iniciar una sesión nueva.",
+	},
+	MsgAgentErrorContext: {
+		LangEnglish:            "⚠️ The conversation is longer than the model's context limit. Send /new to start a fresh session, then retry.",
+		LangChinese:            "⚠️ 上下文已超出模型上限，请发送 /new 重开会话后重试。",
+		LangTraditionalChinese: "⚠️ 上下文已超出模型上限，請發送 /new 重開會話後重試。",
+		LangJapanese:           "⚠️ 会話がモデルのコンテキスト上限を超えています。/new で新しいセッションを開始してから再試行してください。",
+		LangSpanish:            "⚠️ La conversación supera el límite de contexto del modelo. Envía /new para iniciar una sesión nueva y vuelve a intentarlo.",
+	},
+	MsgAgentErrorGeneric: {
+		LangEnglish:            "❌ This turn failed. Please retry; if it keeps failing, send /new to start a fresh session.",
+		LangChinese:            "❌ 本轮处理失败，请重试；若持续失败，可发送 /new 重开会话。",
+		LangTraditionalChinese: "❌ 本輪處理失敗，請重試；若持續失敗，可發送 /new 重開會話。",
+		LangJapanese:           "❌ このターンは失敗しました。再試行し、繰り返す場合は /new で新しいセッションを開始してください。",
+		LangSpanish:            "❌ Este turno falló. Reinténtalo; si sigue fallando, envía /new para iniciar una sesión nueva.",
+	},
+	MsgAgentSendFailed: {
+		LangEnglish:            "❌ The message could not be sent to the agent. Please retry; if it keeps failing, send /new.",
+		LangChinese:            "❌ 消息未能发送给 Agent，请重试；若持续失败可发送 /new。",
+		LangTraditionalChinese: "❌ 訊息未能發送給 Agent，請重試；若持續失敗可發送 /new。",
+		LangJapanese:           "❌ メッセージをエージェントに送信できませんでした。再試行し、繰り返す場合は /new を送信してください。",
+		LangSpanish:            "❌ No se pudo enviar el mensaje al agente. Reinténtalo; si sigue fallando, envía /new.",
+	},
+	MsgQueuedMessageDropped: {
+		LangEnglish:            "⚠️ This message could not be processed. Please send it again.",
+		LangChinese:            "⚠️ 这条消息未能处理，请重新发送。",
+		LangTraditionalChinese: "⚠️ 這條訊息未能處理，請重新發送。",
+		LangJapanese:           "⚠️ このメッセージは処理できませんでした。もう一度送信してください。",
+		LangSpanish:            "⚠️ No se pudo procesar este mensaje. Vuelve a enviarlo.",
+	},
+	MsgFinalDeliveryFailed: {
+		LangEnglish:            "⚠️ The final answer could not be delivered. Please retry, or send /new if it keeps happening.",
+		LangChinese:            "⚠️ 结论未能送达，请重试；若持续失败可发送 /new 重开会话。",
+		LangTraditionalChinese: "⚠️ 結論未能送達，請重試；若持續失敗可發送 /new 重開會話。",
+		LangJapanese:           "⚠️ 最終回答を配信できませんでした。再試行するか、繰り返す場合は /new を送信してください。",
+		LangSpanish:            "⚠️ No se pudo entregar la respuesta final. Reinténtalo o envía /new si sigue ocurriendo.",
+	},
+	MsgFinalDeliveryPartial: {
+		LangEnglish:            "⚠️ Part of the answer could not be delivered. Please retry or ask me to resend the missing part.",
+		LangChinese:            "⚠️ 部分内容未能送达，请重试或让我重发缺失部分。",
+		LangTraditionalChinese: "⚠️ 部分內容未能送達，請重試或讓我重發缺失部分。",
+		LangJapanese:           "⚠️ 回答の一部を配信できませんでした。再試行するか、不足部分の再送を依頼してください。",
+		LangSpanish:            "⚠️ Parte de la respuesta no se pudo entregar. Reinténtalo o pídeme que reenvíe la parte que falta.",
+	},
+	MsgPreviousTurnFailedRestart: {
+		LangEnglish:            "⚠️ The previous turn had already failed; this message is being handled as a fresh turn.",
+		LangChinese:            "⚠️ 上一轮已异常结束，已重新开始处理这条消息。",
+		LangTraditionalChinese: "⚠️ 上一輪已異常結束，已重新開始處理這條訊息。",
+		LangJapanese:           "⚠️ 前のターンは既に異常終了していたため、このメッセージを新しいターンとして処理します。",
+		LangSpanish:            "⚠️ El turno anterior ya había fallado; este mensaje se está procesando como un turno nuevo.",
+	},
+	MsgSteerAfterTurnEnd: {
+		LangEnglish:            "✅ Received — the previous turn had just finished, so this message is being handled as a new turn.",
+		LangChinese:            "✅ 收到，上一轮刚好结束，这条消息已作为新一轮处理。",
+		LangTraditionalChinese: "✅ 收到，上一輪剛好結束，這條訊息已作為新一輪處理。",
+		LangJapanese:           "✅ 受信しました。前のターンがちょうど終了したため、このメッセージは新しいターンとして処理します。",
+		LangSpanish:            "✅ Recibido: el turno anterior acababa de terminar, así que este mensaje se procesa como un turno nuevo.",
+	},
+	MsgTurnStillWorking: {
+		LangEnglish:            "⏳ Still working — %s elapsed. Current step: %s",
+		LangChinese:            "⏳ 仍在处理，已用时 %s。当前步骤：%s",
+		LangTraditionalChinese: "⏳ 仍在處理，已用時 %s。目前步驟：%s",
+		LangJapanese:           "⏳ 処理中です（経過 %s）。現在のステップ：%s",
+		LangSpanish:            "⏳ Aún trabajando — %s transcurridos. Paso actual: %s",
+	},
+	MsgTurnWorkingStep: {
+		LangEnglish:            "working",
+		LangChinese:            "处理中",
+		LangTraditionalChinese: "處理中",
+		LangJapanese:           "処理中",
+		LangSpanish:            "en curso",
 	},
 	MsgFailedToDeleteSession: {
 		LangEnglish:            "❌ %s: %v",

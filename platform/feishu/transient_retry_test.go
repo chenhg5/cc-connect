@@ -521,3 +521,43 @@ func TestWithTransientRetry_BackoffTiming(t *testing.T) {
 		t.Fatalf("elapsed = %v, backoff took unreasonably long", elapsed)
 	}
 }
+
+// A failed progress-card PATCH due to Feishu's frequency limit is transient and
+// must be retried; otherwise a long turn's card stays stuck at "处理中".
+func TestIsTransientError_RateLimitCodes(t *testing.T) {
+	cases := []string{
+		"feishu: update task card code=230429 msg=This operation triggers the frequency limit.",
+		"feishu: refresh card code=99991400 msg=too many requests",
+		"feishu: reply failed: frequency limit",
+	}
+	for _, msg := range cases {
+		if !isTransientError(fmt.Errorf("%s", msg)) {
+			t.Errorf("isTransientError(%q) = false, want true", msg)
+		}
+	}
+	// Other API errors are not transient and must not be retried blindly.
+	if isTransientError(fmt.Errorf("feishu: reply failed code=230001 msg=rate limited")) {
+		t.Error("code=230001 without a frequency-limit signature should not be transient")
+	}
+}
+
+func TestRetryDelayExponentialBackoff(t *testing.T) {
+	network := []time.Duration{transientRetryInitial, 2 * transientRetryInitial, 4 * transientRetryInitial, 8 * transientRetryInitial}
+	for i, want := range network {
+		if got := retryDelay(i, false); got != want {
+			t.Errorf("retryDelay(%d, false) = %v, want %v", i, got, want)
+		}
+	}
+	rate := []time.Duration{rateLimitRetryInitial, 2 * rateLimitRetryInitial, 4 * rateLimitRetryInitial, 8 * rateLimitRetryInitial}
+	for i, want := range rate {
+		if got := retryDelay(i, true); got != want {
+			t.Errorf("retryDelay(%d, true) = %v, want %v", i, got, want)
+		}
+	}
+	if got := retryDelay(20, false); got != transientRetryMaxDelay {
+		t.Errorf("network retry delay cap = %v, want %v", got, transientRetryMaxDelay)
+	}
+	if got := retryDelay(20, true); got != rateLimitRetryMaxDelay {
+		t.Errorf("rate-limit retry delay cap = %v, want %v", got, rateLimitRetryMaxDelay)
+	}
+}

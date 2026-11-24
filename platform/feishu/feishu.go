@@ -1173,7 +1173,8 @@ func (p *Platform) dispatchMessage(ctx context.Context, msgType, content string,
 			SessionKey: sessionKey, Platform: p.platformName,
 			MessageID: messageID,
 			UserID:    userID, UserName: userName, ChatName: chatName,
-			Content: text, ExtraContent: quoted.text, Images: quoted.images, ReplyCtx: rctx,
+			Content: text, ExtraContent: quoted.text,
+			Images: quoted.images, QuotedImages: quoted.images, ReplyCtx: rctx,
 		})
 
 	case "image":
@@ -1241,7 +1242,8 @@ func (p *Platform) dispatchMessage(ctx context.Context, msgType, content string,
 			SessionKey: sessionKey, Platform: p.platformName,
 			MessageID: messageID,
 			UserID:    userID, UserName: userName, ChatName: chatName,
-			Content: text, ExtraContent: quoted.text, Images: append(quoted.images, images...),
+			Content: text, ExtraContent: quoted.text,
+			Images: append(quoted.images, images...), QuotedImages: quoted.images,
 			ReplyCtx: rctx,
 		})
 
@@ -1369,7 +1371,8 @@ func (p *Platform) dispatchMessage(ctx context.Context, msgType, content string,
 			SessionKey: sessionKey, Platform: p.platformName,
 			MessageID: messageID,
 			UserID:    userID, UserName: userName, ChatName: chatName,
-			Content: text, ExtraContent: quoted.text, Images: quoted.images, ReplyCtx: rctx,
+			Content: text, ExtraContent: quoted.text,
+			Images: quoted.images, QuotedImages: quoted.images, ReplyCtx: rctx,
 		})
 
 	default:
@@ -3676,6 +3679,26 @@ const (
 	transientRetryMaxDelay = 5 * time.Second
 )
 
+// Rate-limit retry constants. Feishu throttling needs a longer, separate
+// budget than connection blips: a progress-card PATCH rejected with 230429 is
+// exactly the kind of failure that otherwise leaves a card stuck on "处理中".
+const (
+	maxRateLimitRetries    = 4
+	rateLimitRetryInitial  = 1 * time.Second
+	rateLimitRetryMaxDelay = 10 * time.Second
+)
+
+// isRateLimitError reports whether the error is Feishu's frequency limit.
+func isRateLimitError(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := err.Error()
+	return strings.Contains(msg, "code=230429") ||
+		strings.Contains(msg, "code=99991400") ||
+		strings.Contains(msg, "frequency limit")
+}
+
 // isTransientError returns true if the error is a transient network error
 // that warrants a retry (connection reset, timeout, EOF, etc.).
 func isTransientError(err error) bool {
@@ -3705,6 +3728,12 @@ func isTransientError(err error) bool {
 		"TLS handshake timeout",
 		"server misbehaving",
 		"connection refused",
+		// Feishu throttling: a failed progress-card PATCH due to the frequency
+		// limit is transient and must be retried, otherwise a long turn's card
+		// stays stuck at "处理中" forever.
+		"code=230429",
+		"code=99991400",
+		"frequency limit",
 	} {
 		if strings.Contains(msg, substr) {
 			return true
@@ -3713,13 +3742,31 @@ func isTransientError(err error) bool {
 	return false
 }
 
+// retryDelay returns the exponential-backoff delay for a retry attempt.
+// Rate-limit retries use a longer budget than connection blips.
+func retryDelay(attempt int, rateLimited bool) time.Duration {
+	base := transientRetryInitial
+	maxDelay := transientRetryMaxDelay
+	if rateLimited {
+		base = rateLimitRetryInitial
+		maxDelay = rateLimitRetryMaxDelay
+	}
+	delay := base
+	for i := 0; i < attempt; i++ {
+		delay = min(delay*2, maxDelay)
+	}
+	return delay
+}
+
 // withTransientRetry wraps an operation with exponential-backoff retry on
-// transient network errors. Non-transient errors are returned immediately.
-// Jitter (up to +25% of delay) is added to prevent thundering-herd retries.
+// transient network errors and on Feishu rate limiting. Non-transient errors
+// are returned immediately. Rate limits get a longer budget than connection
+// blips: a throttled progress-card PATCH must keep retrying or the card stays
+// stuck on "处理中". Jitter (up to +25% of delay) prevents thundering-herd
+// retries.
 func (p *Platform) withTransientRetry(ctx context.Context, operation string, fn func() error) error {
 	var lastErr error
-	delay := transientRetryInitial
-	for attempt := 0; attempt <= maxTransientRetries; attempt++ {
+	for attempt := 0; ; attempt++ {
 		lastErr = fn()
 		if lastErr == nil {
 			if attempt > 0 {
@@ -3730,19 +3777,26 @@ func (p *Platform) withTransientRetry(ctx context.Context, operation string, fn 
 			}
 			return nil
 		}
-		if !isTransientError(lastErr) {
+		rateLimited := isRateLimitError(lastErr)
+		if !rateLimited && !isTransientError(lastErr) {
 			return lastErr
 		}
-		if attempt == maxTransientRetries {
+		maxRetries := maxTransientRetries
+		if rateLimited {
+			maxRetries = maxRateLimitRetries
+		}
+		if attempt >= maxRetries {
 			break
 		}
+		delay := retryDelay(attempt, rateLimited)
 		// Add jitter: up to +25% of delay to spread out concurrent retries.
 		jitter := time.Duration(rand.Int64N(int64(delay / 4)))
 		actualDelay := delay + jitter
 		slog.Warn(p.tag()+": transient error, retrying",
 			"operation", operation,
 			"attempt", attempt+1,
-			"max_retries", maxTransientRetries,
+			"max_retries", maxRetries,
+			"rate_limited", rateLimited,
 			"delay", actualDelay,
 			"error", lastErr,
 		)
@@ -3751,9 +3805,8 @@ func (p *Platform) withTransientRetry(ctx context.Context, operation string, fn 
 			return fmt.Errorf("%s: %s retry cancelled: %w (last error: %v)", p.tag(), operation, ctx.Err(), lastErr)
 		case <-time.After(actualDelay):
 		}
-		delay = min(delay*2, transientRetryMaxDelay)
 	}
-	return fmt.Errorf("%s failed after %d retries: %w", operation, maxTransientRetries, lastErr)
+	return fmt.Errorf("%s failed after retries: %w", operation, lastErr)
 }
 
 func stringValue(v *string) string {

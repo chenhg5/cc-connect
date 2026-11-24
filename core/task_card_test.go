@@ -2,6 +2,7 @@ package core
 
 import (
 	"context"
+	"errors"
 	"os"
 	"strings"
 	"sync"
@@ -12,10 +13,12 @@ import (
 
 type taskCardStubPlatform struct {
 	stubPlatformEngine
-	mu       sync.Mutex
-	sends    []*Card
-	updates  []*Card
-	failSend bool
+	mu          sync.Mutex
+	sends       []*Card
+	updates     []*Card
+	failSend    bool
+	failUpdates int // number of upcoming UpdateTaskCard calls to fail
+	updateCalls int
 }
 
 func (p *taskCardStubPlatform) SendTaskCard(_ context.Context, _ any, card *Card) (any, error) {
@@ -31,8 +34,19 @@ func (p *taskCardStubPlatform) SendTaskCard(_ context.Context, _ any, card *Card
 func (p *taskCardStubPlatform) UpdateTaskCard(_ context.Context, _ any, card *Card) error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	p.updateCalls++
+	if p.failUpdates > 0 {
+		p.failUpdates--
+		return errors.New("feishu: update task card code=230429 msg=frequency limit")
+	}
 	p.updates = append(p.updates, card)
 	return nil
+}
+
+func (p *taskCardStubPlatform) updateCount() int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.updateCalls
 }
 
 func (p *taskCardStubPlatform) last() *Card {
@@ -254,5 +268,107 @@ func TestTruncateMiddleChinese(t *testing.T) {
 	}
 	if n := utf8.RuneCountInString(got); n > 21 {
 		t.Fatalf("too long: %d runes", n)
+	}
+}
+
+func withFastTerminalRetries(t *testing.T) {
+	t.Helper()
+	old := taskCardTerminalRetryDelays
+	taskCardTerminalRetryDelays = []time.Duration{0, 0, 0}
+	t.Cleanup(func() { taskCardTerminalRetryDelays = old })
+}
+
+func TestTurnCard_FinishRetriesTerminalUpdate(t *testing.T) {
+	withFastTerminalRetries(t)
+	e := NewEngine("test", &resultAgent{session: newResultAgentSession("ok")}, []Platform{&stubPlatformEngine{n: "test"}}, "", LangChinese)
+	t.Cleanup(e.cancel)
+	p := &taskCardStubPlatform{stubPlatformEngine: stubPlatformEngine{n: "feishu"}, failUpdates: 1}
+
+	tc := newTurnCard(e, p, "ctx", "k")
+	tc.Start()
+	tc.render(true)
+	tc.Finish(taskCardDone, "")
+
+	deadline := time.After(2 * time.Second)
+	for {
+		final := p.last()
+		if final != nil && final.Header != nil && strings.Contains(final.Header.Title, "已完成") {
+			break
+		}
+		select {
+		case <-deadline:
+			t.Fatalf("final card = %+v, want a done title after retry", final)
+		default:
+			time.Sleep(10 * time.Millisecond)
+		}
+	}
+	if got := p.updateCount(); got < 2 {
+		t.Fatalf("UpdateTaskCard calls = %d, want at least 2 (one failure + one retry)", got)
+	}
+}
+
+func TestTurnCard_FinishFallsBackToTextWhenUpdatesFail(t *testing.T) {
+	withFastTerminalRetries(t)
+	e := NewEngine("test", &resultAgent{session: newResultAgentSession("ok")}, []Platform{&stubPlatformEngine{n: "test"}}, "", LangChinese)
+	t.Cleanup(e.cancel)
+	p := &taskCardStubPlatform{stubPlatformEngine: stubPlatformEngine{n: "feishu"}, failUpdates: 100}
+
+	tc := newTurnCard(e, p, "ctx", "k")
+	tc.Start()
+	tc.render(true)
+	tc.Finish(taskCardDone, "")
+
+	deadline := time.After(2 * time.Second)
+	for {
+		sent := p.getSent()
+		if len(sent) > 0 && strings.Contains(sent[len(sent)-1], "已完成") {
+			return
+		}
+		select {
+		case <-deadline:
+			t.Fatalf("sent = %v, want a plain-text done fallback", sent)
+		default:
+			time.Sleep(10 * time.Millisecond)
+		}
+	}
+}
+
+func TestTurnCard_DisableSendsDegradedNotice(t *testing.T) {
+	e := NewEngine("test", &resultAgent{session: newResultAgentSession("ok")}, []Platform{&stubPlatformEngine{n: "test"}}, "", LangChinese)
+	t.Cleanup(e.cancel)
+	p := &taskCardStubPlatform{stubPlatformEngine: stubPlatformEngine{n: "feishu"}, failUpdates: 100}
+
+	tc := newTurnCard(e, p, "ctx", "k")
+	tc.Start()
+	tc.render(true) // create the card (succeeds)
+	for i := 0; i < taskCardMaxFailures; i++ {
+		tc.render(true) // updates are rejected -> card gets disabled
+	}
+
+	sent := p.getSent()
+	if len(sent) == 0 || !strings.Contains(sent[len(sent)-1], "限流") {
+		t.Fatalf("sent = %v, want a card-throttled notice for the user", sent)
+	}
+}
+
+// If the turn ends while the initial card POST is still in flight, Finish must
+// still queue the terminal update; otherwise the card lands as "处理中" and the
+// heartbeat is already stopped.
+func TestTurnCard_FinishWhileCreateInFlight(t *testing.T) {
+	e := NewEngine("test", &resultAgent{session: newResultAgentSession("ok")}, []Platform{&stubPlatformEngine{n: "test"}}, "", LangChinese)
+	t.Cleanup(e.cancel)
+	p := &taskCardStubPlatform{stubPlatformEngine: stubPlatformEngine{n: "feishu"}}
+
+	tc := newTurnCard(e, p, "ctx", "k")
+	tc.Start()
+	tc.mu.Lock()
+	tc.creating = true // initial POST enqueued but not completed
+	tc.mu.Unlock()
+
+	tc.Finish(taskCardDone, "")
+
+	final := p.last()
+	if final == nil || final.Header == nil || !strings.Contains(final.Header.Title, "已完成") {
+		t.Fatalf("final card = %+v, want a done terminal card", final)
 	}
 }

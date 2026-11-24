@@ -69,6 +69,17 @@ const (
 	recalledStopLockWait      = 2 * time.Second
 )
 
+const (
+	// sessionFailureResetThreshold is the number of consecutive failed turns
+	// after which the agent session is dropped (same as /new). A bad transcript
+	// (e.g. an oversized image) makes every resume fail; dropping it is the
+	// only way back without waiting for the user to discover /new.
+	sessionFailureResetThreshold = 3
+	// turnProgressNoticeMax caps how many "still working" nudges one turn may
+	// send, so a genuinely long task does not spam the chat.
+	turnProgressNoticeMax = 3
+)
+
 // VersionInfo is set by main at startup so that /version works.
 var VersionInfo string
 
@@ -244,6 +255,15 @@ type Engine struct {
 	baseWorkDir       string
 	projectState      *ProjectStateStore
 
+	// Consecutive failed turns per session key, used to drop a poisoned agent
+	// session instead of resuming a transcript that fails on every request.
+	failMu          sync.Mutex
+	sessionFailures map[string]int
+
+	// turnProgressInterval controls the "still working" nudge during a long
+	// turn; 0 disables it.
+	turnProgressInterval time.Duration
+
 	// Auto-compress settings
 	autoCompressEnabled   bool
 	autoCompressMaxTokens int
@@ -352,10 +372,22 @@ type interactiveState struct {
 	interruptPending  bool // interrupt sent, waiting for the turn to unwind
 	needsRestart      bool // user stopped the turn; the session may be wedged, restart before reuse
 	interruptedAt     time.Time
-	turnActive        bool // true while a turn (or a queued turn) is in flight
-	turnSettled       bool // the agent already returned a result; a still-locked session is wedged
-	turnProactive     bool // true when the running turn was started by the scheduler
+	turnActive        bool      // true while a turn (or a queued turn) is in flight
+	turnSettled       bool      // the agent already returned a result; a still-locked session is wedged
+	turnProactive     bool      // true when the running turn was started by the scheduler
 	taskCard          *turnCard // live progress card for the current turn (nil when unsupported)
+
+	// Failure visibility bookkeeping for the current turn. lastError is the
+	// most recent real error (including one recovered from a drained EventError
+	// at turn start); errorReported means the user already got a failure
+	// message, so channelClosed must not send a second one.
+	lastError      string
+	errorReported  bool
+	failureCounted bool
+	// currentMsg is the message that started the current turn. After a poisoned
+	// session is auto-reset we use it to re-process the user's message instead
+	// of making them retype it.
+	currentMsg *Message
 
 	// Unsolicited event reader: a background goroutine that consumes agent
 	// events between user-initiated turns (e.g. background task completions).
@@ -1011,6 +1043,14 @@ func (e *Engine) SetBusyMode(mode string) {
 func (e *Engine) SetMaxQueuedMessages(n int) {
 	if n > 0 {
 		e.maxQueuedMessages = n
+	}
+}
+
+// SetTurnProgressInterval controls the "still working" nudge sent during a
+// long turn. Zero disables it.
+func (e *Engine) SetTurnProgressInterval(d time.Duration) {
+	if d >= 0 {
+		e.turnProgressInterval = d
 	}
 }
 
@@ -2105,8 +2145,10 @@ func (e *Engine) handleMessage(p Platform, msg *Message) {
 		msg.Content = content
 	}
 
-	// Rate limit check (per-user role-based, then global fallback)
-	if !e.checkRateLimit(msg) {
+	// Rate limit check (per-user role-based, then global fallback). A message
+	// re-queued after a session reset must not be dropped by the limiter: the
+	// user already paid the rate-limit token on the original attempt.
+	if !msg.Redispatch && !e.checkRateLimit(msg) {
 		slog.Info("message rate limited",
 			"session", msg.SessionKey, "user_id", msg.UserID, "user", msg.UserName)
 		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgRateLimited))
@@ -2179,16 +2221,48 @@ func (e *Engine) handleMessage(p Platform, msg *Message) {
 		interactiveKey = resolvedWorkspace + ":" + msg.SessionKey
 	}
 
-	if len(msg.Images) == 0 && strings.HasPrefix(content, "/") {
+	// Slash commands take precedence over attachments. A quoted reply
+	// re-attaches the quoted message's images (see Message.QuotedImages), which
+	// used to make "/new" in a quoted reply look like an image message and skip
+	// command parsing entirely. An explicit leading slash signals intent, so a
+	// command runs even when the message also carries images.
+	if strings.HasPrefix(content, "/") {
 		if e.handleCommand(p, msg, content) {
 			return
 		}
 		// Unrecognized slash command — fall through to agent as normal message
 	}
 
-	// Permission responses bypass the session lock.
+	// Permission responses bypass the session lock and must run before the
+	// image gate: Feishu re-attaches quoted images to a reply, and an oversized
+	// quoted image must not swallow an "allow"/"deny" response (the agent would
+	// block on <-pending.Resolved forever).
 	// Must be after workspace resolution so interactiveKey is correct.
 	if e.handlePendingPermission(p, msg, content, interactiveKey) {
+		return
+	}
+
+	// Reject oversized images before they reach the agent. An image whose
+	// width/height exceeds the model limit produces HTTP 400 on every request
+	// that replays it; once written to the conversation transcript the whole
+	// session is poisoned, so the only safe point to stop it is here. Commands
+	// and permission responses have already returned above, so neither is
+	// blocked by a bad attachment.
+	if idx, w, h, found := FindOversizedImage(msg.Images); found {
+		quotedCount := len(msg.QuotedImages)
+		fromQuote := idx < quotedCount
+		displayIdx := idx + 1
+		if !fromQuote {
+			displayIdx = idx - quotedCount + 1
+		}
+		slog.Warn("message rejected: image exceeds model dimension limit",
+			"session", msg.SessionKey, "image_index", displayIdx, "quoted", fromQuote,
+			"width", w, "height", h, "limit", MaxModelImageDimension)
+		if fromQuote {
+			e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgQuotedImageTooLarge, w, h, MaxModelImageDimension))
+		} else {
+			e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgImageTooLarge, displayIdx, w, h, MaxModelImageDimension))
+		}
 		return
 	}
 
@@ -2338,6 +2412,7 @@ func (e *Engine) maybeAutoResetSessionOnIdle(p Platform, msg *Message, sessions 
 	}
 
 	e.cleanupInteractiveState(interactiveKey)
+	e.clearSessionFailures(interactiveKey)
 	session.UnlockWithoutUpdate()
 
 	newSession := sessions.NewSession(msg.SessionKey, "")
@@ -2420,12 +2495,21 @@ func (e *Engine) steerBusySession(p Platform, msg *Message, interactiveKey strin
 
 	state.mu.Lock()
 	stillRunning := state.turnActive
-	state.mu.Unlock()
 	if !stillRunning {
-		// The turn ended between the lock probe and the write: the agent will
-		// treat this as a fresh turn, and the unsolicited reader relays the
-		// reply. Log it so the behaviour is traceable.
-		slog.Warn("steer landed after turn end; reply will be relayed by reader", "session", msg.SessionKey)
+		// The turn ended between the lock probe and the write: the agent treats
+		// this as a fresh turn. Point the session at *this* message so the
+		// unsolicited reader quotes the steered message instead of replying to
+		// the previous one (which made the message look unanswered).
+		state.platform = p
+		state.replyCtx = msg.ReplyCtx
+		state.currentMessageID = msg.MessageID
+	}
+	state.mu.Unlock()
+	ackKey := MsgSteerAck
+	if !stillRunning {
+		slog.Warn("steer landed after turn end; routing the reply to the steered message",
+			"session", msg.SessionKey, "msg_id", msg.MessageID)
+		ackKey = MsgSteerAfterTurnEnd
 	}
 
 	session.AddHistory("user", msg.Content)
@@ -2436,8 +2520,9 @@ func (e *Engine) steerBusySession(p Platform, msg *Message, interactiveKey strin
 	// Both cues: emoji reaction on the message plus a short text so the user
 	// knows this went into the running task instead of starting a new one.
 	e.sendAck(p, msg, "")
-	e.reply(p, msg.ReplyCtx, e.i18n.T(MsgSteerAck))
-	slog.Info("message steered into running turn", "session", msg.SessionKey, "user", msg.UserName)
+	e.reply(p, msg.ReplyCtx, e.i18n.T(ackKey))
+	slog.Info("message steered into running turn", "session", msg.SessionKey, "user", msg.UserName,
+		"turn_was_running", stillRunning)
 	return true
 }
 
@@ -2871,6 +2956,13 @@ func (e *Engine) processInteractiveMessageWith(p Platform, msg *Message, session
 	state.interruptedByUser = false
 	state.interruptPending = false
 	state.needsRestart = false
+	// Reset per-turn failure bookkeeping. Keep the message so a poisoned
+	// session can re-process it automatically instead of asking the user to
+	// retype it.
+	state.lastError = ""
+	state.errorReported = false
+	state.failureCounted = false
+	state.currentMsg = msg
 	state.mu.Unlock()
 	defer func() {
 		state.mu.Lock()
@@ -2981,7 +3073,11 @@ func (e *Engine) processInteractiveMessageWith(p Platform, msg *Message, session
 	needResync := state.eventsNeedResync
 	state.mu.Unlock()
 	if needResync {
-		drainEvents(state.agentSession.Events())
+		if drainedErr := drainEvents(state.agentSession.Events()); drainedErr != "" {
+			state.mu.Lock()
+			state.lastError = drainedErr
+			state.mu.Unlock()
+		}
 	}
 
 	promptContent := e.buildSenderPrompt(msg.Content, msg.UserID, msg.UserName, msg.Platform, msg.SessionKey, msg.ChannelKey)
@@ -3277,6 +3373,14 @@ func (e *Engine) getOrCreateInteractiveStateWith(sessionKey string, p Platform, 
 				Platform:   p.Name(),
 				Error:      fmt.Sprintf("failed to start session: %v", err),
 			})
+			// A resume that keeps failing (poisoned transcript) needs the
+			// session dropped, not another identical retry. No state/message is
+			// available here, so the user has to resend (the notice names the
+			// last message). Transient start failures (rate limit/auth/network)
+			// keep the context for the next attempt.
+			if !classifyAgentError(err.Error()).Transient {
+				e.maybeResetPoisonedSession(p, replyCtx, sessionKey, session, sessions, nil, false)
+			}
 			newState := &interactiveState{platform: p, replyCtx: replyCtx, agent: agent, eventsNeedResync: true}
 			adoptPendingFromPlaceholder(e.interactiveStates[sessionKey], newState)
 			state = newState
@@ -3371,6 +3475,9 @@ func (e *Engine) cleanupInteractiveState(sessionKey string, expected ...*interac
 		state.mu.Lock()
 		agentSession = state.agentSession
 		state.agentSession = nil
+		// Release the last message (may hold image bytes); it is only needed
+		// while a failed turn could still be re-dispatched.
+		state.currentMsg = nil
 		state.mu.Unlock()
 	}
 	e.interactiveMu.Unlock()
@@ -3761,7 +3868,7 @@ func (e *Engine) runUnsolicitedReader(ctx context.Context, cancel context.Cancel
 			case EventError:
 				if event.Error != nil {
 					slog.Error("unsolicited agent error", "error", event.Error, "session", sessionKey)
-					e.send(p, replyCtx, fmt.Sprintf(e.i18n.T(MsgError), event.Error))
+					e.send(p, replyCtx, e.agentErrorUserMessage(event.Error.Error()))
 				}
 				state.mu.Lock()
 				state.eventsNeedResync = true
@@ -3772,13 +3879,57 @@ func (e *Engine) runUnsolicitedReader(ctx context.Context, cancel context.Cancel
 	}
 }
 
-type agentErrorHandler struct {
-	contains string
-	msgKey   MsgKey
+// agentErrorClass describes how a raw agent/API error should be handled. One
+// table drives the user-facing text, the reset policy and the redispatch image
+// policy so they cannot drift apart ("message says A, behavior does B").
+type agentErrorClass struct {
+	Kind       string // for logs/tests
+	MsgKey     MsgKey
+	Transient  bool // recovers on retry; do not count toward session reset
+	SkipImages bool // a re-dispatch must not resend the image
 }
 
-var agentErrorHandlers = []agentErrorHandler{
-	{"Session not found", MsgSessionNotFound},
+type agentErrorRule struct {
+	contains string
+	class    agentErrorClass
+}
+
+var agentErrorRules = []agentErrorRule{
+	{"session not found", agentErrorClass{Kind: "session", MsgKey: MsgSessionNotFound}},
+	{"image is too large", agentErrorClass{Kind: "image", MsgKey: MsgAgentErrorImageTooLarge, SkipImages: true}},
+	{"too large to process", agentErrorClass{Kind: "image", MsgKey: MsgAgentErrorImageTooLarge, SkipImages: true}},
+	{"image exceeds", agentErrorClass{Kind: "image", MsgKey: MsgAgentErrorImageTooLarge, SkipImages: true}},
+	{"image size", agentErrorClass{Kind: "image", MsgKey: MsgAgentErrorImageTooLarge, SkipImages: true}},
+	{"image dimensions", agentErrorClass{Kind: "image", MsgKey: MsgAgentErrorImageTooLarge, SkipImages: true}},
+	{"rate limit", agentErrorClass{Kind: "rate_limit", MsgKey: MsgAgentErrorRateLimit, Transient: true}},
+	{"frequency limit", agentErrorClass{Kind: "rate_limit", MsgKey: MsgAgentErrorRateLimit, Transient: true}},
+	{"too many requests", agentErrorClass{Kind: "rate_limit", MsgKey: MsgAgentErrorRateLimit, Transient: true}},
+	{"overloaded", agentErrorClass{Kind: "rate_limit", MsgKey: MsgAgentErrorRateLimit, Transient: true}},
+	{"authentication", agentErrorClass{Kind: "auth", MsgKey: MsgAgentErrorAuth, Transient: true}},
+	{"unauthorized", agentErrorClass{Kind: "auth", MsgKey: MsgAgentErrorAuth, Transient: true}},
+	{"invalid api key", agentErrorClass{Kind: "auth", MsgKey: MsgAgentErrorAuth, Transient: true}},
+	{"context length", agentErrorClass{Kind: "context", MsgKey: MsgAgentErrorContext}},
+	{"maximum context", agentErrorClass{Kind: "context", MsgKey: MsgAgentErrorContext}},
+	{"too many tokens", agentErrorClass{Kind: "context", MsgKey: MsgAgentErrorContext}},
+	{"timeout", agentErrorClass{Kind: "timeout", MsgKey: MsgAgentErrorTimeout, Transient: true}},
+	{"timed out", agentErrorClass{Kind: "timeout", MsgKey: MsgAgentErrorTimeout, Transient: true}},
+	{"deadline exceeded", agentErrorClass{Kind: "timeout", MsgKey: MsgAgentErrorTimeout, Transient: true}},
+}
+
+// classifyAgentError maps a raw agent/API error to its user-facing text and
+// automatic-recovery policy. Raw English internals stay in the log.
+func classifyAgentError(raw string) agentErrorClass {
+	lower := strings.ToLower(raw)
+	for _, rule := range agentErrorRules {
+		if strings.Contains(lower, rule.contains) {
+			return rule.class
+		}
+	}
+	return agentErrorClass{Kind: "generic", MsgKey: MsgAgentErrorGeneric}
+}
+
+func (e *Engine) agentErrorUserMessage(raw string) string {
+	return e.i18n.T(classifyAgentError(raw).MsgKey)
 }
 
 func (e *Engine) processInteractiveEvents(state *interactiveState, session *Session, sessions *SessionManager, sessionKey string, msgID string, turnStart time.Time, stopTypingFn func(), sendDone <-chan error, replyCtx any) {
@@ -3838,11 +3989,85 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 		pl, rc, c := p, replyCtx, content
 		out.push(func() { e.sendForWorkspace(pl, rc, c, workspaceDir) })
 	}
-	sendWorkspaceWithError := func(p Platform, replyCtx any, content string) error {
-		pl, rc, c := p, replyCtx, content
-		out.push(func() { _ = e.sendWithErrorForWorkspace(pl, rc, c, workspaceDir) })
-		return nil
+	// Final answer delivery must not be best-effort. All chunks go out as one
+	// outbox task so they stay ordered and the "answer not delivered" notice
+	// cannot interleave with later chunks. Each chunk is retried once; an
+	// isolated failure does not stop the remaining chunks, but two consecutive
+	// failures mean the platform itself is down. The fallback notice is sent
+	// once per turn (the factory gives each queued turn its own once).
+	newSendFinalChunks := func() func(p Platform, replyCtx any, chunks []string) {
+		var fallbackOnce sync.Once
+		return func(p Platform, replyCtx any, chunks []string) {
+			if len(chunks) == 0 {
+				return
+			}
+			pl, rc := p, replyCtx
+			all := append([]string(nil), chunks...)
+			out.push(func() {
+				delivered := 0
+				anyFailed := false
+				consecutiveFailures := 0
+				for i, chunk := range all {
+					var err error
+					for attempt := 0; attempt < 2; attempt++ {
+						if attempt > 0 {
+							time.Sleep(time.Second)
+						}
+						err = e.sendWithErrorForWorkspace(pl, rc, chunk, workspaceDir)
+						if err == nil {
+							break
+						}
+						slog.Warn("final reply chunk delivery failed",
+							"session", sessionKey, "chunk", i+1, "of", len(all),
+							"attempt", attempt+1, "error", err)
+					}
+					if err != nil {
+						anyFailed = true
+						consecutiveFailures++
+						slog.Error("final reply delivery failed permanently",
+							"session", sessionKey, "chunk", i+1, "of", len(all),
+							"content_len", len(chunk), "error", err)
+						if consecutiveFailures >= 2 {
+							slog.Error("final reply delivery stopped after consecutive failures",
+								"session", sessionKey, "chunk", i+1, "of", len(all))
+							break
+						}
+						continue
+					}
+					consecutiveFailures = 0
+					delivered++
+				}
+				if !anyFailed {
+					slog.Info("final reply delivered", "session", sessionKey, "chunks", len(all))
+					return
+				}
+				noticeKey := MsgFinalDeliveryPartial
+				if delivered == 0 {
+					noticeKey = MsgFinalDeliveryFailed
+				}
+				fallbackOnce.Do(func() {
+					notice := e.i18n.T(noticeKey)
+					for attempt := 0; attempt < 2; attempt++ {
+						if attempt > 0 {
+							time.Sleep(3 * time.Second)
+						}
+						if ferr := e.sendWithErrorForWorkspace(pl, rc, notice, workspaceDir); ferr == nil {
+							slog.Warn("final delivery fallback notice sent",
+								"session", sessionKey, "delivered_chunks", delivered,
+								"total_chunks", len(all), "attempt", attempt+1)
+							return
+						} else {
+							slog.Error("final delivery fallback failed",
+								"session", sessionKey, "attempt", attempt+1, "error", ferr)
+						}
+					}
+					slog.Error("final delivery fallback exhausted: user was not told the answer was lost",
+						"session", sessionKey)
+				})
+			})
+		}
 	}
+	sendFinalChunks := newSendFinalChunks()
 
 	// Streaming card: aggregate entire turn into a single updatable card.
 	var streamCard StreamingCard
@@ -3907,6 +4132,25 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 		idleCh = idleTimer.C
 	}
 
+	// Long-turn progress nudge: tell the user we are still alive instead of
+	// leaving them to infer it from a spinning card. Scheduler runs (cron)
+	// already announce themselves and should not add chat noise.
+	state.mu.Lock()
+	proactiveTurn := state.turnProactive
+	state.mu.Unlock()
+	var progressTimer *time.Timer
+	var progressCh <-chan time.Time
+	if e.turnProgressInterval > 0 && !proactiveTurn {
+		progressTimer = time.NewTimer(e.turnProgressInterval)
+		defer progressTimer.Stop()
+		progressCh = progressTimer.C
+	}
+	progressNotices := 0
+	// lastVisibleEventAt suppresses the "still working" nudge while the agent
+	// is actively streaming text or tool steps — the user can already see
+	// progress, so a redundant text would just be noise.
+	lastVisibleEventAt := time.Now()
+
 	events := state.agentSession.Events()
 	stopCh := state.stopSignal()
 	for {
@@ -3934,16 +4178,59 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 					stopTyping = nil
 				}
 				e.notifyDroppedQueuedMessages(state, err)
+				// Snapshot before cleanup: cleanup marks the state stopped, which
+				// would make an actual send failure look like a user stop.
+				state.mu.Lock()
+				p := state.platform
+				userStopped := state.interruptedByUser || state.needsRestart || state.stopped
+				state.lastError = err.Error()
+				state.errorReported = true
+				state.mu.Unlock()
+				if !userStopped {
+					e.send(p, replyCtx, e.i18n.T(MsgAgentSendFailed))
+					e.recordTurnFailure(state, p, replyCtx, sessionKey, session, sessions, err.Error())
+				} else {
+					slog.Info("send error after user stop; not reported", "session", sessionKey, "error", err)
+				}
 				if state.agentSession == nil || !state.agentSession.Alive() {
 					e.cleanupInteractiveState(sessionKey, state)
 				}
-				state.mu.Lock()
-				p := state.platform
-				state.mu.Unlock()
-				e.send(p, replyCtx, fmt.Sprintf(e.i18n.T(MsgError), err))
 				return
 			}
 			continue
+		case <-progressCh:
+			if progressNotices < turnProgressNoticeMax {
+				// Only nudge when the turn has been quiet: if the agent is
+				// streaming text or tool steps the user already sees progress.
+				quietFor := time.Since(lastVisibleEventAt)
+				if quietFor >= e.turnProgressInterval/2 {
+					progressNotices++
+					step := ""
+					if tc := stateTaskCard(state); tc != nil {
+						step = tc.CurrentStep()
+					}
+					if step == "" {
+						step = e.i18n.T(MsgTurnWorkingStep)
+					}
+					notice := e.i18n.Tf(MsgTurnStillWorking, formatCardElapsed(time.Since(turnStart)), step)
+					state.mu.Lock()
+					pp := state.platform
+					prc := state.replyCtx
+					state.mu.Unlock()
+					e.outboxFor(sessionKey).push(func() {
+						e.sendForWorkspace(pp, prc, notice, workspaceDir)
+					})
+					slog.Info("long turn progress nudge sent",
+						"session", sessionKey, "elapsed", time.Since(turnStart),
+						"quiet_for", quietFor, "notice", progressNotices)
+				} else {
+					slog.Debug("long turn progress nudge skipped: recent output",
+						"session", sessionKey, "quiet_for", quietFor)
+				}
+			}
+			if progressTimer != nil {
+				progressTimer.Reset(e.turnProgressInterval)
+			}
 		case <-idleCh:
 			if tc := stateTaskCard(state); tc != nil {
 				tc.Finish(taskCardFailed, "")
@@ -3955,8 +4242,11 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			state.mu.Lock()
 			state.eventsNeedResync = true
 			p := state.platform
+			state.lastError = "agent session timed out (no response)"
+			state.errorReported = true
 			state.mu.Unlock()
-			e.send(p, replyCtx, fmt.Sprintf(e.i18n.T(MsgError), "agent session timed out (no response)"))
+			e.send(p, replyCtx, e.i18n.T(MsgAgentErrorTimeout))
+			e.recordTurnFailure(state, p, replyCtx, sessionKey, session, sessions, "agent session timed out (no response)")
 			e.cleanupInteractiveState(sessionKey, state)
 			return
 		case <-e.ctx.Done():
@@ -4005,6 +4295,11 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 		state.mu.Lock()
 		p := state.platform
 		state.mu.Unlock()
+
+		switch event.Type {
+		case EventText, EventToolUse, EventToolResult:
+			lastVisibleEventAt = time.Now()
+		}
 
 		// main codebase has no per-session quiet flag; pr309 referenced
 		// sessionQuiet which we drop. e.display.ThinkingMessages /
@@ -4439,6 +4734,41 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			}
 
 		case EventResult:
+			state.mu.Lock()
+			interruptedByUser := state.interruptedByUser
+			state.mu.Unlock()
+			if event.IsError && !interruptedByUser {
+				// The CLI finished the turn with an error result (API 400, max
+				// tokens, ...). Treating it as a normal answer hides the real
+				// reason and poisons the next turn, so surface it as a failure.
+				errText := strings.TrimSpace(event.Content)
+				if errText == "" {
+					errText = "agent returned an error result"
+				}
+				cp.Finalize(ProgressCardStateFailed)
+				sp.discard()
+				state.mu.Lock()
+				state.lastError = errText
+				state.errorReported = true
+				state.eventsNeedResync = true
+				state.turnSettled = true
+				state.mu.Unlock()
+				if tc := stateTaskCard(state); tc != nil {
+					tc.Finish(taskCardFailed, "")
+				}
+				e.send(p, replyCtx, e.agentErrorUserMessage(errText))
+				e.recordTurnFailure(state, p, replyCtx, sessionKey, session, sessions, errText)
+				if state.agentSession == nil || !state.agentSession.Alive() {
+					e.notifyDroppedQueuedMessages(state, fmt.Errorf("%s", errText))
+				}
+				return
+			}
+			e.clearSessionFailures(sessionKey)
+			// Successful turn: release the message (including image bytes) held
+			// only for a possible auto-redispatch after a failure.
+			state.mu.Lock()
+			state.currentMsg = nil
+			state.mu.Unlock()
 			cp.Finalize(ProgressCardStateCompleted)
 			// Use state.agentSession.CurrentSessionID() instead of event.SessionID.
 			// event.SessionID may be empty in some cases, causing the agent_session_id
@@ -4584,6 +4914,10 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				"input_tokens", event.InputTokens,
 				"output_tokens", event.OutputTokens,
 				"silent", isSilent,
+				// Delivery happens on the per-session outbox; its own log line
+				// ("final reply delivered"/"failed permanently") carries the
+				// real outcome, so silent=false here does not mean delivered.
+				"delivery", "queued",
 			)
 
 			normalizedBaseResponse := strings.TrimSpace(baseResponse)
@@ -4602,11 +4936,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				if err := streamCard.Finalize(e.ctx, finalContent); err != nil {
 					slog.Error("streaming card finalize failed, sending fallback", "error", err)
 					// Fallback: send the response as a normal message
-					for _, chunk := range splitMessage(fullResponse, maxPlatformMessageLen) {
-						if err := sendWorkspaceWithError(p, replyCtx, chunk); err != nil {
-							return
-						}
-					}
+					sendFinalChunks(p, replyCtx, splitMessage(fullResponse, maxPlatformMessageLen))
 				}
 			} else if isSilent {
 				// Silent reply: drop any in-flight preview and skip all send paths.
@@ -4633,27 +4963,32 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 					parts = splitter.SplitMarkdownByTables(fullResponse, 5)
 				}
 				finalCard := richCardSupporter.BuildRichCard(CardStatusDone, "", toolSteps, parts[0], false, time.Since(turnStart))
+				cardDelivered := false
 				if cardMessageID != nil {
 					if updater, ok := p.(MessageUpdater); ok {
 						if err := updater.UpdateMessage(e.ctx, cardMessageID, finalCard); err != nil {
-							slog.Debug("rich card: final update failed, falling back to send", "platform", p.Name(), "error", err)
-							if err := p.Send(e.ctx, replyCtx, finalCard); err != nil {
-								slog.Error("failed to send rich card reply", "error", err)
-								return
-							}
+							slog.Warn("rich card: final update failed, falling back to send",
+								"platform", p.Name(), "error", err)
+						} else {
+							cardDelivered = true
 						}
 					}
+				} else if err := p.Send(e.ctx, replyCtx, finalCard); err != nil {
+					slog.Error("failed to send rich card reply", "error", err)
 				} else {
-					if err := p.Send(e.ctx, replyCtx, finalCard); err != nil {
-						slog.Error("failed to send rich card reply", "error", err)
-						return
-					}
+					cardDelivered = true
+				}
+				if !cardDelivered {
+					// Card path failed entirely; deliver the answer as plain text
+					// with the same retry/notice guarantees as the normal path.
+					sendFinalChunks(p, replyCtx, splitMessage(fullResponse, maxPlatformMessageLen))
 				}
 				for _, overflow := range parts[1:] {
 					overflowCard := richCardSupporter.BuildRichCard(CardStatusDone, "", nil, overflow, false, time.Since(turnStart))
 					if err := p.Send(e.ctx, replyCtx, overflowCard); err != nil {
-						slog.Error("failed to send overflow rich card", "error", err)
-						return
+						slog.Error("failed to send overflow rich card, falling back to text",
+							"error", err, "overflow_len", len(overflow))
+						sendFinalChunks(p, replyCtx, splitMessage(overflow, maxPlatformMessageLen))
 					}
 				}
 			} else if toolCount > 0 && segmentStart > 0 {
@@ -4666,11 +5001,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 					unsent = appendFinalMetadataToSegment(unsent, fullResponse)
 				}
 				if unsent != "" {
-					for _, chunk := range splitMessage(unsent, maxPlatformMessageLen) {
-						if err := sendWorkspaceWithError(p, replyCtx, chunk); err != nil {
-							return
-						}
-					}
+					sendFinalChunks(p, replyCtx, splitMessage(unsent, maxPlatformMessageLen))
 				}
 			} else if suppressDuplicate {
 				sp.discard()
@@ -4679,11 +5010,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				slog.Debug("EventResult: finalized stream preview in-place", "response_len", len(fullResponse))
 			} else {
 				slog.Debug("EventResult: sending via p.Send (preview inactive or failed)", "response_len", len(fullResponse), "chunks", len(splitMessage(fullResponse, maxPlatformMessageLen)))
-				for _, chunk := range splitMessage(fullResponse, maxPlatformMessageLen) {
-					if err := sendWorkspaceWithError(p, replyCtx, chunk); err != nil {
-						return
-					}
-				}
+				sendFinalChunks(p, replyCtx, splitMessage(fullResponse, maxPlatformMessageLen))
 			}
 
 			// Post-reply hook: let platforms run a follow-up action once the
@@ -4753,6 +5080,17 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				state.replyCtx = queued.replyCtx
 				state.currentMessageID = queued.messageID
 				state.fromVoice = queued.fromVoice
+				state.lastError = ""
+				state.errorReported = false
+				state.failureCounted = false
+				state.currentMsg = &Message{
+					SessionKey: queued.msgSessionKey, Platform: queued.msgPlatform,
+					MessageID: queued.messageID, UserID: queued.userID,
+					UserName: queued.userName, Content: queued.content,
+					Images: queued.images, Files: queued.files,
+					FromVoice: queued.fromVoice, ChannelKey: queued.channelKey,
+					ReplyCtx: queued.replyCtx,
+				}
 				state.mu.Unlock()
 
 				// Stop the previous turn's typing indicator
@@ -4770,7 +5108,13 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				// Drain stale events before starting the next turn. Between
 				// EventResult and Send(), the only buffered events would be
 				// stale leftovers (e.g. a deferred EventError from cmd.Wait()).
-				drainEvents(state.agentSession.Events())
+				// Keep the error text so a silent failure in the queued turn can
+				// still name its real cause.
+				if drainedErr := drainEvents(state.agentSession.Events()); drainedErr != "" {
+					state.mu.Lock()
+					state.lastError = drainedErr
+					state.mu.Unlock()
+				}
 
 				if pendingSend != nil {
 					if err := <-pendingSend; err != nil {
@@ -4846,6 +5190,19 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 					}
 					idleTimer.Reset(e.eventIdleTimeout)
 				}
+				progressNotices = 0
+				if progressTimer != nil {
+					if !progressTimer.Stop() {
+						select {
+						case <-progressTimer.C:
+						default:
+						}
+					}
+					progressTimer.Reset(e.turnProgressInterval)
+				}
+				// Each queued turn gets its own delivery-fallback once, so a
+				// failure in t1 does not silence the lost-answer notice for t2.
+				sendFinalChunks = newSendFinalChunks()
 
 				slog.Info("processing queued message",
 					"session", sessionKey,
@@ -4878,6 +5235,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			sp.discard()
 			state.mu.Lock()
 			state.eventsNeedResync = true
+			userStopped := state.interruptedByUser || state.needsRestart || state.stopped
 			state.mu.Unlock()
 			if hasRichCard && cardMessageID != nil {
 				errCard := richCardSupporter.BuildRichCard(CardStatusError, "", toolSteps, partialText, false, time.Since(turnStart))
@@ -4887,8 +5245,19 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 					}
 				}
 			}
+			if userStopped {
+				// A process exit caused by /stop is expected; the user already
+				// got the stop confirmation. Don't turn it into an error.
+				slog.Info("agent error after user stop; not reported",
+					"session", sessionKey, "error", event.Error)
+				return
+			}
 			if event.Error != nil {
 				errMsg := event.Error.Error()
+				state.mu.Lock()
+				state.lastError = errMsg
+				state.errorReported = true
+				state.mu.Unlock()
 				slog.Error("agent error", "error", event.Error)
 				e.hooks.Emit(HookEvent{
 					Event:      HookEventError,
@@ -4896,14 +5265,8 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 					Platform:   p.Name(),
 					Error:      event.Error.Error(),
 				})
-				userMsg := fmt.Sprintf(e.i18n.T(MsgError), errMsg)
-				for _, h := range agentErrorHandlers {
-					if strings.Contains(errMsg, h.contains) {
-						userMsg = e.i18n.T(h.msgKey)
-						break
-					}
-				}
-				e.send(p, replyCtx, userMsg)
+				e.send(p, replyCtx, e.agentErrorUserMessage(errMsg))
+				e.recordTurnFailure(state, p, replyCtx, sessionKey, session, sessions, errMsg)
 			}
 			// Only drop queued messages if the agent session is dead.
 			// Some agents (e.g. Codex) emit EventError for per-turn failures
@@ -4916,16 +5279,47 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 	}
 
 channelClosed:
-	// Channel closed - process exited unexpectedly
-	if tc := stateTaskCard(state); tc != nil {
-		tc.Finish(taskCardFailed, "")
-	}
+	// Channel closed - process exited unexpectedly.
+	// Finish the card and clean up in a defer: the final text chunks are
+	// enqueued below and must go out before the card's terminal PATCH (which
+	// can take up to 10s under throttling).
+	defer func() {
+		if tc := stateTaskCard(state); tc != nil {
+			tc.Finish(taskCardFailed, "")
+		}
+		e.cleanupInteractiveState(sessionKey, state)
+	}()
 	slog.Warn("agent process exited", "session_key", sessionKey)
+	// Snapshot before cleanupInteractiveState: cleanup marks the state stopped,
+	// which recordTurnFailure (correctly) treats as an expected stop.
 	state.mu.Lock()
 	state.eventsNeedResync = true
+	p := state.platform
+	userStopped := state.stopped || state.interruptedByUser || state.needsRestart
+	lastErr := state.lastError
+	alreadyReported := state.errorReported
 	state.mu.Unlock()
 	e.notifyDroppedQueuedMessages(state, fmt.Errorf("agent process exited"))
-	e.cleanupInteractiveState(sessionKey, state)
+
+	if !userStopped && e.ctx.Err() == nil {
+		// Falling into channelClosed with no accumulated text used to return
+		// silently. Always tell the user something went wrong, naming the real
+		// error when we have one (e.g. an API 400 recovered from a drained
+		// EventError).
+		reason := strings.TrimSpace(lastErr)
+		if reason == "" {
+			reason = "agent process exited unexpectedly"
+		}
+		if len(textParts) == 0 && !alreadyReported {
+			state.mu.Lock()
+			state.lastError = reason
+			state.errorReported = true
+			state.mu.Unlock()
+			slog.Warn("turn failed without output", "session", sessionKey, "reason", reason)
+			e.send(p, replyCtx, e.agentErrorUserMessage(reason))
+		}
+		e.recordTurnFailure(state, p, replyCtx, sessionKey, session, sessions, reason)
+	}
 
 	if len(textParts) > 0 {
 		state.mu.Lock()
@@ -4961,19 +5355,11 @@ channelClosed:
 			if segmentStart < len(textParts) {
 				unsent := strings.Join(textParts[segmentStart:], "")
 				if unsent != "" {
-					for _, chunk := range splitMessage(unsent, maxPlatformMessageLen) {
-						if err := sendWorkspaceWithError(p, replyCtx, chunk); err != nil {
-							return
-						}
-					}
+					sendFinalChunks(p, replyCtx, splitMessage(unsent, maxPlatformMessageLen))
 				}
 			}
 		} else {
-			for _, chunk := range splitMessage(fullResponse, maxPlatformMessageLen) {
-				if err := sendWorkspaceWithError(p, replyCtx, chunk); err != nil {
-					return
-				}
-			}
+			sendFinalChunks(p, replyCtx, splitMessage(fullResponse, maxPlatformMessageLen))
 		}
 	}
 }
@@ -5034,7 +5420,8 @@ func (e *Engine) notifyDroppedQueuedMessages(state *interactiveState, reason err
 	state.pendingMessages = nil
 	state.mu.Unlock()
 	for _, q := range remaining {
-		e.send(q.platform, q.replyCtx, fmt.Sprintf(e.i18n.T(MsgError), reason))
+		slog.Warn("dropping queued message", "session", q.msgSessionKey, "reason", reason)
+		e.send(q.platform, q.replyCtx, e.i18n.T(MsgQueuedMessageDropped))
 	}
 }
 
@@ -5057,6 +5444,17 @@ func (e *Engine) drainPendingMessages(state *interactiveState, session *Session,
 		state.replyCtx = queued.replyCtx
 		state.currentMessageID = queued.messageID
 		state.fromVoice = queued.fromVoice
+		state.lastError = ""
+		state.errorReported = false
+		state.failureCounted = false
+		state.currentMsg = &Message{
+			SessionKey: queued.msgSessionKey, Platform: queued.msgPlatform,
+			MessageID: queued.messageID, UserID: queued.userID,
+			UserName: queued.userName, Content: queued.content,
+			Images: queued.images, Files: queued.files,
+			FromVoice: queued.fromVoice, ChannelKey: queued.channelKey,
+			ReplyCtx: queued.replyCtx,
+		}
 		state.mu.Unlock()
 
 		// A queued turn may follow a stop, in which case the previous card is
@@ -5075,12 +5473,16 @@ func (e *Engine) drainPendingMessages(state *interactiveState, session *Session,
 		prompt := e.buildSenderPrompt(queued.content, queued.userID, queued.userName, queued.msgPlatform, queued.msgSessionKey, queued.channelKey)
 
 		if state.agentSession == nil || !state.agentSession.Alive() {
-			e.send(queued.platform, queued.replyCtx, fmt.Sprintf(e.i18n.T(MsgError), "agent session ended"))
+			e.send(queued.platform, queued.replyCtx, e.i18n.T(MsgQueuedMessageDropped))
 			e.notifyDroppedQueuedMessages(state, fmt.Errorf("agent session ended"))
 			return false
 		}
 
-		drainEvents(state.agentSession.Events())
+		if drainedErr := drainEvents(state.agentSession.Events()); drainedErr != "" {
+			state.mu.Lock()
+			state.lastError = drainedErr
+			state.mu.Unlock()
+		}
 
 		session.AddHistory("user", queued.content)
 
@@ -5648,6 +6050,7 @@ func (e *Engine) cmdNew(p Platform, msg *Message, args []string) {
 	}
 
 	slog.Info("cmdNew: cleaning up old session", "session_key", msg.SessionKey)
+	e.clearSessionFailures(interactiveKey)
 	e.cleanupInteractiveState(interactiveKey)
 	slog.Info("cmdNew: cleanup done, creating new session", "session_key", msg.SessionKey)
 
@@ -8650,6 +9053,224 @@ func (e *Engine) interruptInteractiveTurn(sessionKey, reason string, dropQueue, 
 //
 // When it fires it hard-stops the session and re-dispatches the messages that
 // were waiting, so a follow-up typed during the stop is never silently lost.
+// noteSessionFailure increments the consecutive-failure counter for a session.
+func (e *Engine) noteSessionFailure(sessionKey string) int {
+	e.failMu.Lock()
+	defer e.failMu.Unlock()
+	if e.sessionFailures == nil {
+		e.sessionFailures = make(map[string]int)
+	}
+	e.sessionFailures[sessionKey]++
+	return e.sessionFailures[sessionKey]
+}
+
+// clearSessionFailures resets the consecutive-failure counter for a session.
+func (e *Engine) clearSessionFailures(sessionKey string) {
+	e.failMu.Lock()
+	if e.sessionFailures != nil {
+		delete(e.sessionFailures, sessionKey)
+	}
+	e.failMu.Unlock()
+}
+
+// recordTurnFailure counts one failed turn, skipping expected stops and
+// shutdowns. The per-turn flag makes EventError + channelClosed count as a
+// single failure rather than two.
+func (e *Engine) recordTurnFailure(state *interactiveState, p Platform, replyCtx any, sessionKey string, session *Session, sessions *SessionManager, errText string) {
+	if e.ctx.Err() != nil {
+		return
+	}
+	class := classifyAgentError(errText)
+	if class.Transient {
+		// Rate limits/timeouts/auth failures recover without dropping context;
+		// resetting here would silently wipe a healthy conversation.
+		slog.Info("transient turn failure; not counting toward session reset",
+			"session", sessionKey, "kind", class.Kind, "error", errText)
+		return
+	}
+	if state != nil {
+		state.mu.Lock()
+		if state.failureCounted || state.stopped || state.interruptedByUser || state.needsRestart {
+			state.mu.Unlock()
+			return
+		}
+		state.failureCounted = true
+		state.mu.Unlock()
+	}
+	e.maybeResetPoisonedSession(p, replyCtx, sessionKey, session, sessions, state, class.SkipImages)
+}
+
+// maybeResetPoisonedSession drops the agent session once the consecutive
+// failure threshold is reached. Contexts that fail on every resume (a 400 in
+// the transcript, for example) cannot self-heal; discarding the agent session
+// ID is the only way to let the next message start clean.
+//
+// When the failed turn's message is still available (state != nil), it is
+// re-processed automatically after the reset: asking a user to retype a long
+// prompt (or re-upload a screenshot) is a poor recovery path.
+func (e *Engine) maybeResetPoisonedSession(p Platform, replyCtx any, sessionKey string, session *Session, sessions *SessionManager, state *interactiveState, skipImages bool) bool {
+	if e.noteSessionFailure(sessionKey) < sessionFailureResetThreshold {
+		return false
+	}
+	e.clearSessionFailures(sessionKey)
+	slog.Warn("session auto-reset after consecutive turn failures",
+		"session", sessionKey, "threshold", sessionFailureResetThreshold)
+
+	snippet := e.lastUserMessageSnippet(session)
+	var redispatch *Message
+	if state != nil {
+		state.mu.Lock()
+		// Scheduler runs belong to the cron scheduler; re-running one from
+		// here would bypass its timeout/notification handling.
+		if !state.turnProactive {
+			redispatch = state.currentMsg
+		}
+		state.mu.Unlock()
+	}
+
+	if session != nil {
+		session.SetAgentSessionID("", "")
+		session.ClearHistory()
+	}
+	if sessions != nil {
+		sessions.Save()
+	}
+	if p != nil {
+		switch {
+		case redispatch != nil:
+			e.reply(p, replyCtx, e.i18n.Tf(MsgSessionAutoResetRedispatch,
+				sessionFailureResetThreshold, e.messageSnippet(redispatch)))
+			go e.redispatchAfterReset(session, p, redispatch, skipImages)
+		case state == nil:
+			// Called from getOrCreateInteractiveStateWith, which holds the
+			// process-wide interactiveMu. A throttled Feishu reply can take
+			// seconds; send it off-lock so other chats are not blocked.
+			go e.reply(p, replyCtx, e.i18n.Tf(MsgSessionAutoResetError,
+				sessionFailureResetThreshold, snippet))
+		default:
+			e.reply(p, replyCtx, e.i18n.Tf(MsgSessionAutoResetError,
+				sessionFailureResetThreshold, snippet))
+		}
+	}
+	return true
+}
+
+// redispatchAfterReset waits for the failed turn to release the session and
+// then processes the same message again on the freshly reset session.
+func (e *Engine) redispatchAfterReset(session *Session, p Platform, msg *Message, skipImages bool) {
+	if e.ctx.Err() != nil {
+		return
+	}
+	if msg.Redispatch {
+		// Never chain automatic re-dispatches: a message that already failed
+		// once after a reset gets the explicit "please resend" path instead of
+		// an endless reset → redispatch → fail loop.
+		slog.Warn("auto-redispatch skipped: message is already a redispatch",
+			"session", msg.SessionKey, "msg_id", msg.MessageID)
+		e.send(p, msg.ReplyCtx, e.i18n.T(MsgRedispatchFailed))
+		return
+	}
+	if session != nil {
+		deadline := time.Now().Add(10 * time.Second)
+		for session.Busy() && time.Now().Before(deadline) {
+			select {
+			case <-e.ctx.Done():
+				return
+			case <-time.After(50 * time.Millisecond):
+			}
+		}
+		if session.Busy() {
+			slog.Warn("auto-redispatch skipped: session still busy after reset",
+				"session", msg.SessionKey)
+			// Do not leave the user waiting after promising a re-dispatch.
+			e.send(p, msg.ReplyCtx, e.i18n.T(MsgRedispatchFailed))
+			return
+		}
+	}
+	// handleMessage merges ExtraContent into Content in place. By the time the
+	// turn failed that merge had already happened, so re-dispatching the
+	// original would prepend the quoted context twice.
+	clone := *msg
+	clone.ExtraContent = ""
+	clone.Redispatch = true
+	clone.Images = append([]ImageAttachment(nil), msg.Images...)
+	clone.QuotedImages = append([]ImageAttachment(nil), msg.QuotedImages...)
+	clone.Files = append([]FileAttachment(nil), msg.Files...)
+
+	// Never retry an image that would fail identically: an image-related
+	// failure drops all images; otherwise only the images the ingress gate
+	// would reject are removed. The user's text still gets processed.
+	var dropped int
+	if skipImages {
+		dropped = len(clone.Images)
+		clone.Images = nil
+		clone.QuotedImages = nil
+	} else if kept, skipped := FilterOversizedImages(clone.Images); skipped > 0 {
+		dropped = skipped
+		clone.Images = kept
+		clone.QuotedImages = nil // source distinction no longer matters
+	}
+	if dropped > 0 {
+		if len(clone.Images) == 0 && len(clone.Files) == 0 && strings.TrimSpace(clone.Content) == "" {
+			e.send(p, msg.ReplyCtx, e.i18n.T(MsgRedispatchOnlyImagesSkipped))
+			return
+		}
+		e.send(p, msg.ReplyCtx, e.i18n.Tf(MsgRedispatchImagesSkipped, dropped))
+	}
+
+	slog.Info("auto-redispatching last message after session reset",
+		"session", msg.SessionKey, "msg_id", msg.MessageID, "images_skipped", dropped)
+	e.handleMessage(p, &clone)
+}
+
+// lastUserMessageSnippet returns a short, single-line view of the most recent
+// user message so the reset notice can tell the user which message it means.
+func (e *Engine) lastUserMessageSnippet(session *Session) string {
+	if session == nil {
+		return e.i18n.T(MsgSnippetUnknown)
+	}
+	history := session.GetHistory(50)
+	for i := len(history) - 1; i >= 0; i-- {
+		if history[i].Role != "user" {
+			continue
+		}
+		if s := userMessageSnippet(history[i].Content); s != "" {
+			return s
+		}
+	}
+	return e.i18n.T(MsgSnippetUnknown)
+}
+
+func (e *Engine) messageSnippet(msg *Message) string {
+	if msg == nil {
+		return e.i18n.T(MsgSnippetUnknown)
+	}
+	if s := userMessageSnippet(msg.Content); s != "" {
+		return s
+	}
+	if len(msg.Images) > 0 {
+		return e.i18n.T(MsgSnippetImage)
+	}
+	if len(msg.Files) > 0 {
+		return e.i18n.T(MsgSnippetFile)
+	}
+	return e.i18n.T(MsgSnippetUnknown)
+}
+
+// userMessageSnippet collapses whitespace and truncates to a readable length.
+func userMessageSnippet(content string) string {
+	s := strings.Join(strings.Fields(content), " ")
+	if s == "" {
+		return ""
+	}
+	const max = 60
+	runes := []rune(s)
+	if len(runes) > max {
+		return string(runes[:max]) + "…"
+	}
+	return s
+}
+
 // restartWedgedSession recovers from a stop that left the agent unable to
 // consume new input (the CLI only reads stdin at turn boundaries). Steering in
 // that state looks successful — the write lands in the pipe — but nothing ever
@@ -8663,7 +9284,10 @@ func (e *Engine) restartWedgedSession(p Platform, msg *Message, interactiveKey s
 		return false
 	}
 	state.mu.Lock()
-	wedged := (state.needsRestart || state.turnSettled) && state.turnActive
+	// A dead agent session with an active turn can never settle. Including it
+	// here stops steer/queue from swallowing messages into a dead pipe.
+	wedged := state.turnActive && (state.needsRestart || state.turnSettled ||
+		state.agentSession == nil || !state.agentSession.Alive())
 	state.mu.Unlock()
 	if !wedged {
 		return false
@@ -8671,6 +9295,7 @@ func (e *Engine) restartWedgedSession(p Platform, msg *Message, interactiveKey s
 
 	slog.Warn("session wedged after stop; restarting and re-dispatching",
 		"session", msg.SessionKey, "interactive_key", interactiveKey)
+	e.reply(p, msg.ReplyCtx, e.i18n.T(MsgPreviousTurnFailedRestart))
 	e.stopInteractiveSessionWithOptions(interactiveKey, false)
 
 	go func() {
@@ -8724,17 +9349,17 @@ func (e *Engine) interruptWatchdog(sessionKey string) {
 	// Redispatch them as fresh messages so they still get answered.
 	for _, q := range pending {
 		msg := &Message{
-			SessionKey:   q.msgSessionKey,
-			Platform:     q.msgPlatform,
-			MessageID:    q.messageID,
-			UserID:       q.userID,
-			UserName:     q.userName,
-			Content:      q.content,
-			Images:       q.images,
-			Files:        q.files,
-			FromVoice:    q.fromVoice,
-			ChannelKey:   q.channelKey,
-			ReplyCtx:     q.replyCtx,
+			SessionKey: q.msgSessionKey,
+			Platform:   q.msgPlatform,
+			MessageID:  q.messageID,
+			UserID:     q.userID,
+			UserName:   q.userName,
+			Content:    q.content,
+			Images:     q.images,
+			Files:      q.files,
+			FromVoice:  q.fromVoice,
+			ChannelKey: q.channelKey,
+			ReplyCtx:   q.replyCtx,
 		}
 		go e.handleMessage(q.platform, msg)
 	}
@@ -8856,7 +9481,9 @@ func (e *Engine) runCompress(state *interactiveState, session *Session, sessions
 	state.replyCtx = replyCtx
 	state.mu.Unlock()
 
-	drainEvents(state.agentSession.Events())
+	if drainedErr := drainEvents(state.agentSession.Events()); drainedErr != "" {
+		slog.Warn("drained previous-turn error before compress", "session", iKey, "error", drainedErr)
+	}
 
 	compressor, ok := e.agent.(ContextCompressor)
 	if !ok || compressor.CompressCommand() == "" {
@@ -8869,7 +9496,7 @@ func (e *Engine) runCompress(state *interactiveState, session *Session, sessions
 	cmd := compressor.CompressCommand()
 	if err := state.agentSession.Send(cmd, nil, nil); err != nil {
 		if !auto {
-			e.reply(p, replyCtx, fmt.Sprintf(e.i18n.T(MsgError), err))
+			e.reply(p, replyCtx, e.i18n.T(MsgAgentSendFailed))
 		}
 		if !state.agentSession.Alive() {
 			e.cleanupInteractiveState(iKey)
@@ -8919,7 +9546,7 @@ func (e *Engine) processCompressEvents(state *interactiveState, session *Session
 			}
 		case <-idleCh:
 			if !auto {
-				e.send(p, replyCtx, fmt.Sprintf(e.i18n.T(MsgError), "compress timed out"))
+				e.send(p, replyCtx, e.i18n.T(MsgAgentErrorTimeout))
 			}
 			e.cleanupInteractiveState(sessionKey, state)
 			e.notifyDroppedQueuedMessages(state, fmt.Errorf("compress timed out"))
@@ -8980,7 +9607,7 @@ func (e *Engine) processCompressEvents(state *interactiveState, session *Session
 			return
 		case EventError:
 			if !auto && event.Error != nil {
-				e.reply(p, replyCtx, fmt.Sprintf(e.i18n.T(MsgError), event.Error))
+				e.reply(p, replyCtx, e.agentErrorUserMessage(event.Error.Error()))
 			}
 			// Only drop queued messages if the agent is dead; some agents
 			// emit per-turn EventError while staying alive.
@@ -9951,24 +10578,33 @@ func (e *Engine) sendRaw(p Platform, replyCtx any, content string) {
 	_ = e.sendAlreadyRenderedWithError(p, replyCtx, content)
 }
 
-// drainEvents discards any buffered events from the channel.
+// drainEvents discards any buffered events from the channel and returns the
+// text of the last EventError it saw.
 // Called before a new turn to prevent stale events from a previous turn's
-// agent process from being mistaken for the new turn's response.
-func drainEvents(ch <-chan Event) {
+// agent process from being mistaken for the new turn's response. Discarding an
+// EventError without keeping its text is what made a failed turn look like an
+// empty successful one; callers should surface the returned reason.
+func drainEvents(ch <-chan Event) (lastError string) {
 	drained := 0
 	for {
 		select {
-		case _, ok := <-ch:
+		case evt, ok := <-ch:
 			if !ok {
 				// Channel is closed; stop immediately to avoid an infinite loop.
-				return
+				if drained > 0 {
+					slog.Warn("drained stale events from closed channel", "count", drained, "last_error", lastError)
+				}
+				return lastError
 			}
 			drained++
+			if evt.Type == EventError && evt.Error != nil {
+				lastError = evt.Error.Error()
+			}
 		default:
 			if drained > 0 {
-				slog.Warn("drained stale events from previous turn", "count", drained)
+				slog.Warn("drained stale events from previous turn", "count", drained, "last_error", lastError)
 			}
-			return
+			return lastError
 		}
 	}
 }
