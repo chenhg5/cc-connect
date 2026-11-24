@@ -1,7 +1,9 @@
 package core
 
 import (
+	"fmt"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -150,5 +152,52 @@ func TestQueueNoticeDefault_RepliesQueued(t *testing.T) {
 	e.ReceiveMessage(p, queueNoticeMessage("follow-up", 1_000))
 	if !queueNoticeSent(p.getSent(), e.i18n.T(MsgMessageQueued)) {
 		t.Fatalf("sent = %v, want MsgMessageQueued", p.getSent())
+	}
+}
+
+// Configuration reload can change the setting while an active session queues
+// messages. It must not race with receipt delivery or affect which messages
+// are admitted.
+func TestQueueNoticeReloadWhileBusy(t *testing.T) {
+	e, p, state, _ := setupQueueNoticeSession(t, newQueuingSession("reload"))
+	const n = 64
+	e.maxQueuedMessages = n + 2
+	start := make(chan struct{})
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		<-start
+		for i := 0; i < n; i++ {
+			e.SetQueueNotice(i%2 == 0)
+		}
+	}()
+	go func() {
+		defer wg.Done()
+		<-start
+		for i := 0; i < n; i++ {
+			e.ReceiveMessage(p, queueNoticeMessage(fmt.Sprintf("queued-%d", i), int64(1_000+i)))
+		}
+	}()
+	close(start)
+	wg.Wait()
+	if got := queueNoticePending(state); got != n {
+		t.Fatalf("pending messages = %d, want %d", got, n)
+	}
+
+	before := len(p.getSent())
+	e.SetQueueNotice(false)
+	e.ReceiveMessage(p, queueNoticeMessage("after-disable", 2_000))
+	if got := len(p.getSent()); got != before {
+		t.Fatalf("sent count after disabling = %d, want %d", got, before)
+	}
+	e.SetQueueNotice(true)
+	e.ReceiveMessage(p, queueNoticeMessage("after-enable", 2_001))
+	sent := p.getSent()
+	if len(sent) != before+1 || !queueNoticeSent(sent[before:], e.i18n.T(MsgMessageQueued)) {
+		t.Fatalf("sent after enabling = %v, want one queue notice", sent[before:])
+	}
+	if got := queueNoticePending(state); got != n+2 {
+		t.Fatalf("pending messages after reloads = %d, want %d", got, n+2)
 	}
 }

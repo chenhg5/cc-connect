@@ -225,15 +225,6 @@ level = "info" # debug, info, warn, error
 # [[projects]]
 # agent_session_idle_timeout_mins = 30
 
-# queue_notice: whether a message that waits for the running turn gets the
-# "will process after the current task finishes" reply (default true). false
-# queues it silently; it is still answered in order, and a full queue is still
-# reported.
-# queue_notice：消息需要等当前任务结束时，是否回复「将在当前任务完成后处理」（默认 true）。
-# false 时静默排队，仍按顺序处理；队列已满照常提示。
-# [[projects]]
-# queue_notice = false
-
 # =============================================================================
 # OS-user isolation via run_as_user (Linux/macOS only)
 # 通过 run_as_user 实现 OS 用户隔离（仅限 Linux/macOS）
@@ -289,6 +280,8 @@ level = "info" # debug, info, warn, error
 # interval_ms = 1500        # Min ms between updates (default: 1500) / 更新最小间隔毫秒数（默认 1500）
 # min_delta_chars = 30      # Min new chars before sending update (default: 30) / 发送更新前最少新增字符数（默认 30）
 # max_chars = 2000          # Max preview length (default: 2000) / 预览最大长度（默认 2000）
+# stop_behavior = "discard" # On /stop: "discard" deletes the preview (default); "freeze" keeps its partial text for reference.
+#                           # /stop 时："discard" 删除预览（默认）；"freeze" 保留部分内容供后续参考。
 
 # =============================================================================
 # Instant Reply / 即时确认回复
@@ -343,6 +336,13 @@ level = "info" # debug, info, warn, error
 # burst = 1
 
 # =============================================================================
+# Message Deduplication / 消息去重
+# =============================================================================
+# [dedup]
+# enabled = true       # Drop repeated MessageIDs in the same platform session / 同一平台会话内按消息 ID 去重
+# window_secs = 30     # Retry window in seconds / 重传去重时间窗（秒）
+
+# =============================================================================
 # Relay Settings / Relay 设置
 # =============================================================================
 # Bot-to-bot relay settings. timeout_secs controls how long cc-connect waits for
@@ -393,6 +393,11 @@ level = "info" # debug, info, warn, error
 #                          # cc-connect 自身的对话文本，忽略 tool_result 与系统提示词/
 #                          # 工具定义的固定开销，误差常达数倍。完全没有用量上报能力的
 #                          # agent 始终使用启发式——那是它们唯一的机制，本开关对其无效。
+
+# [projects.history_bootstrap]
+# enabled = true       # Send recent chat history on the first turn after switching agent type / 切换 agent 类型后的首轮传入近期聊天历史
+# max_entries = 20     # Maximum prior messages / 最多传入的历史消息数
+# max_tokens = 4000    # Approximate token budget for the history block / 历史片段的估算 token 上限
 
 # [projects.observe]
 # enabled = true                    # Forward native terminal sessions to Slack
@@ -941,7 +946,7 @@ mode = "default" # "default" | "acceptEdits" (edit) | "plan" | "auto" | "bypassP
 # 保留 Claude 默认系统提示，并在其后追加本内容（通过 --append-system-prompt）。
 # 想在不丢弃默认提示的前提下补充指令时用它；可与 system_prompt 同时使用。
 # append_system_prompt = "Always respond in Chinese and prefer concise answers."
-
+#
 # Optional: specify a model / 可选：指定模型
 # model = "claude-sonnet-4-20250514"
 
@@ -1146,7 +1151,9 @@ app_secret = "your-feishu-app-secret"
 # reply_to_trigger = true   # Default: bot uses “reply to message” API (quotes the user’s message). Set false to post plain chat messages instead.
 #                           # 默认 true：用「回复消息」API（引用用户消息）。设为 false 则在会话里发普通消息、不引用触发消息。
 # progress_style = "legacy" # Progress rendering style: legacy | compact | card
+#                           # In compact/card mode the progress card is edited at most once per 1.5s.
 #                           # 进度消息展示风格：legacy（逐条消息）| compact（单消息持续更新）| card（结构化卡片）
+#                           # compact/card 下同一张进度卡片最多每 1.5 秒更新一次；最终回复不受节流影响。
 # resolve_mentions = false  # Auto-resolve @name in outgoing messages to Feishu at tags by matching group member names
 #                           # 自动将发出消息中的 @显示名 替换为飞书 at 标签（通过匹配群成员名称）
 # mention_map = { BOT-A = "ou_bot_a_open_id", BOT-B = "ou_bot_b_open_id" }
@@ -1171,6 +1178,16 @@ app_secret = "your-feishu-app-secret"
 #                               # Applies after image batching; include image_batch_window_ms when considering total delay.
 #                               # 普通文字和图片的可选合批窗口，默认关闭；开启后普通文字也会等待，图片另计上面的合批延迟。
 #                               # 命令、权限回复及引用消息不等待此窗口。
+# attachment_wait = "off"   # With thread_isolation, how unmentioned attachments (image/file/video) in an
+#                           # active topic are handled. "off" (default): dispatch at once, as today.
+#                           # "mention": hold them per topic and sender; the same sender's next @bot message
+#                           # in that topic is dispatched with them attached. Unmentioned text never releases them.
+#                           # 开启 thread_isolation 时，已活跃话题里未 @ 的附件（图片/文件/视频）怎么处理。
+#                           # "off"（默认）：立即分发，与现在一致；"mention"：按话题 + 发送人暂存，等同一发送人
+#                           # 在该话题下一次 @机器人 时一起分发。未 @ 的文字不会放行。
+# attachment_wait_secs = 1800 # "mention" only: staged attachments are dropped after this many seconds (1–86400),
+#                             # and a topic stops counting as active after this long without an @bot message.
+#                             # 仅 "mention" 生效：暂存超过该秒数即丢弃；话题超过该时长没有 @机器人 也不再算活跃。
 
 # Lark (International Version) / Lark 国际版
 # Lark now supports WebSocket long-connection too; webhook mode is only needed
@@ -1225,6 +1242,8 @@ app_secret = "your-feishu-app-secret"
 #                                 # Agent 完成回复后添加的表情回复（如 "🥳Done"）；设为 "none" 可禁用
 # card_final_preview_message = false # After an AI Card turn, send a separate Markdown summary
 #                                    # AI 卡片完成后额外发送一条普通 Markdown 摘要，用于刷新会话列表预览
+# at_mention_groups = false # Use text msgtype for group replies so @userId mentions are clickable (DingTalk only highlights @ in text); default false keeps markdown/card behavior
+#                           # 群回复改用 text 消息类型以携带可点击的 @ 提及（DingTalk 仅在 text msgtype 中高亮 @），默认 false 保持原有 markdown/卡片行为
 
 # WPS Xiezuo / WPS 协作 (uncomment to enable / 取消注释以启用)
 # 1. Create a WPS Open Platform app and enable event WebSocket delivery
@@ -1787,6 +1806,12 @@ app_secret = "your-feishu-app-secret"
 # Requires a Codex version that confirms activePermissionProfile; see docs/usage.md.
 # 需要支持 activePermissionProfile 的 Codex 版本；详见 docs/usage.zh-CN.md。
 #
+# Optional (app_server only): minutes to wait for an AskUserQuestion answer
+# before declining it. Default 5; values <= 0 or invalid fall back to 5.
+# 可选（仅 app_server）：等待 AskUserQuestion 回答的分钟数，超时后拒绝。
+# 默认 5；<= 0 或无效值回退为 5。
+# request_user_input_timeout_mins = 5
+#
 # Mode options / 模式说明:
 # - "suggest":   read-only; app_server requests approval when needed, exec cannot prompt / 只读；app_server 按需请求审批，exec 无交互审批
 # - "auto-edit": workspace-write with no approval prompts (same as full-auto) / 工作区可写，无审批提示（等同 full-auto）
@@ -1831,6 +1856,13 @@ app_secret = "your-feishu-app-secret"
 # 追加在 system_prompt 之后，包含在同一段注入的前导内容中。可单独使用，也可与
 # system_prompt 同时使用。
 # append_system_prompt = "Always respond in Chinese and prefer concise answers."
+#
+# Optional: additional prefixes for internal Codex sessions hidden from /list
+# and filtered from /history. Built-in internal prompt prefixes always apply.
+# 可选：额外的内部 Codex 提示前缀；匹配的会话不出现在 /list，提示不出现在 /history。
+# 内置的内部提示前缀始终生效。
+# [projects.agent.options.session_filter]
+# ignore_summary_prefixes = ["Private workflow:"]
 #
 # # Active provider / 当前激活的 provider
 # # provider = "openai"
@@ -1905,6 +1937,9 @@ app_secret = "your-feishu-app-secret"
 # http_url = ""                    # optional: OneBot HTTP API URL for file operations, e.g. "http://127.0.0.1:3000"
 #                                  # Required for SendFile. Useful when OneBot runs in WSL/Docker.
 #                                  # 可选：OneBot HTTP API 地址，用于文件发送。OneBot 在 WSL/Docker 中时必须配置。
+# send_via_http = false            # optional: send text replies via http_url instead of WebSocket (requires http_url).
+#                                  # Enable if long replies fail with "qq: API send_group_msg timeout" (WS has a 15s limit).
+#                                  # 可选：文本回复改走 HTTP API（需配置 http_url）。长回复出现 WS 15 秒超时时开启。
 # allow_from = "*"                 # allowed QQ user IDs, e.g. "12345,67890" or "*" for all
 #                                  # 允许的 QQ 号，如 "12345,67890"，"*" 表示所有
 # share_session_in_channel = false  # If true, all users in a group share one agent session / 群聊共享会话

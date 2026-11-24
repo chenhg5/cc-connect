@@ -42,6 +42,7 @@ type Platform struct {
 	dedup                 core.MessageDedup
 	groupNameCache        sync.Map // groupID -> group name
 	httpURL               string   // OneBot HTTP API URL, e.g. "http://127.0.0.1:3000"
+	sendViaHTTP           bool     // route text Send() through httpURL instead of WS (opt-in, default false)
 }
 
 func New(opts map[string]any) (core.Platform, error) {
@@ -66,6 +67,15 @@ func New(opts map[string]any) (core.Platform, error) {
 	httpURL, _ := opts["http_url"].(string)
 	httpURL = strings.TrimRight(httpURL, "/")
 
+	// send_via_http: send text replies through the OneBot HTTP API instead of
+	// the WebSocket. WS calls share the event readLoop and have a fixed 15s
+	// timeout, which long group replies can exceed (#1474). Opt-in; requires
+	// http_url, otherwise text sends keep using the WebSocket.
+	sendViaHTTP, _ := opts["send_via_http"].(bool)
+	if sendViaHTTP && httpURL == "" {
+		slog.Warn("qq: send_via_http is enabled but http_url is not configured; text messages will be sent over WebSocket")
+	}
+
 	return &Platform{
 		wsURL:                 wsURL,
 		token:                 token,
@@ -73,6 +83,7 @@ func New(opts map[string]any) (core.Platform, error) {
 		requireMention:        requireMention,
 		shareSessionInChannel: shareSessionInChannel,
 		httpURL:               httpURL,
+		sendViaHTTP:           sendViaHTTP,
 	}, nil
 }
 
@@ -458,6 +469,8 @@ func (p *Platform) Reply(ctx context.Context, replyCtx any, content string) erro
 }
 
 // Send sends a message to the conversation identified by replyCtx.
+// Uses the WebSocket by default; when send_via_http is enabled and http_url
+// is configured, it uses the OneBot HTTP API (see textSendCaller).
 func (p *Platform) Send(ctx context.Context, replyCtx any, content string) error {
 	rctx, ok := replyCtx.(*replyContext)
 	if !ok {
@@ -467,16 +480,29 @@ func (p *Platform) Send(ctx context.Context, replyCtx any, content string) error
 	params := map[string]any{
 		"message": content,
 	}
+	call := p.textSendCaller()
 
 	if rctx.messageType == "group" {
 		params["group_id"] = rctx.groupID
-		_, err := p.callAPI("send_group_msg", params)
+		_, err := call("send_group_msg", params)
 		return err
 	}
 
 	params["user_id"] = rctx.userID
-	_, err := p.callAPI("send_private_msg", params)
+	_, err := call("send_private_msg", params)
 	return err
+}
+
+// textSendCaller picks the transport for text messages. The WebSocket path
+// has a fixed 15s response timeout shared with inbound event traffic, which
+// long replies can exceed (#1474); the HTTP path has its own connection and a
+// 120s timeout. HTTP is used only when explicitly enabled, so the default
+// behavior is unchanged.
+func (p *Platform) textSendCaller() func(string, map[string]any) (map[string]any, error) {
+	if p.sendViaHTTP && p.httpURL != "" {
+		return p.callHTTPAPI
+	}
+	return p.callAPI
 }
 
 // SendImage sends an image to the conversation.
