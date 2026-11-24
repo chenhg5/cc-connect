@@ -1825,3 +1825,232 @@ func TestOnRawMessage_RichTextReplyFlagWithoutRepliedMsgUsesRichTextBody(t *test
 		t.Errorf("message content = %q, want %q (richText array body, guard must require repliedMsg)", got.Content, want)
 	}
 }
+
+// ──────────────────────────────────────────────────────────────
+// Group clickable @-mention (at_mention_groups) tests
+//
+// DingTalk only highlights @mentions in TEXT messages (Markdown and ActionCard
+// render an @ as plain text). When at_mention_groups is enabled, a group reply
+// is therefore delivered as a text message carrying the asker's userId both
+// inline and in at.atUserIds.
+// ──────────────────────────────────────────────────────────────
+
+func TestNew_AtMentionGroupsOption(t *testing.T) {
+	// Default: disabled (byte-for-byte current behaviour preserved).
+	plat, err := New(map[string]any{"client_id": "cid", "client_secret": "secret"})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	if got := plat.(*Platform).atGroups; got {
+		t.Fatalf("default atGroups = %v, want false", got)
+	}
+
+	// Explicitly enabled.
+	plat, err = New(map[string]any{
+		"client_id":         "cid",
+		"client_secret":     "secret",
+		"at_mention_groups": true,
+	})
+	if err != nil {
+		t.Fatalf("New() with at_mention_groups error = %v", err)
+	}
+	if got := plat.(*Platform).atGroups; !got {
+		t.Fatalf("atGroups = %v, want true", got)
+	}
+}
+
+func TestBypassCardForGroupAt(t *testing.T) {
+	tests := []struct {
+		name     string
+		atGroups bool
+		isGroup  bool
+		want     bool
+	}{
+		{name: "group + enabled", atGroups: true, isGroup: true, want: true},
+		{name: "group + disabled", atGroups: false, isGroup: true, want: false},
+		{name: "direct + enabled", atGroups: true, isGroup: false, want: false},
+		{name: "direct + disabled", atGroups: false, isGroup: false, want: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			p := &Platform{atGroups: tt.atGroups}
+			if got := p.bypassCardForGroupAt(replyContext{isGroup: tt.isGroup}); got != tt.want {
+				t.Fatalf("bypassCardForGroupAt() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestCreateStreamingCard_GroupBypassWhenAtMentionEnabled(t *testing.T) {
+	p := &Platform{atGroups: true, cardTemplateID: "tpl-id"}
+	_, err := p.CreateStreamingCard(context.Background(), replyContext{isGroup: true, conversationId: "cid"})
+	if err == nil {
+		t.Fatal("expected error when bypassing card for group @-mention, got nil")
+	}
+	if !strings.Contains(err.Error(), "group at-mention") {
+		t.Fatalf("error = %q, want it to mention group at-mention bypass", err)
+	}
+}
+
+func TestMentionText(t *testing.T) {
+	tests := []struct {
+		name    string
+		content string
+		staffID string
+		nick    string
+		want    string
+	}{
+		{name: "prepends id and strips injected name", content: "@温温 hello world", staffID: "194252073827812352", nick: "温温", want: "@194252073827812352 hello world"},
+		{name: "prepends id when no leading mention", content: "hello world", staffID: "123", nick: "温温", want: "@123 hello world"},
+		{name: "strips only one leading mention", content: "@温温 @温温 hi", staffID: "123", nick: "温温", want: "@123 @温温 hi"},
+		{name: "no duplicate when already id-prefixed", content: "@123 hi", staffID: "123", nick: "温温", want: "@123 hi"},
+		{name: "empty content yields bare mention", content: "", staffID: "123", nick: "温温", want: "@123"},
+		{name: "empty staff id leaves content untouched", content: "@温温 hello", staffID: "", nick: "温温", want: "@温温 hello"},
+		{name: "empty nick falls back to id-only stripping", content: "@温温 hello world", staffID: "194252073827812352", nick: "", want: "@194252073827812352 @温温 hello world"},
+		// Review #1973 P1-b: agent reply text must survive verbatim — file paths,
+		// path-like tokens, TODO markers and salutations are NOT sender mentions.
+		{name: "file path mention is not stripped", content: "@src/main.go 里有个 bug", staffID: "123", nick: "温温", want: "@123 @src/main.go 里有个 bug"},
+		{name: "nested path survives", content: "@github/workflows/ci.yml 改好了", staffID: "123", nick: "温温", want: "@123 @github/workflows/ci.yml 改好了"},
+		{name: "TODO marker survives", content: "@TODO: 记得修一下", staffID: "123", nick: "温温", want: "@123 @TODO: 记得修一下"},
+		{name: "salutation to another user survives", content: "@Alice 请看下这个 PR", staffID: "123", nick: "温温", want: "@123 @Alice 请看下这个 PR"},
+		{name: "bare id mention collapses to single mention", content: "@194252073827812352", staffID: "194252073827812352", nick: "温温", want: "@194252073827812352"},
+		{name: "id prefix boundary is respected", content: "@1234 hi", staffID: "123", nick: "温温", want: "@123 @1234 hi"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := mentionText(tt.content, tt.staffID, tt.nick); got != tt.want {
+				t.Fatalf("mentionText(%q, %q, %q) = %q, want %q", tt.content, tt.staffID, tt.nick, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestSend_GroupAtMentionEnabled_UsesTextMsgtype(t *testing.T) {
+	gotPayload := make(chan map[string]any, 1)
+	sessionWebhook := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var payload map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			t.Errorf("decode payload: %v", err)
+		}
+		// Non-blocking send: only the first payload is asserted, and a fallback
+		// second POST must never wedge the handler (validateSendResponse reads
+		// the body below, so it only completes after this handler returns).
+		select {
+		case gotPayload <- payload:
+		default:
+		}
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"errcode":0,"errmsg":"ok"}`)) // real webhook body shape
+	}))
+	defer sessionWebhook.Close()
+
+	p := &Platform{atGroups: true}
+	rc := replyContext{sessionWebhook: sessionWebhook.URL, isGroup: true, senderStaffId: "194252073827812352", senderNick: "温温"}
+	if err := p.Send(context.Background(), rc, "@温温 你好呀～"); err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+
+	select {
+	case payload := <-gotPayload:
+		if payload["msgtype"] != "text" {
+			t.Fatalf("msgtype = %v, want text", payload["msgtype"])
+		}
+		text, _ := payload["text"].(map[string]any)
+		if text == nil || text["content"] != "@194252073827812352 你好呀～" {
+			t.Fatalf("text.content = %v, want %q", text["content"], "@194252073827812352 你好呀～")
+		}
+		at, _ := payload["at"].(map[string]any)
+		ids, _ := at["atUserIds"].([]any)
+		if len(ids) != 1 || ids[0] != "194252073827812352" {
+			t.Fatalf("at.atUserIds = %v, want [\"194252073827812352\"]", ids)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for reply")
+	}
+}
+
+func TestSend_GroupAtMentionDisabled_UsesMarkdown(t *testing.T) {
+	gotPayload := make(chan map[string]any, 1)
+	sessionWebhook := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var payload map[string]any
+		_ = json.NewDecoder(r.Body).Decode(&payload)
+		gotPayload <- payload
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"errcode":0,"errmsg":"ok"}`))
+	}))
+	defer sessionWebhook.Close()
+
+	p := &Platform{atGroups: false}
+	rc := replyContext{sessionWebhook: sessionWebhook.URL, isGroup: true, senderStaffId: "123"}
+	if err := p.Send(context.Background(), rc, "hello"); err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+	select {
+	case payload := <-gotPayload:
+		if payload["msgtype"] != "markdown" {
+			t.Fatalf("msgtype = %v, want markdown (default behaviour unchanged)", payload["msgtype"])
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for reply")
+	}
+}
+
+func TestSend_DirectAtMentionEnabled_Unaffected(t *testing.T) {
+	gotPayload := make(chan map[string]any, 1)
+	sessionWebhook := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var payload map[string]any
+		_ = json.NewDecoder(r.Body).Decode(&payload)
+		gotPayload <- payload
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"errcode":0,"errmsg":"ok"}`))
+	}))
+	defer sessionWebhook.Close()
+
+	p := &Platform{atGroups: true}
+	rc := replyContext{sessionWebhook: sessionWebhook.URL, isGroup: false, senderStaffId: "123"}
+	if err := p.Send(context.Background(), rc, "hello"); err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+	select {
+	case payload := <-gotPayload:
+		if payload["msgtype"] != "markdown" {
+			t.Fatalf("msgtype = %v, want markdown (direct message unaffected)", payload["msgtype"])
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for reply")
+	}
+}
+
+func TestSend_GroupAtMentionFallsBackToMarkdownOnFailure(t *testing.T) {
+	// First (text) attempt returns 500 → Send degrades to the original markdown path.
+	var mu sync.Mutex
+	var msgtypes []string
+	sessionWebhook := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var payload map[string]any
+		_ = json.NewDecoder(r.Body).Decode(&payload)
+		mt, _ := payload["msgtype"].(string)
+		mu.Lock()
+		msgtypes = append(msgtypes, mt)
+		n := len(msgtypes)
+		mu.Unlock()
+		if n == 1 {
+			// First (text) attempt must fail so Send degrades to markdown.
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"errcode":0,"errmsg":"ok"}`)) // real webhook body shape
+	}))
+	defer sessionWebhook.Close()
+
+	p := &Platform{atGroups: true}
+	rc := replyContext{sessionWebhook: sessionWebhook.URL, isGroup: true, senderStaffId: "123"}
+	if err := p.Send(context.Background(), rc, "hello"); err != nil {
+		t.Fatalf("Send should degrade to markdown, got error: %v", err)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if len(msgtypes) != 2 || msgtypes[0] != "text" || msgtypes[1] != "markdown" {
+		t.Fatalf("msgtypes = %v, want [text markdown]", msgtypes)
+	}
+}

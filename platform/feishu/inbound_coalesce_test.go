@@ -211,3 +211,99 @@ func TestInboundCoalesce_CommandCannotOvertakeTimerDelivery(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+// newCardCoalesceTestPlatform builds a card-enabled platform with a long
+// coalescing window, so anything that gets buffered stays buffered until Stop.
+func newCardCoalesceTestPlatform(t *testing.T) (*interactivePlatform, chan *core.Message) {
+	t.Helper()
+	created, err := New(map[string]any{
+		"app_id": "unit-test-app", "app_secret": "unit-test-secret",
+		"enable_feishu_card": true, "inbound_coalesce_window_ms": 60000,
+		"domain": stubOpenAPIDomain(t),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ip := created.(*interactivePlatform)
+	got := make(chan *core.Message, 10)
+	ip.handler = func(_ core.Platform, msg *core.Message) { got <- msg }
+	return ip, got
+}
+
+// cardChatMessage is a plain text message from the same user and chat that
+// the card action in cardActionEvent comes from.
+func cardChatMessage(p *Platform, id, text string) *core.Message {
+	sessionKey := p.sessionKeyFromCardAction("oc_test_chat", "ou_user", nil)
+	return &core.Message{
+		SessionKey: sessionKey, UserID: "ou_user", MessageID: id, Content: text,
+		ReplyCtx: replyContext{messageID: id, chatID: "oc_test_chat", sessionKey: sessionKey},
+	}
+}
+
+// waitCardActionHandled waits until the asynchronous card dispatch has either
+// reached the handler or been buffered for the session.
+func waitCardActionHandled(t *testing.T, p *Platform, got chan *core.Message, sessionKey string) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		p.inboundCoalesceMu.Lock()
+		buffered := p.inboundCoalesce[sessionKey] != nil
+		p.inboundCoalesceMu.Unlock()
+		if buffered || len(got) > 0 {
+			return
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Fatal("card action was neither dispatched nor buffered")
+}
+
+func TestInboundCoalesce_AskQuestionClickIsNotMergedWithFollowingText(t *testing.T) {
+	ip, got := newCardCoalesceTestPlatform(t)
+	text := cardChatMessage(ip.Platform, "text", "and one more thing")
+	if _, err := ip.onCardAction(cardActionEvent("ou_user", "askq:0:1")); err != nil {
+		t.Fatal(err)
+	}
+	waitCardActionHandled(t, ip.Platform, got, text.SessionKey)
+	ip.dispatchCoreMessage(text)
+	if err := ip.Stop(); err != nil {
+		t.Fatal(err)
+	}
+	var contents []string
+	for len(got) > 0 {
+		contents = append(contents, (<-got).Content)
+	}
+	if len(contents) != 2 || contents[0] != "askq:0:1" || contents[1] != "and one more thing" {
+		t.Fatalf("dispatched %q; want the unmodified option click, then the text", contents)
+	}
+}
+
+func TestInboundCoalesce_CardCallbackFlushesPendingTextFirst(t *testing.T) {
+	ip, got := newCardCoalesceTestPlatform(t)
+	ip.dispatchCoreMessage(cardChatMessage(ip.Platform, "text", "pending"))
+	if _, err := ip.onCardAction(cardActionEvent("ou_user", "askq:0:1")); err != nil {
+		t.Fatal(err)
+	}
+	first := waitAnyMessage(t, got, 2*time.Second, "pending text flushed by the click")
+	second := waitAnyMessage(t, got, 2*time.Second, "option click")
+	if first.Content != "pending" || second.Content != "askq:0:1" {
+		t.Fatalf("dispatch order = %q, %q; want pending text, then the unmodified click",
+			first.Content, second.Content)
+	}
+	if err := ip.Stop(); err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 0 {
+		t.Fatalf("got %d extra requests", len(got))
+	}
+}
+
+func TestInboundCoalesce_AskQuestionContentIsNeverBuffered(t *testing.T) {
+	p, got := newInboundTestPlatform(t, 60000)
+	p.dispatchCoreMessage(inboundTestMessage("askq", "askq:0:1"))
+	if len(got) != 1 || (<-got).Content != "askq:0:1" {
+		t.Fatal("askq: callback was buffered")
+	}
+	if err := p.Stop(); err != nil {
+		t.Fatal(err)
+	}
+}

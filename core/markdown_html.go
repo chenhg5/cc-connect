@@ -642,9 +642,24 @@ func convertInlineHTML(s string) string {
 		return key
 	}
 
-	// 0. Stash existing valid Telegram HTML tags
+	// 0. Stash block-level HTML first: <pre> and <code> bodies are literal text
+	// that may itself contain backticks, so they must be protected as a whole
+	// before Markdown inline code is extracted.
 	s = reExistingPreCode.ReplaceAllStringFunc(s, func(m string) string { return nextPH(m) })
 	s = reExistingCode.ReplaceAllStringFunc(s, func(m string) string { return nextPH(m) })
+
+	// 1. Extract inline code → placeholder (content escaped).
+	//
+	// This has to happen before the inline tag stash below: an HTML tag written
+	// inside backticks (`<b>x</b>`) is code text, not markup. Stashing it first
+	// would restore the raw tag inside the <code> element and Telegram would
+	// render it as formatting instead of showing the source (issue #2275).
+	s = reInlineCodeHTML.ReplaceAllStringFunc(s, func(m string) string {
+		inner := m[1 : len(m)-1]
+		return nextPH("<code>" + escapeHTML(inner) + "</code>")
+	})
+
+	// 1b. Stash existing inline Telegram HTML tags
 	s = reExistingLink.ReplaceAllStringFunc(s, func(m string) string { return nextPH(m) })
 	s = reExistingSpoiler.ReplaceAllStringFunc(s, func(m string) string { return nextPH(m) })
 	s = reExistingEmoji.ReplaceAllStringFunc(s, func(m string) string { return nextPH(m) })
@@ -652,12 +667,6 @@ func convertInlineHTML(s string) string {
 	s = reExistingItalic.ReplaceAllStringFunc(s, func(m string) string { return nextPH(m) })
 	s = reExistingUnderline.ReplaceAllStringFunc(s, func(m string) string { return nextPH(m) })
 	s = reExistingStrike.ReplaceAllStringFunc(s, func(m string) string { return nextPH(m) })
-
-	// 1. Extract inline code → placeholder (content escaped)
-	s = reInlineCodeHTML.ReplaceAllStringFunc(s, func(m string) string {
-		inner := m[1 : len(m)-1]
-		return nextPH("<code>" + escapeHTML(inner) + "</code>")
-	})
 
 	// 2. Extract links → placeholder (text & URL escaped)
 	s = reLinkHTML.ReplaceAllStringFunc(s, func(m string) string {

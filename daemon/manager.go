@@ -55,6 +55,19 @@ type Manager interface {
 	Platform() string
 }
 
+// InPlaceRestarter is implemented by managers whose Restart must replace the
+// running service in place instead of a separate Stop followed by Start.
+//
+// launchd is the case: Stop boots out every cc-connect label, including the
+// legacy com.cc-connect.retry agent, and also kills commands the daemon
+// spawned. Its Restart kicks the loaded job with `launchctl kickstart -kp`,
+// kicks a loaded legacy job instead of tearing it down, and refuses to touch
+// anything when the current plist is missing. Callers use this method when it is
+// available so a `daemon restart` cannot leave a legacy-only install down.
+type InPlaceRestarter interface {
+	RestartInPlace() error
+}
+
 // NewManager returns a platform-specific daemon manager.
 func NewManager() (Manager, error) {
 	return newPlatformManager()
