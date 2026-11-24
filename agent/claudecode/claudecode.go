@@ -583,12 +583,9 @@ func (a *Agent) StartSession(ctx context.Context, sessionID string) (core.AgentS
 	// prompt. Read under the mutex and pass through to newClaudeSession so the
 	// session picks up the right tool-prompt bundle at spawn time.
 	lang := a.lang
-	// When router_url is set, --verbose conflicts with --output-format stream-json
-	// (verbose emits non-JSON text to stdout that corrupts the JSON stream).
-	disableVerbose := a.routerURL != ""
 	a.mu.Unlock()
 
-	return newClaudeSession(ctx, workDir, a.cmd, a.cliExtraArgs, a.cmdArgsFlag, model, effort, sessionID, mode, systemPrompt, appendSystemPrompt, tools, disTools, pluginDirs, extraEnv, platformPrompt, disableVerbose, a.spawnOpts, maxTok, ctxWin, a.ccDataDir, lang)
+	return newClaudeSession(ctx, workDir, a.cmd, a.cliExtraArgs, a.cmdArgsFlag, model, effort, sessionID, mode, systemPrompt, appendSystemPrompt, tools, disTools, pluginDirs, extraEnv, platformPrompt, a.spawnOpts, maxTok, ctxWin, a.ccDataDir, lang)
 }
 
 func (a *Agent) ListSessions(ctx context.Context) ([]core.AgentSessionInfo, error) {
