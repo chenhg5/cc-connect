@@ -22,6 +22,7 @@ import (
 
 type fakeThreadOps struct {
 	resolveChannel        func(channelID string) (*discordgo.Channel, error)
+	listActiveThreads     func(guildID string) ([]*discordgo.Channel, error)
 	startThread           func(channelID, messageID, name string, archiveDuration int) (*discordgo.Channel, error)
 	startStandaloneThread func(channelID, name string, typ discordgo.ChannelType, archiveDuration int) (*discordgo.Channel, error)
 	joinThread            func(threadID string) error
@@ -58,6 +59,13 @@ func (f fakeThreadOps) ResolveChannel(channelID string) (*discordgo.Channel, err
 		return nil, nil
 	}
 	return f.resolveChannel(channelID)
+}
+
+func (f fakeThreadOps) ListActiveThreads(guildID string) ([]*discordgo.Channel, error) {
+	if f.listActiveThreads == nil {
+		return nil, nil
+	}
+	return f.listActiveThreads(guildID)
 }
 
 func (f fakeThreadOps) StartThread(channelID, messageID, name string, archiveDuration int) (*discordgo.Channel, error) {
@@ -1822,3 +1830,61 @@ func basePlatformFor(t *testing.T, pAny core.Platform) *Platform {
 	}
 }
 
+func TestResolveThreadReplyContext_UsesThreadCreatedByOtherBot(t *testing.T) {
+	resolved := 0
+	joined := ""
+	ops := fakeThreadOps{
+		resolveChannel: func(id string) (*discordgo.Channel, error) {
+			resolved++
+			if id == "message-1" {
+				return &discordgo.Channel{ID: id, ParentID: "channel-1", Type: discordgo.ChannelTypeGuildPublicThread}, nil
+			}
+			return &discordgo.Channel{ID: id, Type: discordgo.ChannelTypeGuildText}, nil
+		},
+		startThread: func(string, string, string, int) (*discordgo.Channel, error) {
+			return nil, fmt.Errorf("thread already exists")
+		},
+		joinThread: func(id string) error { joined = id; return nil },
+	}
+	m := &discordgo.MessageCreate{Message: &discordgo.Message{ID: "message-1", ChannelID: "channel-1", GuildID: "guild-1", Content: "<@bot> hi"}}
+	key, rc, parent, err := resolveThreadReplyContext(m, "bot", ops)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resolved != 2 || joined != "message-1" || key != "discord:message-1" || rc.channelID != "message-1" || parent != "channel-1" {
+		t.Fatalf("recovered thread: resolved=%d joined=%q key=%q rc=%+v parent=%q", resolved, joined, key, rc, parent)
+	}
+}
+
+func TestResolveThreadReplyContext_FindsActiveThreadAfterCreateRace(t *testing.T) {
+	joined := ""
+	ops := fakeThreadOps{
+		resolveChannel: func(id string) (*discordgo.Channel, error) {
+			if id == "message-1" {
+				return nil, fmt.Errorf("not yet visible")
+			}
+			return &discordgo.Channel{ID: id, Type: discordgo.ChannelTypeGuildText}, nil
+		},
+		startThread: func(string, string, string, int) (*discordgo.Channel, error) {
+			return nil, fmt.Errorf("already exists")
+		},
+		listActiveThreads: func(guildID string) ([]*discordgo.Channel, error) {
+			if guildID != "guild-1" {
+				t.Fatalf("guild ID = %q", guildID)
+			}
+			return []*discordgo.Channel{
+				{ID: "other", ParentID: "channel-2", Name: "hi", Type: discordgo.ChannelTypeGuildPublicThread},
+				{ID: "thread-1", ParentID: "channel-1", Name: "hi", Type: discordgo.ChannelTypeGuildPublicThread},
+			}, nil
+		},
+		joinThread: func(id string) error { joined = id; return nil },
+	}
+	m := &discordgo.MessageCreate{Message: &discordgo.Message{ID: "message-1", ChannelID: "channel-1", GuildID: "guild-1", Content: "<@bot> hi"}}
+	key, rc, parent, err := resolveThreadReplyContext(m, "bot", ops)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if joined != "thread-1" || key != "discord:thread-1" || rc.channelID != "thread-1" || parent != "channel-1" {
+		t.Fatalf("recovered active thread: joined=%q key=%q rc=%+v parent=%q", joined, key, rc, parent)
+	}
+}

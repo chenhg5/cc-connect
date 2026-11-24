@@ -231,6 +231,7 @@ func (rc replyContext) useThreadChannel() bool {
 
 type discordThreadOps interface {
 	ResolveChannel(channelID string) (*discordgo.Channel, error)
+	ListActiveThreads(guildID string) ([]*discordgo.Channel, error)
 	StartThread(channelID, messageID, name string, archiveDuration int) (*discordgo.Channel, error)
 	StartStandaloneThread(channelID, name string, typ discordgo.ChannelType, archiveDuration int) (*discordgo.Channel, error)
 	JoinThread(threadID string) error
@@ -248,6 +249,17 @@ func (o sessionThreadOps) ResolveChannel(channelID string) (*discordgo.Channel, 
 		return ch, nil
 	}
 	return o.session.Channel(channelID)
+}
+
+func (o sessionThreadOps) ListActiveThreads(guildID string) ([]*discordgo.Channel, error) {
+	if o.session == nil {
+		return nil, fmt.Errorf("discord: session not initialized")
+	}
+	list, err := o.session.GuildThreadsActive(guildID)
+	if err != nil {
+		return nil, err
+	}
+	return list.Threads, nil
 }
 
 func (o sessionThreadOps) StartThread(channelID, messageID, name string, archiveDuration int) (*discordgo.Channel, error) {
@@ -410,9 +422,30 @@ func resolveThreadReplyContext(m *discordgo.MessageCreate, botID string, ops dis
 		return buildThreadSessionKey(threadID), rc, m.ChannelID, nil
 	}
 
-	thread, err := ops.StartThread(m.ChannelID, m.ID, threadNameForMessage(m, botID), 1440)
+	threadName := threadNameForMessage(m, botID)
+	thread, err := ops.StartThread(m.ChannelID, m.ID, threadName, 1440)
 	if err != nil {
-		return "", replyContext{}, "", fmt.Errorf("start thread for message %s: %w", m.ID, err)
+		// Another bot may have won the create race. Message-created thread IDs
+		// equal the message ID, so check that exact thread before falling back.
+		if existing, lookupErr := ops.ResolveChannel(m.ID); lookupErr == nil && existing != nil && isThreadChannelType(existing.Type) && existing.ParentID == m.ChannelID {
+			thread = existing
+		} else if m.GuildID != "" {
+			active, listErr := ops.ListActiveThreads(m.GuildID)
+			if listErr == nil {
+				for _, candidate := range active {
+					if candidate != nil && isThreadChannelType(candidate.Type) && candidate.ParentID == m.ChannelID && candidate.Name == threadName {
+						if thread != nil {
+							thread = nil
+							break
+						} // ambiguous name
+						thread = candidate
+					}
+				}
+			}
+		}
+		if thread == nil {
+			return "", replyContext{}, "", fmt.Errorf("start thread for message %s in channel %s: %w (exact thread and active-thread lookup found no unique match)", m.ID, m.ChannelID, err)
+		}
 	}
 	if err := ops.JoinThread(thread.ID); err != nil {
 		slog.Debug("discord: join new thread failed", "thread", thread.ID, "error", err)
