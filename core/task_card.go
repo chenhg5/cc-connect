@@ -51,8 +51,9 @@ const (
 //	📋 排队中 (2)
 //	[⏹ 停止当前]
 //
-// It refreshes on three triggers: agent step changes, queue changes, and a 5s
-// heartbeat that keeps the elapsed clock moving while the agent is silent.
+// It refreshes on three triggers: agent step changes, queue changes, and the
+// independent ticker, which keeps the elapsed clock moving even when the agent
+// is silent (long tool calls) or streaming.
 type turnCard struct {
 	e        *Engine
 	sender   TaskCardSender
@@ -70,7 +71,6 @@ type turnCard struct {
 	step             string
 	queue            []string
 	lastRender       time.Time
-	lastActivityAt   time.Time // last agent text/tool event; quiets the ticker
 	finished         bool
 	degradedNotified bool
 	creating         bool
@@ -115,24 +115,37 @@ func (tc *turnCard) EnsureStarted() {
 		return
 	}
 	tc.mu.Lock()
-	if tc.cardStarted || tc.finished || tc.visible {
+	if tc.cardStarted || tc.finished {
 		tc.mu.Unlock()
 		return
 	}
 	tc.cardStarted = true
 	interval := tc.tickInterval
+	visible := tc.visible
 	tc.mu.Unlock()
-	tc.render(true)
+	// The card may already be visible from an earlier queue/step render; the
+	// ticker must still start, otherwise the elapsed clock freezes for the rest
+	// of the turn.
+	if !visible {
+		tc.render(true)
+	}
 	if interval > 0 {
+		slog.Debug("task card ticker started",
+			"platform", tc.senderName(), "interval", interval)
 		go tc.heartbeat(interval)
 	}
 }
 
-// heartbeat refreshes the card independently of agent events, so a long tool
-// call does not freeze the elapsed clock.
+// heartbeat refreshes the card on its own cadence so the elapsed clock advances
+// even when the agent emits no events. It renders unconditionally on every tick
+// (when healthy); the elapsed field changes every second, so a dirty check
+// would only reintroduce the freeze.
 func (tc *turnCard) heartbeat(interval time.Duration) {
 	ticker := time.NewTicker(interval)
-	defer ticker.Stop()
+	defer func() {
+		ticker.Stop()
+		slog.Debug("task card ticker stopped", "platform", tc.senderName())
+	}()
 	for {
 		select {
 		case <-tc.done:
@@ -141,19 +154,12 @@ func (tc *turnCard) heartbeat(interval time.Duration) {
 			return
 		case <-ticker.C:
 			tc.mu.Lock()
-			lastActivity := tc.lastActivityAt
 			finished := tc.finished
 			tc.mu.Unlock()
 			if finished {
 				return
 			}
-			// While the agent is streaming text/tool steps the user already
-			// sees progress; don't burn quota on card PATCHes. Resume once the
-			// turn has been quiet for two tick intervals.
-			if !lastActivity.IsZero() && time.Since(lastActivity) < 2*interval {
-				continue
-			}
-			tc.render(false)
+			tc.renderTick()
 		}
 	}
 }
@@ -169,17 +175,6 @@ func (tc *turnCard) Visible() bool {
 	return tc.visible
 }
 
-// NoteActivity records agent output so the independent ticker can stay quiet
-// while the user is already seeing streamed text/tool steps.
-func (tc *turnCard) NoteActivity() {
-	if tc == nil {
-		return
-	}
-	tc.mu.Lock()
-	tc.lastActivityAt = time.Now()
-	tc.mu.Unlock()
-}
-
 // SetStep records what the agent is doing now and refreshes (throttled).
 func (tc *turnCard) SetStep(step string) {
 	if tc == nil {
@@ -191,7 +186,6 @@ func (tc *turnCard) SetStep(step string) {
 		return
 	}
 	tc.step = truncateIf(strings.TrimSpace(step), taskCardMaxStepLen)
-	tc.lastActivityAt = time.Now()
 	tc.mu.Unlock()
 	tc.render(false)
 }
@@ -207,7 +201,6 @@ func (tc *turnCard) SetQueue(items []string) {
 		return
 	}
 	tc.queue = items
-	tc.lastActivityAt = time.Now()
 	tc.mu.Unlock()
 	tc.render(false)
 }
@@ -400,7 +393,39 @@ func (tc *turnCard) terminalText() string {
 	return title
 }
 
+type renderPolicy int
+
+const (
+	renderThrottled renderPolicy = iota
+	renderForced
+	renderTicker
+)
+
+func renderPolicyName(p renderPolicy) string {
+	switch p {
+	case renderForced:
+		return "forced"
+	case renderTicker:
+		return "ticker"
+	default:
+		return "throttled"
+	}
+}
+
 func (tc *turnCard) render(force bool) {
+	policy := renderThrottled
+	if force {
+		policy = renderForced
+	}
+	tc.renderWith(policy)
+}
+
+// renderTick is the ticker path: it bypasses the normal coalescing gap so the
+// elapsed clock advances on every tick, but still honours the failure backoff
+// so a rate-limited platform is not hammered.
+func (tc *turnCard) renderTick() { tc.renderWith(renderTicker) }
+
+func (tc *turnCard) renderWith(policy renderPolicy) {
 	if tc == nil {
 		return
 	}
@@ -409,12 +434,14 @@ func (tc *turnCard) render(force bool) {
 	// Finish uses applyCard directly; a normal render after it must not enqueue.
 	if tc.finished {
 		tc.mu.Unlock()
+		slog.Debug("task card refresh skipped", "platform", tc.senderName(), "reason", "finished")
 		return
 	}
 	// A create is already in flight; don't enqueue a second one.
 	if tc.handle == nil && tc.creating {
 		tc.pendingRender = true
 		tc.mu.Unlock()
+		slog.Debug("task card refresh skipped", "platform", tc.senderName(), "reason", "create_in_flight")
 		return
 	}
 	// Single-flight: one card request at a time. Requests arriving while a
@@ -423,6 +450,7 @@ func (tc *turnCard) render(force bool) {
 	if tc.rendering {
 		tc.pendingRender = true
 		tc.mu.Unlock()
+		slog.Debug("task card refresh skipped", "platform", tc.senderName(), "reason", "render_in_flight")
 		return
 	}
 	now := time.Now()
@@ -436,8 +464,17 @@ func (tc *turnCard) render(force bool) {
 	if tc.failCount >= taskCardDegradedThreshold {
 		minGap = taskCardDegradedGap
 	}
-	if !force && now.Sub(tc.lastRender) < minGap {
+	if policy == renderTicker && tc.failCount == 0 {
+		// Healthy ticker refreshes must not be coalesced: the elapsed clock
+		// changes every second and the user expects a steady cadence.
+		minGap = 0
+	}
+	if policy != renderForced && now.Sub(tc.lastRender) < minGap {
+		gap := now.Sub(tc.lastRender)
 		tc.mu.Unlock()
+		slog.Debug("task card refresh skipped",
+			"platform", tc.senderName(), "reason", "throttled",
+			"gap", gap, "min_gap", minGap, "policy", renderPolicyName(policy))
 		return
 	}
 	tc.lastRender = now
@@ -516,6 +553,7 @@ func (tc *turnCard) render(force bool) {
 		}
 		finished := tc.finished
 		visible := tc.visible
+		elapsed := time.Since(tc.started)
 		tc.mu.Unlock()
 		if err == nil {
 			if prevFails > 0 {
@@ -523,6 +561,10 @@ func (tc *turnCard) render(force bool) {
 					"platform", tc.senderName(), "op", op,
 					"previous_failures", prevFails, "finished", finished)
 			}
+			slog.Debug("task card refresh delivered",
+				"platform", tc.senderName(), "op", op,
+				"policy", renderPolicyName(policy), "elapsed", formatCardElapsed(elapsed),
+				"finished", finished)
 			return
 		}
 
@@ -672,6 +714,11 @@ func (e *Engine) syncTaskCardQueue(state *interactiveState) {
 		items = append(items, queued.content)
 	}
 	state.mu.Unlock()
+	if len(items) == 0 && !tc.Visible() {
+		// Keep the card lazy: an empty queue at turn start must not create the
+		// "准备中" card before the agent does any work.
+		return
+	}
 	tc.SetQueue(items)
 }
 

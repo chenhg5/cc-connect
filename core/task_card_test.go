@@ -534,36 +534,86 @@ func TestTurnCard_RenderCoalescesWhileInFlight(t *testing.T) {
 	}
 }
 
-// While the agent is streaming output the ticker must stay quiet; it resumes
-// after two quiet intervals.
-func TestTurnCard_TickerQuietWhileAgentActive(t *testing.T) {
-	withFastCardThrottle(t)
+// The ticker must keep refreshing while the agent is active: the elapsed clock
+// is user-visible and must not freeze between events.
+func TestTurnCard_TickerRefreshesWhileAgentActive(t *testing.T) {
 	e := NewEngine("test", &resultAgent{session: newResultAgentSession("ok")}, []Platform{&stubPlatformEngine{n: "test"}}, "", LangChinese)
-	e.SetCardTickInterval(30 * time.Millisecond)
+	e.SetCardTickInterval(20 * time.Millisecond)
 	t.Cleanup(e.cancel)
 	p := &taskCardStubPlatform{stubPlatformEngine: stubPlatformEngine{n: "feishu"}}
 
 	tc := newTurnCard(e, p, "ctx", "k")
 	tc.EnsureStarted()
 	time.Sleep(10 * time.Millisecond) // let the create land
-	tc.NoteActivity()
 
 	before := p.updateCount()
-	time.Sleep(45 * time.Millisecond) // one tick, but within the 60ms quiet window
-	if got := p.updateCount(); got > before {
-		t.Fatalf("card refreshed while the agent was active: %d -> %d", before, got)
+	time.Sleep(80 * time.Millisecond) // several ticks
+	if got := p.updateCount(); got <= before {
+		t.Fatalf("card did not refresh during an active turn: %d -> %d", before, got)
+	}
+	tc.Finish(taskCardDone, "")
+}
+
+// The ticker must keep a steady cadence: several ticks inside a short window,
+// not just one refresh followed by silence.
+func TestTurnCard_TickerCadence(t *testing.T) {
+	e := NewEngine("test", &resultAgent{session: newResultAgentSession("ok")}, []Platform{&stubPlatformEngine{n: "test"}}, "", LangChinese)
+	e.SetCardTickInterval(50 * time.Millisecond)
+	t.Cleanup(e.cancel)
+	p := &taskCardStubPlatform{stubPlatformEngine: stubPlatformEngine{n: "feishu"}}
+
+	tc := newTurnCard(e, p, "ctx", "k")
+	tc.EnsureStarted()
+	time.Sleep(400 * time.Millisecond)
+	updates := p.updateCount()
+	tc.Finish(taskCardDone, "")
+
+	// ~8 ticks expected; allow scheduling jitter and one coalesced render.
+	if updates < 5 {
+		t.Fatalf("UpdateTaskCard calls = %d in 400ms at 50ms tick, want a steady cadence", updates)
+	}
+}
+
+// Regression: the card can become visible before EnsureStarted (early queue or
+// step render). The ticker must still start, otherwise elapsed time freezes for
+// the rest of the turn.
+func TestTurnCard_TickerStartsWhenCardAlreadyVisible(t *testing.T) {
+	e := NewEngine("test", &resultAgent{session: newResultAgentSession("ok")}, []Platform{&stubPlatformEngine{n: "test"}}, "", LangChinese)
+	e.SetCardTickInterval(20 * time.Millisecond)
+	t.Cleanup(e.cancel)
+	p := &taskCardStubPlatform{stubPlatformEngine: stubPlatformEngine{n: "feishu"}}
+
+	tc := newTurnCard(e, p, "ctx", "k")
+	tc.render(true) // card visible before the first tool event
+	if !tc.Visible() {
+		t.Fatal("card should be visible after a forced render")
 	}
 
-	deadline := time.After(500 * time.Millisecond)
-	for {
-		if p.updateCount() > before {
-			return
-		}
-		select {
-		case <-deadline:
-			t.Fatal("card ticker did not resume after the quiet window")
-		default:
-			time.Sleep(5 * time.Millisecond)
-		}
+	tc.EnsureStarted()
+	before := p.updateCount()
+	time.Sleep(90 * time.Millisecond)
+	if got := p.updateCount(); got <= before {
+		t.Fatalf("ticker did not start for an already-visible card: %d -> %d", before, got)
 	}
+	tc.Finish(taskCardDone, "")
+}
+
+// An empty queue at turn start must not create the "准备中" card.
+func TestSyncTaskCardQueueEmptyKeepsCardLazy(t *testing.T) {
+	e := NewEngine("test", &resultAgent{session: newResultAgentSession("ok")}, []Platform{&stubPlatformEngine{n: "test"}}, "", LangChinese)
+	t.Cleanup(e.cancel)
+	p := &taskCardStubPlatform{stubPlatformEngine: stubPlatformEngine{n: "feishu"}}
+
+	tc := newTurnCard(e, p, "ctx", "k")
+	state := &interactiveState{taskCard: tc}
+	e.syncTaskCardQueue(state)
+	if len(p.sends) != 0 {
+		t.Fatalf("card created for an empty queue: %d", len(p.sends))
+	}
+
+	tc.SetStep("Bash · true")
+	if len(p.sends) != 1 {
+		t.Fatalf("card sends = %d, want 1 after the first step", len(p.sends))
+	}
+	tc.Finish(taskCardDone, "")
 }

@@ -4257,15 +4257,6 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 		p := state.platform
 		state.mu.Unlock()
 
-		// Quiet the card ticker while the user is already seeing streamed text
-		// or tool steps; it resumes after two quiet tick intervals.
-		switch event.Type {
-		case EventText, EventToolUse, EventToolResult:
-			if tc := stateTaskCard(state); tc != nil {
-				tc.NoteActivity()
-			}
-		}
-
 		// main codebase has no per-session quiet flag; pr309 referenced
 		// sessionQuiet which we drop. e.display.ThinkingMessages /
 		// ToolMessages handle user-level quiet in the fallback branches.
