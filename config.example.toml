@@ -985,6 +985,14 @@ mode = "default" # "default" | "acceptEdits" (edit) | "plan" | "auto" | "bypassP
 # Active provider (matches a name in [[projects.agent.providers]] or provider_refs)
 # 当前激活的 provider（对应下方 providers 或 provider_refs 中的 name）
 # provider = "anthropic"
+# If exactly one provider applies to this agent, it is selected automatically.
+# With multiple providers, set provider explicitly; otherwise none is selected.
+# 若只有一个适用于此 agent 的 provider，将自动激活；多个时需显式指定 provider。
+# Claude Code environment priority: options.env < active provider env < session env.
+# Claude Code 的环境变量优先级：options.env < 当前 provider env < 会话 env。
+# Claude Code's own settings.json may override process env; remove conflicting
+# env entries there if requests still go to a different endpoint.
+# 若请求仍走向其他端点，请检查 Claude Code 的 settings.json 是否覆盖了进程环境变量。
 
 # Reference global [[providers]] by name — avoids duplicating keys per project
 # 引用全局 [[providers]] — 避免每个项目重复配置

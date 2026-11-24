@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net/url"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -2060,8 +2061,48 @@ func wireAgentProviders(agent core.Agent, agentCfg config.AgentConfig) providerW
 	if result.explicitProviderRequested {
 		result.activeProviderApplied = ps.SetActiveProvider(active)
 		result.canStartInitialRefresh = result.activeProviderApplied
+	} else {
+		var applicable []core.ProviderConfig
+		for i, p := range agentCfg.Providers {
+			if len(p.AgentTypes) == 0 || containsString(p.AgentTypes, agentCfg.Type) {
+				applicable = append(applicable, providers[i])
+			}
+		}
+		switch len(applicable) {
+		case 1:
+			result.activeProviderApplied = ps.SetActiveProvider(applicable[0].Name)
+			result.canStartInitialRefresh = result.activeProviderApplied
+			if result.activeProviderApplied {
+				logActiveProviderRoute(applicable[0])
+			}
+		case 0:
+			// No configured provider applies to this agent type.
+		default:
+			names := make([]string, len(applicable))
+			for i, p := range applicable {
+				names[i] = p.Name
+			}
+			slog.Warn("multiple providers available; set options.provider to select one", "providers", names)
+		}
+	}
+	if result.explicitProviderRequested && result.activeProviderApplied {
+		if p := ps.GetActiveProvider(); p != nil {
+			logActiveProviderRoute(*p)
+		}
 	}
 	return result
+}
+
+func logActiveProviderRoute(p core.ProviderConfig) {
+	host := ""
+	if u, err := url.Parse(p.BaseURL); err == nil {
+		host = u.Hostname()
+	}
+	model := p.Model
+	if model == "" {
+		model = p.Env["ANTHROPIC_MODEL"]
+	}
+	slog.Info("agent provider route selected", "provider", p.Name, "base_url_host", host, "model", model)
 }
 
 func startInitialRefreshIfReady(agent core.Agent, result providerWiringResult) {
