@@ -13232,6 +13232,31 @@ func TestWorkspace_Bind_Unbind_List(t *testing.T) {
 	}
 }
 
+func TestWorkspace_ListShowsPreviouslyBoundProjects(t *testing.T) {
+	p := &stubPlatformEngine{n: "test"}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	baseDir := t.TempDir()
+	for _, name := range []string{"project-a", "project-b"} {
+		if err := os.MkdirAll(filepath.Join(baseDir, name), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	e.SetMultiWorkspace(baseDir, filepath.Join(t.TempDir(), "bindings.json"))
+	for _, name := range []string{"project-a", "project-b"} {
+		msg := &Message{SessionKey: "test:ch1:user1", Content: "/workspace bind " + name, ReplyCtx: "ctx"}
+		e.handleCommand(p, msg, msg.Content)
+	}
+	p.clearSent()
+	msg := &Message{SessionKey: "test:ch1:user1", Content: "/workspace list", ReplyCtx: "ctx"}
+	e.handleCommand(p, msg, msg.Content)
+	got := strings.Join(p.getSent(), "\n")
+	for _, name := range []string{"project-a", "project-b"} {
+		if !strings.Contains(got, name) {
+			t.Fatalf("/workspace list omitted %s: %q", name, got)
+		}
+	}
+}
+
 func TestWorkspace_Bind_NonexistentDir(t *testing.T) {
 	p := &stubPlatformEngine{n: "test"}
 	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)

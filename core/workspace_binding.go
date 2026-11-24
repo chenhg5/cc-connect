@@ -43,9 +43,10 @@ func (ft *FlexTime) UnmarshalJSON(b []byte) error {
 
 // WorkspaceBinding maps a channel to a workspace directory.
 type WorkspaceBinding struct {
-	ChannelName string   `json:"channel_name"`
-	Workspace   string   `json:"workspace"`
-	BoundAt     FlexTime `json:"bound_at"`
+	ChannelName        string   `json:"channel_name"`
+	Workspace          string   `json:"workspace"`
+	PreviousWorkspaces []string `json:"previous_workspaces,omitempty"`
+	BoundAt            FlexTime `json:"bound_at"`
 }
 
 // WorkspaceBindingManager persists channel->workspace mappings.
@@ -107,10 +108,22 @@ func (m *WorkspaceBindingManager) Bind(projectKey, channelKey, channelName, work
 	if m.bindings[projectKey] == nil {
 		m.bindings[projectKey] = make(map[string]*WorkspaceBinding)
 	}
+	var previous []string
+	if old := m.lookupLocked(projectKey, channelKey); old != nil {
+		for _, path := range old.PreviousWorkspaces {
+			if path != workspace {
+				previous = append(previous, path)
+			}
+		}
+		if old.Workspace != workspace {
+			previous = append(previous, old.Workspace)
+		}
+	}
 	m.bindings[projectKey][channelKey] = &WorkspaceBinding{
-		ChannelName: channelName,
-		Workspace:   workspace,
-		BoundAt:     FlexTime{time.Now()},
+		ChannelName:        channelName,
+		Workspace:          workspace,
+		PreviousWorkspaces: previous,
+		BoundAt:            FlexTime{time.Now()},
 	}
 	m.saveLocked()
 }
@@ -144,6 +157,7 @@ func (m *WorkspaceBindingManager) MigrateChannelKey(projectKey, oldChannelKey, n
 	}
 
 	inherited := *binding
+	inherited.PreviousWorkspaces = append([]string(nil), binding.PreviousWorkspaces...)
 	proj[newChannelKey] = &inherited
 	m.saveLocked()
 	return true
