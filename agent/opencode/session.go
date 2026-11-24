@@ -42,6 +42,8 @@ type opencodeSession struct {
 	turnUsage         core.TokenUsage
 	usageSteps        map[string]bool
 	sidechain         opencodeSidechainMeter
+	errorSent         atomic.Bool // true when an explicit agent error has been sent for this turn
+	textSent          atomic.Bool // true when this turn streamed visible answer text
 }
 
 func newOpencodeSession(ctx context.Context, cmd string, extraArgs []string, workDir, model, mode, agentName, resumeID string, extraEnv []string) (*opencodeSession, error) {
@@ -85,6 +87,8 @@ func (s *opencodeSession) Send(prompt string, messageID string, images []core.Im
 	s.resultSent.Store(false)
 	s.turnUsage = core.TokenUsage{}
 	s.usageSteps = nil
+	s.errorSent.Store(false)
+	s.textSent.Store(false)
 	s.expectingContinue.Store(false)
 
 	chatID := s.CurrentSessionID()
@@ -248,6 +252,10 @@ func (s *opencodeSession) readLoop(cmd *exec.Cmd, stdout io.ReadCloser, stderrBu
 	}
 
 	if err := scanner.Err(); err != nil {
+		if !s.alive.Load() || s.ctx.Err() != nil {
+			return
+		}
+		s.alive.Store(false)
 		slog.Error("opencodeSession: scanner error", "error", err)
 		evt := core.Event{Type: core.EventError, Error: fmt.Errorf("read stdout: %w", err)}
 		s.takeUsage(&evt)
@@ -261,17 +269,28 @@ func (s *opencodeSession) readLoop(cmd *exec.Cmd, stdout io.ReadCloser, stderrBu
 
 	// exec copies stderr into stderrBuf from its own goroutine until Wait
 	// returns, so the buffer is only safe to read after that.
-	_ = cmd.Wait()
+	waitErr := cmd.Wait()
 	waited = true
+	if !s.alive.Load() || s.ctx.Err() != nil {
+		return
+	}
 
 	stderrMsg := stderrBuf.String()
-	if stderrMsg != "" {
-		slog.Error("opencodeSession: process error", "stderr", truncate(stderrMsg, 500))
+	if waitErr != nil {
+		s.alive.Store(false)
+		slog.Error("opencodeSession: process error", "error", waitErr, "stderr", truncate(stderrMsg, 500))
 		if strings.Contains(stderrMsg, "Session not found") {
 			s.chatID.Store("")
 			slog.Warn("opencodeSession: cleared stale session ID")
 		}
-		evt := core.Event{Type: core.EventError, Error: fmt.Errorf("%s", stderrMsg)}
+		if s.errorSent.Load() {
+			return
+		}
+		err := fmt.Errorf("opencode exited without a result: %w", waitErr)
+		if stderrMsg != "" {
+			err = fmt.Errorf("opencode exited without a result: %w: %s", waitErr, stderrMsg)
+		}
+		evt := core.Event{Type: core.EventError, Error: err}
 		s.takeUsage(&evt)
 		select {
 		case s.events <- evt:
@@ -289,8 +308,28 @@ func (s *opencodeSession) readLoop(cmd *exec.Cmd, stdout io.ReadCloser, stderrBu
 		return
 	}
 
-	slog.Debug("opencodeSession: readLoop complete, sending fallback EventResult", "session_id", s.CurrentSessionID())
-	s.sendEventResult()
+	if s.resultSent.Load() {
+		return
+	}
+	if s.errorSent.Load() {
+		return
+	}
+	if s.textSent.Load() {
+		s.sendEventResult()
+		return
+	}
+	s.alive.Store(false)
+	err := fmt.Errorf("opencode exited without a result")
+	if stderrMsg != "" {
+		err = fmt.Errorf("opencode exited without a result: %s", stderrMsg)
+	}
+	slog.Error("opencodeSession: turn ended without a result", "error", err, "session_id", s.CurrentSessionID())
+	evt := core.Event{Type: core.EventError, Error: err}
+	s.takeUsage(&evt)
+	select {
+	case s.events <- evt:
+	case <-s.ctx.Done():
+	}
 }
 
 // OpenCode NDJSON event structure:
@@ -346,6 +385,9 @@ func (s *opencodeSession) handleText(raw map[string]any) {
 		evt := core.Event{Type: core.EventText, Content: text, Metadata: metadata, Synthetic: synthetic}
 		select {
 		case s.events <- evt:
+			if !synthetic {
+				s.textSent.Store(true)
+			}
 		case <-s.ctx.Done():
 			return
 		}
@@ -455,6 +497,7 @@ func (s *opencodeSession) handleReasoning(raw map[string]any) {
 func (s *opencodeSession) handleError(raw map[string]any) {
 	errMsg := extractErrorMessage(raw)
 	slog.Error("opencodeSession: agent error", "error", errMsg)
+	s.errorSent.Store(true)
 	evt := core.Event{Type: core.EventError, Error: fmt.Errorf("%s", errMsg)}
 	s.takeUsage(&evt)
 	select {
@@ -545,7 +588,7 @@ func (s *opencodeSession) handleStepFinish(raw map[string]any) {
 	}
 	slog.Debug("opencodeSession: step finished", "reason", reason, "session_id", s.CurrentSessionID())
 
-	if reason == "stop" {
+	if reason == "stop" && s.textSent.Load() {
 		s.sendEventResult()
 	}
 }
@@ -565,8 +608,8 @@ func (s *opencodeSession) sendEventResult() {
 	}
 }
 
-// An error can be followed by the EOF fallback result. Drain the completed
-// requests once so failed turns retain their usage without billing it twice.
+// Drain completed requests into their result or error so the turn retains
+// its usage without billing the same requests again.
 func (s *opencodeSession) takeUsage(event *core.Event) {
 	s.turnUsage.Apply(event)
 	s.turnUsage = core.TokenUsage{}

@@ -159,6 +159,7 @@ func TestOpencodeSessionSendRunsInWorkDir(t *testing.T) {
 			os.Exit(2)
 		}
 		_, _ = os.Stdout.WriteString(`{"type":"text","part":{"text":"cwd recorded"}}` + "\n")
+		_, _ = os.Stdout.WriteString(`{"type":"step_finish","part":{"reason":"stop"}}` + "\n")
 		os.Exit(0)
 	}
 
@@ -310,6 +311,7 @@ func TestHandleStepStopSendsEventResult(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	s := &opencodeSession{events: make(chan core.Event, 1), ctx: ctx}
+	s.textSent.Store(true)
 	s.handleStepFinish(raw)
 
 	select {
@@ -366,6 +368,7 @@ func TestHandleStepDuplicateEventResultPrevented(t *testing.T) {
 		ctx:        ctx,
 		resultSent: atomic.Bool{},
 	}
+	s.textSent.Store(true)
 
 	s.handleStepFinish(raw)
 	s.handleStepFinish(raw)
@@ -518,8 +521,12 @@ func TestErrorPreservesConsumedUsageWithoutRebillingTheFallback(t *testing.T) {
 
 func TestScannerFailurePreservesConsumedUsage(t *testing.T) {
 	s := &opencodeSession{ctx: context.Background(), events: make(chan core.Event, 4), turnUsage: core.TokenUsage{InputTokens: 10, OutputTokens: 20}}
+	s.alive.Store(true)
 	s.wg.Add(1)
 	s.readLoop(exec.Command("true"), io.NopCloser(strings.NewReader(strings.Repeat("x", 11*1024*1024))), &bytes.Buffer{})
+	if len(s.events) != 1 {
+		t.Fatalf("got %d events, want one scanner error", len(s.events))
+	}
 	result := <-s.events
 	if result.Type != core.EventError || result.InputTokens != 10 || result.OutputTokens != 20 || len(s.events) != 0 {
 		t.Fatalf("scanner error lost consumed usage: %+v", result)

@@ -28,8 +28,6 @@ import (
 // In "auto" mode, permission requests are auto-approved internally
 // (avoiding --dangerously-skip-permissions which fails under root).
 type claudeSession struct {
-	sidechain       *sidechainMeter
-	dataDir         string
 	cmd             *exec.Cmd
 	stdin           io.WriteCloser
 	stdinMu         sync.Mutex
@@ -50,6 +48,9 @@ type claudeSession struct {
 	// carried a model field yet; callers should fall back to the Agent's
 	// configured model.
 	activeModel atomic.Value // stores string
+
+	sidechain *sidechainMeter
+	dataDir   string
 	// lastModelSwitch remembers the last model_refusal_fallback that was
 	// reported, so a fallback the CLI announces twice (provisional, then final)
 	// reaches the user once.
