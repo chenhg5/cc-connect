@@ -40,6 +40,7 @@ type opencodeSession struct {
 	expectingContinue atomic.Bool // true when compaction_continue received, waiting for next step
 	resultSent        atomic.Bool // true when EventResult has been sent for this turn
 	errorSent         atomic.Bool // true when an explicit agent error has been sent for this turn
+	textSent          atomic.Bool // true when this turn streamed visible answer text
 }
 
 func newOpencodeSession(ctx context.Context, cmd string, extraArgs []string, workDir, model, mode, agentName, resumeID string, extraEnv []string) (*opencodeSession, error) {
@@ -81,6 +82,7 @@ func (s *opencodeSession) Send(prompt string, messageID string, images []core.Im
 
 	s.resultSent.Store(false)
 	s.errorSent.Store(false)
+	s.textSent.Store(false)
 	s.expectingContinue.Store(false)
 
 	chatID := s.CurrentSessionID()
@@ -267,14 +269,21 @@ func (s *opencodeSession) readLoop(cmd *exec.Cmd, stdout io.ReadCloser, stderrBu
 	}
 
 	stderrMsg := stderrBuf.String()
-	if stderrMsg != "" {
+	if waitErr != nil {
 		s.alive.Store(false)
-		slog.Error("opencodeSession: process error", "stderr", truncate(stderrMsg, 500))
+		slog.Error("opencodeSession: process error", "error", waitErr, "stderr", truncate(stderrMsg, 500))
 		if strings.Contains(stderrMsg, "Session not found") {
 			s.chatID.Store("")
 			slog.Warn("opencodeSession: cleared stale session ID")
 		}
-		evt := core.Event{Type: core.EventError, Error: fmt.Errorf("%s", stderrMsg)}
+		if s.errorSent.Load() {
+			return
+		}
+		err := fmt.Errorf("opencode exited without a result: %w", waitErr)
+		if stderrMsg != "" {
+			err = fmt.Errorf("opencode exited without a result: %w: %s", waitErr, stderrMsg)
+		}
+		evt := core.Event{Type: core.EventError, Error: err}
 		select {
 		case s.events <- evt:
 		case <-s.ctx.Done():
@@ -294,13 +303,17 @@ func (s *opencodeSession) readLoop(cmd *exec.Cmd, stdout io.ReadCloser, stderrBu
 	if s.resultSent.Load() {
 		return
 	}
-	s.alive.Store(false)
 	if s.errorSent.Load() {
 		return
 	}
+	if s.textSent.Load() {
+		s.sendEventResult()
+		return
+	}
+	s.alive.Store(false)
 	err := fmt.Errorf("opencode exited without a result")
-	if waitErr != nil {
-		err = fmt.Errorf("opencode exited without a result: %w", waitErr)
+	if stderrMsg != "" {
+		err = fmt.Errorf("opencode exited without a result: %s", stderrMsg)
 	}
 	slog.Error("opencodeSession: turn ended without a result", "error", err, "session_id", s.CurrentSessionID())
 	select {
@@ -362,6 +375,9 @@ func (s *opencodeSession) handleText(raw map[string]any) {
 		evt := core.Event{Type: core.EventText, Content: text, Metadata: metadata, Synthetic: synthetic}
 		select {
 		case s.events <- evt:
+			if !synthetic {
+				s.textSent.Store(true)
+			}
 		case <-s.ctx.Done():
 			return
 		}
@@ -543,7 +559,7 @@ func (s *opencodeSession) handleStepFinish(raw map[string]any) {
 	}
 	slog.Debug("opencodeSession: step finished", "reason", reason, "session_id", s.CurrentSessionID())
 
-	if reason == "stop" {
+	if reason == "stop" && s.textSent.Load() {
 		s.sendEventResult()
 	}
 }

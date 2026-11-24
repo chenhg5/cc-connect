@@ -308,6 +308,7 @@ func TestHandleStepStopSendsEventResult(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	s := &opencodeSession{events: make(chan core.Event, 1), ctx: ctx}
+	s.textSent.Store(true)
 	s.handleStepFinish(raw)
 
 	select {
@@ -364,6 +365,7 @@ func TestHandleStepDuplicateEventResultPrevented(t *testing.T) {
 		ctx:        ctx,
 		resultSent: atomic.Bool{},
 	}
+	s.textSent.Store(true)
 
 	s.handleStepFinish(raw)
 	s.handleStepFinish(raw)

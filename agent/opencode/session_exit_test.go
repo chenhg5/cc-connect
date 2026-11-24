@@ -13,8 +13,30 @@ import (
 
 func TestOpencodeSessionUnexpectedExitReportsError(t *testing.T) {
 	if os.Getenv("GO_WANT_OPENCODE_EXIT_HELPER") != "" {
-		if os.Getenv("GO_WANT_OPENCODE_EXIT_HELPER") == "explicit" {
+		mode := os.Getenv("GO_WANT_OPENCODE_EXIT_HELPER")
+		if mode == "explicit" {
 			_, _ = os.Stdout.WriteString("{\"type\":\"error\",\"error\":\"API failed\"}\n")
+			os.Exit(0)
+		}
+		if mode == "empty-stop" {
+			_, _ = os.Stdout.WriteString("{\"type\":\"step_finish\",\"part\":{\"reason\":\"stop\"}}\n")
+			os.Exit(0)
+		}
+		if strings.HasPrefix(mode, "text-") {
+			_, _ = os.Stdout.WriteString("{\"type\":\"text\",\"part\":{\"text\":\"answer\"}}\n")
+			reason := strings.TrimPrefix(mode, "text-")
+			if reason == "nonzero" {
+				os.Exit(9)
+			}
+			if reason == "stderr" {
+				_, _ = os.Stderr.WriteString("harmless warning\n")
+				reason = "unknown"
+			}
+			if reason == "missing" {
+				_, _ = os.Stdout.WriteString("{\"type\":\"step_finish\",\"part\":{}}\n")
+			} else {
+				_, _ = os.Stdout.WriteString("{\"type\":\"step_finish\",\"part\":{\"reason\":\"" + reason + "\"}}\n")
+			}
 			os.Exit(0)
 		}
 		_, _ = os.Stdout.WriteString("{\"type\":\"step_finish\",\"part\":{\"reason\":\"unknown\"}}\n")
@@ -46,6 +68,81 @@ func TestOpencodeSessionUnexpectedExitReportsError(t *testing.T) {
 				t.Fatal("abnormally exited session remains alive")
 			}
 		})
+	}
+}
+
+func TestOpencodeSessionStopWithoutTextReportsError(t *testing.T) {
+	s, err := newOpencodeSession(context.Background(), os.Args[0], []string{"-test.run=^TestOpencodeSessionUnexpectedExitReportsError$", "--"}, t.TempDir(), "", "", "", "", []string{"GO_WANT_OPENCODE_EXIT_HELPER=empty-stop"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = s.Close() }()
+	if err := s.Send("hello", "", nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	s.wg.Wait()
+	if len(s.Events()) != 1 {
+		t.Fatalf("events = %d, want one error", len(s.Events()))
+	}
+	event := <-s.Events()
+	if event.Type != core.EventError || event.Error == nil {
+		t.Fatalf("empty stop event = %+v, want EventError", event)
+	}
+}
+
+func TestOpencodeSessionNormalExitAfterTextReportsResult(t *testing.T) {
+	for _, reason := range []string{"end_turn", "length", "missing", "tool-calls", "unknown", "stderr"} {
+		t.Run(reason, func(t *testing.T) {
+			s, err := newOpencodeSession(context.Background(), os.Args[0], []string{"-test.run=^TestOpencodeSessionUnexpectedExitReportsError$", "--"}, t.TempDir(), "", "", "", "", []string{"GO_WANT_OPENCODE_EXIT_HELPER=text-" + reason})
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer func() { _ = s.Close() }()
+			if err := s.Send("hello", "", nil, nil); err != nil {
+				t.Fatal(err)
+			}
+			s.wg.Wait()
+			if len(s.Events()) != 2 {
+				t.Fatalf("events = %d, want text and result", len(s.Events()))
+			}
+			text := <-s.Events()
+			result := <-s.Events()
+			if text.Type != core.EventText || text.Content != "answer" || result.Type != core.EventResult {
+				t.Fatalf("events = %+v, %+v", text, result)
+			}
+			if !s.Alive() {
+				t.Fatal("successful fallback closed the reusable session")
+			}
+			if reason == "unknown" {
+				if err := s.Send("second turn", "", nil, nil); err != nil {
+					t.Fatalf("second turn after fallback: %v", err)
+				}
+				s.wg.Wait()
+				if len(s.Events()) != 2 {
+					t.Fatalf("second turn emitted %d events, want text and result", len(s.Events()))
+				}
+			}
+		})
+	}
+}
+
+func TestOpencodeSessionNonzeroExitAfterTextReportsError(t *testing.T) {
+	s, err := newOpencodeSession(context.Background(), os.Args[0], []string{"-test.run=^TestOpencodeSessionUnexpectedExitReportsError$", "--"}, t.TempDir(), "", "", "", "", []string{"GO_WANT_OPENCODE_EXIT_HELPER=text-nonzero"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = s.Close() }()
+	if err := s.Send("hello", "", nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	s.wg.Wait()
+	if len(s.Events()) != 2 {
+		t.Fatalf("events = %d, want text and error", len(s.Events()))
+	}
+	text := <-s.Events()
+	result := <-s.Events()
+	if text.Type != core.EventText || result.Type != core.EventError || result.Error == nil {
+		t.Fatalf("events = %+v, %+v", text, result)
 	}
 }
 
