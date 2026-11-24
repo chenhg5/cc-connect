@@ -203,8 +203,5 @@ func wsBoldSpanNeedsRepair(s string, start, end int) bool {
 		return false
 	}
 	r, _ := utf8.DecodeRuneInString(s[end:])
-	if unicode.IsSpace(r) {
-		return false
-	}
-	return true
+	return !unicode.IsSpace(r)
 }
