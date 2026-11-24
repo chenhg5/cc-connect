@@ -1,10 +1,44 @@
 package core
 
 import (
+	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 )
+
+func TestWorkspaceBindingManager_RetainsPreviouslyBoundWorkspace(t *testing.T) {
+	storePath := filepath.Join(t.TempDir(), "bindings.json")
+	key := workspaceChannelKey("weixin", "dm")
+	mgr := NewWorkspaceBindingManager(storePath)
+	mgr.Bind("project:multi", key, "dm", "/projects/a")
+	mgr.Bind("project:multi", key, "dm", "/projects/b")
+
+	active := mgr.Lookup("project:multi", key)
+	if active == nil || active.Workspace != "/projects/b" {
+		t.Fatalf("active binding = %+v, want /projects/b", active)
+	}
+	data, err := os.ReadFile(storePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(data), "/projects/a") || !strings.Contains(string(data), "/projects/b") {
+		t.Fatalf("saved bindings discarded a workspace: %s", data)
+	}
+	if reloaded := NewWorkspaceBindingManager(storePath).Lookup("project:multi", key); reloaded == nil || reloaded.Workspace != "/projects/b" {
+		t.Fatalf("reloaded active binding = %+v, want /projects/b", reloaded)
+	}
+	mgr.Bind("project:multi", key, "dm", "/projects/a")
+	active = mgr.Lookup("project:multi", key)
+	if active == nil || active.Workspace != "/projects/a" || len(active.PreviousWorkspaces) != 1 || active.PreviousWorkspaces[0] != "/projects/b" {
+		t.Fatalf("rebinding a previous workspace should not duplicate history: %+v", active)
+	}
+	mgr.Unbind("project:multi", key)
+	if b := NewWorkspaceBindingManager(storePath).Lookup("project:multi", key); b != nil {
+		t.Fatalf("unbind should remove active and previous workspaces: %+v", b)
+	}
+}
 
 func TestWorkspaceBindingManager_SaveLoad(t *testing.T) {
 	dir := t.TempDir()

@@ -1039,10 +1039,11 @@ func (m *ManagementServer) handleProjectWorkspaces(w http.ResponseWriter, r *htt
 		list := make([]map[string]any, 0, len(bindings))
 		for channelKey, b := range bindings {
 			entry := map[string]any{
-				"channel_key":  channelKey,
-				"channel_name": b.ChannelName,
-				"workspace":    b.Workspace,
-				"bound_at":     b.BoundAt.Time,
+				"channel_key":         channelKey,
+				"channel_name":        b.ChannelName,
+				"workspace":           b.Workspace,
+				"previous_workspaces": b.PreviousWorkspaces,
+				"bound_at":            b.BoundAt.Time,
 			}
 			if ws := e.workspacePool.Get(b.Workspace); ws != nil {
 				entry["active"] = ws.HasActiveTurn()

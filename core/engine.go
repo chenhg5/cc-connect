@@ -7956,6 +7956,9 @@ func (e *Engine) handleWorkspaceCommand(p Platform, msg *Message, args []string)
 				name = chID
 			}
 			sb.WriteString(fmt.Sprintf("• #%s → `%s`\n", name, b.Workspace))
+			for _, path := range b.PreviousWorkspaces {
+				fmt.Fprintf(&sb, "  ↳ `%s`\n", path)
+			}
 		}
 		e.reply(p, msg.ReplyCtx, sb.String())
 	}
