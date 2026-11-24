@@ -28,20 +28,21 @@ import (
 // In "auto" mode, permission requests are auto-approved internally
 // (avoiding --dangerously-skip-permissions which fails under root).
 type claudeSession struct {
-	cmd             *exec.Cmd
-	stdin           io.WriteCloser
-	stdinMu         sync.Mutex
-	events          chan core.Event
-	sessionID       atomic.Value // stores string
-	permissionMode  atomic.Value // stores string
-	autoApprove     atomic.Bool
-	acceptEditsOnly atomic.Bool
-	dontAsk         atomic.Bool
-	workDir         string
-	ctx             context.Context
-	cancel          context.CancelFunc
-	done            chan struct{}
-	alive           atomic.Bool
+	cmd              *exec.Cmd
+	stdin            io.WriteCloser
+	stdinMu          sync.Mutex
+	events           chan core.Event
+	sessionID        atomic.Value // stores string
+	permissionMode   atomic.Value // stores string
+	autoApprove      atomic.Bool
+	acceptEditsOnly  atomic.Bool
+	dontAsk          atomic.Bool
+	workDir          string
+	ctx              context.Context
+	cancel           context.CancelFunc
+	done             chan struct{}
+	alive            atomic.Bool
+	toolResultMaxLen int
 
 	// activeModel stores the model id reported by the CLI's init event (e.g.
 	// "claude-opus-4-7[1m]"). It may be empty if the init event hasn't
@@ -293,8 +294,12 @@ func buildAppendSystemPrompt(agentPrompt, platformPrompt, userAppend string) str
 	return strings.Join(parts, "\n")
 }
 
-func newClaudeSession(ctx context.Context, workDir, cliBin string, cliExtraArgs []string, cmdArgsFlag string, model, effort, sessionID, mode, systemPrompt, appendSystemPrompt string, allowedTools, disallowedTools []string, pluginDirs []string, extraEnv []string, platformPrompt string, disableVerbose bool, spawnOpts core.SpawnOptions, maxContextTokens int, ctxWindowTokens int, ccDataDir string, lang core.Language) (*claudeSession, error) {
+func newClaudeSession(ctx context.Context, workDir, cliBin string, cliExtraArgs []string, cmdArgsFlag string, model, effort, sessionID, mode, systemPrompt, appendSystemPrompt string, allowedTools, disallowedTools []string, pluginDirs []string, extraEnv []string, platformPrompt string, spawnOpts core.SpawnOptions, maxContextTokens int, ctxWindowTokens int, ccDataDir string, lang core.Language, toolResultMaxLen ...int) (*claudeSession, error) {
 	sessionCtx, cancel := context.WithCancel(ctx)
+	resultLimit := defaultToolResultMaxLen
+	if len(toolResultMaxLen) > 0 && toolResultMaxLen[0] > 0 {
+		resultLimit = toolResultMaxLen[0]
+	}
 
 	// Claude Code rejects bypassPermissions when running as root.
 	// Downgrade to "auto" which auto-approves internally in cc-connect.
@@ -320,9 +325,7 @@ func newClaudeSession(ctx context.Context, workDir, cliBin string, cliExtraArgs 
 		"--output-format", "stream-json",
 		"--input-format", "stream-json",
 		"--permission-prompt-tool", "stdio",
-	}
-	if !disableVerbose {
-		innerArgs = append(innerArgs, "--verbose")
+		"--verbose",
 	}
 
 	if mode != "" && mode != "default" {
@@ -570,6 +573,7 @@ func newClaudeSession(ctx context.Context, workDir, cliBin string, cliExtraArgs 
 		promptFilePath:       cleanupPromptPath,
 		ctxWindowOverride:    ctxWindowTokens,
 		configuredEffort:     effort,
+		toolResultMaxLen:     resultLimit,
 	}
 	cs.setPermissionMode(mode)
 	cs.sessionID.Store(sessionID)
@@ -1226,6 +1230,7 @@ func (cs *claudeSession) handleUser(raw map[string]any) {
 			if isError {
 				slog.Debug("claudeSession: tool error", "content", result)
 			}
+			result = core.RedactToolText(strings.TrimSpace(result))
 			success := !isError
 			code := 0
 			if isError {
@@ -1234,10 +1239,10 @@ func (cs *claudeSession) handleUser(raw map[string]any) {
 			toolID, _ := item["tool_use_id"].(string)
 			evt := core.Event{
 				Type:         core.EventToolResult,
-				ToolCallID:   toolID,
-				ToolResult:   core.RedactToolText(strings.TrimSpace(result)),
+				ToolResult:   truncateToolResult(strings.TrimSpace(result), cs.toolResultMaxLen),
 				ToolExitCode: &code,
 				ToolSuccess:  &success,
+				ToolCallID:   toolID,
 			}
 			select {
 			case cs.events <- evt:

@@ -48,6 +48,7 @@ type Agent struct {
 	disallowedTools     []string
 	maxContextTokens    int // optional: passed as --max-context-tokens when > 0
 	contextWindowTokens int // optional: override the context-window-size heuristic used by the ctx% indicator. When <= 0, fall back to model-name heuristics.
+	toolResultMaxLen    int // maximum bytes sent for a tool result, including the truncation notice
 	providers           []core.ProviderConfig
 	activeIdx           int // -1 = no provider set
 	sessionEnv          []string
@@ -233,6 +234,21 @@ func New(opts map[string]any) (core.Agent, error) {
 			contextWindowTokens = int(v)
 		}
 	}
+	toolResultMaxLen := defaultToolResultMaxLen
+	switch v := opts["tool_result_max_len"].(type) {
+	case int:
+		if v > 0 {
+			toolResultMaxLen = v
+		}
+	case int64:
+		if v > 0 {
+			toolResultMaxLen = int(v)
+		}
+	case float64:
+		if v > 0 {
+			toolResultMaxLen = int(v)
+		}
+	}
 
 	// Claude Code Router support
 	routerURL, _ := opts["router_url"].(string)
@@ -305,6 +321,7 @@ func New(opts map[string]any) (core.Agent, error) {
 		disallowedTools:     disallowedTools,
 		maxContextTokens:    maxContextTokens,
 		contextWindowTokens: contextWindowTokens,
+		toolResultMaxLen:    toolResultMaxLen,
 		configEnv:           configEnv,
 		activeIdx:           -1,
 		routerURL:           routerURL,
@@ -554,6 +571,7 @@ func (a *Agent) StartSession(ctx context.Context, sessionID string) (core.AgentS
 	copy(disTools, a.disallowedTools)
 	maxTok := a.maxContextTokens
 	ctxWin := a.contextWindowTokens
+	toolResultMaxLen := a.toolResultMaxLen
 	model := a.model
 	effort := a.reasoningEffort
 	workDir := a.workDir
@@ -583,12 +601,9 @@ func (a *Agent) StartSession(ctx context.Context, sessionID string) (core.AgentS
 	// prompt. Read under the mutex and pass through to newClaudeSession so the
 	// session picks up the right tool-prompt bundle at spawn time.
 	lang := a.lang
-	// When router_url is set, --verbose conflicts with --output-format stream-json
-	// (verbose emits non-JSON text to stdout that corrupts the JSON stream).
-	disableVerbose := a.routerURL != ""
 	a.mu.Unlock()
 
-	return newClaudeSession(ctx, workDir, a.cmd, a.cliExtraArgs, a.cmdArgsFlag, model, effort, sessionID, mode, systemPrompt, appendSystemPrompt, tools, disTools, pluginDirs, extraEnv, platformPrompt, disableVerbose, a.spawnOpts, maxTok, ctxWin, a.ccDataDir, lang)
+	return newClaudeSession(ctx, workDir, a.cmd, a.cliExtraArgs, a.cmdArgsFlag, model, effort, sessionID, mode, systemPrompt, appendSystemPrompt, tools, disTools, pluginDirs, extraEnv, platformPrompt, a.spawnOpts, maxTok, ctxWin, a.ccDataDir, lang, toolResultMaxLen)
 }
 
 func (a *Agent) ListSessions(ctx context.Context) ([]core.AgentSessionInfo, error) {
@@ -976,6 +991,9 @@ func (a *Agent) WorkspaceAgentOptions() map[string]any {
 	}
 	if a.contextWindowTokens > 0 {
 		opts["context_window_tokens"] = a.contextWindowTokens
+	}
+	if a.toolResultMaxLen > 0 && a.toolResultMaxLen != defaultToolResultMaxLen {
+		opts["tool_result_max_len"] = a.toolResultMaxLen
 	}
 	if a.routerURL != "" {
 		opts["router_url"] = a.routerURL
