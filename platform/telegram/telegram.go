@@ -14,6 +14,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 	"unicode/utf16"
 	"unicode/utf8"
@@ -107,13 +108,15 @@ func (t *stdlibTypingTicker) C() <-chan time.Time { return t.Ticker.C }
 type botFactory func(token string, onUpdate func(context.Context, *models.Update), httpClient *http.Client) (telegramBot, *models.User, func(context.Context), error)
 
 type Platform struct {
-	token                 string
-	allowFrom             string
-	groupReplyAll         bool
-	shareSessionInChannel bool
-	enableReactions       bool
-	progressStyle         string // "legacy" | "compact" — telegram has no rich card, so "card" is mapped to "compact"
-	httpClient            *http.Client
+	token                  string
+	allowFrom              string
+	groupReplyAll          bool
+	shareSessionInChannel  bool
+	enableReactions        bool
+	progressStyle          string // "legacy" | "compact" — telegram has no rich card, so "card" is mapped to "compact"
+	httpClient             *http.Client
+	offlineMessageMaxAge   time.Duration
+	skippedOfflineMessages atomic.Int64
 
 	mu                  sync.RWMutex
 	bot                 telegramBot
@@ -131,9 +134,10 @@ type Platform struct {
 }
 
 const (
-	initialReconnectBackoff = time.Second
-	maxReconnectBackoff     = 30 * time.Second
-	stableConnectionWindow  = 10 * time.Second
+	initialReconnectBackoff     = time.Second
+	maxReconnectBackoff         = 30 * time.Second
+	stableConnectionWindow      = 10 * time.Second
+	defaultOfflineMessageMaxAge = 10 * time.Minute
 )
 
 func New(opts map[string]any) (core.Platform, error) {
@@ -168,6 +172,28 @@ func New(opts map[string]any) (core.Platform, error) {
 			return nil, fmt.Errorf("telegram: http_timeout_secs must be between 61 and 3600")
 		}
 		httpTimeout = time.Duration(seconds) * time.Second
+	}
+	offlineMessageMaxAge := defaultOfflineMessageMaxAge
+	if raw, ok := opts["offline_message_max_age_mins"]; ok {
+		const maxMinutes = int64(math.MaxInt64 / int64(time.Minute))
+		var minutes int64
+		switch value := raw.(type) {
+		case int:
+			minutes = int64(value)
+		case int64:
+			minutes = value
+		case float64:
+			if math.IsNaN(value) || value != math.Trunc(value) || value < 0 || value > float64(maxMinutes) {
+				return nil, fmt.Errorf("telegram: offline_message_max_age_mins must be a non-negative integer")
+			}
+			minutes = int64(value)
+		default:
+			return nil, fmt.Errorf("telegram: offline_message_max_age_mins must be a non-negative integer")
+		}
+		if minutes < 0 || minutes > maxMinutes {
+			return nil, fmt.Errorf("telegram: offline_message_max_age_mins is out of range")
+		}
+		offlineMessageMaxAge = time.Duration(minutes) * time.Minute
 	}
 	httpClient := &http.Client{Timeout: httpTimeout}
 	if proxyURL, _ := opts["proxy"].(string); proxyURL != "" {
@@ -214,6 +240,7 @@ func New(opts map[string]any) (core.Platform, error) {
 		enableReactions:       enableReactions,
 		progressStyle:         progressStyle,
 		httpClient:            httpClient,
+		offlineMessageMaxAge:  offlineMessageMaxAge,
 	}, nil
 }
 
@@ -370,9 +397,27 @@ func (p *Platform) runConnection(ctx context.Context) error {
 
 	slog.Info("telegram: connected", "bot", me.Username)
 	p.emitReady(gen)
+	summaryDone := make(chan struct{})
+	stopSummary := make(chan struct{})
+	go func() {
+		defer close(summaryDone)
+		ticker := time.NewTicker(10 * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ticker.C:
+				p.logSkippedOfflineMessages()
+			case <-stopSummary:
+				p.logSkippedOfflineMessages()
+				return
+			}
+		}
+	}()
 
 	// Start polling — blocks until ctx is cancelled or connection drops.
 	startPoll(ctx)
+	close(stopSummary)
+	<-summaryDone
 
 	p.clearBot(gen, b)
 	return nil
@@ -393,6 +438,10 @@ func (p *Platform) processUpdate(ctx context.Context, update *models.Update) {
 func (p *Platform) handleMessage(ctx context.Context, msg *models.Message) {
 	// Telegram retains updates while the bot is offline, so their timestamps
 	// can predate this process. Message IDs are deduplicated by the engine.
+	if p.offlineMessageMaxAge > 0 && msg.Date > 0 && time.Since(time.Unix(int64(msg.Date), 0)) > p.offlineMessageMaxAge {
+		p.skippedOfflineMessages.Add(1)
+		return
+	}
 	if msg.From == nil {
 		return
 	}
@@ -579,6 +628,12 @@ func (p *Platform) handleMessage(ctx context.Context, msg *models.Message) {
 		ChannelKey: channelKey,
 		ReplyCtx:   rctx,
 	}, msg)
+}
+
+func (p *Platform) logSkippedOfflineMessages() {
+	if count := p.skippedOfflineMessages.Swap(0); count > 0 {
+		slog.Info("telegram: skipped stale offline messages", "count", count)
+	}
 }
 
 func (p *Platform) dispatchMessage(msg *core.Message, tgMsg *models.Message) {
