@@ -7,7 +7,7 @@ import {
 } from 'lucide-react';
 import { Badge, Button } from '@/components/ui';
 import { getSession, type SessionDetail } from '@/api/sessions';
-import { useBridgeSocket, fetchBridgeConfig, type BridgeConfig, type BridgeIncoming, type BridgeStatus } from '@/hooks/useBridgeSocket';
+import { useBridgeSocket, fetchBridgeConfig, type BridgeConfigResult, type BridgeIncoming, type BridgeStatus } from '@/hooks/useBridgeSocket';
 import Markdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import rehypeHighlight from 'rehype-highlight';
@@ -266,7 +266,8 @@ export default function SessionChat() {
   const [sending, setSending] = useState(false);
   const [loading, setLoading] = useState(true);
   const [typing, setTyping] = useState(false);
-  const [bridgeCfg, setBridgeCfg] = useState<BridgeConfig | null>(null);
+  const [bridgeAvailability, setBridgeAvailability] = useState<BridgeConfigResult>({ config: null, unavailable: 'disabled' });
+  const bridgeCfg = bridgeAvailability.config;
   const messagesEnd = useRef<HTMLDivElement>(null);
   const streamBufRef = useRef<Map<string, string>>(new Map());
   const previewHandleCounter = useRef(0);
@@ -283,7 +284,7 @@ export default function SessionChat() {
         fetchBridgeConfig(),
       ]);
       setSession(data);
-      setBridgeCfg(cfg);
+      setBridgeAvailability(cfg);
       if (data.history) {
         setMessages(data.history.map((h, i) => ({
           id: `hist-${i}`,
@@ -563,7 +564,11 @@ export default function SessionChat() {
         ) : !bridgeCfg ? (
           <div className="flex items-center gap-2 px-4 py-3 text-sm text-amber-600 dark:text-amber-400 bg-amber-50 dark:bg-amber-900/20 rounded-xl">
             <WifiOff size={14} />
-            <span>{t('sessions.bridgeNotAvailable', 'Bridge not available. Enable [bridge] in config.toml to chat from web.')}</span>
+            <span>{bridgeAvailability.unavailable === 'management-error'
+              ? t('sessions.managementUnavailable')
+              : bridgeAvailability.unavailable === 'start-failed'
+                ? t('sessions.bridgeStartFailed', { detail: bridgeAvailability.detail ? `: ${bridgeAvailability.detail}` : '' })
+                : t('sessions.bridgeNotAvailable')}</span>
           </div>
         ) : bridgeStatus === 'disconnected' || bridgeStatus === 'error' ? (
           <div className="flex items-center gap-2 px-4 py-3 text-sm text-amber-600 dark:text-amber-400 bg-amber-50 dark:bg-amber-900/20 rounded-xl">

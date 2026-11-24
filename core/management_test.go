@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -267,6 +268,69 @@ func TestMgmt_StatusIncludesBridgeToken(t *testing.T) {
 	}
 	if data.Bridge.Token != "bridge-secret" {
 		t.Fatalf("expected bridge token, got %q", data.Bridge.Token)
+	}
+}
+
+func TestMgmt_StatusReportsBridgeNotListening(t *testing.T) {
+	mgmt, ts, _ := testManagementServer(t, "tok")
+	mgmt.SetBridgeServer(NewBridgeServer(9810, "bridge-secret", "/bridge/ws", nil))
+	r := mgmtGet(t, ts.URL+"/api/v1/status", "tok")
+	if !r.OK {
+		t.Fatalf("status failed: %s", r.Error)
+	}
+	var data map[string]json.RawMessage
+	if err := json.Unmarshal(r.Data, &data); err != nil {
+		t.Fatal(err)
+	}
+	var bridge map[string]any
+	if err := json.Unmarshal(data["bridge"], &bridge); err != nil {
+		t.Fatal(err)
+	}
+	if bridge["enabled"] != true || bridge["listening"] != false {
+		t.Fatalf("expected enabled but not listening, got %+v", bridge)
+	}
+	if _, ok := bridge["last_error"]; !ok {
+		t.Fatalf("status omitted last_error: %+v", bridge)
+	}
+}
+
+func TestMgmt_StatusReportsBridgeFailureAndDisabled(t *testing.T) {
+	mgmt, ts, _ := testManagementServer(t, "tok")
+	readBridge := func() map[string]any {
+		t.Helper()
+		r := mgmtGet(t, ts.URL+"/api/v1/status", "tok")
+		if !r.OK {
+			t.Fatalf("status failed: %s", r.Error)
+		}
+		var data map[string]json.RawMessage
+		if err := json.Unmarshal(r.Data, &data); err != nil {
+			t.Fatal(err)
+		}
+		var bridge map[string]any
+		if err := json.Unmarshal(data["bridge"], &bridge); err != nil {
+			t.Fatal(err)
+		}
+		return bridge
+	}
+	if got := readBridge(); got["enabled"] != false || got["listening"] != false {
+		t.Fatalf("expected disabled bridge status, got %+v", got)
+	}
+	occupied, err := net.Listen("tcp", ":0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := occupied.Close(); err != nil {
+			t.Errorf("close occupied listener: %v", err)
+		}
+	})
+	bs := NewBridgeServer(occupied.Addr().(*net.TCPAddr).Port, "bridge-secret", "/bridge/ws", nil)
+	mgmt.SetBridgeServer(bs)
+	if err := bs.Start(); err == nil {
+		t.Fatal("expected bridge bind failure")
+	}
+	if got := readBridge(); got["enabled"] != true || got["listening"] != false || got["last_error"] == "" {
+		t.Fatalf("expected enabled bridge with bind failure, got %+v", got)
 	}
 }
 

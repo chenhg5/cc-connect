@@ -100,7 +100,9 @@
     "bridgeConnected": "connected",
     "bridgeConnecting": "connecting...",
     "bridgeDisconnected": "disconnected",
-    "bridgeNotAvailable": "Bridge not available. Enable [bridge] in config.toml to chat from web."
+    "bridgeNotAvailable": "Bridge not available. Enable [bridge] in config.toml to chat from web.",
+    "managementUnavailable": "Cannot reach the management API, or authentication failed. Check the API connection and token.",
+    "bridgeStartFailed": "Bridge failed to start{{detail}}. Check the server logs."
   },
   "providers": {
     "title": "Providers",

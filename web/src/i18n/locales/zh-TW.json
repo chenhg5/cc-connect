@@ -100,7 +100,9 @@
     "bridgeConnected": "已連線",
     "bridgeConnecting": "連線中...",
     "bridgeDisconnected": "未連線",
-    "bridgeNotAvailable": "Bridge 未啟用。請在 config.toml 中啟用 [bridge] 以支援網頁聊天。"
+    "bridgeNotAvailable": "Bridge 未啟用。請在 config.toml 中啟用 [bridge] 以支援網頁聊天。",
+    "managementUnavailable": "無法連線管理 API，或驗證失敗。請檢查 API 連線和權杖。",
+    "bridgeStartFailed": "Bridge 啟動失敗{{detail}}。請檢查伺服器日誌。"
   },
   "providers": {
     "title": "模型供應商",
