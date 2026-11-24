@@ -5596,7 +5596,12 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 
 		select {
 		case <-stopCh:
-			sp.discard()
+			if e.streamPreview.StopBehavior == StopBehaviorFreeze {
+				sp.freeze()
+				sp.detachPreview()
+			} else {
+				sp.discard()
+			}
 			return
 		case event, ok = <-events:
 			if !ok {

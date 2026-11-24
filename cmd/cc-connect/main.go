@@ -612,6 +612,13 @@ func main() {
 			if cfg.StreamPreview.DisabledPlatforms != nil {
 				spcfg.DisabledPlatforms = cfg.StreamPreview.DisabledPlatforms
 			}
+			if cfg.StreamPreview.StopBehavior != nil {
+				if !core.StopBehaviorIsValid(*cfg.StreamPreview.StopBehavior) {
+					slog.Error("invalid [stream_preview] stop_behavior: expected discard or freeze", "value", *cfg.StreamPreview.StopBehavior)
+					os.Exit(1)
+				}
+				spcfg.StopBehavior = *cfg.StreamPreview.StopBehavior
+			}
 			engine.SetStreamPreviewCfg(spcfg)
 		}
 

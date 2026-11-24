@@ -280,6 +280,8 @@ level = "info" # debug, info, warn, error
 # interval_ms = 1500        # Min ms between updates (default: 1500) / 更新最小间隔毫秒数（默认 1500）
 # min_delta_chars = 30      # Min new chars before sending update (default: 30) / 发送更新前最少新增字符数（默认 30）
 # max_chars = 2000          # Max preview length (default: 2000) / 预览最大长度（默认 2000）
+# stop_behavior = "discard" # On /stop: "discard" deletes the preview (default); "freeze" keeps its partial text for reference.
+#                           # /stop 时："discard" 删除预览（默认）；"freeze" 保留部分内容供后续参考。
 
 # =============================================================================
 # Instant Reply / 即时确认回复
