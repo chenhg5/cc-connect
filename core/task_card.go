@@ -5,9 +5,11 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 )
 
 // taskCardMinRenderGap is a variable so tests can disable the throttle.
@@ -15,6 +17,11 @@ var taskCardMinRenderGap = 1500 * time.Millisecond
 
 const (
 	defaultCardTickInterval = 5 * time.Second
+	// DefaultCardStartDelay keeps quick answers card-free: a turn that finishes
+	// within this window replies normally and never posts a card. Long turns
+	// get the progress card at the threshold, without waiting for any event.
+	// Exported so the cmd layer does not duplicate the value.
+	DefaultCardStartDelay   = 2 * time.Second
 	taskCardMaxQueueItems   = 5
 	taskCardMaxStepLen      = 80
 	taskCardMaxQueueItemLen = 40
@@ -47,7 +54,7 @@ const (
 // drained queue of turns):
 //
 //	⏳ 正在处理 · 3:12
-//	当前步骤：查 jinkela 日志
+//	**当前步骤：**查 jinkela 日志
 //	📋 排队中 (2)
 //	[⏹ 停止当前]
 //
@@ -80,6 +87,10 @@ type turnCard struct {
 	failCount        int
 	visible          bool          // true once the card message exists
 	tickInterval     time.Duration // 0 = no independent ticker
+	startDelay       time.Duration // how long a turn may run before the first post
+	startScheduled   bool          // Start already armed the delay timer
+	startAborted     bool          // the turn's result arrived first; never post
+	startGen         int           // invalidates timers superseded by abort/rearm
 
 	done chan struct{}
 	once sync.Once
@@ -88,34 +99,121 @@ type turnCard struct {
 // newTurnCard returns nil when the platform cannot host a live card, so all
 // call sites can stay nil-safe.
 func newTurnCard(e *Engine, p Platform, replyCtx any, key string) *turnCard {
+	return newTurnCardAt(e, p, replyCtx, key, time.Now())
+}
+
+// newTurnCardAt anchors the elapsed clock and the start delay at the moment the
+// user's message began processing. Slow agent startup then neither delays the
+// progress card past the threshold nor resets the elapsed time to zero.
+func newTurnCardAt(e *Engine, p Platform, replyCtx any, key string, started time.Time) *turnCard {
 	sender, ok := p.(TaskCardSender)
 	if !ok || sender == nil {
 		return nil
+	}
+	delay := e.cardStartDelay - time.Since(started)
+	if delay < 0 {
+		delay = 0
 	}
 	return &turnCard{
 		e:            e,
 		sender:       sender,
 		replyCtx:     replyCtx,
 		key:          key,
-		started:      time.Now(),
+		started:      started,
 		status:       taskCardRunning,
 		tickInterval: e.cardTickInterval,
+		startDelay:   delay,
 		done:         make(chan struct{}),
 	}
 }
 
-// Start is intentionally a no-op: the card appears on the first real step
-// (see EnsureStarted), so quick answers never leave an empty "准备中" card.
-func (tc *turnCard) Start() {}
+// Start schedules the first card post. A turn that finishes within the start
+// delay never creates a card at all; a longer turn gets the progress card at
+// the threshold, without waiting for its first tool or model event.
+func (tc *turnCard) Start() {
+	if tc == nil {
+		return
+	}
+	tc.mu.Lock()
+	if tc.startScheduled || tc.cardStarted || tc.finished || tc.startAborted {
+		tc.mu.Unlock()
+		return
+	}
+	tc.startScheduled = true
+	gen := tc.startGen
+	delay := tc.startDelay
+	tc.mu.Unlock()
 
-// EnsureStarted posts the card the first time the agent actually does
-// something (a tool call). Idempotent and safe to call from the event loop.
+	if delay <= 0 {
+		tc.EnsureStarted()
+		return
+	}
+	slog.Debug("task card start scheduled",
+		"platform", tc.senderName(), "delay", delay, "session", tc.key)
+	go func() {
+		timer := time.NewTimer(delay)
+		defer timer.Stop()
+		select {
+		case <-timer.C:
+			tc.mu.Lock()
+			valid := tc.startGen == gen && !tc.cardStarted && !tc.finished && !tc.startAborted
+			tc.mu.Unlock()
+			if valid {
+				tc.EnsureStarted()
+			}
+		case <-tc.done:
+			// The turn ended first: no card may appear after the reply.
+		case <-tc.e.ctx.Done():
+		}
+	}()
+}
+
+// AbortStart prevents a card that has not been posted yet from appearing after
+// the turn's final output. It is a no-op once the card started (a visible card
+// is finished through the normal terminal path instead).
+func (tc *turnCard) AbortStart() {
+	if tc == nil {
+		return
+	}
+	tc.mu.Lock()
+	defer tc.mu.Unlock()
+	if tc.cardStarted {
+		return
+	}
+	tc.startAborted = true
+	tc.startScheduled = false
+	tc.startGen++
+}
+
+// RearmStart restarts the delayed post for a queued turn that reuses this card
+// after the previous turn's result aborted it. The threshold restarts at the
+// queued turn's beginning. No-op unless the start was aborted.
+func (tc *turnCard) RearmStart() {
+	if tc == nil {
+		return
+	}
+	tc.mu.Lock()
+	if tc.cardStarted || tc.finished || !tc.startAborted {
+		tc.mu.Unlock()
+		return
+	}
+	tc.startAborted = false
+	tc.startScheduled = false
+	tc.startGen++
+	tc.startDelay = tc.e.cardStartDelay
+	tc.mu.Unlock()
+	tc.Start()
+}
+
+// EnsureStarted posts the card once and starts its ticker. It is the target of
+// the start-delay timer in Start, and stays idempotent so any early caller is
+// safe; a card that already finished is never posted.
 func (tc *turnCard) EnsureStarted() {
 	if tc == nil {
 		return
 	}
 	tc.mu.Lock()
-	if tc.cardStarted || tc.finished {
+	if tc.cardStarted || tc.finished || tc.startAborted {
 		tc.mu.Unlock()
 		return
 	}
@@ -130,6 +228,14 @@ func (tc *turnCard) EnsureStarted() {
 		tc.render(true)
 	}
 	if interval > 0 {
+		// The turn may have finished while the create was being prepared; do
+		// not start a ticker that would log started/stopped back to back.
+		tc.mu.Lock()
+		finished := tc.finished
+		tc.mu.Unlock()
+		if finished {
+			return
+		}
 		// Info level on purpose: two lines per turn that make ticker lifecycle
 		// visible without enabling debug (the cadence itself stays at debug).
 		slog.Info("task card ticker started",
@@ -236,8 +342,8 @@ func (tc *turnCard) Finish(status taskCardStatus, note string) {
 	tc.once.Do(func() { close(tc.done) })
 
 	if !hasCard {
-		// The card was never posted (quick answer / no tool call); there is
-		// nothing to finish and no text fallback is needed.
+		// The card was never posted (the turn finished before the start delay
+		// or no card was ever rendered); nothing to finish, no text fallback.
 		return
 	}
 
@@ -437,6 +543,13 @@ func (tc *turnCard) renderWith(policy renderPolicy) {
 	if tc.finished {
 		tc.mu.Unlock()
 		slog.Debug("task card refresh skipped", "platform", tc.senderName(), "reason", "finished")
+		return
+	}
+	// Before the start threshold the card must not exist yet: step/queue
+	// updates only refresh memory. EnsureStarted renders with renderForced.
+	if !tc.cardStarted && policy != renderForced {
+		tc.mu.Unlock()
+		slog.Debug("task card refresh skipped", "platform", tc.senderName(), "reason", "not_started")
 		return
 	}
 	// A create is already in flight; don't enqueue a second one.
@@ -716,11 +829,9 @@ func (e *Engine) syncTaskCardQueue(state *interactiveState) {
 		items = append(items, queued.content)
 	}
 	state.mu.Unlock()
-	if len(items) == 0 && !tc.Visible() {
-		// Keep the card lazy: an empty queue at turn start must not create the
-		// "准备中" card before the agent does any work.
-		return
-	}
+	// Always mirror the queue, including an empty one: SetQueue is memory-only
+	// until the delayed start posts the card, and a popped entry left in memory
+	// would otherwise appear as a phantom "排队中" row on the first post.
 	tc.SetQueue(items)
 }
 
@@ -773,20 +884,51 @@ func compactCommand(input string) string {
 	return shortenPaths(s)
 }
 
-// shortenPaths collapses long path tokens to their last two segments.
+// pathRE matches an absolute, home-relative or ./-relative path at a token
+// boundary. Matching at the boundary (instead of treating the whole token as a
+// path) keeps a flag or a call around it intact: --config=/a/b/c and
+// require('/a/b/c') shorten only the path itself.
+var pathRE = regexp.MustCompile("(?:^|[\\s=\"'(])((?:~|/|\\./)[^\\s\"'`()<>\\[\\]{}|&;,:]+)")
+
+// shortenPaths collapses long paths to their last two segments, so a command
+// stays readable inside the one-line step regardless of how deep the path is.
 func shortenPaths(s string) string {
-	parts := strings.Fields(s)
-	for i, tok := range parts {
-		if len(tok) <= 28 || !strings.Contains(tok, "/") {
-			continue
-		}
-		segs := strings.Split(tok, "/")
-		if len(segs) < 4 {
-			continue
-		}
-		parts[i] = "…/" + strings.Join(segs[len(segs)-2:], "/")
+	matches := pathRE.FindAllStringSubmatchIndex(s, -1)
+	if len(matches) == 0 {
+		return s
 	}
-	return strings.Join(parts, " ")
+	var b strings.Builder
+	last := 0
+	for _, m := range matches {
+		start, end := m[2], m[3] // group 1: the path without its boundary char
+		b.WriteString(s[last:start])
+		b.WriteString(shortenPath(s[start:end]))
+		last = end
+	}
+	b.WriteString(s[last:])
+	return b.String()
+}
+
+// shortenPath keeps the tail of one path: …/<last2> when that is compact
+// enough, …/<base> otherwise. Short paths and paths that would barely shrink
+// are left alone.
+func shortenPath(p string) string {
+	orig := utf8.RuneCountInString(p)
+	if orig <= 24 {
+		return p
+	}
+	segs := strings.Split(p, "/")
+	if len(segs) < 3 {
+		return p
+	}
+	short := "…/" + strings.Join(segs[len(segs)-2:], "/")
+	if utf8.RuneCountInString(short) > 32 {
+		short = "…/" + segs[len(segs)-1]
+	}
+	if orig-utf8.RuneCountInString(short) < 8 {
+		return p
+	}
+	return short
 }
 
 // truncateMiddle keeps both ends of a long string so the tail (usually the
@@ -834,7 +976,9 @@ func (e *Engine) rotateTaskCardIfFinished(state *interactiveState, p Platform, r
 	state.mu.Lock()
 	state.taskCard = tc
 	state.mu.Unlock()
-	tc.Start()
+	// Mirror the queue before arming the timer so the first post already has
+	// the current queue (and nothing stale from a previous turn).
 	e.syncTaskCardQueue(state)
+	tc.Start()
 	return tc
 }

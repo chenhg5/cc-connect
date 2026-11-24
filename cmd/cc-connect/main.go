@@ -79,6 +79,32 @@ func cardTickInterval(cfg *config.Config) time.Duration {
 	return d
 }
 
+// cardStartDelay returns the configured [display] card_delay_ms. Unset falls
+// back to the engine default (single source of truth in core). A value <= 0
+// posts the card as soon as the turn starts; positive values are clamped to
+// [200ms, 10s] so a bad config cannot hide the progress signal for a whole turn
+// or flood the platform.
+func cardStartDelay(cfg *config.Config) time.Duration {
+	const (
+		minCardDelay = 200 * time.Millisecond
+		maxCardDelay = 10 * time.Second
+	)
+	if cfg.Display.CardDelayMs == nil {
+		return core.DefaultCardStartDelay
+	}
+	if *cfg.Display.CardDelayMs <= 0 {
+		return 0
+	}
+	d := time.Duration(*cfg.Display.CardDelayMs) * time.Millisecond
+	if d < minCardDelay {
+		return minCardDelay
+	}
+	if d > maxCardDelay {
+		return maxCardDelay
+	}
+	return d
+}
+
 type initialModelRefreshStarter interface {
 	StartInitialModelRefresh()
 }
@@ -537,6 +563,8 @@ func main() {
 
 		// Card ticker: independent progress-card refresh (default 5s, 0 = off).
 		engine.SetCardTickInterval(cardTickInterval(cfg))
+		// Card delay: quick answers stay card-free (default 2s, 0 = immediate).
+		engine.SetCardStartDelay(cardStartDelay(cfg))
 
 		// Wire auto-compress settings
 		if proj.AutoCompress.Enabled != nil && *proj.AutoCompress.Enabled {
@@ -1463,6 +1491,7 @@ func reloadConfig(configPath, projName string, engine *core.Engine) (*core.Confi
 		ToolMessages:     tool,
 	})
 	engine.SetCardTickInterval(cardTickInterval(cfg))
+	engine.SetCardStartDelay(cardStartDelay(cfg))
 	result.DisplayUpdated = true
 
 	// Wire show_context_indicator and reply_footer from display config

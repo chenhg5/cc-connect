@@ -194,6 +194,10 @@ type DisplayConfig struct {
 	// CardTickMs is the independent progress-card refresh interval in
 	// milliseconds. Default 5000; 0 disables the ticker.
 	CardTickMs *int `toml:"card_tick_ms"`
+	// CardDelayMs is how long a turn may run before the progress card is
+	// posted, in milliseconds. Default 2000: quick answers finish below the
+	// threshold and never post a card; 0 posts the card immediately.
+	CardDelayMs *int `toml:"card_delay_ms"`
 }
 
 // StreamPreviewConfig controls real-time streaming preview in IM.

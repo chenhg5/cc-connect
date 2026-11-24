@@ -691,12 +691,12 @@ var messages = map[MsgKey]map[Language]string{
 		LangChinese: "准备中",
 	},
 	MsgTaskCardStep: {
-		LangEnglish: "Current step: %s",
-		LangChinese: "当前步骤：%s",
+		LangEnglish: "**Current step:** %s",
+		LangChinese: "**当前步骤：**%s",
 	},
 	MsgTaskCardLastStep: {
-		LangEnglish: "Last step: %s",
-		LangChinese: "最后步骤：%s",
+		LangEnglish: "**Last step:** %s",
+		LangChinese: "**最后步骤：**%s",
 	},
 	MsgTaskCardQueue: {
 		LangEnglish: "📋 Queued (%d)",

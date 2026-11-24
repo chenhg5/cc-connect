@@ -47,6 +47,12 @@ func (p *taskCardStubPlatform) updateCount() int {
 	return p.updateCalls
 }
 
+func (p *taskCardStubPlatform) sendCount() int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return len(p.sends)
+}
+
 func (p *taskCardStubPlatform) last() *Card {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -126,7 +132,7 @@ func TestTurnCard_ReflectsStepQueueAndFinish(t *testing.T) {
 
 	card := p.last()
 	body := cardBody(t, card)
-	if !strings.Contains(body, "当前步骤：`Bash · grep booking_check_fail_rate`") {
+	if !strings.Contains(body, "**当前步骤：**`Bash · grep booking_check_fail_rate`") {
 		t.Fatalf("body = %q, want inline current step", body)
 	}
 	if !strings.Contains(body, "排队中 (2)") {
@@ -163,25 +169,254 @@ func TestFormatCardElapsed(t *testing.T) {
 	}
 }
 
-// A turn that finishes before the first render must not leave a card behind.
+// A turn that finishes within the start delay must not leave a card behind.
 func TestTurnCard_QuickTurnLeavesNoCard(t *testing.T) {
 	e := NewEngine("test", &resultAgent{session: newResultAgentSession("ok")}, []Platform{&stubPlatformEngine{n: "test"}}, "", LangChinese)
+	e.SetCardStartDelay(100 * time.Millisecond)
 	t.Cleanup(e.cancel)
 	p := &taskCardStubPlatform{stubPlatformEngine: stubPlatformEngine{n: "feishu"}}
 
 	tc := newTurnCard(e, p, "ctx", "k")
 	tc.Start()
 	tc.Finish(taskCardDone, "")
+	// The timer would have fired by now if Finish had not cancelled it.
+	time.Sleep(150 * time.Millisecond)
 
 	if tc.Visible() {
 		t.Fatal("card became visible for a turn that finished before the delay")
 	}
-	p.mu.Lock()
-	sends := len(p.sends)
-	p.mu.Unlock()
-	if sends != 0 {
+	if sends := p.sendCount(); sends != 0 {
 		t.Fatalf("sent %d cards for a quick turn, want 0", sends)
 	}
+}
+
+// A long turn gets the card at the threshold even without any tool or model
+// event; step/queue updates recorded before the threshold land in that first
+// post.
+func TestTurnCard_DelayedStartPostsCardAfterThreshold(t *testing.T) {
+	e := NewEngine("test", &resultAgent{session: newResultAgentSession("ok")}, []Platform{&stubPlatformEngine{n: "test"}}, "", LangChinese)
+	e.SetCardStartDelay(50 * time.Millisecond)
+	t.Cleanup(e.cancel)
+	p := &taskCardStubPlatform{stubPlatformEngine: stubPlatformEngine{n: "feishu"}}
+
+	tc := newTurnCard(e, p, "ctx", "k")
+	tc.SetStep("Bash · git status")
+	tc.SetQueue([]string{"帮我查下订单"})
+	start := time.Now()
+	tc.Start()
+
+	deadline := time.After(2 * time.Second)
+	for p.last() == nil {
+		select {
+		case <-deadline:
+			t.Fatal("card was not posted after the start delay")
+		default:
+			time.Sleep(5 * time.Millisecond)
+		}
+	}
+	if elapsed := time.Since(start); elapsed < 40*time.Millisecond {
+		t.Fatalf("card posted after %v, want at least the 50ms delay", elapsed)
+	}
+	body := cardBody(t, p.last())
+	if !strings.Contains(body, "**当前步骤：**`Bash · git status`") {
+		t.Fatalf("body = %q, want the pre-threshold step in the first post", body)
+	}
+	if !strings.Contains(body, "↳ 1. `帮我查下订单`") {
+		t.Fatalf("body = %q, want the pre-threshold queue in the first post", body)
+	}
+	tc.Finish(taskCardDone, "")
+}
+
+// Step and queue updates before the threshold only touch memory: they must not
+// create the card on their own.
+func TestTurnCard_UpdatesBeforeStartStayInMemory(t *testing.T) {
+	e := NewEngine("test", &resultAgent{session: newResultAgentSession("ok")}, []Platform{&stubPlatformEngine{n: "test"}}, "", LangChinese)
+	e.SetCardStartDelay(5 * time.Second)
+	t.Cleanup(e.cancel)
+	p := &taskCardStubPlatform{stubPlatformEngine: stubPlatformEngine{n: "feishu"}}
+
+	tc := newTurnCard(e, p, "ctx", "k")
+	tc.Start()
+	tc.SetStep("Bash · ls")
+	tc.SetQueue([]string{"排队消息"})
+	time.Sleep(20 * time.Millisecond)
+	if p.last() != nil {
+		t.Fatal("step/queue update posted the card before the start threshold")
+	}
+
+	// A forced start (manual EnsureStarted here) posts the accumulated state.
+	tc.EnsureStarted()
+	deadline := time.After(2 * time.Second)
+	for p.last() == nil {
+		select {
+		case <-deadline:
+			t.Fatal("card did not post after EnsureStarted")
+		default:
+			time.Sleep(5 * time.Millisecond)
+		}
+	}
+	body := cardBody(t, p.last())
+	if !strings.Contains(body, "**当前步骤：**`Bash · ls`") || !strings.Contains(body, "↳ 1. `排队消息`") {
+		t.Fatalf("body = %q, want the accumulated step and queue", body)
+	}
+	tc.Finish(taskCardDone, "")
+}
+
+// delay 0 keeps the old immediate behavior for deployments that want a card on
+// every turn.
+func TestTurnCard_ZeroDelayStartsImmediately(t *testing.T) {
+	e := NewEngine("test", &resultAgent{session: newResultAgentSession("ok")}, []Platform{&stubPlatformEngine{n: "test"}}, "", LangChinese)
+	e.SetCardStartDelay(0)
+	t.Cleanup(e.cancel)
+	p := &taskCardStubPlatform{stubPlatformEngine: stubPlatformEngine{n: "feishu"}}
+
+	tc := newTurnCard(e, p, "ctx", "k")
+	tc.Start()
+	deadline := time.After(2 * time.Second)
+	for p.last() == nil {
+		select {
+		case <-deadline:
+			t.Fatal("card did not post immediately with delay 0")
+		default:
+			time.Sleep(5 * time.Millisecond)
+		}
+	}
+	tc.Finish(taskCardDone, "")
+}
+
+// A final result delivered before the threshold must not be followed by a
+// card that appears during slow post-reply work.
+func TestTurnCard_AbortStartPreventsCardAfterResult(t *testing.T) {
+	e := NewEngine("test", &resultAgent{session: newResultAgentSession("ok")}, []Platform{&stubPlatformEngine{n: "test"}}, "", LangChinese)
+	e.SetCardStartDelay(30 * time.Millisecond)
+	t.Cleanup(e.cancel)
+	p := &taskCardStubPlatform{stubPlatformEngine: stubPlatformEngine{n: "feishu"}}
+
+	tc := newTurnCard(e, p, "ctx", "k")
+	tc.Start()
+	tc.AbortStart()
+	time.Sleep(60 * time.Millisecond)
+	if sends := p.sendCount(); sends != 0 {
+		t.Fatalf("card sent %d times after the turn's result landed", sends)
+	}
+	tc.Finish(taskCardDone, "")
+}
+
+// A queued turn reusing the card after an abort gets a fresh threshold.
+func TestTurnCard_RearmStartAfterAbort(t *testing.T) {
+	e := NewEngine("test", &resultAgent{session: newResultAgentSession("ok")}, []Platform{&stubPlatformEngine{n: "test"}}, "", LangChinese)
+	e.SetCardStartDelay(30 * time.Millisecond)
+	t.Cleanup(e.cancel)
+	p := &taskCardStubPlatform{stubPlatformEngine: stubPlatformEngine{n: "feishu"}}
+
+	tc := newTurnCard(e, p, "ctx", "k")
+	tc.Start()
+	tc.AbortStart()
+	tc.RearmStart()
+
+	deadline := time.After(2 * time.Second)
+	for p.last() == nil {
+		select {
+		case <-deadline:
+			t.Fatal("card was not posted after re-arming the delayed start")
+		default:
+			time.Sleep(5 * time.Millisecond)
+		}
+	}
+	if sends := p.sendCount(); sends != 1 {
+		t.Fatalf("card sends = %d, want exactly 1 after re-arm", sends)
+	}
+	tc.Finish(taskCardDone, "")
+}
+
+// A queued entry that already started running must disappear from the queue
+// mirror before the first card is posted.
+func TestSyncTaskCardQueueClearsPoppedEntryBeforeStart(t *testing.T) {
+	e := NewEngine("test", &resultAgent{session: newResultAgentSession("ok")}, []Platform{&stubPlatformEngine{n: "test"}}, "", LangChinese)
+	e.SetCardStartDelay(200 * time.Millisecond)
+	t.Cleanup(e.cancel)
+	p := &taskCardStubPlatform{stubPlatformEngine: stubPlatformEngine{n: "feishu"}}
+
+	tc := newTurnCard(e, p, "ctx", "k")
+	state := &interactiveState{taskCard: tc, pendingMessages: []queuedMessage{{content: "second message"}}}
+	e.syncTaskCardQueue(state)
+
+	// The drain pops the entry and starts it as the next turn.
+	state.mu.Lock()
+	state.pendingMessages = nil
+	state.mu.Unlock()
+	e.syncTaskCardQueue(state)
+
+	tc.mu.Lock()
+	queued := len(tc.queue)
+	tc.mu.Unlock()
+	if queued != 0 {
+		t.Fatalf("queue mirror = %d entries, want 0 after the entry started running", queued)
+	}
+
+	tc.EnsureStarted()
+	body := cardBody(t, p.last())
+	if strings.Contains(body, "排队中") {
+		t.Fatalf("body = %q, a running entry must not appear as queued", body)
+	}
+	tc.Finish(taskCardDone, "")
+}
+
+// Repeated Start calls arm the delay timer once: one scheduled log, one
+// goroutine. EnsureStarted remains the single creator either way.
+func TestTurnCard_StartTwiceSchedulesOnce(t *testing.T) {
+	e := NewEngine("test", &resultAgent{session: newResultAgentSession("ok")}, []Platform{&stubPlatformEngine{n: "test"}}, "", LangChinese)
+	e.SetCardStartDelay(30 * time.Millisecond)
+	t.Cleanup(e.cancel)
+	p := &taskCardStubPlatform{stubPlatformEngine: stubPlatformEngine{n: "feishu"}}
+
+	tc := newTurnCard(e, p, "ctx", "k")
+	tc.Start()
+	tc.Start()
+	tc.mu.Lock()
+	scheduled := tc.startScheduled
+	tc.mu.Unlock()
+	if !scheduled {
+		t.Fatal("startScheduled = false after Start")
+	}
+
+	deadline := time.After(2 * time.Second)
+	for p.last() == nil {
+		select {
+		case <-deadline:
+			t.Fatal("card was not posted")
+		default:
+			time.Sleep(5 * time.Millisecond)
+		}
+	}
+	if got := p.sendCount(); got != 1 {
+		t.Fatalf("card sends = %d, want 1", got)
+	}
+	tc.Finish(taskCardDone, "")
+}
+
+// The threshold and the elapsed clock are anchored to when the turn began, not
+// when the card object was built: slow agent startup must not delay the card
+// past the threshold, and the clock keeps the true elapsed time.
+func TestTurnCard_StartDelayAnchoredToTurnStart(t *testing.T) {
+	e := NewEngine("test", &resultAgent{session: newResultAgentSession("ok")}, []Platform{&stubPlatformEngine{n: "test"}}, "", LangChinese)
+	e.SetCardStartDelay(3 * time.Second)
+	t.Cleanup(e.cancel)
+	p := &taskCardStubPlatform{stubPlatformEngine: stubPlatformEngine{n: "feishu"}}
+
+	started := time.Now().Add(-5 * time.Second)
+	tc := newTurnCardAt(e, p, "ctx", "k", started)
+	if !tc.started.Equal(started) {
+		t.Fatalf("started = %v, want the turn start %v", tc.started, started)
+	}
+	tc.Start()
+	if sends := p.sendCount(); sends != 1 {
+		t.Fatalf("card sends = %d, want 1: the threshold already elapsed during startup", sends)
+	}
+	if title := p.last().Header.Title; strings.Contains(title, "0:00") {
+		t.Fatalf("title = %q, want elapsed time counted from the turn start", title)
+	}
+	tc.Finish(taskCardDone, "")
 }
 
 // A follow-up that was queued behind a stopped turn must get its own live card.
@@ -211,26 +446,26 @@ func TestRotateTaskCardAfterStop(t *testing.T) {
 	}
 }
 
-// The card must appear only when the agent starts doing real work, so plain
-// answers never leave an empty "准备中" card behind.
-func TestTurnCardAppearsOnFirstToolUse(t *testing.T) {
+// EnsureStarted posts the card once; the engine no longer calls it on the
+// first tool event (the start-delay timer is the only production trigger).
+func TestTurnCardEnsureStartedPostsOnce(t *testing.T) {
 	e := NewEngine("test", &resultAgent{session: newResultAgentSession("ok")}, []Platform{&stubPlatformEngine{n: "test"}}, "", LangChinese)
 	t.Cleanup(e.cancel)
 	p := &taskCardStubPlatform{stubPlatformEngine: stubPlatformEngine{n: "feishu"}}
 
 	tc := newTurnCard(e, p, "ctx", "k")
-	tc.Start() // no-op
-	if len(p.sends) != 0 {
-		t.Fatalf("card sent before any work: %d", len(p.sends))
+	tc.Start() // schedules the delayed post; nothing is sent yet
+	if sends := p.sendCount(); sends != 0 {
+		t.Fatalf("card sent before the start delay: %d", sends)
 	}
 
 	tc.EnsureStarted()
-	if len(p.sends) != 1 {
-		t.Fatalf("card sends = %d, want 1 after first tool use", len(p.sends))
+	if sends := p.sendCount(); sends != 1 {
+		t.Fatalf("card sends = %d, want 1 after EnsureStarted", sends)
 	}
 	tc.EnsureStarted() // idempotent
-	if len(p.sends) != 1 {
-		t.Fatalf("card re-sent on repeat EnsureStarted: %d", len(p.sends))
+	if sends := p.sendCount(); sends != 1 {
+		t.Fatalf("card re-sent on repeat EnsureStarted: %d", sends)
 	}
 	tc.Finish(taskCardDone, "")
 }
@@ -242,6 +477,12 @@ func TestTaskCardStepTextShowsRawCommand(t *testing.T) {
 		{"shell_wrapper", "Bash", `bash -lc "go test ./..."`, "Bash · go test ./..."},
 		{"drops_cd_prefix", "Bash", "cd /tmp/x && go test ./...", "Bash · go test ./..."},
 		{"shortens_long_path", "Bash", "cat /var/folders/aa/bb/cc/project/file.go", "Bash · cat …/project/file.go"},
+		{"shortens_home_path", "Bash", "ls ~/Documents/ObsidianNotes/AgentSync/cc-connect-arm64", "Bash · ls …/AgentSync/cc-connect-arm64"},
+		{"shortens_dot_relative_path", "Bash", "cat ./demo-repo/src/components/profile.ts", "Bash · cat …/components/profile.ts"},
+		{"shortens_path_in_flag", "Bash", "tool --config=/Users/me/projects/agent/config.toml run", "Bash · tool --config=…/agent/config.toml run"},
+		{"shortens_quoted_path", "Bash", `node -e "require('/Users/me/projects/agent/lib/x.js')"`, `Bash · node -e "require('…/lib/x.js')"`},
+		{"leaves_short_paths", "Bash", "ls /usr/local/bin", "Bash · ls /usr/local/bin"},
+		{"leaves_urls", "Bash", "curl https://example.com/a/b/c/d", "Bash · curl https://example.com/a/b/c/d"},
 		{"tool_only", "Read", "", "Read"},
 		{"input_only", "", "ls -la", "ls -la"},
 	}
@@ -280,10 +521,10 @@ func TestTaskCardPreparingStaysOnOneLine(t *testing.T) {
 	tc.render(true)
 
 	body := cardBody(t, p.last())
-	if !strings.Contains(body, "当前步骤：准备中") {
+	if !strings.Contains(body, "**当前步骤：**准备中") {
 		t.Fatalf("body = %q, want preparing on the label line", body)
 	}
-	if strings.Contains(body, "当前步骤：\n") {
+	if strings.Contains(body, "**当前步骤：**\n") {
 		t.Fatalf("body = %q, preparing must not break the line", body)
 	}
 	tc.Finish(taskCardDone, "")
@@ -307,14 +548,33 @@ func TestTaskCardInlineStepAndQueue(t *testing.T) {
 	if !ok {
 		t.Fatalf("first element = %T, want CardMarkdown", card.Elements[0])
 	}
-	if !strings.Contains(md.Content, "当前步骤：`Bash · cat <at id=all></at>`") {
+	if !strings.Contains(md.Content, "**当前步骤：**`Bash · cat <at id=all></at>`") {
 		t.Fatalf("step is not inline-coded verbatim: %q", md.Content)
 	}
-	if strings.Contains(md.Content, "当前步骤：\n") {
+	if strings.Contains(md.Content, "**当前步骤：**\n") {
 		t.Fatalf("step label must stay on one line: %q", md.Content)
 	}
 	if !strings.Contains(md.Content, "↳ 1. `[点我](http://x) **急**`") {
 		t.Fatalf("queued markdown was not inlined literally: %q", md.Content)
+	}
+	tc.Finish(taskCardDone, "")
+}
+
+// The progress card carries progress only: the body is exactly the step line
+// plus the queue lines, never model output or the reply text.
+func TestTaskCardBodyCarriesOnlyProgress(t *testing.T) {
+	e := NewEngine("test", &resultAgent{session: newResultAgentSession("ok")}, []Platform{&stubPlatformEngine{n: "test"}}, "", LangChinese)
+	t.Cleanup(e.cancel)
+	p := &taskCardStubPlatform{stubPlatformEngine: stubPlatformEngine{n: "feishu"}}
+
+	tc := newTurnCard(e, p, "ctx", "k")
+	tc.SetStep("Bash · git status")
+	tc.SetQueue([]string{"再来一个"})
+	tc.render(true)
+
+	want := "**当前步骤：**`Bash · git status`\n📋 排队中 (1)\n↳ 1. `再来一个`"
+	if body := cardBody(t, p.last()); body != want {
+		t.Fatalf("body = %q, want exactly the progress lines %q", body, want)
 	}
 	tc.Finish(taskCardDone, "")
 }
@@ -584,7 +844,7 @@ func TestTurnCard_TickerStartsWhenCardAlreadyVisible(t *testing.T) {
 	p := &taskCardStubPlatform{stubPlatformEngine: stubPlatformEngine{n: "feishu"}}
 
 	tc := newTurnCard(e, p, "ctx", "k")
-	tc.render(true) // card visible before the first tool event
+	tc.render(true) // card forced visible before EnsureStarted runs
 	if !tc.Visible() {
 		t.Fatal("card should be visible after a forced render")
 	}
@@ -598,30 +858,40 @@ func TestTurnCard_TickerStartsWhenCardAlreadyVisible(t *testing.T) {
 	tc.Finish(taskCardDone, "")
 }
 
-// A lazily created card object must not suppress the pre-output loading
-// animation before it is actually visible; otherwise long thinking phases show
-// nothing at all.
-func TestShouldPreStartLoadingWaitsForVisibleCard(t *testing.T) {
+// A task card replaces the "正在思考..." placeholder entirely: the card posts
+// on its start-delay timer even before the first event, so the placeholder
+// must never be sent on card-capable platforms. Platforms without a task card
+// keep the loading animation.
+func TestShouldPreStartLoadingSuppressedByTaskCard(t *testing.T) {
 	e := NewEngine("test", &resultAgent{session: newResultAgentSession("ok")}, []Platform{&stubPlatformEngine{n: "test"}}, "", LangChinese)
 	t.Cleanup(e.cancel)
 	p := &taskCardStubPlatform{stubPlatformEngine: stubPlatformEngine{n: "feishu"}}
 	tc := newTurnCard(e, p, "ctx", "k")
 	state := &interactiveState{taskCard: tc, platform: p, replyCtx: "ctx"}
 
-	if !e.shouldPreStartLoading(state, p) {
-		t.Fatal("loading suppressed while the task card is not visible")
+	if e.shouldPreStartLoading(state, p) {
+		t.Fatal("loading placeholder must be suppressed while a live task card exists")
 	}
 	tc.render(true)
-	if !tc.Visible() {
-		t.Fatal("card should be visible after render")
-	}
 	if e.shouldPreStartLoading(state, p) {
-		t.Fatal("loading should be suppressed once the card is visible")
+		t.Fatal("loading placeholder must stay suppressed once the card is visible")
 	}
 	tc.Finish(taskCardDone, "")
+	// A finished card from an earlier turn must not suppress the placeholder:
+	// proactive turns create no new card and rely on it.
+	if !e.shouldPreStartLoading(state, p) {
+		t.Fatal("loading placeholder must come back once the task card is finished")
+	}
+
+	plain := &stubPlatformEngine{n: "plain"}
+	plainState := &interactiveState{platform: plain, replyCtx: "ctx"}
+	if !e.shouldPreStartLoading(plainState, plain) {
+		t.Fatal("platforms without a task card must keep the loading animation")
+	}
 }
 
-// An empty queue at turn start must not create the "准备中" card.
+// Neither an empty queue nor a pre-threshold step may create the "准备中"
+// card; the delayed start owns the first post.
 func TestSyncTaskCardQueueEmptyKeepsCardLazy(t *testing.T) {
 	e := NewEngine("test", &resultAgent{session: newResultAgentSession("ok")}, []Platform{&stubPlatformEngine{n: "test"}}, "", LangChinese)
 	t.Cleanup(e.cancel)
@@ -630,13 +900,18 @@ func TestSyncTaskCardQueueEmptyKeepsCardLazy(t *testing.T) {
 	tc := newTurnCard(e, p, "ctx", "k")
 	state := &interactiveState{taskCard: tc}
 	e.syncTaskCardQueue(state)
-	if len(p.sends) != 0 {
-		t.Fatalf("card created for an empty queue: %d", len(p.sends))
+	if sends := p.sendCount(); sends != 0 {
+		t.Fatalf("card created for an empty queue: %d", sends)
 	}
 
 	tc.SetStep("Bash · true")
-	if len(p.sends) != 1 {
-		t.Fatalf("card sends = %d, want 1 after the first step", len(p.sends))
+	if sends := p.sendCount(); sends != 0 {
+		t.Fatalf("card sends = %d, want 0 before the start threshold", sends)
+	}
+
+	tc.EnsureStarted()
+	if sends := p.sendCount(); sends != 1 {
+		t.Fatalf("card sends = %d, want 1 after EnsureStarted", sends)
 	}
 	tc.Finish(taskCardDone, "")
 }

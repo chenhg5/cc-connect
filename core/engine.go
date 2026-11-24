@@ -260,6 +260,10 @@ type Engine struct {
 	// cardTickInterval is the independent progress-card refresh interval;
 	// 0 disables the ticker.
 	cardTickInterval time.Duration
+	// cardStartDelay is how long a turn may run before the progress card is
+	// posted; 0 posts it immediately. Quick turns below the threshold never
+	// create a card at all.
+	cardStartDelay time.Duration
 
 	// Auto-compress settings
 	autoCompressEnabled   bool
@@ -492,6 +496,7 @@ func NewEngine(name string, ag Agent, platforms []Platform, sessionStorePath str
 		stopWait:              interruptUnwindWaitTimeout,
 		showContextIndicator:  true,
 		cardTickInterval:      defaultCardTickInterval,
+		cardStartDelay:        DefaultCardStartDelay,
 	}
 
 	if ag != nil {
@@ -1023,6 +1028,14 @@ func (e *Engine) SetMaxQueuedMessages(n int) {
 func (e *Engine) SetCardTickInterval(d time.Duration) {
 	if d >= 0 {
 		e.cardTickInterval = d
+	}
+}
+
+// SetCardStartDelay controls how long a turn may run before the progress card
+// is posted. Zero posts it immediately; negative values are ignored.
+func (e *Engine) SetCardStartDelay(d time.Duration) {
+	if d >= 0 {
+		e.cardStartDelay = d
 	}
 }
 
@@ -2954,14 +2967,16 @@ func (e *Engine) processInteractiveMessageWith(p Platform, msg *Message, session
 	var taskCard *turnCard
 	cardOutcome := taskCardDone
 	if !msg.Proactive {
-		taskCard = newTurnCard(e, p, msg.ReplyCtx, interactiveKey)
+		taskCard = newTurnCardAt(e, p, msg.ReplyCtx, interactiveKey, turnStart)
 	}
 	if taskCard != nil {
 		state.mu.Lock()
 		state.taskCard = taskCard
 		state.mu.Unlock()
-		taskCard.Start()
+		// Mirror the queue before arming the timer so the first post already
+		// carries the current queue.
 		e.syncTaskCardQueue(state)
+		taskCard.Start()
 		defer func() {
 			// No-op when a terminal state was already rendered (stop/failure).
 			taskCard.Finish(cardOutcome, "")
@@ -3946,15 +3961,17 @@ func (e *Engine) agentErrorUserMessage(raw string) string {
 }
 
 // shouldPreStartLoading reports whether the pre-output loading animation should
-// run. A task card suppresses it only once the card is actually visible: the
-// card object is created lazily and may not be posted until the first tool
-// call, so an invisible object must not hide the spinner (long thinking phases
-// would otherwise have no feedback at all).
+// run. A live task card replaces the "正在思考..." placeholder entirely: it is
+// posted on its start-delay timer even when no model/tool event has arrived
+// yet, so it must not coexist with a placeholder card. A finished card from an
+// earlier turn is not a reason to suppress the placeholder: proactive turns
+// create no new card, so the loading animation is their only feedback.
+// Platforms without a task card keep the loading animation.
 func (e *Engine) shouldPreStartLoading(state *interactiveState, p Platform) bool {
 	if e.display.CardMode == "rich" {
 		return false
 	}
-	if tc := stateTaskCard(state); tc != nil && tc.Visible() {
+	if tc := stateTaskCard(state); tc != nil && !tc.Finished() {
 		return false
 	}
 	if style := progressStyleForTarget(p, state.replyCtx); style == progressStyleCompact || style == progressStyleCard {
@@ -4372,8 +4389,10 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 
 		case EventToolUse:
 			toolCount++
+			// The card starts on its own start-delay timer (turnCard.Start),
+			// not on the first tool event; SetStep only updates memory until
+			// the threshold elapses.
 			if tc := stateTaskCard(state); tc != nil {
-				tc.EnsureStarted()
 				tc.SetStep(taskCardStepText(event.ToolName, event.ToolInput))
 			}
 			if hasRichCard {
@@ -4730,6 +4749,13 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				return
 			}
 			e.clearSessionFailures(sessionKey)
+			// The agent's final result is in. A card that has not been posted
+			// yet must not appear while the reply is delivered or after slow
+			// post-reply work (auto-compress, hooks) finishes. A queued turn
+			// that reuses this card re-arms the timer when it starts.
+			if tc := stateTaskCard(state); tc != nil {
+				tc.AbortStart()
+			}
 			// Successful turn: release the message (including image bytes) held
 			// only for a possible auto-redispatch after a failure.
 			state.mu.Lock()
@@ -5058,6 +5084,13 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 					ReplyCtx: queued.replyCtx,
 				}
 				state.mu.Unlock()
+
+				// The previous turn's result may have aborted the start timer
+				// before its card appeared. The queued turn continues under
+				// the same card, so re-arm it with a fresh threshold.
+				if tc := stateTaskCard(state); tc != nil {
+					tc.RearmStart()
+				}
 
 				// Stop the previous turn's typing indicator
 				if stopTyping != nil {
@@ -5389,8 +5422,16 @@ func (e *Engine) drainPendingMessages(state *interactiveState, session *Session,
 	for {
 		state.mu.Lock()
 		if len(state.pendingMessages) == 0 {
-			session.Unlock()
+			// This drain also serves orphaned-queue goroutines that have no
+			// outer card-finish defer, so close the card that belonged to the
+			// turns just drained. Finish while the session is still locked so a
+			// new turn cannot race in and close the card as "stopped" first.
+			idleCard := state.taskCard
 			state.mu.Unlock()
+			if idleCard != nil {
+				idleCard.Finish(taskCardDone, "")
+			}
+			session.Unlock()
 			return true
 		}
 		queued := state.pendingMessages[0]
@@ -5423,12 +5464,18 @@ func (e *Engine) drainPendingMessages(state *interactiveState, session *Session,
 		e.syncTaskCardQueue(state)
 		if tc != nil {
 			tc.SetStep("")
+			// A queued turn may reuse a card whose start was aborted by the
+			// previous turn's result; re-arm it for this turn.
+			tc.RearmStart()
 		}
 
 		e.i18n.DetectAndSet(queued.content)
 		prompt := e.buildSenderPrompt(queued.content, queued.userID, queued.userName, queued.msgPlatform, queued.msgSessionKey, queued.channelKey)
 
 		if state.agentSession == nil || !state.agentSession.Alive() {
+			if tc := stateTaskCard(state); tc != nil {
+				tc.Finish(taskCardStopped, "")
+			}
 			e.send(queued.platform, queued.replyCtx, e.i18n.T(MsgQueuedMessageDropped))
 			e.notifyDroppedQueuedMessages(state, fmt.Errorf("agent session ended"))
 			return false

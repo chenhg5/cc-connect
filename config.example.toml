@@ -104,6 +104,8 @@ level = "info" # debug, info, warn, error
 #                                # 在助手回复底部显示类似 Codex 的状态行（默认 true 显示）
 # card_tick_ms = 5000            # Progress-card refresh interval in ms (default: 5000; 0 = off)
 #                                # 进度卡片独立刷新间隔（毫秒；默认 5000；0 = 关闭）
+# card_delay_ms = 2000           # Delay before the progress card appears (default: 2000; 0 = immediately; clamped to 200-10000)
+#                                # 进度卡延迟出现阈值（毫秒；默认 2000；0 = 立即出卡；非 0 值钳制到 200-10000）
 
 # Per-project override: each [[projects]] entry may have its own [projects.display]
 # block that overrides individual fields of the global [display] block above.
@@ -112,6 +114,9 @@ level = "info" # debug, info, warn, error
 # stay verbose, or vice versa.
 # 每个 [[projects]] 条目可以有自己的 [projects.display] 块，逐字段覆盖全局
 # [display]。已设字段优先，未设字段回落到全局值，再回落到默认值。
+# Exception: card_tick_ms / card_delay_ms are global-only and are not overridden
+# by [projects.display].
+# 例外：card_tick_ms / card_delay_ms 仅支持全局 [display]，项目级 display 不生效。
 #
 # [[projects]]
 # name = "noisy-project"
