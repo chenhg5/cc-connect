@@ -1372,7 +1372,9 @@ func TestToolResultMaxLenOption(t *testing.T) {
 	}{
 		{nil, 4000}, {int64(0), 4000}, {int64(800), 800}, {float64(900), 900},
 	} {
-		agent, err := New(map[string]any{"work_dir": t.TempDir(), "tool_result_max_len": tc.value})
+		// Constructing the agent checks the configured CLI path; the option
+		// parser does not need a real Claude installation.
+		agent, err := New(map[string]any{"work_dir": t.TempDir(), "cmd": os.Args[0], "tool_result_max_len": tc.value})
 		if err != nil {
 			t.Fatal(err)
 		}
