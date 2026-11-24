@@ -279,6 +279,11 @@ func promptActionForScreen(screen string) string {
 		return ""
 	}
 	if strings.Contains(lower, "quick safety check") || strings.Contains(lower, "yes, i trust this folder") {
+		for _, line := range strings.Split(lower, "\n") {
+			if strings.Contains(line, "❯") && strings.Contains(line, "no, exit") {
+				return "\x1b[B\r"
+			}
+		}
 		return "\r"
 	}
 	if (strings.Contains(lower, "telemetry") || strings.Contains(lower, "help improve") || strings.Contains(lower, "usage data")) &&
