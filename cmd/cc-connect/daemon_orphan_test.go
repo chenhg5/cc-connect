@@ -163,3 +163,51 @@ func TestReapLeftoverFromMeta_EmptyLockIsNoOp(t *testing.T) {
 		t.Fatal("reapLeftoverFromMeta should not kill anything for a lock with no PID")
 	}
 }
+
+// fakeInPlaceManager is a serviceLifecycle that also owns its restart
+// transaction, like launchd does.
+type fakeInPlaceManager struct {
+	fakeServiceManager
+	restartErr error
+}
+
+func (f *fakeInPlaceManager) RestartInPlace() error {
+	f.calls = append(f.calls, "restart_in_place")
+	return f.restartErr
+}
+
+// Regression test for #2274: on macOS the generic Stop → reap → Start path
+// boots out every cc-connect label, so a legacy-only install ends up with no
+// daemon at all (Start refuses when the current plist is missing). A manager
+// that owns its restart must be asked to restart in place instead, and must not
+// be stopped or reaped first.
+func TestRestartService_UsesInPlaceRestartWhenAvailable(t *testing.T) {
+	mgr := &fakeInPlaceManager{}
+	if err := restartService(mgr, recordReap(&mgr.calls, true)); err != nil {
+		t.Fatalf("restartService: %v", err)
+	}
+	assertCalls(t, mgr.calls, []string{"restart_in_place"})
+}
+
+// The in-place path must surface its error, not fall back to Stop → Start.
+func TestRestartService_PropagatesInPlaceRestartError(t *testing.T) {
+	restartErr := errors.New("restart: current service is not installed")
+	mgr := &fakeInPlaceManager{restartErr: restartErr}
+
+	err := restartService(mgr, recordReap(&mgr.calls, true))
+
+	if !errors.Is(err, restartErr) {
+		t.Fatalf("err = %v, want %v", err, restartErr)
+	}
+	assertCalls(t, mgr.calls, []string{"restart_in_place"})
+}
+
+// A manager without the capability keeps the Windows ordering the reap exists
+// for.
+func TestRestartService_FallsBackToStopReapStartForOtherManagers(t *testing.T) {
+	mgr := &fakeServiceManager{}
+	if err := restartService(mgr, recordReap(&mgr.calls, true)); err != nil {
+		t.Fatalf("restartService: %v", err)
+	}
+	assertCalls(t, mgr.calls, []string{"stop", "reap", "start"})
+}

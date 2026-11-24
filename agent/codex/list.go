@@ -22,6 +22,54 @@ import (
 // concurrency because each scanner can allocate up to this limit.
 const maxCodexJSONLLineSize = 64 * 1024 * 1024
 
+var defaultInternalPromptPrefixes = []string{
+	"You are the final diagnosis layer",
+	"You are the decision layer",
+	"You are selecting one best skill",
+	"You are a senior game backend engineer diagnosing",
+	"The following is the Codex agent history whose request action you are assessing",
+}
+
+func parseSessionFilterPrefixes(raw any) []string {
+	options, ok := raw.(map[string]any)
+	if !ok {
+		return nil
+	}
+	var prefixes []string
+	add := func(value any) {
+		if prefix, ok := value.(string); ok {
+			if prefix = strings.TrimSpace(prefix); prefix != "" {
+				prefixes = append(prefixes, prefix)
+			}
+		}
+	}
+	switch values := options["ignore_summary_prefixes"].(type) {
+	case []string:
+		for _, value := range values {
+			add(value)
+		}
+	case []any:
+		for _, value := range values {
+			add(value)
+		}
+	}
+	return prefixes
+}
+
+func effectiveInternalPromptPrefixes(extra []string) []string {
+	return append(append([]string(nil), defaultInternalPromptPrefixes...), extra...)
+}
+
+func isInternalPrompt(text string, prefixes []string) bool {
+	text = strings.TrimSpace(text)
+	for _, prefix := range prefixes {
+		if prefix != "" && strings.HasPrefix(text, prefix) {
+			return true
+		}
+	}
+	return false
+}
+
 // resolveCodexHomeDir returns the effective CODEX_HOME directory.
 // Priority: explicit config value > CODEX_HOME env > ~/.codex
 func resolveCodexHomeDir(explicit string) string {
@@ -40,7 +88,11 @@ func resolveCodexHomeDir(explicit string) string {
 
 // listCodexSessions scans the codex sessions directory for JSONL transcript
 // files whose cwd matches workDir.
-func listCodexSessions(workDir, codexHome string) ([]core.AgentSessionInfo, error) {
+func listCodexSessions(workDir, codexHome string, extraPrefixes ...[]string) ([]core.AgentSessionInfo, error) {
+	var prefixes []string
+	if len(extraPrefixes) > 0 {
+		prefixes = extraPrefixes[0]
+	}
 	absWorkDir, err := filepath.Abs(workDir)
 	if err != nil {
 		absWorkDir = workDir
@@ -68,10 +120,12 @@ func listCodexSessions(workDir, codexHome string) ([]core.AgentSessionInfo, erro
 		info           core.AgentSessionInfo
 		firstSummaryAt time.Time
 		hasSummary     bool
+		firstPrompt    string
+		firstPromptAt  time.Time
 	}
 	sessionsByID := make(map[string]sessionAggregate)
 	for _, f := range files {
-		info := parseCodexSessionFile(f, absWorkDir)
+		info, firstPrompt := parseCodexSessionFileDetail(f, absWorkDir, prefixes)
 		if info != nil {
 			if title := sessionTitles[info.ID]; title != "" {
 				if titleRunes := []rune(title); len(titleRunes) > 60 {
@@ -79,7 +133,6 @@ func listCodexSessions(workDir, codexHome string) ([]core.AgentSessionInfo, erro
 				}
 				info.Summary = title
 			}
-			patchSessionSource(info.ID, codexHome)
 			// Codex can split one logical session across multiple rollout files.
 			// Use the latest segment for time while keeping the earliest prompt as
 			// the stable fallback title.
@@ -95,11 +148,19 @@ func listCodexSessions(workDir, codexHome string) ([]core.AgentSessionInfo, erro
 				previous.firstSummaryAt = info.ModifiedAt
 				previous.hasSummary = true
 			}
+			if firstPrompt != "" && (previous.firstPrompt == "" || info.ModifiedAt.Before(previous.firstPromptAt)) {
+				previous.firstPrompt = firstPrompt
+				previous.firstPromptAt = info.ModifiedAt
+			}
 			sessionsByID[info.ID] = previous
 		}
 	}
 	sessions := make([]core.AgentSessionInfo, 0, len(sessionsByID))
 	for _, aggregate := range sessionsByID {
+		if isInternalPrompt(aggregate.firstPrompt, effectiveInternalPromptPrefixes(prefixes)) {
+			continue
+		}
+		patchSessionSource(aggregate.info.ID, codexHome)
 		sessions = append(sessions, aggregate.info)
 	}
 
@@ -145,22 +206,35 @@ func loadCodexSessionTitles(codexHome string) map[string]string {
 // parseCodexSessionFile reads a Codex JSONL transcript.
 // ListSessions skips a damaged file and keeps scanning other sessions; errors
 // are logged with the path for diagnosis. Returns nil if the cwd does not match.
-func parseCodexSessionFile(path, filterCwd string) *core.AgentSessionInfo {
+func parseCodexSessionFile(path, filterCwd string, extraPrefixes ...[]string) *core.AgentSessionInfo {
+	var customPrefixes []string
+	if len(extraPrefixes) > 0 {
+		customPrefixes = extraPrefixes[0]
+	}
+	info, firstPrompt := parseCodexSessionFileDetail(path, filterCwd, customPrefixes)
+	if isInternalPrompt(firstPrompt, effectiveInternalPromptPrefixes(customPrefixes)) {
+		return nil
+	}
+	return info
+}
+
+func parseCodexSessionFileDetail(path, filterCwd string, customPrefixes []string) (*core.AgentSessionInfo, string) {
 	f, err := os.Open(path)
 	if err != nil {
-		return nil
+		return nil, ""
 	}
 	defer f.Close()
 
 	stat, err := f.Stat()
 	if err != nil {
-		return nil
+		return nil, ""
 	}
 
 	var sessionID string
 	var sessionCwd string
 	var sessionSource json.RawMessage
 	var summary string
+	var firstPrompt string
 	var msgCount int
 	userMsgSeen := 0
 
@@ -179,7 +253,7 @@ func parseCodexSessionFile(path, filterCwd string) *core.AgentSessionInfo {
 		}
 		if err := json.Unmarshal([]byte(line), &entry); err != nil {
 			slog.Warn("codex: decode session file", "path", path, "error", err)
-			return nil
+			return nil, ""
 		}
 
 		switch entry.Type {
@@ -194,7 +268,7 @@ func parseCodexSessionFile(path, filterCwd string) *core.AgentSessionInfo {
 			}
 			if err := json.Unmarshal(entry.Payload, &meta); err != nil {
 				slog.Warn("codex: decode session metadata", "path", path, "error", err)
-				return nil
+				return nil, ""
 			}
 			sessionID = meta.ID
 			sessionCwd = meta.Cwd
@@ -210,17 +284,25 @@ func parseCodexSessionFile(path, filterCwd string) *core.AgentSessionInfo {
 			}
 			if err := json.Unmarshal(entry.Payload, &item); err != nil {
 				slog.Warn("codex: decode session response item", "path", path, "error", err)
-				return nil
+				return nil, ""
 			}
 			switch item.Role {
 			case "user":
 				userMsgSeen++
 				msgCount++
+				if firstPrompt == "" {
+					for _, c := range item.Content {
+						if c.Type == "input_text" && isUserPromptBase(c.Text) {
+							firstPrompt = c.Text
+							break
+						}
+					}
+				}
 				// Earlier user items can be system/AGENTS.md instructions.
 				// Keep the first real prompt so later turns do not rename the session.
 				if summary == "" {
 					for _, c := range item.Content {
-						if c.Type == "input_text" && c.Text != "" && isUserPrompt(c.Text) {
+						if c.Type == "input_text" && c.Text != "" && isUserPrompt(c.Text, customPrefixes) {
 							summary = c.Text
 							break
 						}
@@ -233,19 +315,19 @@ func parseCodexSessionFile(path, filterCwd string) *core.AgentSessionInfo {
 	}
 	if err := scanner.Err(); err != nil {
 		slog.Warn("codex: scan session file", "path", path, "error", err)
-		return nil
+		return nil, ""
 	}
 
 	// Filter by cwd
 	if filterCwd != "" && sessionCwd != "" && sessionCwd != filterCwd {
-		return nil
+		return nil, ""
 	}
 
 	if sessionID == "" {
-		return nil
+		return nil, ""
 	}
 	if isSubagentSessionSource(sessionSource) {
-		return nil
+		return nil, ""
 	}
 
 	if len([]rune(summary)) > 60 {
@@ -257,7 +339,7 @@ func parseCodexSessionFile(path, filterCwd string) *core.AgentSessionInfo {
 		Summary:      summary,
 		MessageCount: msgCount,
 		ModifiedAt:   stat.ModTime(),
-	}
+	}, firstPrompt
 }
 
 // isSubagentSessionSource reports whether Codex recorded the rollout as an
@@ -302,7 +384,11 @@ func parseCodexTimestamp(value string) time.Time {
 // getSessionHistory reads the JSONL transcript and returns user/assistant messages.
 // Unlike ListSessions, it returns read errors so /history can report failure
 // without presenting incomplete history as a complete conversation.
-func getSessionHistory(sessionID, codexHome string, limit int) ([]core.HistoryEntry, error) {
+func getSessionHistory(sessionID, codexHome string, limit int, extraPrefixes ...[]string) ([]core.HistoryEntry, error) {
+	var prefixes []string
+	if len(extraPrefixes) > 0 {
+		prefixes = extraPrefixes[0]
+	}
 	path := findSessionFile(sessionID, codexHome)
 	if path == "" {
 		return nil, fmt.Errorf("session file not found for %s", sessionID)
@@ -313,14 +399,18 @@ func getSessionHistory(sessionID, codexHome string, limit int) ([]core.HistoryEn
 		return nil, err
 	}
 	defer f.Close()
-	entries, err := readCodexSessionHistory(f, limit)
+	entries, err := readCodexSessionHistory(f, limit, prefixes)
 	if err != nil {
 		return nil, fmt.Errorf("codex: scan session history %s: %w", path, err)
 	}
 	return entries, nil
 }
 
-func readCodexSessionHistory(r io.Reader, limit int) ([]core.HistoryEntry, error) {
+func readCodexSessionHistory(r io.Reader, limit int, extraPrefixes ...[]string) ([]core.HistoryEntry, error) {
+	var prefixes []string
+	if len(extraPrefixes) > 0 {
+		prefixes = extraPrefixes[0]
+	}
 	var entries []core.HistoryEntry
 
 	scanner := bufio.NewScanner(r)
@@ -362,7 +452,7 @@ func readCodexSessionHistory(r io.Reader, limit int) ([]core.HistoryEntry, error
 		switch {
 		case item.Role == "user" && len(item.Content) > 0:
 			for _, c := range item.Content {
-				if c.Type == "input_text" && c.Text != "" && isUserPrompt(c.Text) {
+				if c.Type == "input_text" && c.Text != "" && isUserPrompt(c.Text, prefixes) {
 					entries = append(entries, core.HistoryEntry{
 						Role: "user", Content: c.Text, Timestamp: ts,
 					})
@@ -430,7 +520,7 @@ func patchSessionSource(sessionID, codexHome string) {
 
 // isUserPrompt returns true if the text looks like an actual user prompt
 // rather than system context (AGENTS.md, environment_context, permissions, etc.)
-func isUserPrompt(text string) bool {
+func isUserPromptBase(text string) bool {
 	t := strings.TrimSpace(text)
 	if t == "" {
 		return false
@@ -444,4 +534,15 @@ func isUserPrompt(text string) bool {
 		return false
 	}
 	return true
+}
+
+func isUserPrompt(text string, extraPrefixes ...[]string) bool {
+	if !isUserPromptBase(text) {
+		return false
+	}
+	var customPrefixes []string
+	if len(extraPrefixes) > 0 {
+		customPrefixes = extraPrefixes[0]
+	}
+	return !isInternalPrompt(text, effectiveInternalPromptPrefixes(customPrefixes))
 }

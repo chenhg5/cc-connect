@@ -12,7 +12,8 @@ import (
 func writeConfig(t *testing.T, body string) string {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "config.toml")
-	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+	fixture := strings.ReplaceAll(body, "${RELEASE_CONFIG_FIXTURE_VALUE}", t.Name())
+	if err := os.WriteFile(path, []byte(fixture), 0o644); err != nil {
 		t.Fatalf("write config: %v", err)
 	}
 	return path
@@ -33,7 +34,7 @@ work_dir = "/tmp/cc-connect-release-work"
 [[projects.platforms]]
 type = "feishu"
 app_id = "cli_release"
-app_secret = "secret"
+app_secret = "${RELEASE_CONFIG_FIXTURE_VALUE}"
 `
 }
 
@@ -66,7 +67,7 @@ work_dir = "/tmp/cc-connect-release-work"
 [[projects.platforms]]
 type = "feishu"
 app_id = "cli_release"
-app_secret = "secret"
+app_secret = "${RELEASE_CONFIG_FIXTURE_VALUE}"
 `)
 
 	cfg, err := config.Load(path)
@@ -128,6 +129,7 @@ disabled_platforms = ["feishu", "telegram"]
 interval_ms = 250
 min_delta_chars = 12
 max_chars = 777
+stop_behavior = "freeze"
 
 [[projects]]
 name = "release"
@@ -148,7 +150,7 @@ work_dir = "/tmp/cc-connect-release-work"
 [[projects.platforms]]
 type = "feishu"
 app_id = "cli_release"
-app_secret = "secret"
+app_secret = "${RELEASE_CONFIG_FIXTURE_VALUE}"
 `)
 
 	cfg, err := config.Load(path)
@@ -169,6 +171,9 @@ app_secret = "secret"
 	}
 	if cfg.StreamPreview.MaxChars == nil || *cfg.StreamPreview.MaxChars != 777 {
 		t.Fatalf("stream_preview.max_chars = %#v, want 777", cfg.StreamPreview.MaxChars)
+	}
+	if cfg.StreamPreview.StopBehavior == nil || *cfg.StreamPreview.StopBehavior != "freeze" {
+		t.Fatalf("stream_preview.stop_behavior = %#v, want freeze", cfg.StreamPreview.StopBehavior)
 	}
 
 	proj := &cfg.Projects[0]
@@ -219,7 +224,7 @@ work_dir = "/tmp/cc-connect-release-work"
 [[projects.platforms]]
 type = "feishu"
 app_id = "cli_release"
-app_secret = "secret"
+app_secret = "${RELEASE_CONFIG_FIXTURE_VALUE}"
 `,
 			wantErr: `projects[0].display.mode must be "full", "compact", "quiet", or "final"`,
 		},
@@ -237,7 +242,7 @@ work_dir = "/tmp/cc-connect-release-work"
 [[projects.platforms]]
 type = "feishu"
 app_id = "cli_release"
-app_secret = "secret"
+app_secret = "${RELEASE_CONFIG_FIXTURE_VALUE}"
 `,
 			wantErr: "reset_on_idle_mins must be >= 0",
 		},

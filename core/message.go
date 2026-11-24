@@ -427,6 +427,7 @@ type Message struct {
 	LegacyChannelKey string
 	ReplyCtx         any    // platform-specific context needed for replying
 	FromVoice        bool   // true if message originated from voice transcription
+	SilentEmpty      bool   // suppress fallback reply for an empty synthetic turn
 	ModeOverride     string // if set, temporarily override agent permission mode for this message
 	// IsPermissionResponse is set by inline-button / card-action paths in
 	// platforms when a synthesized message is forwarded as a permission
@@ -443,6 +444,14 @@ type Message struct {
 	// drop late redeliveries that reuse a new message_id but an older create_time
 	// than a message already processed. Zero means unset (no ordering hint).
 	UserMessageTimeMs int64
+	// CardAnswerRendered is set by platforms whose card/button callback both
+	// forwards the answer and replaces the original card with the rendered
+	// result in the callback response (e.g. Feishu askq: option clicks and
+	// askq_text form submits). The engine then skips the "✅ question: answer"
+	// chat echo, which would otherwise duplicate a result the user can already
+	// see in the card. Plain-text answers and platforms without in-place card
+	// updates leave it false and keep the echo.
+	CardAnswerRendered bool
 }
 
 // EventType distinguishes different kinds of agent output.
