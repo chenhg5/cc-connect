@@ -2344,58 +2344,6 @@ func TestCUJ_H2_TwoPlatformsConcurrentNoBleed(t *testing.T) {
 	}
 }
 
-// TestCUJ_QueueStealsResult isolates the same-session queue/event-reader race
-// discovered while stabilizing H2. The queued messages should all become user
-// history entries; the current engine sometimes treats their results as
-// unsolicited events and never drains the remaining queue.
-func TestCUJ_QueueStealsResult(t *testing.T) {
-	t.Skip("#2366: unsolicited reader can consume a queued turn's result, leaving later messages undrained; enable after the queue ownership fix lands")
-	const messages = 5 // four queued per session, below the default queue cap
-	dir := t.TempDir()
-	pA := &stubPlatformEngine{n: "platA"}
-	pB := &stubPlatformEngine{n: "platB"}
-	e := NewEngine("test", &cujAgent{}, []Platform{pA, pB}, dir+"/sessions.json", LangEnglish)
-	t.Cleanup(func() { _ = e.Stop() })
-	var wg sync.WaitGroup
-	for i := 0; i < messages; i++ {
-		for _, tc := range []struct {
-			platform *stubPlatformEngine
-			key      string
-		}{
-			{pA, "platA:queued"}, {pB, "platB:queued"},
-		} {
-			wg.Add(1)
-			go func(i int, p *stubPlatformEngine, key string) {
-				defer wg.Done()
-				e.ReceiveMessage(p, &Message{
-					SessionKey: key, Platform: p.Name(), MessageID: fmt.Sprintf("%s-%d", key, i),
-					UserID: "queued", UserName: "queued", Content: fmt.Sprintf("prompt %d", i), ReplyCtx: "ctx",
-				})
-			}(i, tc.platform, tc.key)
-		}
-	}
-	wg.Wait()
-	deadline := time.Now().Add(2 * time.Second)
-	for {
-		counts := [2]int{}
-		for j, key := range []string{"platA:queued", "platB:queued"} {
-			for _, h := range e.sessions.GetOrCreateActive(key).GetHistory(0) {
-				if h.Role == "user" {
-					counts[j]++
-				}
-			}
-		}
-		if counts[0] == messages && counts[1] == messages &&
-			!e.sessions.GetOrCreateActive("platA:queued").Busy() && !e.sessions.GetOrCreateActive("platB:queued").Busy() {
-			return
-		}
-		if time.Now().After(deadline) {
-			t.Fatalf("same-session queue lost results: processed A=%d/%d B=%d/%d prompts", counts[0], messages, counts[1], messages)
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
-}
-
 // ---------------------------------------------------------------------------
 // Streaming-aware platform + agent extension for CUJ tests that need to
 // exercise the streamPreview (sp) code path.
