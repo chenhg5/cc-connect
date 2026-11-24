@@ -3770,29 +3770,22 @@ func SaveProviderRefs(projectName string, refs []string) error {
 func RemoveProject(projectName string) error {
 	configMu.Lock()
 	defer configMu.Unlock()
-	if ConfigPath == "" {
-		return fmt.Errorf("config path not set")
-	}
-	data, err := os.ReadFile(ConfigPath)
+	data, cfg, err := loadDocumentConfigLocked()
 	if err != nil {
-		return fmt.Errorf("read config: %w", err)
+		return err
 	}
-	cfg := &Config{}
-	if err := toml.Unmarshal(data, cfg); err != nil {
-		return fmt.Errorf("parse config: %w", err)
-	}
-	found := false
 	for i := range cfg.Projects {
 		if cfg.Projects[i].Name == projectName {
 			cfg.Projects = append(cfg.Projects[:i], cfg.Projects[i+1:]...)
-			found = true
-			break
+			if len(cfg.Projects) == 0 {
+				cfg.Projects = nil
+			}
+			return saveDocumentPatch(data, cfg, func(raw string) (string, error) {
+				return removeProjectBlock(raw, i)
+			})
 		}
 	}
-	if !found {
-		return fmt.Errorf("project %q not found", projectName)
-	}
-	return saveConfig(cfg)
+	return fmt.Errorf("project %q not found", projectName)
 }
 
 // AddPlatformToProject appends a platform config to a project.
@@ -3801,24 +3794,23 @@ func RemoveProject(projectName string) error {
 func AddPlatformToProject(projectName string, platform PlatformConfig, workDir, agentType string) error {
 	configMu.Lock()
 	defer configMu.Unlock()
-	if ConfigPath == "" {
-		return fmt.Errorf("config path not set")
-	}
-	data, err := os.ReadFile(ConfigPath)
+	data, cfg, err := loadDocumentConfigLocked()
 	if err != nil {
-		return fmt.Errorf("read config: %w", err)
+		return err
 	}
-	cfg := &Config{}
-	if err := toml.Unmarshal(data, cfg); err != nil {
-		return fmt.Errorf("parse config: %w", err)
-	}
-	if platform.Options == nil {
-		platform.Options = map[string]any{}
+	if len(platform.Options) == 0 {
+		platform.Options = nil
 	}
 	for i := range cfg.Projects {
 		if cfg.Projects[i].Name == projectName {
 			cfg.Projects[i].Platforms = append(cfg.Projects[i].Platforms, platform)
-			return saveConfig(cfg)
+			block, err := serializePlatformBlock(platform)
+			if err != nil {
+				return err
+			}
+			return saveDocumentPatch(data, cfg, func(raw string) (string, error) {
+				return insertPlatformBlock(raw, i, block)
+			})
 		}
 	}
 	agentCfg := AgentConfig{Type: "codex", Options: map[string]any{}}
@@ -3836,12 +3828,22 @@ func AddPlatformToProject(projectName string, platform PlatformConfig, workDir, 
 		}
 		agentCfg.Options["work_dir"] = wd
 	}
-	cfg.Projects = append(cfg.Projects, ProjectConfig{
+	if len(agentCfg.Options) == 0 {
+		agentCfg.Options = nil
+	}
+	project := ProjectConfig{
 		Name:      projectName,
 		Agent:     agentCfg,
 		Platforms: []PlatformConfig{platform},
+	}
+	cfg.Projects = append(cfg.Projects, project)
+	block, err := serializeProjectBlock(project)
+	if err != nil {
+		return err
+	}
+	return saveDocumentPatch(data, cfg, func(raw string) (string, error) {
+		return insertDocument(raw, len(raw), documentNewline(raw)+projectBlockNewlines(raw, block)), nil
 	})
-	return saveConfig(cfg)
 }
 
 func writeRawConfig(content string) error {
