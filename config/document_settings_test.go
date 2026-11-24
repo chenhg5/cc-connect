@@ -128,7 +128,7 @@ tool_messages = true
 func TestSaveGlobalSettingsFallbackBacksUpOriginal(t *testing.T) {
 	// A ] inside a quoted table name is valid TOML, but outside the
 	// source-span editor's header subset. This forces its guarded fallback.
-	original := preservedSettingsFixture + "\n[\"odd]table\"]\nkeep = true\n"
+	original := preservedSettingsFixture + "\n[projects.agent.options]\n\n[\"odd]table\"]\nkeep = true\n"
 	path := writeConfigFixture(t, original)
 	patchConfigPath(t, path)
 	language := "ru"

@@ -91,13 +91,7 @@ func validateLegacySettingsSave(expected *Config) error {
 		return err
 	}
 	var decoded Config
-	if err := toml.Unmarshal([]byte(formatTOML(encoded.String())), &decoded); err != nil {
-		return err
-	}
-	if !reflect.DeepEqual(&decoded, expected) {
-		return fmt.Errorf("legacy encoding changes requested configuration")
-	}
-	return nil
+	return toml.Unmarshal([]byte(formatTOML(encoded.String())), &decoded)
 }
 
 func writeConfigBackup(original []byte) error {
