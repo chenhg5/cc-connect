@@ -408,11 +408,7 @@ func weixinHTTPGet(ctx context.Context, fullURL, routeTag string, debug bool) ([
 		return nil, err
 	}
 	if debug {
-		snippet := string(body)
-		if len(snippet) > 200 {
-			snippet = snippet[:200]
-		}
-		fmt.Fprintf(os.Stderr, "[debug] GET %s -> %d %s\n", fullURL, resp.StatusCode, strings.TrimSpace(snippet))
+		fmt.Fprintf(os.Stderr, "[debug] get_bot_qrcode status=%d bytes=%d\n", resp.StatusCode, len(body))
 	}
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("http %d: %s", resp.StatusCode, weixinTruncateBody(body, 256))
@@ -490,11 +486,7 @@ func weixinPollQRStatus(ctx context.Context, apiBase, qrKey, routeTag string, de
 		return nil, err
 	}
 	if debug {
-		snippet := string(body)
-		if len(snippet) > 200 {
-			snippet = snippet[:200]
-		}
-		fmt.Fprintf(os.Stderr, "[debug] poll status -> %d %s\n", resp.StatusCode, strings.TrimSpace(snippet))
+		fmt.Fprintf(os.Stderr, "[debug] get_qrcode_status status=%d bytes=%d\n", resp.StatusCode, len(body))
 	}
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("get_qrcode_status http %d: %s", resp.StatusCode, weixinTruncateBody(body, 256))
@@ -533,11 +525,7 @@ func verifyWeixinToken(ctx context.Context, apiBase, token, routeTag string, deb
 		return err
 	}
 	if debug {
-		snippet := string(raw)
-		if len(snippet) > 300 {
-			snippet = snippet[:300]
-		}
-		fmt.Fprintf(os.Stderr, "[debug] verify getUpdates -> %d %s\n", resp.StatusCode, strings.TrimSpace(snippet))
+		fmt.Fprintf(os.Stderr, "[debug] verify getUpdates status=%d bytes=%d\n", resp.StatusCode, len(raw))
 	}
 	if resp.StatusCode != http.StatusOK {
 		return fmt.Errorf("http %d: %s", resp.StatusCode, weixinTruncateBody(raw, 256))

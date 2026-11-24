@@ -665,7 +665,7 @@ func (c *registrationClient) registrationCall(action string, params map[string]s
 		return err
 	}
 	if c.debug {
-		fmt.Fprintf(os.Stderr, "[debug] registration action=%s status=%d body=%s\n", action, resp.StatusCode, strings.TrimSpace(string(body)))
+		fmt.Fprintf(os.Stderr, "[debug] registration action=%s status=%d bytes=%d\n", action, resp.StatusCode, len(body))
 	}
 	if err := json.Unmarshal(body, out); err != nil {
 		return fmt.Errorf("decode response: %w", err)
