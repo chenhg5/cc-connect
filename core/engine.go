@@ -6582,10 +6582,18 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			var statusFooter string
 			var legacyStatusFooter string
 			if !isSilent && !finalMode {
-				footerContext := replyFooterContextText(replyFooterSessionContextUsage(state.agentSession), e.i18n)
+				contextUsage := replyFooterSessionContextUsage(state.agentSession)
+				footerContext := replyFooterContextText(contextUsage, e.i18n)
 				if e.showContextIndicator {
 					if sdkPlausible {
-						if text := contextIndicatorText(event.InputTokens); text != "" {
+						contextTokens, contextWindow := event.InputTokens, modelContextWindow
+						if contextUsage != nil && contextUsage.ContextWindow > 0 {
+							contextWindow = contextUsage.ContextWindow
+							if contextUsage.UsedTokens > 0 {
+								contextTokens = contextUsage.UsedTokens
+							}
+						}
+						if text := contextIndicatorText(contextTokens, contextWindow); text != "" {
 							footerContext = text
 						}
 					} else if selfPct > 0 {
@@ -6720,7 +6728,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			} else if hasRichCard {
 				parts := []string{fullResponse}
 				if splitter, ok := p.(MarkdownTableSplitter); ok {
-					parts = splitter.SplitMarkdownByTables(fullResponse, 5)
+					parts = splitter.SplitMarkdownByTables(fullResponse)
 				}
 				richStatusFooter := e.composeRichStatusFooter(false, turnStart, e.agent, state.agentSession, state.workspaceDir)
 				if legacyStatusFooter != "" {
@@ -12833,8 +12841,9 @@ func (e *Engine) sendAskQuestionPrompt(p Platform, replyCtx any, questions []Use
 		return
 	}
 
-	// Try inline buttons (Telegram)
-	if bs, ok := p.(InlineButtonSender); ok {
+	// A multi-select button would submit the first choice immediately. Show
+	// numbered text choices so the user can reply with several numbers.
+	if bs, ok := p.(InlineButtonSender); ok && !q.MultiSelect {
 		var textBuf strings.Builder
 		textBuf.WriteString("❓ *")
 		textBuf.WriteString(q.Question)
@@ -12892,7 +12901,12 @@ func (e *Engine) sendAskQuestionPrompt(p Platform, replyCtx any, questions []Use
 		}
 		sb.WriteString("\n")
 	}
-	sb.WriteString(fmt.Sprintf("\n%s", e.i18n.T(MsgAskQuestionNote)))
+	note := MsgAskQuestionNote
+	if q.MultiSelect {
+		note = MsgAskQuestionNoteMulti
+	}
+	sb.WriteString("\n")
+	sb.WriteString(e.i18n.T(note))
 	e.send(p, replyCtx, sb.String())
 }
 
@@ -18136,11 +18150,11 @@ func gitClone(repoURL, dest string) error {
 
 const modelContextWindow = 200_000 // generic fallback window for heuristic context estimates
 
-func contextIndicatorText(inputTokens int) string {
-	if inputTokens <= 0 {
+func contextIndicatorText(inputTokens, contextWindow int) string {
+	if inputTokens <= 0 || contextWindow <= 0 {
 		return ""
 	}
-	pct := inputTokens * 100 / modelContextWindow
+	pct := inputTokens * 100 / contextWindow
 	if pct > 100 {
 		pct = 100
 	}
