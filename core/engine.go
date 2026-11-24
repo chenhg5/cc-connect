@@ -585,6 +585,7 @@ type interactiveState struct {
 	pending                  *pendingPermission
 	pendingUserInput         *pendingUserInput
 	pendingMessages          []queuedMessage // messages queued while session was busy
+	restartQueuedOnExit      bool            // recover queued turns when the agent process dies
 	approveAll               bool            // when true, auto-approve all permission requests for this session
 	fromVoice                bool            // true if current turn originated from voice transcription
 	sideText                 string
@@ -3350,6 +3351,12 @@ func (e *Engine) handleMessage(p Platform, msg *Message) {
 			}
 			return
 		}
+		// Cleanup may have completed between the failed TryLock and the
+		// rejected queue append. A free lock means this turn can proceed.
+		if g, ok := session.TryLock(); ok {
+			lockGen = g
+			goto sessionLocked
+		}
 		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgPreviousProcessing))
 		return
 	}
@@ -3498,9 +3505,9 @@ func (e *Engine) queueMessageForBusySession(p Platform, msg *Message, interactiv
 	e.interactiveMu.Unlock()
 	defer state.mu.Unlock()
 
-	// Allow queueing when agentSession is nil (session is starting up,
-	// issue #565). Only reject if the session was established and died.
-	if state.agentSession != nil && !state.agentSession.Alive() {
+	// A dead process can still hold the busy lock while its foreground turn
+	// unwinds. Accept the message and let the drain path restart the session.
+	if state.stopped && !state.restartQueuedOnExit {
 		return false
 	}
 
@@ -3599,10 +3606,46 @@ func (e *Engine) drainOrphanedQueue(session *Session, sessions *SessionManager, 
 	state, hasState := e.interactiveStates[interactiveKey]
 	e.interactiveMu.Unlock()
 
-	if !hasState || state == nil || state.agentSession == nil || !state.agentSession.Alive() {
-		if hasState && state != nil {
-			e.notifyDroppedQueuedMessages(state, fmt.Errorf("agent session ended"))
+	if !hasState || state == nil {
+		return
+	}
+	state.mu.Lock()
+	hasAgentSession := state.agentSession != nil
+	dead := !hasAgentSession || !state.agentSession.Alive()
+	queued := len(state.pendingMessages) > 0
+	state.mu.Unlock()
+	if dead {
+		if !queued {
+			return
 		}
+		if hasAgentSession {
+			e.cleanupInteractiveStateForRestart(interactiveKey, state)
+			e.interactiveMu.Lock()
+			state = e.interactiveStates[interactiveKey]
+			e.interactiveMu.Unlock()
+			if state == nil {
+				return
+			}
+		}
+		// The old foreground turn has released the session lock. Start a
+		// fresh process for the first queued message; the new state adopts
+		// the rest of the queue and drains it in order.
+		state.mu.Lock()
+		if len(state.pendingMessages) == 0 {
+			state.mu.Unlock()
+			return
+		}
+		first := state.pendingMessages[0]
+		state.pendingMessages = state.pendingMessages[1:]
+		state.mu.Unlock()
+		msg := &Message{MessageID: first.messageID, Platform: first.msgPlatform,
+			SessionKey: first.msgSessionKey, ChannelKey: first.channelKey,
+			Content: first.content, Images: first.images, Files: first.files,
+			FromVoice: first.fromVoice, SilentEmpty: first.silentEmpty,
+			UserID: first.userID, UserName: first.userName, ReplyCtx: first.replyCtx,
+			UserMessageTimeMs: first.userMessageTimeMs}
+		e.processInteractiveMessageWith(first.platform, msg, session, agent, sessions, interactiveKey, workspaceDir, first.msgSessionKey, lockGen)
+		unlocked = true
 		return
 	}
 
@@ -3610,15 +3653,9 @@ func (e *Engine) drainOrphanedQueue(session *Session, sessions *SessionManager, 
 	// from Events() and we must not have concurrent readers.
 	e.stopUnsolicitedReader(state)
 
-	unlocked = e.drainPendingMessages(state, session, sessions, interactiveKey, lockGen)
-
-	// Restart unsolicited reader if the session is still alive and clean.
-	state.mu.Lock()
-	alive := state.agentSession != nil && state.agentSession.Alive() && !state.stopped && !state.eventsNeedResync
-	state.mu.Unlock()
-	if alive {
-		e.startUnsolicitedReader(state, session, sessions, interactiveKey, workspaceDir)
-	}
+	unlocked = e.drainPendingMessages(state, session, sessions, interactiveKey, lockGen, func() {
+		e.startIdleUnsolicitedReader(state, session, sessions, interactiveKey, workspaceDir)
+	})
 }
 
 // ──────────────────────────────────────────────────────────────
@@ -4192,6 +4229,7 @@ func (e *Engine) processInteractiveMessageWith(p Platform, msg *Message, session
 
 	if state.agentSession == nil {
 		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgFailedToStartAgentSession))
+		e.notifyDroppedQueuedMessages(state, fmt.Errorf("failed to start agent session"))
 		return
 	}
 	e.cancelAgentSessionIdleClose(state)
@@ -4280,9 +4318,26 @@ func (e *Engine) processInteractiveMessageWith(p Platform, msg *Message, session
 		slog.Warn("slow agent send", "elapsed", elapsed, "session", msg.SessionKey, "content_len", len(msg.Content))
 	}
 	stopTyping = nil // ownership transferred; prevent defer from double-stopping
+	// An agent can die while later messages are queued. Its cleanup leaves a
+	// placeholder with those messages; restart under this same session lock.
+	e.interactiveMu.Lock()
+	replacement := e.interactiveStates[interactiveKey]
+	e.interactiveMu.Unlock()
+	if replacement != nil && replacement != state {
+		replacement.mu.Lock()
+		queued := len(replacement.pendingMessages) > 0
+		replacement.mu.Unlock()
+		if queued {
+			e.drainOrphanedQueue(session, sessions, interactiveKey, agent, workspaceDir, lockGen)
+			unlocked = true
+			return
+		}
+	}
 
-	// Start unsolicited reader and arm the idle close timer BEFORE draining
-	// queued messages. drainPendingMessages releases the session lock, and
+	// Arm the idle close timer BEFORE draining queued messages. The reader is
+	// started by drainPendingMessages only after the queue is empty: otherwise
+	// it competes with the foreground drain for the same Events channel.
+	// drainPendingMessages releases the session lock, and
 	// without this ordering the next user message can race in, call
 	// cancelAgentSessionIdleClose (a no-op since nothing was scheduled yet),
 	// and then the late schedule below arms a timer that no subsequent cancel
@@ -4294,7 +4349,6 @@ func (e *Engine) processInteractiveMessageWith(p Platform, msg *Message, session
 	alive := state.agentSession != nil && state.agentSession.Alive() && !state.stopped && !state.eventsNeedResync
 	state.mu.Unlock()
 	if alive {
-		e.startUnsolicitedReader(state, session, sessions, interactiveKey, workspaceDir)
 		e.scheduleAgentSessionIdleClose(interactiveKey, state)
 	}
 
@@ -4302,7 +4356,9 @@ func (e *Engine) processInteractiveMessageWith(p Platform, msg *Message, session
 	// processInteractiveEvents observing an empty queue and returning here
 	// (session is still locked, so handleMessage's TryLock fails and routes
 	// the message to queueMessageForBusySession). Drain any such orphans.
-	if e.drainPendingMessages(state, session, sessions, interactiveKey, lockGen) {
+	if e.drainPendingMessages(state, session, sessions, interactiveKey, lockGen, func() {
+		e.startIdleUnsolicitedReader(state, session, sessions, interactiveKey, workspaceDir)
+	}) {
 		unlocked = true
 	}
 }
@@ -4697,9 +4753,22 @@ func (e *Engine) getOrCreateInteractiveStateWith(sessionKey string, p Platform, 
 // to avoid race conditions where concurrent requests see an empty map while the
 // agent session is still being shut down (which can take up to 130s for Stop hooks).
 func (e *Engine) cleanupInteractiveState(sessionKey string, expected ...*interactiveState) {
+	e.cleanupInteractiveStateWithPolicy(sessionKey, false, expected...)
+}
+
+// cleanupInteractiveStateForRestart preserves queued turns when a dead agent
+// process is being replaced. Explicit resets and shutdown still drop them.
+func (e *Engine) cleanupInteractiveStateForRestart(sessionKey string, expected *interactiveState) {
+	expected.mu.Lock()
+	expected.restartQueuedOnExit = true
+	expected.mu.Unlock()
+	e.cleanupInteractiveStateWithPolicy(sessionKey, true, expected)
+}
+
+func (e *Engine) cleanupInteractiveStateWithPolicy(sessionKey string, preserveQueued bool, expected ...*interactiveState) {
 	e.interactiveMu.Lock()
 	state, ok := e.interactiveStates[sessionKey]
-	if len(expected) > 0 && expected[0] != nil && state != expected[0] {
+	if len(expected) > 0 && state != expected[0] {
 		// Another turn has already replaced the state — skip cleanup.
 		e.interactiveMu.Unlock()
 		return
@@ -4740,7 +4809,9 @@ func (e *Engine) cleanupInteractiveState(sessionKey string, expected ...*interac
 			pending.resolve()
 		}
 
-		e.notifyDroppedQueuedMessages(state, fmt.Errorf("session reset"))
+		if !preserveQueued || e.ctx.Err() != nil {
+			e.notifyDroppedQueuedMessages(state, fmt.Errorf("session reset"))
+		}
 	}
 
 	// Close the agent session BEFORE deleting from the map.
@@ -4755,10 +4826,26 @@ func (e *Engine) cleanupInteractiveState(sessionKey string, expected ...*interac
 	e.interactiveMu.Lock()
 	// Re-check that the state hasn't been replaced during the close
 	currentState, currentOk := e.interactiveStates[sessionKey]
-	if currentOk && len(expected) > 0 && expected[0] != nil && currentState != expected[0] {
+	if currentOk && len(expected) > 0 && currentState != expected[0] {
 		// Another turn has replaced the state during our close — don't delete it.
 		e.interactiveMu.Unlock()
+		if ok && state != nil {
+			e.notifyDroppedQueuedMessages(state, fmt.Errorf("session reset"))
+		}
 		return
+	}
+	if ok && state != nil {
+		state.mu.Lock()
+		if preserveQueued && e.ctx.Err() == nil && len(state.pendingMessages) > 0 {
+			placeholder := &interactiveState{platform: state.platform, replyCtx: state.replyCtx,
+				pendingMessages: state.pendingMessages, eventsNeedResync: true, busySession: state.busySession}
+			state.pendingMessages = nil
+			state.mu.Unlock()
+			e.interactiveStates[sessionKey] = placeholder
+			e.interactiveMu.Unlock()
+			return
+		}
+		state.mu.Unlock()
 	}
 	delete(e.interactiveStates, sessionKey)
 	e.interactiveMu.Unlock()
@@ -5191,6 +5278,17 @@ func (e *Engine) startUnsolicitedReader(state *interactiveState, session *Sessio
 	state.mu.Unlock()
 
 	go e.runUnsolicitedReader(ctx, cancel, done, flushDone, state, agentSession, session, sessions, sessionKey, workspaceDir)
+}
+
+// startIdleUnsolicitedReader hands Events back to the background reader only
+// after the foreground queue is empty. The caller still owns the session lock.
+func (e *Engine) startIdleUnsolicitedReader(state *interactiveState, session *Session, sessions *SessionManager, sessionKey, workspaceDir string) {
+	state.mu.Lock()
+	alive := state.agentSession != nil && state.agentSession.Alive() && !state.stopped && !state.eventsNeedResync
+	state.mu.Unlock()
+	if alive {
+		e.startUnsolicitedReader(state, session, sessions, sessionKey, workspaceDir)
+	}
 }
 
 // runUnsolicitedReader is the goroutine body for the unsolicited event reader.
@@ -7005,7 +7103,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			// Some agents (e.g. Codex) emit EventError for per-turn failures
 			// while keeping the session alive for subsequent turns.
 			if state.agentSession == nil || !state.agentSession.Alive() {
-				e.notifyDroppedQueuedMessages(state, event.Error)
+				e.cleanupInteractiveStateForRestart(sessionKey, state)
 			}
 			return
 		}
@@ -7017,8 +7115,7 @@ channelClosed:
 	state.mu.Lock()
 	state.eventsNeedResync = true
 	state.mu.Unlock()
-	e.notifyDroppedQueuedMessages(state, fmt.Errorf("agent process exited"))
-	e.cleanupInteractiveState(sessionKey, state)
+	e.cleanupInteractiveStateForRestart(sessionKey, state)
 
 	if len(textParts) > 0 {
 		state.mu.Lock()
@@ -7141,7 +7238,7 @@ func (e *Engine) notifyDroppedQueuedMessages(state *interactiveState, reason err
 // queue. It atomically unlocks the session when the queue is empty (while holding
 // state.mu) to close the race window between "queue empty" and "session unlocked".
 // Returns true if the session was unlocked by this call.
-func (e *Engine) drainPendingMessages(state *interactiveState, session *Session, sessions *SessionManager, sessionKey string, lockGen uint64) bool {
+func (e *Engine) drainPendingMessages(state *interactiveState, session *Session, sessions *SessionManager, sessionKey string, lockGen uint64, onIdle ...func()) bool {
 	for {
 		state.mu.Lock()
 		if len(state.pendingMessages) == 0 && state.restartAfterTurn {
@@ -7155,6 +7252,19 @@ func (e *Engine) drainPendingMessages(state *interactiveState, session *Session,
 			continue
 		}
 		if len(state.pendingMessages) == 0 {
+			// Start the background reader while this turn still owns the
+			// session lock. Recheck the queue afterward: a concurrent message
+			// may have arrived while the reader was starting.
+			state.mu.Unlock()
+			if len(onIdle) > 0 && onIdle[0] != nil {
+				onIdle[0]()
+			}
+			state.mu.Lock()
+			if len(state.pendingMessages) > 0 {
+				state.mu.Unlock()
+				e.stopUnsolicitedReader(state)
+				continue
+			}
 			session.Unlock(lockGen)
 			state.mu.Unlock()
 			return true
@@ -7192,9 +7302,17 @@ func (e *Engine) drainPendingMessages(state *interactiveState, session *Session,
 		as := state.agentSession // capture under lock to avoid race with cleanup (mirrors #1436)
 		state.mu.Unlock()
 		if as == nil || !as.Alive() {
-			e.send(queued.platform, queued.replyCtx, fmt.Sprintf(e.i18n.T(MsgError), "agent session ended"))
-			e.notifyDroppedQueuedMessages(state, fmt.Errorf("agent session ended"))
-			return false
+			state.mu.Lock()
+			state.pendingMessages = append([]queuedMessage{queued}, state.pendingMessages...)
+			agent := state.agent
+			workspaceDir := state.workspaceDir
+			state.mu.Unlock()
+			if agent == nil {
+				agent = e.agent
+			}
+			e.cleanupInteractiveStateForRestart(sessionKey, state)
+			e.drainOrphanedQueue(session, sessions, sessionKey, agent, workspaceDir, lockGen)
+			return true
 		}
 
 		drainEvents(as.Events())
@@ -7810,7 +7928,10 @@ func (e *Engine) cmdNew(p Platform, msg *Message, args []string) {
 	}
 
 	slog.Info("cmdNew: cleaning up old session", "session_key", msg.SessionKey)
-	e.cleanupInteractiveState(interactiveKey)
+	e.interactiveMu.Lock()
+	expected := e.interactiveStates[interactiveKey]
+	e.interactiveMu.Unlock()
+	e.cleanupInteractiveState(interactiveKey, expected)
 	slog.Info("cmdNew: cleanup done, creating new session", "session_key", msg.SessionKey)
 
 	// Clear old session's agent session ID so it cannot be resumed
