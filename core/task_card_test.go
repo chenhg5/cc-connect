@@ -598,6 +598,29 @@ func TestTurnCard_TickerStartsWhenCardAlreadyVisible(t *testing.T) {
 	tc.Finish(taskCardDone, "")
 }
 
+// A lazily created card object must not suppress the pre-output loading
+// animation before it is actually visible; otherwise long thinking phases show
+// nothing at all.
+func TestShouldPreStartLoadingWaitsForVisibleCard(t *testing.T) {
+	e := NewEngine("test", &resultAgent{session: newResultAgentSession("ok")}, []Platform{&stubPlatformEngine{n: "test"}}, "", LangChinese)
+	t.Cleanup(e.cancel)
+	p := &taskCardStubPlatform{stubPlatformEngine: stubPlatformEngine{n: "feishu"}}
+	tc := newTurnCard(e, p, "ctx", "k")
+	state := &interactiveState{taskCard: tc, platform: p, replyCtx: "ctx"}
+
+	if !e.shouldPreStartLoading(state, p) {
+		t.Fatal("loading suppressed while the task card is not visible")
+	}
+	tc.render(true)
+	if !tc.Visible() {
+		t.Fatal("card should be visible after render")
+	}
+	if e.shouldPreStartLoading(state, p) {
+		t.Fatal("loading should be suppressed once the card is visible")
+	}
+	tc.Finish(taskCardDone, "")
+}
+
 // An empty queue at turn start must not create the "准备中" card.
 func TestSyncTaskCardQueueEmptyKeepsCardLazy(t *testing.T) {
 	e := NewEngine("test", &resultAgent{session: newResultAgentSession("ok")}, []Platform{&stubPlatformEngine{n: "test"}}, "", LangChinese)

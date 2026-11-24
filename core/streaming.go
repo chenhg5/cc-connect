@@ -443,6 +443,26 @@ func (sp *streamPreview) setStatus(status CardStatus) {
 	}
 }
 
+// discardLoadingPreview removes a loading card that never received real
+// content, so a tool-first turn does not leave a stale spinner next to the
+// task card. It is a no-op once any text has been accumulated or when no
+// preview message exists.
+func (sp *streamPreview) discardLoadingPreview() {
+	sp.mu.Lock()
+	if sp.fullText != "" || sp.previewMsgID == nil {
+		sp.mu.Unlock()
+		return
+	}
+	handle := sp.previewMsgID
+	sp.previewMsgID = nil
+	sp.degraded = true
+	sp.mu.Unlock()
+	if cleaner, ok := sp.platform.(PreviewCleaner); ok {
+		slog.Debug("stream preview: discarding content-less loading card")
+		_ = cleaner.DeletePreviewMessage(sp.ctx, handle)
+	}
+}
+
 // detachPreview clears the preview message handle so that finish() won't
 // delete it. Call this after freeze() when the frozen preview should remain
 // visible as a permanent message (e.g. text before the first tool call).

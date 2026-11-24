@@ -62,6 +62,41 @@ func TestStreamPreview_DisabledPlatformSkipsLoadingAndFinish(t *testing.T) {
 	}
 }
 
+func TestStreamPreview_DiscardLoadingPreview(t *testing.T) {
+	mp := &mockCleanerPlatform{}
+	sp := newStreamPreview(StreamPreviewCfg{Enabled: true}, mp, "ctx", context.Background(), nil)
+	sp.mu.Lock()
+	sp.previewMsgID = "preview-1"
+	sp.mu.Unlock()
+
+	sp.discardLoadingPreview()
+
+	if len(mp.deleted) != 1 || mp.deleted[0] != "preview-1" {
+		t.Fatalf("deleted = %#v, want the loading preview", mp.deleted)
+	}
+	sp.mu.Lock()
+	handle := sp.previewMsgID
+	sp.mu.Unlock()
+	if handle != nil {
+		t.Fatalf("preview handle = %#v, want nil after discard", handle)
+	}
+}
+
+func TestStreamPreview_DiscardLoadingPreviewKeepsContent(t *testing.T) {
+	mp := &mockCleanerPlatform{}
+	sp := newStreamPreview(StreamPreviewCfg{Enabled: true}, mp, "ctx", context.Background(), nil)
+	sp.mu.Lock()
+	sp.previewMsgID = "preview-1"
+	sp.fullText = "real content"
+	sp.mu.Unlock()
+
+	sp.discardLoadingPreview()
+
+	if len(mp.deleted) != 0 {
+		t.Fatalf("deleted = %#v, want no deletion once content exists", mp.deleted)
+	}
+}
+
 func TestStreamPreview_BasicFlow(t *testing.T) {
 	mp := &mockUpdaterPlatform{}
 	cfg := StreamPreviewCfg{

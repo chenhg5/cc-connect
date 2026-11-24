@@ -3945,6 +3945,26 @@ func (e *Engine) agentErrorUserMessage(raw string) string {
 	return e.i18n.T(classifyAgentError(raw).MsgKey)
 }
 
+// shouldPreStartLoading reports whether the pre-output loading animation should
+// run. A task card suppresses it only once the card is actually visible: the
+// card object is created lazily and may not be posted until the first tool
+// call, so an invisible object must not hide the spinner (long thinking phases
+// would otherwise have no feedback at all).
+func (e *Engine) shouldPreStartLoading(state *interactiveState, p Platform) bool {
+	if e.display.CardMode == "rich" {
+		return false
+	}
+	if tc := stateTaskCard(state); tc != nil && tc.Visible() {
+		return false
+	}
+	if style := progressStyleForTarget(p, state.replyCtx); style == progressStyleCompact || style == progressStyleCard {
+		if e.display.ThinkingMessages || e.display.ToolMessages {
+			return false
+		}
+	}
+	return true
+}
+
 func (e *Engine) processInteractiveEvents(state *interactiveState, session *Session, sessions *SessionManager, sessionKey string, msgID string, turnStart time.Time, stopTypingFn func(), sendDone <-chan error, replyCtx any) {
 	if msgID != "" {
 		state.mu.Lock()
@@ -4101,25 +4121,9 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 	state.mu.Unlock()
 
 	// Pre-start a loading animation card (reusing sp's preview stream) to fill
-	// the gap between "message received" and the first real output. Only start
-	// it when sp is the sole content channel:
-	//   - rich card mode (card_mode=rich) drives its own card → skip.
-	//   - compact/card progress style with visible thinking/tool already posts
-	//     a progress card via cp → skip (that card is the "processing" signal).
-	shouldStartLoading := e.display.CardMode != "rich"
-	if stateTaskCard(state) != nil {
-		// The live task card is the progress signal; a second spinner would
-		// just add noise.
-		shouldStartLoading = false
-	}
-	if shouldStartLoading {
-		if style := progressStyleForTarget(state.platform, state.replyCtx); style == progressStyleCompact || style == progressStyleCard {
-			if e.display.ThinkingMessages || e.display.ToolMessages {
-				shouldStartLoading = false
-			}
-		}
-	}
-	if shouldStartLoading {
+	// the gap between "message received" and the first real output. See
+	// shouldPreStartLoading for the suppression rules.
+	if e.shouldPreStartLoading(state, state.platform) {
 		stopLoading = sp.startLoading(func(frame int) string {
 			return loadingSpinnerFrames[frame%len(loadingSpinnerFrames)] + " " + e.i18n.T(MsgLoading)
 		}, loadingFrameInterval)
@@ -4250,6 +4254,12 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			case EventText, EventThinking, EventToolUse, EventToolResult:
 				stopLoading()
 				stopLoading = nil
+				if event.Type == EventToolUse || event.Type == EventToolResult {
+					// A tool-first turn has no text to take over the loading
+					// card; drop the content-less spinner so the task card (or
+					// the tool message) is the only progress signal.
+					sp.discardLoadingPreview()
+				}
 			}
 		}
 
