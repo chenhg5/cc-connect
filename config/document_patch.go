@@ -19,6 +19,7 @@ type documentEdit struct {
 	table    string
 	project  int
 	platform int
+	provider int
 	key      string
 	value    *string
 }
@@ -33,11 +34,11 @@ func documentValue(v any) *string {
 }
 
 func settingEdit(table string, project, platform int, key string, value any) documentEdit {
-	return documentEdit{table: table, project: project, platform: platform, key: key, value: documentValue(value)}
+	return documentEdit{table: table, project: project, platform: platform, provider: -1, key: key, value: documentValue(value)}
 }
 
 func deleteSetting(table string, project, platform int, key string) documentEdit {
-	return documentEdit{table: table, project: project, platform: platform, key: key}
+	return documentEdit{table: table, project: project, platform: platform, provider: -1, key: key}
 }
 
 // saveSettingsDocument is called under configMu. Failed source or semantic
@@ -46,14 +47,20 @@ func saveSettingsDocument(original []byte, expected *Config, edits []documentEdi
 	if len(edits) == 0 {
 		return nil
 	}
-	patched := string(original)
-	var patchErr error
-	for _, edit := range edits {
-		patched, patchErr = patchDocument(patched, edit)
-		if patchErr != nil {
-			break
+	return saveDocumentPatch(original, expected, func(raw string) (string, error) {
+		var err error
+		for _, edit := range edits {
+			raw, err = patchDocument(raw, edit)
+			if err != nil {
+				return "", err
+			}
 		}
-	}
+		return raw, nil
+	})
+}
+
+func saveDocumentPatch(original []byte, expected *Config, patch func(string) (string, error)) error {
+	patched, patchErr := patch(string(original))
 	if patchErr == nil {
 		var actual Config
 		if err := toml.Unmarshal([]byte(patched), &actual); err != nil {
@@ -140,6 +147,7 @@ func writeAtomicFile(path string, data []byte, mode os.FileMode) (err error) {
 type documentEntry struct {
 	table              string
 	project, platform  int
+	provider           int
 	key                string
 	lineStart, valueAt int
 	valueEnd, lineEnd  int
@@ -148,6 +156,7 @@ type documentEntry struct {
 type documentTable struct {
 	name              string
 	project, platform int
+	provider          int
 	start, end        int
 }
 
@@ -159,7 +168,7 @@ func patchDocument(raw string, edit documentEdit) (string, error) {
 	var found *documentEntry
 	for i := range entries {
 		e := &entries[i]
-		if e.table == edit.table && e.project == edit.project && e.platform == edit.platform && e.key == edit.key {
+		if e.table == edit.table && e.project == edit.project && e.platform == edit.platform && e.provider == edit.provider && e.key == edit.key {
 			if found != nil {
 				return "", fmt.Errorf("ambiguous key %s in [%s]", edit.key, edit.table)
 			}
@@ -181,19 +190,26 @@ func patchDocument(raw string, edit documentEdit) (string, error) {
 	var target *documentTable
 	for i := range tables {
 		t := &tables[i]
-		if t.name == edit.table && t.project == edit.project && t.platform == edit.platform {
+		if t.name == edit.table && t.project == edit.project && t.platform == edit.platform && t.provider == edit.provider {
 			if target != nil {
 				return "", fmt.Errorf("ambiguous table [%s]", edit.table)
 			}
 			target = t
 		}
 	}
-	line := edit.key + " = " + *edit.value + documentNewline(raw)
+	line := documentKey(edit.key) + " = " + *edit.value + documentNewline(raw)
 	if target != nil {
 		return insertDocument(raw, target.end, line), nil
 	}
 	if edit.table == "" {
 		return insertDocument(raw, 0, line), nil
+	}
+	if edit.provider >= 0 {
+		_, ownerEnd, err := providerDocumentSpan(tables, len(raw), edit.table, edit.project, edit.provider)
+		if err != nil {
+			return "", err
+		}
+		return insertDocument(raw, ownerEnd, documentNewline(raw)+"["+edit.table+"]"+documentNewline(raw)+line), nil
 	}
 	// A missing nested table belongs to the selected project/platform. Insert
 	// it at the end of its owning array-table block, before the next sibling.
@@ -205,6 +221,45 @@ func patchDocument(raw string, edit documentEdit) (string, error) {
 		return insertDocument(raw, owner, documentNewline(raw)+"["+edit.table+"]"+documentNewline(raw)+line), nil
 	}
 	return insertDocument(raw, len(raw), documentNewline(raw)+"["+edit.table+"]"+documentNewline(raw)+line), nil
+}
+
+func documentKey(key string) string {
+	for _, c := range key {
+		valid := c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9' || c == '_' || c == '-'
+		if !valid {
+			return strconv.Quote(key)
+		}
+	}
+	return key
+}
+
+func providerDocumentSpan(tables []documentTable, total int, table string, project, provider int) (int, int, error) {
+	base := "providers"
+	if strings.HasPrefix(table, "projects.agent.providers") {
+		base = "projects.agent.providers"
+	}
+	start := -1
+	for _, t := range tables {
+		if t.name == base && t.project == project && t.provider == provider {
+			start = t.start
+			break
+		}
+	}
+	if start < 0 {
+		return 0, 0, fmt.Errorf("cannot locate provider %d in %s", provider, base)
+	}
+	end := total
+	for _, t := range tables {
+		if t.start <= start {
+			continue
+		}
+		belongs := t.name == base || strings.HasPrefix(t.name, base+".")
+		if t.project != project || t.provider != provider || !belongs {
+			end = t.start
+			break
+		}
+	}
+	return start, end, nil
 }
 
 func documentOwnerEnd(tables []documentTable, total, project, platform int) int {
@@ -262,9 +317,10 @@ func sameTOMLValue(a, b string) bool {
 // into the backup + legacy save path.
 func scanConfigDocument(raw string) ([]documentEntry, []documentTable, error) {
 	entries := make([]documentEntry, 0)
-	tables := []documentTable{{name: "", project: -1, platform: -1, start: 0, end: len(raw)}}
-	table, project, platform := "", -1, -1
+	tables := []documentTable{{name: "", project: -1, platform: -1, provider: -1, start: 0, end: len(raw)}}
+	table, project, platform, provider := "", -1, -1, -1
 	projectCount := -1
+	globalProviderCount, inlineProviderCount := -1, -1
 	for at := 0; at < len(raw); {
 		lineEnd := strings.IndexByte(raw[at:], '\n')
 		if lineEnd < 0 {
@@ -286,20 +342,38 @@ func scanConfigDocument(raw string) ([]documentEntry, []documentTable, error) {
 			if name == "projects" && array {
 				projectCount++
 				project = projectCount
-				platform = -1
+				platform, provider, inlineProviderCount = -1, -1, -1
 			} else if name == "projects.platforms" && array {
 				project = projectCount
 				platform++
+				provider = -1
 			} else if strings.HasPrefix(name, "projects.platforms.") {
 				project = projectCount
-			} else if strings.HasPrefix(name, "projects.") {
+				provider = -1
+			} else if name == "projects.agent.providers" && array {
 				project = projectCount
 				platform = -1
-			} else if name != "projects" {
+				inlineProviderCount++
+				provider = inlineProviderCount
+			} else if strings.HasPrefix(name, "projects.agent.providers.") {
+				project = projectCount
+				platform = -1
+				provider = inlineProviderCount
+			} else if strings.HasPrefix(name, "projects.") {
+				project = projectCount
+				platform, provider = -1, -1
+			} else if name == "providers" && array {
 				project, platform = -1, -1
+				globalProviderCount++
+				provider = globalProviderCount
+			} else if strings.HasPrefix(name, "providers.") {
+				project, platform = -1, -1
+				provider = globalProviderCount
+			} else if name != "projects" {
+				project, platform, provider = -1, -1, -1
 			}
 			table = name
-			tables = append(tables, documentTable{name: table, project: project, platform: platform, start: at, end: len(raw)})
+			tables = append(tables, documentTable{name: table, project: project, platform: platform, provider: provider, start: at, end: len(raw)})
 			at = lineEnd
 			continue
 		}
@@ -315,7 +389,7 @@ func scanConfigDocument(raw string) ([]documentEntry, []documentTable, error) {
 		if err != nil {
 			return nil, nil, err
 		}
-		entries = append(entries, documentEntry{table: table, project: project, platform: platform, key: key, lineStart: at, valueAt: valueAt, valueEnd: valueEnd, lineEnd: assignmentEnd})
+		entries = append(entries, documentEntry{table: table, project: project, platform: platform, provider: provider, key: key, lineStart: at, valueAt: valueAt, valueEnd: valueEnd, lineEnd: assignmentEnd})
 		at = assignmentEnd
 	}
 	return entries, tables, nil
