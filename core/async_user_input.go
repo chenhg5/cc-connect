@@ -68,7 +68,9 @@ func (e *Engine) handleAsyncUserInput(p Platform, msg *Message, content, key str
 		pending.current++
 		next := pending.current
 		state.mu.Unlock()
-		e.reply(p, msg.ReplyCtx, fmt.Sprintf("✅ %s: **%s**", question.Question, answer))
+		if !msg.CardAnswerRendered {
+			e.reply(p, msg.ReplyCtx, fmt.Sprintf("✅ %s: **%s**", question.Question, answer))
+		}
 		e.sendAskQuestionPrompt(p, msg.ReplyCtx, pending.questions, next, pending.id)
 		return content, true
 	}
@@ -98,7 +100,9 @@ func (e *Engine) handleAsyncUserInput(p Platform, msg *Message, content, key str
 		e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgError), err))
 		return content, true
 	}
-	e.reply(p, msg.ReplyCtx, fmt.Sprintf("✅ %s: **%s**", question.Question, answer))
+	if !msg.CardAnswerRendered {
+		e.reply(p, msg.ReplyCtx, fmt.Sprintf("✅ %s: **%s**", question.Question, answer))
+	}
 	if steered {
 		session.AddHistory("user", prompt)
 		sessions.Save()

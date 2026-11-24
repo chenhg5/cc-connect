@@ -25,11 +25,13 @@ const ExplicitActivationTTL = 7 * 24 * time.Hour
 
 // Session tracks one conversation between a user and the agent.
 type Session struct {
-	ID                  string   `json:"id"`
-	Name                string   `json:"name"`
-	AgentSessionID      string   `json:"agent_session_id"`
-	AgentType           string   `json:"agent_type,omitempty"`
-	PastAgentSessionIDs []string `json:"past_agent_session_ids,omitempty"`
+	ID                           string   `json:"id"`
+	Name                         string   `json:"name"`
+	AgentSessionID               string   `json:"agent_session_id"`
+	AgentType                    string   `json:"agent_type,omitempty"`
+	PastAgentSessionIDs          []string `json:"past_agent_session_ids,omitempty"`
+	HistoryBootstrappedAgentType string   `json:"history_bootstrapped_agent_type,omitempty"`
+	HistoryBootstrapPending      bool     `json:"history_bootstrap_pending,omitempty"`
 	// ActiveProvider is the agent provider name that was active when this
 	// session last took a turn. It is restored before --resume so that a
 	// cc-connect process restart does not silently drop a user's
@@ -171,6 +173,18 @@ func (s *Session) AddHistory(role, content string) {
 	})
 }
 
+// SeedHistoryIfEmpty imports a backend transcript without duplicating history
+// already recorded by the bridge or by another concurrent switch.
+func (s *Session) SeedHistoryIfEmpty(entries []HistoryEntry) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if len(s.History) != 0 || len(entries) == 0 {
+		return false
+	}
+	s.History = append([]HistoryEntry(nil), entries...)
+	return true
+}
+
 // recordPastAgentSessionID saves the current AgentSessionID to PastAgentSessionIDs
 // so it remains visible in KnownAgentSessionIDs after the ID is replaced or cleared.
 // Must be called with s.mu held.
@@ -195,6 +209,10 @@ func (s *Session) SetAgentInfo(agentSessionID, agentType, name string) {
 	defer s.mu.Unlock()
 	if s.AgentSessionID != agentSessionID {
 		s.recordPastAgentSessionID()
+	}
+	if s.AgentType != "" && s.AgentType != agentType {
+		s.HistoryBootstrappedAgentType = ""
+		s.HistoryBootstrapPending = true
 	}
 	s.AgentSessionID = agentSessionID
 	s.AgentType = agentType
@@ -303,6 +321,10 @@ func (s *Session) SetAgentSessionID(id, agentType string) {
 	if s.AgentSessionID != id {
 		s.recordPastAgentSessionID()
 	}
+	if s.AgentType != "" && s.AgentType != agentType {
+		s.HistoryBootstrappedAgentType = ""
+		s.HistoryBootstrapPending = true
+	}
 	s.AgentSessionID = id
 	s.AgentType = agentType
 }
@@ -318,6 +340,10 @@ func (s *Session) CompareAndSetAgentSessionID(id, agentType string) bool {
 	defer s.mu.Unlock()
 	if s.AgentSessionID != "" && s.AgentSessionID != ContinueSession {
 		return false
+	}
+	if s.AgentType != "" && s.AgentType != agentType {
+		s.HistoryBootstrappedAgentType = ""
+		s.HistoryBootstrapPending = true
 	}
 	s.AgentSessionID = id
 	s.AgentType = agentType
@@ -336,6 +362,7 @@ func (s *Session) ClearHistory() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.History = nil
+	s.HistoryBootstrapPending = false
 }
 
 // HistoryLen returns the current number of history entries.
@@ -358,10 +385,37 @@ func (s *Session) GetHistory(n int) []HistoryEntry {
 	return out
 }
 
-// UserMeta stores human-readable display info for a session key.
+// HistoryForAgentSwitch returns earlier entries when this session has moved
+// from another agent type and the new agent has not received them yet. The
+// current user message is already the final history entry at this call site.
+func (s *Session) HistoryForAgentSwitch(agentType string) []HistoryEntry {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if agentType == "" || !s.HistoryBootstrapPending || s.HistoryBootstrappedAgentType == agentType {
+		return nil
+	}
+	if len(s.History) < 2 {
+		s.HistoryBootstrapPending = false
+		s.HistoryBootstrappedAgentType = agentType
+		return nil
+	}
+	return append([]HistoryEntry(nil), s.History[:len(s.History)-1]...)
+}
+
+func (s *Session) MarkHistoryBootstrapped(agentType string) {
+	s.mu.Lock()
+	s.HistoryBootstrappedAgentType = agentType
+	s.HistoryBootstrapPending = false
+	s.mu.Unlock()
+}
+
+// UserMeta stores the identity and display info for a session key.
 type UserMeta struct {
+	UserID   string `json:"user_id,omitempty"`
 	UserName string `json:"user_name,omitempty"`
+	ChatID   string `json:"chat_id,omitempty"`
 	ChatName string `json:"chat_name,omitempty"`
+	ChatType string `json:"chat_type,omitempty"`
 }
 
 // snapshotVersion tracks the schema version so we can detect data saved by
@@ -573,7 +627,12 @@ func (sm *SessionManager) GetSessionName(agentSessionID string) string {
 // UpdateUserMeta updates the human-readable metadata for a session key.
 // Only non-empty fields are applied (merge behavior).
 func (sm *SessionManager) UpdateUserMeta(sessionKey, userName, chatName string) {
-	if userName == "" && chatName == "" {
+	sm.UpdateUserIdentity(sessionKey, UserMeta{UserName: userName, ChatName: chatName})
+}
+
+// UpdateUserIdentity merges non-empty identity fields from an incoming message.
+func (sm *SessionManager) UpdateUserIdentity(sessionKey string, incoming UserMeta) {
+	if incoming == (UserMeta{}) {
 		return
 	}
 	sm.mu.Lock()
@@ -583,11 +642,20 @@ func (sm *SessionManager) UpdateUserMeta(sessionKey, userName, chatName string) 
 		meta = &UserMeta{}
 		sm.userMeta[sessionKey] = meta
 	}
-	if userName != "" {
-		meta.UserName = userName
+	if incoming.UserID != "" {
+		meta.UserID = incoming.UserID
 	}
-	if chatName != "" {
-		meta.ChatName = chatName
+	if incoming.UserName != "" {
+		meta.UserName = incoming.UserName
+	}
+	if incoming.ChatID != "" {
+		meta.ChatID = incoming.ChatID
+	}
+	if incoming.ChatName != "" {
+		meta.ChatName = incoming.ChatName
+	}
+	if incoming.ChatType != "" {
+		meta.ChatType = incoming.ChatType
 	}
 }
 
@@ -779,15 +847,17 @@ func (sm *SessionManager) saveLocked() {
 			s.AgentSessionID = ""
 		}
 		snapSessions[id] = &Session{
-			ID:                  s.ID,
-			Name:                s.Name,
-			AgentSessionID:      agentSID,
-			AgentType:           s.AgentType,
-			PastAgentSessionIDs: append([]string(nil), s.PastAgentSessionIDs...),
-			History:             append([]HistoryEntry(nil), s.History...),
-			CreatedAt:           s.CreatedAt,
-			UpdatedAt:           s.UpdatedAt,
-			LastUserActivity:    s.LastUserActivity,
+			ID:                           s.ID,
+			Name:                         s.Name,
+			AgentSessionID:               agentSID,
+			AgentType:                    s.AgentType,
+			PastAgentSessionIDs:          append([]string(nil), s.PastAgentSessionIDs...),
+			HistoryBootstrappedAgentType: s.HistoryBootstrappedAgentType,
+			HistoryBootstrapPending:      s.HistoryBootstrapPending,
+			History:                      append([]HistoryEntry(nil), s.History...),
+			CreatedAt:                    s.CreatedAt,
+			UpdatedAt:                    s.UpdatedAt,
+			LastUserActivity:             s.LastUserActivity,
 			// #1731: explicit-activation timestamp must survive a process
 			// restart; otherwise a /switch followed by a crash would lose the
 			// exemption and the next message after restart would be rotated.
@@ -918,6 +988,8 @@ func (sm *SessionManager) InvalidateForAgent(agentType string) {
 			s.recordPastAgentSessionID()
 			s.AgentSessionID = ""
 			s.AgentType = agentType
+			s.HistoryBootstrappedAgentType = ""
+			s.HistoryBootstrapPending = true
 			invalidated++
 		}
 		s.mu.Unlock()

@@ -28,20 +28,21 @@ import (
 // In "auto" mode, permission requests are auto-approved internally
 // (avoiding --dangerously-skip-permissions which fails under root).
 type claudeSession struct {
-	cmd             *exec.Cmd
-	stdin           io.WriteCloser
-	stdinMu         sync.Mutex
-	events          chan core.Event
-	sessionID       atomic.Value // stores string
-	permissionMode  atomic.Value // stores string
-	autoApprove     atomic.Bool
-	acceptEditsOnly atomic.Bool
-	dontAsk         atomic.Bool
-	workDir         string
-	ctx             context.Context
-	cancel          context.CancelFunc
-	done            chan struct{}
-	alive           atomic.Bool
+	cmd              *exec.Cmd
+	stdin            io.WriteCloser
+	stdinMu          sync.Mutex
+	events           chan core.Event
+	sessionID        atomic.Value // stores string
+	permissionMode   atomic.Value // stores string
+	autoApprove      atomic.Bool
+	acceptEditsOnly  atomic.Bool
+	dontAsk          atomic.Bool
+	workDir          string
+	ctx              context.Context
+	cancel           context.CancelFunc
+	done             chan struct{}
+	alive            atomic.Bool
+	toolResultMaxLen int
 
 	// activeModel stores the model id reported by the CLI's init event (e.g.
 	// "claude-opus-4-7[1m]"). It may be empty if the init event hasn't
@@ -111,7 +112,32 @@ type claudeSession struct {
 	// Stop hook timeout. The wait ends as soon as the process exits,
 	// so typical shutdowns take seconds, not the full timeout.
 	gracefulStopTimeout time.Duration
-	ccHooks             *ccPermissionHookRunner // Claude Code PermissionRequest hook runner
+
+	// turnActive is true between a successful Send and the result event that
+	// terminates the turn. CancelTurn uses it to tell "there is a turn to
+	// interrupt" from "the session is already idle" — an idle session must not
+	// pay the cancel-confirmation timeout, because no result event is coming
+	// and there is nothing to interrupt.
+	turnActive atomic.Bool
+
+	// cancelMu guards cancelWaiters. CancelTurn registers a waiter BEFORE
+	// writing the interrupt request, because the CLI can emit the terminating
+	// result event in the same millisecond as the control_response ack; a
+	// waiter installed after the write would miss it and time out on a turn
+	// that actually stopped. The terminating result belongs to the turn, not
+	// to one caller, so concurrent cancels all register here and handleResult
+	// wakes every one of them.
+	cancelMu      sync.Mutex
+	cancelWaiters map[chan struct{}]struct{}
+
+	// cancelConfirmTimeout bounds how long CancelTurn waits for the CLI to
+	// confirm the interrupted turn actually terminated. On expiry CancelTurn
+	// returns an error and the engine falls back to Close() (stdin close →
+	// SIGTERM → SIGKILL), so an interrupt the CLI silently ignored still
+	// results in a stopped agent.
+	cancelConfirmTimeout time.Duration
+
+	ccHooks *ccPermissionHookRunner // Claude Code PermissionRequest hook runner
 
 	// startupWarning holds a one-time message to surface to the IM user at
 	// session start (e.g. when a permission mode was silently downgraded).
@@ -268,8 +294,12 @@ func buildAppendSystemPrompt(agentPrompt, platformPrompt, userAppend string) str
 	return strings.Join(parts, "\n")
 }
 
-func newClaudeSession(ctx context.Context, workDir, cliBin string, cliExtraArgs []string, cmdArgsFlag string, model, effort, sessionID, mode, systemPrompt, appendSystemPrompt string, allowedTools, disallowedTools []string, pluginDirs []string, extraEnv []string, platformPrompt string, disableVerbose bool, spawnOpts core.SpawnOptions, maxContextTokens int, ctxWindowTokens int, ccDataDir string, lang core.Language) (*claudeSession, error) {
+func newClaudeSession(ctx context.Context, workDir, cliBin string, cliExtraArgs []string, cmdArgsFlag string, model, effort, sessionID, mode, systemPrompt, appendSystemPrompt string, allowedTools, disallowedTools []string, pluginDirs []string, extraEnv []string, platformPrompt string, spawnOpts core.SpawnOptions, maxContextTokens int, ctxWindowTokens int, ccDataDir string, lang core.Language, toolResultMaxLen ...int) (*claudeSession, error) {
 	sessionCtx, cancel := context.WithCancel(ctx)
+	resultLimit := defaultToolResultMaxLen
+	if len(toolResultMaxLen) > 0 && toolResultMaxLen[0] > 0 {
+		resultLimit = toolResultMaxLen[0]
+	}
 
 	// Claude Code rejects bypassPermissions when running as root.
 	// Downgrade to "auto" which auto-approves internally in cc-connect.
@@ -295,9 +325,7 @@ func newClaudeSession(ctx context.Context, workDir, cliBin string, cliExtraArgs 
 		"--output-format", "stream-json",
 		"--input-format", "stream-json",
 		"--permission-prompt-tool", "stdio",
-	}
-	if !disableVerbose {
-		innerArgs = append(innerArgs, "--verbose")
+		"--verbose",
 	}
 
 	if mode != "" && mode != "default" {
@@ -531,19 +559,21 @@ func newClaudeSession(ctx context.Context, workDir, cliBin string, cliExtraArgs 
 	}
 
 	cs := &claudeSession{
-		cmd:                 cmd,
-		stdin:               stdin,
-		events:              make(chan core.Event, 64),
-		workDir:             workDir,
-		ctx:                 sessionCtx,
-		cancel:              cancel,
-		done:                make(chan struct{}),
-		gracefulStopTimeout: defaultGracefulStopTimeout,
-		ccHooks:             newCCPermissionHookRunner(workDir),
-		startupWarning:      rootDowngradeWarning,
-		promptFilePath:      cleanupPromptPath,
-		ctxWindowOverride:   ctxWindowTokens,
-		configuredEffort:    effort,
+		cmd:                  cmd,
+		stdin:                stdin,
+		events:               make(chan core.Event, 64),
+		workDir:              workDir,
+		ctx:                  sessionCtx,
+		cancel:               cancel,
+		done:                 make(chan struct{}),
+		gracefulStopTimeout:  defaultGracefulStopTimeout,
+		cancelConfirmTimeout: defaultCancelConfirmTimeout,
+		ccHooks:              newCCPermissionHookRunner(workDir),
+		startupWarning:       rootDowngradeWarning,
+		promptFilePath:       cleanupPromptPath,
+		ctxWindowOverride:    ctxWindowTokens,
+		configuredEffort:     effort,
+		toolResultMaxLen:     resultLimit,
 	}
 	cs.setPermissionMode(mode)
 	cs.sessionID.Store(sessionID)
@@ -604,6 +634,9 @@ func (cs *claudeSession) finishReadLoop(waitErrCh <-chan error, stderrBuf *bytes
 	err := <-waitErrCh
 
 	cs.alive.Store(false)
+	// A dead process has no active turn; clear the flag so a later /stop
+	// cannot take the idle fast path against a stale true.
+	cs.turnActive.Store(false)
 	if err != nil {
 		stderrMsg := ""
 		if stderrBuf != nil {
@@ -1203,7 +1236,7 @@ func (cs *claudeSession) handleUser(raw map[string]any) {
 			}
 			evt := core.Event{
 				Type:         core.EventToolResult,
-				ToolResult:   truncateStr(strings.TrimSpace(result), 500),
+				ToolResult:   truncateToolResult(strings.TrimSpace(result), cs.toolResultMaxLen),
 				ToolExitCode: &code,
 				ToolSuccess:  &success,
 			}
@@ -1250,6 +1283,15 @@ func (cs *claudeSession) handleResult(raw map[string]any) {
 	isCompaction := isCompactionResult(raw)
 	if isCompaction {
 		slog.Info("claudeSession: mid-turn compaction event; continuing turn", "subtype", resultSubtype(raw))
+	} else {
+		// A non-compaction result terminates the turn, whatever its subtype.
+		// `error_during_execution` is what the CLI emits for a turn ended by
+		// our own interrupt; `success` is a turn that completed on its own.
+		// Either way the turn is over, so release anything waiting on that fact.
+		// Signalled before the cs.events send below, which can block on a slow
+		// consumer — a blocked consumer must not delay the interrupt ack.
+		cs.turnActive.Store(false)
+		cs.signalTurnTerminated()
 	}
 
 	// Exact context size, in order of preference:
@@ -1555,6 +1597,13 @@ func (cs *claudeSession) writeJSON(v any) error {
 	if _, err := cs.stdin.Write(append(data, '\n')); err != nil {
 		return fmt.Errorf("write stdin: %w", err)
 	}
+	// A successfully delivered user message opens a turn. Recorded here rather
+	// than in Send so both Send paths (plain text and attachment) are covered,
+	// and so a failed write never marks a turn that the CLI will never see.
+	// handleResult clears it when the turn terminates.
+	if m, ok := v.(map[string]any); ok && m["type"] == "user" {
+		cs.turnActive.Store(true)
+	}
 	return nil
 }
 
@@ -1736,6 +1785,161 @@ func (cs *claudeSession) GetContextUsage() *core.ContextUsage {
 func (cs *claudeSession) Alive() bool {
 	return cs.alive.Load()
 }
+
+// CancelTurn implements core.AgentSessionCanceller. Asks Claude Code
+// to interrupt the current generation over the existing stream-json
+// stdin channel — `{"type":"control_request","request":{"subtype":
+// "interrupt"}, "request_id": "..."}`. The CLI replies with a
+// `control_response`, emits a `result` event that terminates the turn
+// (subtype="error_during_execution"), and returns to its idle-waiting
+// state with the same Claude session ID. The subprocess stays alive
+// and stdin stays open so the next user message can be delivered
+// without a re-spawn — matching TUI Esc/Ctrl+C semantics through the
+// stream-json wire protocol instead of an in-process AbortController
+// (TUI-only) or an OS signal (which closes stdin in stream-json mode
+// and is unreliable on Windows).
+//
+// Verified empirically against Claude Code v2.x in --input-format
+// stream-json mode; see /tmp/cc-cancel-verify/v7 in the local fork.
+//
+// 🔴 2026-10-01 加了确认步骤（原实现是 fire-and-forget，PR #1765 评审时
+// 被标为 P3 "no protocol handshake to detect this"）。
+//
+// 症状：写完 interrupt 就返回 nil，飞书秒回「执行已停止」，但 bot 还在继续
+// 干活。生产日志（2026-10-01，9 次 interrupt）显示**只有约一半真的停了**：
+// 停的那几次 interrupt 之后 5~20s 无事件；没停的那几次在 0.00~1.42s 后
+// 事件流原样继续（system → assistant → user …），全程没有 result 事件。
+//
+// 为什么不能只看 control_response：它只表示「请求收到了、队列是空的」
+// （`still_queued: []`），**不表示这一轮结束了**。没停的那些次里
+// control_response 照样是 subtype=success。
+//
+// 真正的终止信号是随后的 result 事件。对照实验（CLI 2.1.245，stream-json）：
+// interrupt 打在正在生成的 turn 上，同一毫秒内就收到
+// `result / error_during_execution`，进程保持存活 —— 正是这里想要的语义。
+// 所以协议本身没问题，缺的是「等它，并兜底」。
+//
+// 现在：装 waiter → 写 interrupt → 等 result。
+//   - 收到 result          → 真的停了，返回 nil，session 留着复用
+//   - 超时 / 进程退出       → 返回 error，engine 走 normalCleanup → Close()
+//     （stdin close → SIGTERM → SIGKILL）
+//
+// 空闲 session（turnActive=false）直接返回 nil：没有 turn 可中断，也不会有
+// result 事件，不该白白等满超时。
+func (cs *claudeSession) CancelTurn() error {
+	cs.stdinMu.Lock()
+	stdinClosed := cs.stdin == nil
+	cs.stdinMu.Unlock()
+	if stdinClosed {
+		return fmt.Errorf("claudecode: stdin closed, session torn down")
+	}
+	if !cs.alive.Load() {
+		return fmt.Errorf("claudecode: process not alive")
+	}
+	// Nothing is running: no result event is coming, so waiting would just add
+	// the timeout to every idle /stop. The session is already in the state the
+	// caller asked for.
+	if !cs.turnActive.Load() {
+		return nil
+	}
+
+	timeout := cs.cancelConfirmTimeout
+	if timeout <= 0 {
+		timeout = defaultCancelConfirmTimeout
+	}
+
+	// Install the waiter BEFORE the write. The CLI can emit the terminating
+	// result in the same millisecond as the control_response ack, so a waiter
+	// installed after writeJSON returns could miss it and time out on a turn
+	// that actually stopped.
+	wait, waiting := cs.beginCancelWait()
+	if !waiting {
+		// The turn ended between the check above and the registration; no
+		// result is coming, so there is nothing left to wait for.
+		return nil
+	}
+	defer cs.endCancelWait(wait)
+
+	requestID := fmt.Sprintf("interrupt-%d", time.Now().UnixNano())
+	if err := cs.writeJSON(map[string]any{
+		"type":       "control_request",
+		"request_id": requestID,
+		"request":    map[string]any{"subtype": "interrupt"},
+	}); err != nil {
+		return fmt.Errorf("claudecode: write interrupt: %w", err)
+	}
+
+	select {
+	case <-wait:
+		slog.Info("claudeSession: interrupt confirmed, turn terminated",
+			"request_id", requestID)
+		return nil
+	case <-cs.done:
+		return fmt.Errorf("claudecode: process exited while cancelling turn")
+	case <-time.After(timeout):
+		return fmt.Errorf("claudecode: no result event within %s of interrupt "+
+			"(request_id=%s) — the turn is probably still running; "+
+			"falling back to Close()", timeout, requestID)
+	}
+}
+
+// beginCancelWait registers a waiter for the current turn's terminating result
+// and returns it. The confirmation is a property of the turn, not of the
+// caller, so concurrent cancels all share it: every registered waiter is woken
+// when the result arrives. A caller that stops waiting early removes its own
+// waiter with endCancelWait.
+//
+// The turnActive check and the registration happen under cancelMu, which
+// signalTurnTerminated also takes. Either the waiter is registered before the
+// terminating result clears the set and is woken, or the turn already ended and
+// the caller is told there is nothing to wait for. A separate check outside the
+// lock would leave a window where the result arrives between the check and the
+// registration, and the caller would wait out the full timeout for an event
+// that has already happened.
+func (cs *claudeSession) beginCancelWait() (chan struct{}, bool) {
+	cs.cancelMu.Lock()
+	defer cs.cancelMu.Unlock()
+	if !cs.turnActive.Load() {
+		return nil, false
+	}
+	ch := make(chan struct{})
+	if cs.cancelWaiters == nil {
+		cs.cancelWaiters = make(map[chan struct{}]struct{})
+	}
+	cs.cancelWaiters[ch] = struct{}{}
+	return ch, true
+}
+
+// endCancelWait removes this caller's waiter, and only this caller's: with
+// concurrent cancels the set holds every caller's waiter.
+func (cs *claudeSession) endCancelWait(ch chan struct{}) {
+	cs.cancelMu.Lock()
+	delete(cs.cancelWaiters, ch)
+	cs.cancelMu.Unlock()
+}
+
+// signalTurnTerminated wakes every caller waiting on the turn. Safe to call
+// with no waiters registered.
+func (cs *claudeSession) signalTurnTerminated() {
+	cs.cancelMu.Lock()
+	waiters := cs.cancelWaiters
+	cs.cancelWaiters = nil
+	cs.cancelMu.Unlock()
+	for ch := range waiters {
+		close(ch)
+	}
+}
+
+// defaultCancelConfirmTimeout bounds how long CancelTurn waits for the CLI to
+// confirm the interrupted turn actually ended, before handing off to Close().
+//
+// The CLI emits the terminating result in the same millisecond as the
+// control_response ack when it is able to interrupt at all (measured on
+// 2.1.245), so the wait is only ever paid in the failure case. 5s matches
+// defaultGracefulStopTimeout so the worst-case /stop cost — confirm timeout
+// plus the Close() escalation ladder — stays in the same ballpark as the
+// pre-#1765 behaviour, instead of stacking two long waits.
+const defaultCancelConfirmTimeout = 5 * time.Second
 
 // defaultGracefulStopTimeout 是 Close() Phase 1「关掉 stdin、等它自己干净退出」
 // 的等待上限。

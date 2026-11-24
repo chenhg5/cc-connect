@@ -18,6 +18,7 @@ Complete guide to using cc-connect features.
 - [Voice Messages (STT)](#voice-messages-speech-to-text)
 - [Voice Reply (TTS)](#voice-reply-text-to-speech)
 - [Image and File Send-Back](#image-and-file-send-back)
+- [Lifecycle Hooks](#lifecycle-hooks)
 - [Scheduled Tasks (Cron)](#scheduled-tasks-cron)
 - [Shell Configuration](#shell-configuration)
 - [Multi-Bot Relay](#multi-bot-relay)
@@ -56,6 +57,8 @@ During a session, the agent may request tool permissions. Reply **allow** / **de
 Use `/ps` (or `/btw`) to add instructions while a task is running. An idle session rejects the command. The delivery confirmation means the bridge sent the request, not that the agent has finished processing it.
 
 With Pi, enable `rpc = true` for native steering: the supplement is queued for the next model call, after the current assistant turn's tool calls. If Pi has already finished while the bridge is still delivering its reply, the supplement starts a follow-up turn. Pi's default JSON mode keeps its existing one-shot sending behavior; it cannot inject into an already running process.
+
+Codex `/ps` steering requires an app-server that implements `turn/steer` (codex-cli 0.166.0 or newer). Older CLIs return a method-not-supported error; upgrade the Codex CLI to use this feature.
 
 cc-connect rotates to a fresh session automatically after long inactivity:
 
@@ -270,6 +273,13 @@ model = "MiniMax-M3.1-Flash"
 name = "bedrock"
 env = { CLAUDE_CODE_USE_BEDROCK = "1", AWS_PROFILE = "bedrock" }
 ```
+
+When exactly one provider applies to the agent, cc-connect selects it automatically.
+If several apply, set `provider = "name"` under `[projects.agent.options]` to choose one;
+otherwise none is selected. Claude Code environment values are applied in this order:
+`options.env`, active provider `env`, then session env (later values win).
+If requests still reach a different endpoint, check Claude Code's `settings.json`
+for conflicting environment values and remove them there.
 
 ### CLI Commands
 
@@ -898,6 +908,27 @@ Notes:
 - The target platform also enforces its own file-size/type limit at delivery; the effective per-attachment ceiling is the smaller of that limit and `max_attachment_size_mb` (a file that passes cc-connect may still be rejected by the platform).
 
 ---
+
+## Lifecycle Hooks
+
+`[[hooks]]` rules run a shell command or POST to an HTTP endpoint when a lifecycle event fires. The event names are `message.received`, `message.sent`, `session.started`, `session.ended`, `turn.cancelled`, `cron.triggered`, `timer.triggered`, `permission.requested`, `error`, plus the wildcard `*`.
+
+### `/stop` and `turn.cancelled`
+
+For agents that support graceful cancellation (Claude Code and ACP-based agents), `/stop` interrupts the current turn but keeps the agent process and the conversation alive, so `/compress`, `/clear`, and `/resume` keep working afterwards. A stop is therefore no longer necessarily a session end.
+
+`stop_hook_event` selects which event `/stop` fires:
+
+```toml
+# Default: keeps the historical behaviour, existing rules keep firing.
+stop_hook_event = "session.ended"
+
+# Opt in: fire the precise event when the turn was cancelled and the
+# session was kept alive.
+stop_hook_event = "turn.cancelled"
+```
+
+In both modes `session.ended` is fired when the session really is torn down: the agent has no graceful cancel, or cancellation failed and the process was killed. A `/stop` fires exactly one of the two events, so rules matching `event = "*"` still receive one event per stop.
 
 ## Scheduled Tasks (Cron)
 

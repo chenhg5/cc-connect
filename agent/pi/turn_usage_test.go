@@ -21,12 +21,14 @@ func TestTurnResultCarriesTheTurnsTokenUsage(t *testing.T) {
 	s := newTestSession(true) // rpc=true
 	defer s.cancel()
 
+	s.handleEvent(map[string]any{"type": "agent_start"})
 	s.handleEvent(assistantEnd(map[string]any{
 		"input": 1468.0, "output": 44.0, "cacheRead": 256.0, "cacheWrite": 0.0,
 		"totalTokens": 1768.0, "reasoning": 20.0, "cacheWrite1h": 0.0,
 	}, ""))
 	s.handleEvent(assistantEnd(map[string]any{"input": 7.0, "output": 0.0}, "429 rate_limit_error"))
 	s.handleEvent(map[string]any{"type": "agent_end", "willRetry": true, "messages": []any{}})
+	s.handleEvent(map[string]any{"type": "agent_start"})
 	s.handleEvent(map[string]any{"type": "message_end", "message": map[string]any{
 		"role": "toolResult", "toolName": "bash", "content": []any{},
 		"usage": map[string]any{"input": 999.0},
@@ -56,5 +58,40 @@ func TestTurnResultCarriesTheTurnsTokenUsage(t *testing.T) {
 		if evt.Type == core.EventResult && evt.InputTokens+evt.OutputTokens != 0 {
 			t.Fatalf("next turn must start from zero, got %+v", evt)
 		}
+	}
+}
+
+func TestPiRPCCompactionAndAgentEndReportUsageOnce(t *testing.T) {
+	s := newTestSession(true)
+	defer s.cancel()
+	s.handleEvent(map[string]any{"type": "agent_start"})
+	s.handleEvent(assistantEnd(map[string]any{"input": 24.0, "output": 3.0}, ""))
+	s.handleEvent(map[string]any{"type": "compaction_end"})
+	s.handleEvent(assistantEnd(map[string]any{"input": 15.0}, ""))
+	s.handleEvent(map[string]any{"type": "agent_end"})
+	got := drainEvents(s)
+	if len(got) != 1 || got[0].Type != core.EventResult || got[0].InputTokens != 24 || got[0].OutputTokens != 3 {
+		t.Fatalf("compaction and agent end must report once, got %+v", got)
+	}
+	s.handleEvent(map[string]any{"type": "agent_start"})
+	s.handleEvent(assistantEnd(map[string]any{"input": 7.0}, ""))
+	s.handleEvent(map[string]any{"type": "agent_end"})
+	got = drainEvents(s)
+	if len(got) != 1 || got[0].Type != core.EventResult || got[0].InputTokens != 7 {
+		t.Fatalf("next turn must not inherit trailing usage, got %+v", got)
+	}
+}
+
+func TestPiRPCFreshAgentStartDropsAbandonedTurnUsage(t *testing.T) {
+	s := newTestSession(true)
+	defer s.cancel()
+	s.handleEvent(map[string]any{"type": "agent_start"})
+	s.handleEvent(assistantEnd(map[string]any{"input": 80.0}, ""))
+	s.handleEvent(map[string]any{"type": "agent_start"})
+	s.handleEvent(assistantEnd(map[string]any{"input": 16.0}, ""))
+	s.handleEvent(map[string]any{"type": "agent_end"})
+	got := drainEvents(s)
+	if len(got) != 1 || got[0].Type != core.EventResult || got[0].InputTokens != 16 {
+		t.Fatalf("fresh turn must not inherit abandoned usage, got %+v", got)
 	}
 }

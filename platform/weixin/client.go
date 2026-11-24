@@ -14,6 +14,7 @@ import (
 	"net/http"
 	"strings"
 	"time"
+	"unicode/utf8"
 )
 
 const (
@@ -121,6 +122,10 @@ func truncateForLog(b []byte, max int) string {
 	s := string(b)
 	if len(s) <= max {
 		return s
+	}
+	// Keep the byte limit without splitting a multi-byte rune.
+	for max > 0 && !utf8.RuneStart(s[max]) {
+		max--
 	}
 	return s[:max] + "…"
 }

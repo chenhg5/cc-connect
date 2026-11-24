@@ -89,11 +89,16 @@ type piSession struct {
 	pendingErr string
 
 	// RPC-only fields (nil/zero when rpc=false)
-	rpcCmd     *exec.Cmd
-	rpcStdin   io.WriteCloser
-	rpcStdinMu sync.Mutex
-	stderrBuf  cappedStderrWriter
-	rpcReady   chan struct{} // closed once after handleEvent stores sessionId from the get_state probe written by startRPC
+	rpcCmd           *exec.Cmd
+	rpcStdin         io.WriteCloser
+	rpcStdinMu       sync.Mutex
+	stderrBuf        cappedStderrWriter
+	rpcWaitOnce      sync.Once
+	rpcReady         chan struct{} // closed once after handleEvent stores sessionId from the get_state probe written by startRPC
+	rpcResultSent    atomic.Bool
+	rpcPromptPending atomic.Bool
+	rpcAgentActive   bool // readLoopRPC alone owns this flag
+	rpcRetryPending  bool // a retry start belongs to the existing token-usage turn
 
 	// Extension UI: maps Pi's extension_ui_request id -> cc-connect RequestID
 	extPendingMu  sync.Mutex
@@ -131,6 +136,12 @@ func (s *piSession) addTurnUsage(msg map[string]any) {
 	s.turnUsage.output += n("output")
 	s.turnUsage.cacheRead += n("cacheRead")
 	s.turnUsage.cacheWrite += n("cacheWrite")
+	s.usageMu.Unlock()
+}
+
+func (s *piSession) resetTurnUsage() {
+	s.usageMu.Lock()
+	s.turnUsage = piTokenUsage{}
 	s.usageMu.Unlock()
 }
 
@@ -285,12 +296,14 @@ func (s *piSession) startRPC(resumeID string) error {
 }
 
 func (s *piSession) killRPC() {
-	if s.rpcCmd != nil && s.rpcCmd.Process != nil {
-		if err := forceKillCmd(s.rpcCmd); err != nil {
-			slog.Warn("piSession: kill rpc process", "error", err)
+	s.rpcWaitOnce.Do(func() {
+		if s.rpcCmd != nil && s.rpcCmd.Process != nil {
+			if err := forceKillCmd(s.rpcCmd); err != nil {
+				slog.Warn("piSession: kill rpc process", "error", err)
+			}
+			_ = s.rpcCmd.Wait() // Join os/exec stderr copying before readLoopRPC reads stderrBuf.
 		}
-		_, _ = s.rpcCmd.Process.Wait()
-	}
+	})
 }
 
 // readLoopRPC is the persistent RPC readLoop goroutine.
@@ -533,13 +546,19 @@ func (s *piSession) writeRPCCommand(cmd map[string]any) error {
 // locally, please read them: …" trailer instead so pi's own file
 // tools load only what the model actually needs.
 func (s *piSession) sendRPC(prompt string, imageAtFiles []string, filePaths []string) error {
+	s.rpcResultSent.Store(false)
+	s.rpcPromptPending.Store(true)
 	cmd := map[string]any{
 		"type":              "prompt",
 		"message":           composeRPCPrompt(promptWithFileRefs(prompt, filePaths), imageAtFiles),
 		"streamingBehavior": "steer",
 	}
 	slog.Debug("piSession: sending RPC prompt", "bytes", len(prompt))
-	return s.writeRPCCommand(cmd)
+	if err := s.writeRPCCommand(cmd); err != nil {
+		s.rpcPromptPending.Store(false)
+		return err
+	}
+	return nil
 }
 
 // promptWithFileRefs appends a plain-text trailer that tells the model
@@ -633,6 +652,30 @@ func (s *piSession) handleEvent(raw map[string]any) {
 			}
 			s.sessionID.Store(sid)
 			slog.Debug("piSession: state probe stored sessionId", "sessionId", sid)
+			break
+		}
+		if !s.rpc || raw["command"] != "prompt" {
+			break
+		}
+		if success, _ := raw["success"].(bool); !success {
+			errMsg, _ := raw["error"].(string)
+			if errMsg == "" {
+				errMsg = "prompt rejected"
+			}
+			select {
+			case s.events <- core.Event{Type: core.EventError, Error: fmt.Errorf("pi: %s", errMsg)}:
+			case <-s.ctx.Done():
+			}
+			if !s.rpcAgentActive {
+				s.emitRPCCompletion()
+			}
+			break
+		}
+		data, _ := raw["data"].(map[string]any)
+		if data["disposition"] == "handled" && !s.rpcAgentActive {
+			// An extension or input handler consumed the prompt, so Pi will
+			// not emit agent_end for this command. Keep the session available.
+			s.emitRPCCompletion()
 		}
 
 	case "message_update":
@@ -650,8 +693,11 @@ func (s *piSession) handleEvent(raw map[string]any) {
 			// agent_end cycle. Keep the turn open and wait for the
 			// retry outcome instead of closing the turn on a failure
 			// Pi is about to recover from.
+			s.rpcRetryPending = s.rpc
 			break
 		}
+		s.rpcAgentActive = false
+		s.rpcRetryPending = false
 		if s.pendingErr != "" {
 			// Turn is really over and the last assistant message failed:
 			// surface the deferred error before closing the turn.
@@ -665,11 +711,7 @@ func (s *piSession) handleEvent(raw map[string]any) {
 		if s.rpc {
 			// RPC mode: agent_end marks turn completion; json mode relies
 			// on process exit to emit EventResult.
-			evt := s.resultEvent()
-			select {
-			case s.events <- evt:
-			case <-s.ctx.Done():
-			}
+			s.emitRPCCompletion()
 		}
 
 	case "compaction_start":
@@ -708,12 +750,8 @@ func (s *piSession) handleEvent(raw map[string]any) {
 		//    JSON mode (json one-shot) is unaffected — process exit is the
 		//    turn-end marker there, and compaction_end has no special meaning.
 		//
-		// Duplicate EventResult (when both agent_end and compaction_end
-		// close the same turn) is safe: processInteractiveEvents only
-		// sends a message to the platform when fullResponse has accumulated
-		// text in the second pass, which is empty for out-of-band
-		// compactions. The only side effect is a redundant
-		// ws.BeginTurn/EndTurn pair, accepted as belt-and-suspenders.
+		// If agent_end already closed this turn, emitRPCCompletion suppresses
+		// the duplicate completion.
 		if errMsg, _ := raw["errorMessage"].(string); errMsg != "" {
 			evt := core.Event{Type: core.EventError, Error: fmt.Errorf("%s", errMsg)}
 			select {
@@ -722,11 +760,7 @@ func (s *piSession) handleEvent(raw map[string]any) {
 			}
 		}
 		if s.rpc {
-			evt := s.resultEvent()
-			select {
-			case s.events <- evt:
-			case <-s.ctx.Done():
-			}
+			s.emitRPCCompletion()
 		}
 
 	case "extension_ui_request":
@@ -735,9 +769,32 @@ func (s *piSession) handleEvent(raw map[string]any) {
 		}
 
 	// Informational — no events produced
-	case "agent_start", "turn_start", "turn_end", "message_start", "extension_error":
+	case "agent_start":
+		if s.rpc && !s.rpcRetryPending {
+			// A new run sometimes starts after an aborted turn with no
+			// terminal event. Its usage must not inherit that turn's counts.
+			s.resetTurnUsage()
+		}
+		s.rpcRetryPending = false
+		s.rpcAgentActive = true
+		s.rpcResultSent.Store(false)
+	case "turn_start", "turn_end", "message_start", "extension_error":
 	default:
 		slog.Debug("piSession: unrecognized event type", "type", eventType, "raw", raw)
+	}
+}
+
+func (s *piSession) emitRPCCompletion() {
+	if s.rpcResultSent.Swap(true) {
+		return
+	}
+	// The first terminal event accounts for this turn; duplicate markers
+	// must not drain the counter or emit another result.
+	s.rpcPromptPending.Store(false)
+	evt := s.resultEvent()
+	select {
+	case s.events <- evt:
+	case <-s.ctx.Done():
 	}
 }
 
@@ -750,6 +807,16 @@ func (s *piSession) handleExtensionUIRequest(raw map[string]any) {
 	}
 
 	switch method {
+	case "notify":
+		// Extension slash commands often report their result via ctx.ui.notify
+		// without starting an agent turn. Forward that text before the
+		// handled prompt response closes the turn.
+		if message, _ := raw["message"].(string); message != "" && s.rpcPromptPending.Load() {
+			select {
+			case s.events <- core.Event{Type: core.EventText, Content: message}:
+			case <-s.ctx.Done():
+			}
+		}
 	case "confirm":
 		s.forwardConfirm(id, raw)
 	case "input":

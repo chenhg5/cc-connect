@@ -25,10 +25,11 @@ const (
 	weixinSetupModeNew  = "new"
 	weixinSetupModeBind = "bind"
 
-	defaultWeixinAPIURL  = "https://ilinkai.weixin.qq.com"
-	defaultWeixinBotType = "3"
-	weixinQRPollTimeout  = 35 * time.Second
-	weixinMaxQRRefresh   = 3
+	defaultWeixinAPIURL      = "https://ilinkai.weixin.qq.com"
+	defaultWeixinBotType     = "3"
+	weixinIlinkClientVersion = "1"
+	weixinQRPollTimeout      = 35 * time.Second
+	weixinMaxQRRefresh       = 3
 
 	// 微信 ilink QR 码有效期约 120 秒，在预估过期前 30 秒主动刷新，
 	// 避免用户正在扫码时 QR 码过期导致的糟糕体验。
@@ -43,6 +44,8 @@ type weixinBotQRResponse struct {
 
 type weixinQRStatusResponse struct {
 	Status      string `json:"status"`
+	Ret         int    `json:"ret"`
+	ErrMsg      string `json:"errmsg"`
 	BotToken    string `json:"bot_token"`
 	IlinkBotID  string `json:"ilink_bot_id"`
 	BaseURL     string `json:"baseurl"`
@@ -288,6 +291,9 @@ func runWeixinQRLoginFlow(opts weixinQRLoginOptions) (*weixinQRLoginResult, erro
 		if err != nil {
 			return nil, err
 		}
+		if status.Ret != 0 || strings.TrimSpace(status.ErrMsg) != "" || status.Status == "need_upgrade" {
+			return nil, fmt.Errorf("ilink 拒绝扫码（可能需要升级微信接口）: ret=%d status=%s msg=%s", status.Ret, status.Status, weixinTruncateBody([]byte(status.ErrMsg), 256))
+		}
 
 		switch status.Status {
 		case "wait", "":
@@ -390,6 +396,7 @@ func weixinHTTPGet(ctx context.Context, fullURL, routeTag string, debug bool) ([
 	if routeTag != "" {
 		req.Header.Set("SKRouteTag", routeTag)
 	}
+	req.Header.Set("iLink-App-ClientVersion", weixinIlinkClientVersion)
 	client := &http.Client{Timeout: weixinQRPollTimeout + 5*time.Second}
 	resp, err := client.Do(req)
 	if err != nil {
@@ -401,11 +408,7 @@ func weixinHTTPGet(ctx context.Context, fullURL, routeTag string, debug bool) ([
 		return nil, err
 	}
 	if debug {
-		snippet := string(body)
-		if len(snippet) > 200 {
-			snippet = snippet[:200]
-		}
-		fmt.Fprintf(os.Stderr, "[debug] GET %s -> %d %s\n", fullURL, resp.StatusCode, strings.TrimSpace(snippet))
+		fmt.Fprintf(os.Stderr, "[debug] get_bot_qrcode status=%d bytes=%d\n", resp.StatusCode, len(body))
 	}
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("http %d: %s", resp.StatusCode, weixinTruncateBody(body, 256))
@@ -415,10 +418,11 @@ func weixinHTTPGet(ctx context.Context, fullURL, routeTag string, debug bool) ([
 
 func weixinTruncateBody(b []byte, max int) string {
 	s := string(b)
-	if len(s) <= max {
+	runes := []rune(s)
+	if len(runes) <= max {
 		return s
 	}
-	return s[:max] + "…"
+	return string(runes[:max]) + "…"
 }
 
 func weixinFetchBotQRCode(ctx context.Context, apiBase, botType, routeTag string, debug bool) (*weixinBotQRResponse, error) {
@@ -460,7 +464,7 @@ func weixinPollQRStatus(ctx context.Context, apiBase, qrKey, routeTag string, de
 	if err != nil {
 		return nil, err
 	}
-	req.Header.Set("iLink-App-ClientVersion", "1")
+	req.Header.Set("iLink-App-ClientVersion", weixinIlinkClientVersion)
 	if routeTag != "" {
 		req.Header.Set("SKRouteTag", routeTag)
 	}
@@ -482,11 +486,7 @@ func weixinPollQRStatus(ctx context.Context, apiBase, qrKey, routeTag string, de
 		return nil, err
 	}
 	if debug {
-		snippet := string(body)
-		if len(snippet) > 200 {
-			snippet = snippet[:200]
-		}
-		fmt.Fprintf(os.Stderr, "[debug] poll status -> %d %s\n", resp.StatusCode, strings.TrimSpace(snippet))
+		fmt.Fprintf(os.Stderr, "[debug] get_qrcode_status status=%d bytes=%d\n", resp.StatusCode, len(body))
 	}
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("get_qrcode_status http %d: %s", resp.StatusCode, weixinTruncateBody(body, 256))
@@ -525,11 +525,7 @@ func verifyWeixinToken(ctx context.Context, apiBase, token, routeTag string, deb
 		return err
 	}
 	if debug {
-		snippet := string(raw)
-		if len(snippet) > 300 {
-			snippet = snippet[:300]
-		}
-		fmt.Fprintf(os.Stderr, "[debug] verify getUpdates -> %d %s\n", resp.StatusCode, strings.TrimSpace(snippet))
+		fmt.Fprintf(os.Stderr, "[debug] verify getUpdates status=%d bytes=%d\n", resp.StatusCode, len(raw))
 	}
 	if resp.StatusCode != http.StatusOK {
 		return fmt.Errorf("http %d: %s", resp.StatusCode, weixinTruncateBody(raw, 256))

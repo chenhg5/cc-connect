@@ -197,6 +197,61 @@ func TestListSkills_AgentOverrideTakesPrecedence(t *testing.T) {
 	}
 }
 
+// OpenCode flattens every permission key into one ruleset in file order and
+// picks the last rule whose permission key and pattern both match, so a
+// top-level "*" sits next to the skill rules instead of being dropped.
+func TestListSkills_WildcardPermissionCombinesWithSkillRules(t *testing.T) {
+	cases := []struct {
+		name  string
+		cfg   string
+		agent string
+		want  []string
+	}{
+		{
+			name: "global wildcard deny then skill exception",
+			cfg:  `{"permission": {"*": "deny", "skill": {"safe": "allow"}}}`,
+			want: []string{"safe"},
+		},
+		{
+			name: "skill exception then global wildcard deny",
+			cfg:  `{"permission": {"skill": {"safe": "allow"}, "*": "deny"}}`,
+			want: nil,
+		},
+		{
+			name: "other tool keys do not affect skills",
+			cfg:  `{"permission": {"*": "deny", "bash": "allow", "skill": {"safe": "allow"}}}`,
+			want: []string{"safe"},
+		},
+		{
+			name:  "agent wildcard deny then skill exception",
+			cfg:   `{"agent": {"build": {"permission": {"*": "deny", "skill": {"safe": "allow"}}}}}`,
+			agent: "build",
+			want:  []string{"safe"},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			tmp := t.TempDir()
+			home := filepath.Join(tmp, "home")
+			repo := filepath.Join(tmp, "repo")
+			setTestHome(t, home)
+			if err := os.MkdirAll(filepath.Join(repo, ".git"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			skillsRoot := filepath.Join(repo, ".opencode", "skills")
+			writeValidOpencodeSkill(t, skillsRoot, "safe")
+			writeValidOpencodeSkill(t, skillsRoot, "other")
+			writeOpencodeConfig(t, repo, tc.cfg)
+
+			a := &Agent{workDir: repo, agentName: tc.agent}
+			got := skillNames(listOpencodeSkills(t, a))
+			if strings.Join(got, ",") != strings.Join(tc.want, ",") {
+				t.Fatalf("config %s: got %v, want %v", tc.cfg, got, tc.want)
+			}
+		})
+	}
+}
+
 func TestListSkills_MalformedSkippedNeverInjected(t *testing.T) {
 	tmp := t.TempDir()
 	home := filepath.Join(tmp, "home")

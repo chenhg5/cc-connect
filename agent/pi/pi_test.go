@@ -683,7 +683,7 @@ func TestResolveModelRef(t *testing.T) {
 		{"", ""},
 	}
 	for _, tt := range tests {
-		if got := resolveModelRef(tt.in); got != tt.want {
+		if got, _ := resolveModelRef(tt.in); got != tt.want {
 			t.Errorf("resolveModelRef(%q) = %q, want %q", tt.in, got, tt.want)
 		}
 	}
@@ -3459,5 +3459,95 @@ func TestSupportedThinkingLevels_BareIDPrefersDefaultProvider(t *testing.T) {
 	}
 	if got := thinkingLevelsForDef(m); fmt.Sprint(got) != fmt.Sprint([]string{"low", "high", "max"}) {
 		t.Fatalf("levels = %v, want [low high max]", got)
+	}
+}
+
+// ── model reference ":<thinking>" suffix ─────────────────────
+
+// writeSuffixCatalog writes a models.json with one reasoning model and one
+// model whose ID itself ends in a thinking-level name.
+func writeSuffixCatalog(t *testing.T) {
+	t.Helper()
+	tmpDir := t.TempDir()
+	t.Setenv("PI_CODING_AGENT_DIR", tmpDir)
+	data, _ := json.Marshal(map[string]any{
+		"providers": map[string]any{
+			"acme": map[string]any{"models": []any{
+				map[string]any{"id": "deep", "reasoning": true},
+				map[string]any{"id": "turbo:max", "reasoning": true, "thinkingLevelMap": map[string]any{"max": "max"}},
+			}},
+		},
+	})
+	if err := os.WriteFile(filepath.Join(tmpDir, "models.json"), data, 0o644); err != nil {
+		t.Fatalf("write models.json: %v", err)
+	}
+}
+
+// Regression test: a model reference such as "provider/model:high" was
+// canonicalised to "provider/model" and the ":high" suffix was silently
+// dropped, so pi ran at its default thinking level instead of "high".
+func TestModelRefThinkingSuffix(t *testing.T) {
+	writeSuffixCatalog(t)
+
+	tests := []struct {
+		name         string
+		opts         map[string]any
+		wantModel    string
+		wantThinking string
+	}{
+		{"qualified suffix", map[string]any{"model": "acme/deep:high"}, "acme/deep", "high"},
+		{"bare id suffix", map[string]any{"model": "deep:Medium"}, "acme/deep", "medium"},
+		{"explicit thinking wins", map[string]any{"model": "acme/deep:high", "thinking": "low"}, "acme/deep", "low"},
+		{"no suffix", map[string]any{"model": "acme/deep"}, "acme/deep", ""},
+		// A colon that is part of the model ID is not a suffix.
+		{"level-named id", map[string]any{"model": "acme/turbo:max"}, "acme/turbo:max", ""},
+		// Unresolvable references are passed to pi verbatim; pi parses the
+		// suffix itself.
+		{"unresolvable", map[string]any{"model": "other/custom:high"}, "other/custom:high", ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			tt.opts["cmd"] = "echo"
+			ag, err := New(tt.opts)
+			if err != nil {
+				t.Fatalf("New() error = %v", err)
+			}
+			a := ag.(*Agent)
+			if got := a.GetModel(); got != tt.wantModel {
+				t.Errorf("GetModel() = %q, want %q", got, tt.wantModel)
+			}
+			if got := a.GetReasoningEffort(); got != tt.wantThinking {
+				t.Errorf("GetReasoningEffort() = %q, want %q", got, tt.wantThinking)
+			}
+			sess, err := a.StartSession(context.Background(), "")
+			if err != nil {
+				t.Fatalf("StartSession() error = %v", err)
+			}
+			t.Cleanup(func() {
+				if err := sess.Close(); err != nil {
+					t.Errorf("Close() error = %v", err)
+				}
+			})
+			ps := sess.(*piSession)
+			if ps.model != tt.wantModel || ps.thinking != tt.wantThinking {
+				t.Errorf("session model/thinking = %q/%q, want %q/%q", ps.model, ps.thinking, tt.wantModel, tt.wantThinking)
+			}
+		})
+	}
+}
+
+func TestSetModelThinkingSuffix(t *testing.T) {
+	writeSuffixCatalog(t)
+
+	a := &Agent{thinking: "low"}
+	// A suffix on the newly selected model is the latest explicit choice.
+	a.SetModel("acme/deep:high")
+	if a.GetModel() != "acme/deep" || a.GetReasoningEffort() != "high" {
+		t.Fatalf("after SetModel(acme/deep:high): model/thinking = %q/%q, want acme/deep/high", a.GetModel(), a.GetReasoningEffort())
+	}
+	// Switching without a suffix keeps the current level.
+	a.SetModel("acme/deep")
+	if a.GetModel() != "acme/deep" || a.GetReasoningEffort() != "high" {
+		t.Fatalf("after SetModel(acme/deep): model/thinking = %q/%q, want acme/deep/high", a.GetModel(), a.GetReasoningEffort())
 	}
 }
