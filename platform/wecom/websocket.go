@@ -438,8 +438,8 @@ func (p *WSPlatform) handleMsgCallback(frame wsFrame) {
 			SessionKey: sessionKey, Platform: "wecom",
 			MessageID: body.MsgID,
 			UserID:    body.From.UserID, UserName: body.From.UserID,
-			ChatName: chatName,
-			Content:  content, ExtraContent: quotedContent, ReplyCtx: rctx, FromVoice: true,
+			ChatID: chatID, ChatName: chatName, ChatType: body.ChatType,
+			Content: content, ExtraContent: quotedContent, ReplyCtx: rctx, FromVoice: true,
 		})
 		return
 	}
@@ -455,8 +455,8 @@ func (p *WSPlatform) handleMsgCallback(frame wsFrame) {
 			SessionKey: sessionKey, Platform: "wecom",
 			MessageID: body.MsgID,
 			UserID:    body.From.UserID, UserName: body.From.UserID,
-			ChatName: chatName,
-			Content:  content, ExtraContent: quotedContent, ReplyCtx: rctx,
+			ChatID: chatID, ChatName: chatName, ChatType: body.ChatType,
+			Content: content, ExtraContent: quotedContent, ReplyCtx: rctx,
 		})
 		return
 	}
@@ -648,6 +648,7 @@ func (p *WSPlatform) handleEventCallback(frame wsFrame) {
 			MessageID:            body.MsgID,
 			UserID:               body.From.UserID,
 			UserName:             body.From.UserID,
+			ChatID:               chatID,
 			ChatName:             chatName,
 			Content:              responseText,
 			ReplyCtx:             rctx,

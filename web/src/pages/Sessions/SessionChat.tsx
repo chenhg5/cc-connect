@@ -13,6 +13,20 @@ import remarkGfm from 'remark-gfm';
 import rehypeHighlight from 'rehype-highlight';
 import { cn } from '@/lib/utils';
 
+function IdentityField({ label, value, copyLabel }: { label: string; value?: string; copyLabel: string }) {
+  if (!value) return null;
+  return (
+    <div className="flex items-center gap-1.5 min-w-0 text-xs text-gray-500 dark:text-gray-400">
+      <span className="shrink-0">{label}:</span>
+      <span className="truncate" title={value}>{value}</span>
+      <button type="button" onClick={() => void navigator.clipboard.writeText(value)}
+        className="shrink-0 hover:text-accent" title={`${copyLabel} ${label}`} aria-label={`${copyLabel} ${label}`}>
+        <Copy size={12} />
+      </button>
+    </div>
+  );
+}
+
 // ── Markdown renderers ───────────────────────────────────────
 
 function CopyButton({ code }: { code: string }) {
@@ -459,8 +473,19 @@ export default function SessionChat() {
             <div className="flex items-center gap-2 mt-0.5">
               <Badge>{project}</Badge>
               {session?.platform && <Badge variant="info">{session.platform}</Badge>}
-              <span className="text-xs text-gray-500">{session?.session_key}</span>
             </div>
+            {session && (
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-x-4 gap-y-1 mt-2">
+                <IdentityField label={t('sessions.userName')} value={session.user_name} copyLabel={t('sessions.copy')} />
+                <IdentityField label={t('sessions.userId')} value={session.user_id} copyLabel={t('sessions.copy')} />
+                <IdentityField label={t('sessions.chatName')} value={session.chat_name} copyLabel={t('sessions.copy')} />
+                <IdentityField label={t('sessions.chatId')} value={session.chat_id} copyLabel={t('sessions.copy')} />
+                <IdentityField label={t('sessions.chatType')} value={session.chat_type === 'group' ? t('sessions.chatTypeGroup') : session.chat_type === 'single' ? t('sessions.chatTypeSingle') : session.chat_type} copyLabel={t('sessions.copy')} />
+                <IdentityField label={t('sessions.sessionId')} value={session.id} copyLabel={t('sessions.copy')} />
+                <IdentityField label={t('sessions.sessionKey')} value={session.session_key} copyLabel={t('sessions.copy')} />
+                <IdentityField label={t('sessions.agentSessionId')} value={session.agent_session_id} copyLabel={t('sessions.copy')} />
+              </div>
+            )}
           </div>
         </div>
         <Button size="sm" variant="ghost" onClick={fetchSession}>

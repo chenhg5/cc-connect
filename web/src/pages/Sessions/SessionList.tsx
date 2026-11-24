@@ -6,6 +6,7 @@ import { Badge, EmptyState } from '@/components/ui';
 import { listProjects, type ProjectSummary } from '@/api/projects';
 import { listSessions, type Session } from '@/api/sessions';
 import { cn } from '@/lib/utils';
+import { sessionOwnerLabel } from './sessionIdentity';
 
 interface FlatSession extends Session {
   _project: string;
@@ -115,6 +116,11 @@ export default function SessionList() {
                   <span className="text-[10px] text-gray-400 shrink-0 mt-0.5">
                     {timeAgo(s.updated_at || s.created_at, t)}
                   </span>
+                </div>
+
+                {/* Keep sender and source visible even when every session is named "default". */}
+                <div className="mb-2 text-xs text-gray-500 dark:text-gray-400 truncate" title={sessionOwnerLabel(s)}>
+                  {sessionOwnerLabel(s) || s.session_key}
                 </div>
 
                 {/* Last message preview */}
