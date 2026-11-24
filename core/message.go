@@ -431,6 +431,7 @@ type Message struct {
 	FromVoice        bool   // true if message originated from voice transcription
 	SilentEmpty      bool   // suppress fallback reply for an empty synthetic turn
 	ModeOverride     string // if set, temporarily override agent permission mode for this message
+	DeliveryLabel    string // displayed on an automated final reply; not sent to the agent
 	// IsPermissionResponse is set by inline-button / card-action paths in
 	// platforms when a synthesized message is forwarded as a permission
 	// decision (e.g. Telegram handleCallbackQuery for perm:allow/deny,

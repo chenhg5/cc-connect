@@ -957,10 +957,25 @@ func (cs *CronScheduler) runJob(job *CronJob, manual bool) {
 // Used for muted cron jobs that should execute without sending chat messages.
 type mutePlatform struct {
 	Platform
+	kind       string
+	jobID      string
+	sessionKey string
 }
 
-func (m *mutePlatform) Reply(_ context.Context, _ any, _ string) error { return nil }
-func (m *mutePlatform) Send(_ context.Context, _ any, _ string) error  { return nil }
+func (m *mutePlatform) auditDiscard(content string) {
+	slog.Info("scheduled delivery suppressed by mute", "kind", m.kind, "job", m.jobID,
+		"session_key", m.sessionKey, "bytes", len(content))
+}
+
+func (m *mutePlatform) Reply(_ context.Context, _ any, content string) error {
+	m.auditDiscard(content)
+	return nil
+}
+
+func (m *mutePlatform) Send(_ context.Context, _ any, content string) error {
+	m.auditDiscard(content)
+	return nil
+}
 
 func GenerateCronID() string {
 	b := make([]byte, 4)
