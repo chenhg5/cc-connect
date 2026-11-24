@@ -224,7 +224,9 @@ func TestQueuedTurnOwnsEventsUntilDrainCompletes(t *testing.T) {
 	e.stopUnsolicitedReader(state)
 }
 
-func TestSameSessionQueueResultsRemainOwned(t *testing.T) {
+// TestCUJ_QueueStealsResult_Recovery exercises #2366 without a skip on the
+// fixing branch; the original reproducer in #2362 remains skipped until merge.
+func TestCUJ_QueueStealsResult_Recovery(t *testing.T) {
 	const messages = 5
 	pA := &stubPlatformEngine{n: "platA"}
 	pB := &stubPlatformEngine{n: "platB"}
