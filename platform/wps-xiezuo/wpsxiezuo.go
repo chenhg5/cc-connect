@@ -499,7 +499,7 @@ func (p *Platform) runConnection(ctx context.Context) error {
 		if err != nil {
 			return fmt.Errorf("read: %w", err)
 		}
-		slog.Info("wps-xiezuo: message received", "type", msgType, "len", len(raw), "data", string(raw))
+		slog.Info("wps-xiezuo: message received", "type", msgType, "len", len(raw))
 
 		// Reset deadline on successful read
 		_ = conn.SetReadDeadline(time.Now().Add(pingTimeout))
@@ -613,7 +613,7 @@ func (p *Platform) handleRawMessage(ctx context.Context, raw []byte) {
 		return
 	}
 
-	slog.Debug("wps-xiezuo: unknown frame", "data", string(raw))
+	slog.Debug("wps-xiezuo: unknown frame", "bytes", len(raw))
 }
 
 // --- GoAway handling ---

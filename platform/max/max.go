@@ -380,7 +380,7 @@ func (p *Platform) webhookHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	var upd maxUpdate
 	if err := json.Unmarshal(body, &upd); err != nil {
-		slog.Warn("max: webhook unmarshal", "err", err, "body", string(body[:min(len(body), 256)]))
+		slog.Warn("max: webhook unmarshal", "err", err, "body_bytes", len(body))
 		w.WriteHeader(http.StatusBadRequest)
 		return
 	}
