@@ -3637,7 +3637,11 @@ func SaveProjectSettings(projectName string, update ProjectSettingsUpdate) error
 				proj.Platforms[j].Options["allow_from"] = strings.TrimSpace(af)
 			}
 		}
-		return saveConfig(cfg)
+		edits, err := projectSettingsEdits(data, cfg, i, update)
+		if err != nil {
+			return err
+		}
+		return saveSettingsDocument(data, cfg, edits)
 	}
 	return fmt.Errorf("project %q not found", projectName)
 }
@@ -4026,7 +4030,7 @@ func SaveGlobalSettings(u GlobalSettingsUpdate) error {
 	if u.QueueMaxDepth != nil {
 		cfg.Queue.MaxDepth = u.QueueMaxDepth
 	}
-	return saveConfig(cfg)
+	return saveSettingsDocument(data, cfg, globalSettingsEdits(u))
 }
 
 // WebSetupResult holds the config values after enabling web admin.
