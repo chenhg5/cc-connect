@@ -126,8 +126,8 @@ func TestTurnCard_ReflectsStepQueueAndFinish(t *testing.T) {
 
 	card := p.last()
 	body := cardBody(t, card)
-	if !strings.Contains(body, "```\nBash · grep booking_check_fail_rate\n```") {
-		t.Fatalf("body = %q, want fenced current step", body)
+	if !strings.Contains(body, "当前步骤：`Bash · grep booking_check_fail_rate`") {
+		t.Fatalf("body = %q, want inline current step", body)
 	}
 	if !strings.Contains(body, "排队中 (2)") {
 		t.Fatalf("body = %q, want queue header", body)
@@ -258,21 +258,6 @@ func TestTaskCardStepTextShowsRawCommand(t *testing.T) {
 	}
 }
 
-func TestCardCodeBlock(t *testing.T) {
-	cases := []struct{ name, in, fence string }{
-		{"plain", "Bash · git status", "```"},
-		{"two_backticks", "echo ``x``", "```"},
-		{"triple_backticks", "echo ```x```", "````"},
-	}
-	for _, c := range cases {
-		got := cardCodeBlock(c.in)
-		want := c.fence + "\n" + c.in + "\n" + c.fence
-		if got != want {
-			t.Errorf("%s: cardCodeBlock(%q) = %q, want %q", c.name, c.in, got, want)
-		}
-	}
-}
-
 func TestCardInlineCode(t *testing.T) {
 	cases := []struct{ name, in, want string }{
 		{"plain", "hello [x](y) **b**", "`hello [x](y) **b**`"},
@@ -286,7 +271,25 @@ func TestCardInlineCode(t *testing.T) {
 	}
 }
 
-func TestTaskCardCodeBlockAndInlinedQueue(t *testing.T) {
+func TestTaskCardPreparingStaysOnOneLine(t *testing.T) {
+	e := NewEngine("test", &resultAgent{session: newResultAgentSession("ok")}, []Platform{&stubPlatformEngine{n: "test"}}, "", LangChinese)
+	t.Cleanup(e.cancel)
+	p := &taskCardStubPlatform{stubPlatformEngine: stubPlatformEngine{n: "feishu"}}
+
+	tc := newTurnCard(e, p, "ctx", "k")
+	tc.render(true)
+
+	body := cardBody(t, p.last())
+	if !strings.Contains(body, "当前步骤：准备中") {
+		t.Fatalf("body = %q, want preparing on the label line", body)
+	}
+	if strings.Contains(body, "当前步骤：\n") {
+		t.Fatalf("body = %q, preparing must not break the line", body)
+	}
+	tc.Finish(taskCardDone, "")
+}
+
+func TestTaskCardInlineStepAndQueue(t *testing.T) {
 	e := NewEngine("test", &resultAgent{session: newResultAgentSession("ok")}, []Platform{&stubPlatformEngine{n: "test"}}, "", LangChinese)
 	t.Cleanup(e.cancel)
 	p := &taskCardStubPlatform{stubPlatformEngine: stubPlatformEngine{n: "feishu"}}
@@ -304,8 +307,11 @@ func TestTaskCardCodeBlockAndInlinedQueue(t *testing.T) {
 	if !ok {
 		t.Fatalf("first element = %T, want CardMarkdown", card.Elements[0])
 	}
-	if !strings.Contains(md.Content, "```\nBash · cat <at id=all></at>\n```") {
-		t.Fatalf("step is not fenced verbatim: %q", md.Content)
+	if !strings.Contains(md.Content, "当前步骤：`Bash · cat <at id=all></at>`") {
+		t.Fatalf("step is not inline-coded verbatim: %q", md.Content)
+	}
+	if strings.Contains(md.Content, "当前步骤：\n") {
+		t.Fatalf("step label must stay on one line: %q", md.Content)
 	}
 	if !strings.Contains(md.Content, "↳ 1. `[点我](http://x) **急**`") {
 		t.Fatalf("queued markdown was not inlined literally: %q", md.Content)

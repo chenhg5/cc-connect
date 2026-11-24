@@ -574,12 +574,14 @@ func (tc *turnCard) buildCardLocked() *Card {
 	if tc.finished {
 		stepKey = MsgTaskCardLastStep
 	}
-	var body string
 	if step == "" {
-		body = tc.e.i18n.Tf(stepKey, tc.e.i18n.T(MsgTaskCardPreparing))
+		step = tc.e.i18n.T(MsgTaskCardPreparing)
 	} else {
-		body = tc.e.i18n.Tf(stepKey, cardCodeBlock(step))
+		// Inline code keeps the step on one line while rendering the command
+		// (including <at>, links, backticks and emphasis) literally.
+		step = cardInlineCode(step)
 	}
+	body := tc.e.i18n.Tf(stepKey, step)
 
 	if len(tc.queue) > 0 && tc.status == taskCardRunning {
 		body += "\n" + tc.e.i18n.Tf(MsgTaskCardQueue, len(tc.queue))
@@ -604,19 +606,6 @@ func (tc *turnCard) buildCardLocked() *Card {
 		})
 	}
 	return card
-}
-
-// cardCodeBlock wraps user-controlled command text in a fenced code block so
-// it renders literally: <at>, backticks, asterisks and brackets stay inert.
-// The fence is longer than any backtick run inside the text, otherwise a
-// command containing "```" could close the block early.
-func cardCodeBlock(s string) string {
-	n := backtickRun(s) + 1
-	if n < 3 {
-		n = 3
-	}
-	fence := strings.Repeat("`", n)
-	return fence + "\n" + s + "\n" + fence
 }
 
 // cardInlineCode renders user text as a single-line code span: links, bold,
