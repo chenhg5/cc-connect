@@ -173,6 +173,18 @@ func (s *Session) AddHistory(role, content string) {
 	})
 }
 
+// SeedHistoryIfEmpty imports a backend transcript without duplicating history
+// already recorded by the bridge or by another concurrent switch.
+func (s *Session) SeedHistoryIfEmpty(entries []HistoryEntry) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if len(s.History) != 0 || len(entries) == 0 {
+		return false
+	}
+	s.History = append([]HistoryEntry(nil), entries...)
+	return true
+}
+
 // recordPastAgentSessionID saves the current AgentSessionID to PastAgentSessionIDs
 // so it remains visible in KnownAgentSessionIDs after the ID is replaced or cleared.
 // Must be called with s.mu held.
