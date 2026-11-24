@@ -75,7 +75,7 @@ func TestCronSchedulerRetriesEmptyResponseOnce(t *testing.T) {
 	}
 	starts := 0
 	for _, message := range platform.getSent() {
-		if strings.HasPrefix(message, "⏰") {
+		if message == "⏰ do work" {
 			starts++
 		}
 	}

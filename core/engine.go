@@ -593,6 +593,7 @@ type interactiveState struct {
 	restartQueuedOnExit      bool            // recover queued turns when the agent process dies
 	approveAll               bool            // when true, auto-approve all permission requests for this session
 	fromVoice                bool            // true if current turn originated from voice transcription
+	deliveryLabel            string          // label for this automated turn's final reply
 	sideText                 string
 	silentEmpty              bool // suppress fallback reply for an empty synthetic turn
 	deleteMode               *deleteModeState
@@ -1663,7 +1664,7 @@ func (e *Engine) ExecuteCronJob(job *CronJob) error {
 	// Wrap platform to discard all outgoing messages when muted
 	effectivePlatform := targetPlatform
 	if job.Mute {
-		effectivePlatform = &mutePlatform{targetPlatform}
+		effectivePlatform = &mutePlatform{Platform: targetPlatform, kind: "cron", jobID: job.ID, sessionKey: sessionKey}
 	}
 
 	silent := job.Silent != nil && *job.Silent
@@ -1695,14 +1696,15 @@ func (e *Engine) ExecuteCronJob(job *CronJob) error {
 	content := job.Prompt
 
 	msg := &Message{
-		SessionKey:   sessionKey,
-		Platform:     platformName,
-		UserID:       "cron",
-		UserName:     "cron",
-		Content:      content,
-		ReplyCtx:     replyCtx,
-		SilentEmpty:  silent,
-		ModeOverride: job.Mode,
+		SessionKey:    sessionKey,
+		Platform:      platformName,
+		UserID:        "cron",
+		UserName:      "cron",
+		Content:       content,
+		ReplyCtx:      replyCtx,
+		SilentEmpty:   silent,
+		ModeOverride:  job.Mode,
+		DeliveryLabel: cronDeliveryLabel(job),
 	}
 
 	// Resolve workspace-specific agent and sessions for multi-workspace mode.
@@ -1874,7 +1876,7 @@ func (e *Engine) ExecuteTimerJob(job *TimerJob) error {
 
 	effectivePlatform := targetPlatform
 	if job.Mute {
-		effectivePlatform = &mutePlatform{targetPlatform}
+		effectivePlatform = &mutePlatform{Platform: targetPlatform, kind: "timer", jobID: job.ID, sessionKey: sessionKey}
 	}
 
 	// Notify user unless muted or silent
@@ -2177,6 +2179,18 @@ func cronRunTitle(job *CronJob) string {
 	return "cron"
 }
 
+// cronDeliveryLabel identifies a result without copying the job prompt or
+// shell command into the final reply (silent jobs have no start notice).
+func cronDeliveryLabel(job *CronJob) string {
+	if job == nil {
+		return "⏰"
+	}
+	if desc := strings.TrimSpace(job.Description); desc != "" {
+		return fmt.Sprintf("⏰ [%s] %s", job.ID, truncateStr(desc, 40))
+	}
+	return fmt.Sprintf("⏰ [%s]", job.ID)
+}
+
 // executeCronShell runs a shell command for a cron job and sends the output.
 func (e *Engine) executeCronShell(p Platform, replyCtx any, job *CronJob) error {
 	workDir := job.WorkDir
@@ -2194,7 +2208,7 @@ func (e *Engine) executeCronShell(p Platform, replyCtx any, job *CronJob) error 
 		timeout = 60 * time.Second
 	}
 
-	cmdLabel := truncateStr(job.Exec, 60)
+	cmdLabel := fmt.Sprintf("%s [%s]", truncateStr(job.Exec, 48), job.ID)
 
 	ctx, cancel := context.WithTimeout(e.ctx, timeout)
 	defer cancel()
@@ -4244,6 +4258,7 @@ func (e *Engine) processInteractiveMessageWith(p Platform, msg *Message, session
 	state.replyCtx = msg.ReplyCtx
 	state.currentMessageID = msg.MessageID
 	state.currentTurnUserMessageTimeMs = msg.UserMessageTimeMs
+	state.deliveryLabel = msg.DeliveryLabel
 	state.mu.Unlock()
 	stopRecallMonitor := e.startMessageRecallMonitor(interactiveKey)
 	defer stopRecallMonitor()
@@ -5671,8 +5686,9 @@ func (e *Engine) runUnsolicitedReader(ctx context.Context, cancel context.Cancel
 					}
 				}
 				if event.Error != nil {
-					slog.Error("unsolicited agent error", "error", event.Error, "session", sessionKey)
-					e.send(p, replyCtx, fmt.Sprintf(e.i18n.T(MsgError), event.Error))
+					userMsg, class := e.agentErrorReply(event.Error)
+					slog.Error("unsolicited agent error", "error", event.Error, "error_class", class, "session", sessionKey)
+					e.send(p, replyCtx, userMsg)
 				}
 				state.mu.Lock()
 				alive := agentSession.Alive() && !state.stopped
@@ -5732,7 +5748,24 @@ var agentErrorHandlers = []agentErrorHandler{
 	{"Session not found", MsgSessionNotFound},
 }
 
+func (e *Engine) agentErrorReply(err error) (string, string) {
+	errMsg := err.Error()
+	lower := strings.ToLower(errMsg)
+	if strings.Contains(lower, "thread-store conflict") || strings.Contains(lower, "already has an active writer") {
+		return e.i18n.T(MsgThreadWriterConflict), "thread_writer_conflict"
+	}
+	for _, h := range agentErrorHandlers {
+		if strings.Contains(errMsg, h.contains) {
+			return e.i18n.T(h.msgKey), "known_agent_error"
+		}
+	}
+	return fmt.Sprintf(e.i18n.T(MsgError), errMsg), "agent_error"
+}
+
 func (e *Engine) processInteractiveEvents(state *interactiveState, session *Session, sessions *SessionManager, sessionKey string, msgID string, turnStart time.Time, stopTypingFn func(), sendDone <-chan error, replyCtx any, lockGen uint64) {
+	state.mu.Lock()
+	deliveryLabel := state.deliveryLabel
+	state.mu.Unlock()
 	if msgID != "" {
 		state.mu.Lock()
 		state.currentMessageID = msgID
@@ -6742,6 +6775,10 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			}
 
 			if !isSilent {
+				if deliveryLabel != "" {
+					baseResponse = deliveryLabel + "\n" + baseResponse
+					cleanResponse = deliveryLabel + "\n" + cleanResponse
+				}
 				e.hooks.Emit(HookEvent{
 					Event:      HookEventMessageSent,
 					SessionKey: sessionKey,
@@ -7228,21 +7265,14 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				}
 			}
 			if event.Error != nil {
-				errMsg := event.Error.Error()
-				slog.Error("agent error", "error", event.Error)
+				userMsg, class := e.agentErrorReply(event.Error)
+				slog.Error("agent error", "error", event.Error, "error_class", class)
 				e.hooks.Emit(HookEvent{
 					Event:      HookEventError,
 					SessionKey: sessionKey,
 					Platform:   p.Name(),
 					Error:      event.Error.Error(),
 				})
-				userMsg := fmt.Sprintf(e.i18n.T(MsgError), errMsg)
-				for _, h := range agentErrorHandlers {
-					if strings.Contains(errMsg, h.contains) {
-						userMsg = e.i18n.T(h.msgKey)
-						break
-					}
-				}
 				e.send(p, replyCtx, userMsg)
 			}
 			// Only drop queued messages if the agent session is dead.
@@ -7480,6 +7510,9 @@ func (e *Engine) drainPendingMessages(state *interactiveState, session *Session,
 		}
 
 		slog.Info("processing queued message", "session", sessionKey)
+		state.mu.Lock()
+		state.deliveryLabel = ""
+		state.mu.Unlock()
 		e.processInteractiveEvents(state, session, sessions, sessionKey, queued.messageID, time.Now(), stopTyping, sendDone, queued.replyCtx, lockGen)
 	}
 }
@@ -8080,7 +8113,19 @@ func (e *Engine) cmdNew(p Platform, msg *Message, args []string) {
 	e.interactiveMu.Lock()
 	expected := e.interactiveStates[interactiveKey]
 	e.interactiveMu.Unlock()
+	var previousBusy bool
+	var queuedDropped int
+	if expected != nil {
+		expected.mu.Lock()
+		busySession := expected.busySession
+		queuedDropped = len(expected.pendingMessages)
+		expected.mu.Unlock()
+		previousBusy = busySession != nil && busySession.Busy()
+	}
 	e.cleanupInteractiveStateForNew(interactiveKey, expected)
+	e.closingMu.Lock()
+	closeUnconfirmed := e.unsafeResume[interactiveKey]
+	e.closingMu.Unlock()
 	slog.Info("cmdNew: cleanup done, creating new session", "session_key", msg.SessionKey)
 
 	// Clear old session's agent session ID so it cannot be resumed
@@ -8094,11 +8139,25 @@ func (e *Engine) cmdNew(p Platform, msg *Message, args []string) {
 		name = strings.Join(args, " ")
 	}
 	sessions.NewSession(msg.SessionKey, name)
+	reply := e.i18n.T(MsgNewSessionCreated)
 	if name != "" {
-		e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgNewSessionCreatedName), name))
-	} else {
-		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgNewSessionCreated))
+		reply = e.i18n.Tf(MsgNewSessionCreatedName, name)
 	}
+	if previousBusy {
+		if closeUnconfirmed {
+			reply += "\n" + e.i18n.T(MsgPreviousTaskUnconfirmed)
+		} else {
+			reply += "\n" + e.i18n.T(MsgPreviousTaskStopped)
+		}
+	}
+	if queuedDropped > 0 {
+		reply += "\n" + e.i18n.Tf(MsgQueuedMessagesDropped, queuedDropped)
+	}
+	if previousBusy || queuedDropped > 0 {
+		slog.Info("cmdNew: previous work reset", "session", old.ID, "was_busy", previousBusy,
+			"close_unconfirmed", closeUnconfirmed, "queued_dropped", queuedDropped)
+	}
+	e.reply(p, msg.ReplyCtx, reply)
 }
 
 // applySessionFilter narrows agent sessions to those the given sessionKey may
