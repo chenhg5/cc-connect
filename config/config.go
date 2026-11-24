@@ -479,7 +479,7 @@ type AutoCompressConfig struct {
 	Enabled        *bool `toml:"enabled,omitempty"`         // default false
 	MaxTokens      *int  `toml:"max_tokens,omitempty"`      // estimated token threshold to trigger /compress
 	MinGapMins     *int  `toml:"min_gap_mins,omitempty"`    // minimum minutes between auto-compress runs (default 30)
-	OverheadTokens *int  `toml:"overhead_tokens,omitempty"` // fixed prompt/tool allowance for heuristic estimates (default 20000; 0 disables)
+	OverheadTokens *int  `toml:"overhead_tokens,omitempty"` // fixed prompt/tool allowance for heuristic estimates (default 0)
 	// AllowHeuristic restores deciding from the text-length heuristic when an
 	// agent that CAN report exact usage has not reported it yet. Default false:
 	// such turns make no decision and wait for the next turn, which carries the

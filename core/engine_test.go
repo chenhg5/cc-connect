@@ -10698,13 +10698,14 @@ func TestAutoCompress_AgentWithoutReporter_StillUsesHeuristic(t *testing.T) {
 	}
 }
 
-func TestAutoCompress_NoReporterIncludesDefaultOverhead(t *testing.T) {
+func TestAutoCompress_NoReporterIncludesConfiguredOverhead(t *testing.T) {
 	p := &stubPlatformEngine{n: "test"}
 	inner := newQueuingSession("overhead")
 	sess := &noReporterSession{AgentSession: inner, inner: inner}
 	agent := &stubCompressorAgent{cmd: "/compact"}
 	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
 	e.SetAutoCompressConfig(true, 15_000, 0)
+	e.SetAutoCompressOverheadTokens(20_000)
 	key := "test:overhead"
 	state := &interactiveState{agentSession: sess, platform: p, replyCtx: "ctx"}
 	e.interactiveStates[key] = state
@@ -10722,10 +10723,31 @@ func TestAutoCompress_NoReporterIncludesDefaultOverhead(t *testing.T) {
 		}
 		select {
 		case <-deadline:
-			t.Fatal("expected default fixed overhead to cross the auto-compress threshold")
+			t.Fatal("expected configured fixed overhead to cross the auto-compress threshold")
 		default:
 			time.Sleep(10 * time.Millisecond)
 		}
+	}
+}
+
+func TestAutoCompress_UnconfiguredOverheadPreservesHeuristic(t *testing.T) {
+	p := &stubPlatformEngine{n: "test"}
+	inner := newQueuingSession("unconfigured-overhead")
+	sess := &noReporterSession{AgentSession: inner, inner: inner}
+	e := NewEngine("test", &stubCompressorAgent{cmd: "/compact"}, []Platform{p}, "", LangEnglish)
+	e.SetAutoCompressConfig(true, 15_000, 0)
+	key := "test:unconfigured-overhead"
+	state := &interactiveState{agentSession: sess, platform: p, replyCtx: "ctx"}
+	e.interactiveStates[key] = state
+	session := e.sessions.GetOrCreateActive(key)
+	session.AddHistory("user", "short history")
+	go e.processInteractiveEvents(state, session, e.sessions, key, "msg1", time.Now(), func() {}, nil, nil, 0)
+	inner.events <- Event{Type: EventResult, Content: "response", Done: true}
+	time.Sleep(300 * time.Millisecond)
+	inner.sendMu.Lock()
+	defer inner.sendMu.Unlock()
+	if len(inner.sendCalls) != 0 {
+		t.Fatalf("unconfigured overhead must preserve the old estimate, got sends %v", inner.sendCalls)
 	}
 }
 

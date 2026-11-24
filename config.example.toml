@@ -380,9 +380,9 @@ level = "info" # debug, info, warn, error
 # enabled = true
 # max_tokens = 12000     # estimated token threshold to trigger compression
 # min_gap_mins = 30      # minimum minutes between auto-compress runs (default 30)
-# overhead_tokens = 20000 # fixed prompt/tools allowance for heuristic estimates;
-#                         # set 0 for previous behavior. Tune by agent and tools;
-#                         # Claude Code setups may need 15K-60K.
+# overhead_tokens = 0    # default: preserve the previous text-only estimate.
+#                        # To include prompt/tool overhead, set 15000-60000 based on
+#                        # your agent and tools, and raise max_tokens above this value.
 # allow_heuristic = false  # decide from the text-length heuristic when an agent that
 #                          # CAN report exact usage has not reported it yet. Off by
 #                          # default: wait for the exact number instead. The heuristic

@@ -536,6 +536,10 @@ type Engine struct {
 	dataDir string
 }
 
+// DefaultAutoCompressOverheadTokens preserves the historical text-only
+// estimate until an operator opts into a fixed prompt/tool allowance.
+const DefaultAutoCompressOverheadTokens = 0
+
 // workspaceInitFlow tracks a channel that is being onboarded to a workspace.
 type workspaceInitFlow struct {
 	state       string // "awaiting_url", "awaiting_confirm"
@@ -832,7 +836,7 @@ func NewEngine(name string, ag Agent, platforms []Platform, sessionStorePath str
 		historyBootstrapEnabled:    true,
 		historyBootstrapMaxEntries: 20,
 		historyBootstrapMaxTokens:  4000,
-		autoCompressOverheadTokens: 20_000,
+		autoCompressOverheadTokens: DefaultAutoCompressOverheadTokens,
 	}
 
 	if ag != nil {
