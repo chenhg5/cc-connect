@@ -85,11 +85,12 @@ type piSession struct {
 	pendingErr string
 
 	// RPC-only fields (nil/zero when rpc=false)
-	rpcCmd     *exec.Cmd
-	rpcStdin   io.WriteCloser
-	rpcStdinMu sync.Mutex
-	stderrBuf  cappedStderrWriter
-	rpcReady   chan struct{} // closed once after handleEvent stores sessionId from the get_state probe written by startRPC
+	rpcCmd      *exec.Cmd
+	rpcStdin    io.WriteCloser
+	rpcStdinMu  sync.Mutex
+	stderrBuf   cappedStderrWriter
+	rpcWaitOnce sync.Once
+	rpcReady    chan struct{} // closed once after handleEvent stores sessionId from the get_state probe written by startRPC
 
 	// Extension UI: maps Pi's extension_ui_request id -> cc-connect RequestID
 	extPendingMu  sync.Mutex
@@ -238,12 +239,14 @@ func (s *piSession) startRPC(resumeID string) error {
 }
 
 func (s *piSession) killRPC() {
-	if s.rpcCmd != nil && s.rpcCmd.Process != nil {
-		if err := forceKillCmd(s.rpcCmd); err != nil {
-			slog.Warn("piSession: kill rpc process", "error", err)
+	s.rpcWaitOnce.Do(func() {
+		if s.rpcCmd != nil && s.rpcCmd.Process != nil {
+			if err := forceKillCmd(s.rpcCmd); err != nil {
+				slog.Warn("piSession: kill rpc process", "error", err)
+			}
+			_ = s.rpcCmd.Wait() // Join os/exec stderr copying before readLoopRPC reads stderrBuf.
 		}
-		_, _ = s.rpcCmd.Process.Wait()
-	}
+	})
 }
 
 // readLoopRPC is the persistent RPC readLoop goroutine.

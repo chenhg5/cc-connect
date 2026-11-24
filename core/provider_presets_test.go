@@ -515,3 +515,65 @@ func TestProviderPresetsIncludesLazu(t *testing.T) {
 		t.Fatalf("opencode base_url = %q", opencode.BaseURL)
 	}
 }
+
+func TestProviderPresetsIncludesOnomeo(t *testing.T) {
+	body, err := os.ReadFile("../provider-presets.json")
+	if err != nil {
+		t.Fatalf("read provider-presets.json: %v", err)
+	}
+
+	var presets ProviderPresetsResponse
+	if err := json.Unmarshal(body, &presets); err != nil {
+		t.Fatalf("parse provider-presets.json: %v", err)
+	}
+
+	var onomeo *ProviderPreset
+	for i := range presets.Providers {
+		if presets.Providers[i].Name == "onomeo" {
+			onomeo = &presets.Providers[i]
+			break
+		}
+	}
+	if onomeo == nil {
+		t.Fatal("onomeo preset not found")
+	}
+	if onomeo.InviteURL != "" {
+		t.Fatalf("onomeo invite_url = %q, want empty", onomeo.InviteURL)
+	}
+
+	claude := onomeo.AgentConfig("claudecode")
+	if claude == nil {
+		t.Fatal("onomeo claudecode config missing")
+	}
+	if claude.BaseURL != "https://onomeo.com" {
+		t.Fatalf("claudecode base_url = %q", claude.BaseURL)
+	}
+	if claude.Model != "claude-sonnet-5.5" {
+		t.Fatalf("claudecode model = %q", claude.Model)
+	}
+
+	codex := onomeo.AgentConfig("codex")
+	if codex == nil {
+		t.Fatal("onomeo codex config missing")
+	}
+	if codex.BaseURL != "https://onomeo.com/v1" {
+		t.Fatalf("codex base_url = %q", codex.BaseURL)
+	}
+	if codex.Model != "gpt-6.2-sol" {
+		t.Fatalf("codex model = %q", codex.Model)
+	}
+	if codex.CodexConfig == nil || codex.CodexConfig.WireAPI != "responses" {
+		t.Fatalf("codex_config = %#v", codex.CodexConfig)
+	}
+
+	opencode := onomeo.AgentConfig("opencode")
+	if opencode == nil {
+		t.Fatal("onomeo opencode config missing")
+	}
+	if opencode.BaseURL != "https://onomeo.com/v1" {
+		t.Fatalf("opencode base_url = %q", opencode.BaseURL)
+	}
+	if opencode.Model != "deepseek-v4.1-flash" {
+		t.Fatalf("opencode model = %q", opencode.Model)
+	}
+}

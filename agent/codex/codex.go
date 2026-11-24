@@ -56,6 +56,7 @@ type Agent struct {
 	configEnv              []string // env vars from [projects.agent.options.env] — persists across SetSessionEnv calls
 	sessionEnv             []string
 	mu                     sync.RWMutex
+	ignoreSessionPrefixes  []string
 
 	// requestUserInputTimeout is the app_server AskUserQuestion wait
 	// (request_user_input_timeout_mins); always > 0 after New.
@@ -149,6 +150,7 @@ func New(opts map[string]any) (core.Agent, error) {
 		cmd:                     cmd,
 		cliExtraArgs:            cliExtraArgs,
 		configEnv:               configEnv,
+		ignoreSessionPrefixes:   parseSessionFilterPrefixes(opts["session_filter"]),
 		activeIdx:               -1,
 	}, nil
 }
@@ -655,15 +657,17 @@ func (a *Agent) ListSessions(_ context.Context) ([]core.AgentSessionInfo, error)
 	a.mu.RLock()
 	codexHome := a.codexHome
 	workDir := a.workDir
+	ignorePrefixes := append([]string(nil), a.ignoreSessionPrefixes...)
 	a.mu.RUnlock()
-	return listCodexSessions(workDir, codexHome)
+	return listCodexSessions(workDir, codexHome, ignorePrefixes)
 }
 
 func (a *Agent) GetSessionHistory(_ context.Context, sessionID string, limit int) ([]core.HistoryEntry, error) {
 	a.mu.RLock()
 	codexHome := a.codexHome
+	ignorePrefixes := append([]string(nil), a.ignoreSessionPrefixes...)
 	a.mu.RUnlock()
-	return getSessionHistory(sessionID, codexHome, limit)
+	return getSessionHistory(sessionID, codexHome, limit, ignorePrefixes)
 }
 
 func (a *Agent) DeleteSession(_ context.Context, sessionID string) error {
