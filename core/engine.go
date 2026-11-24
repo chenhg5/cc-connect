@@ -6097,11 +6097,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				if !e.display.ToolMessages {
 					break
 				}
-				toolSteps = append(toolSteps, ToolStep{
-					Kind:    ToolStepKindTool,
-					Name:    event.ToolName,
-					Summary: truncateIf(event.ToolInput, e.display.ToolMaxLen),
-				})
+				toolSteps = appendToolStep(toolSteps, event.ToolName, truncateIf(formatToolInput(event.ToolName, event.ToolInput), e.display.ToolMaxLen))
 				if cardMessageID == nil {
 					card := buildResolvedRichCard(CardStatusWorking, "", toolSteps, partialText, true, e.composeRichStatusFooter(true, turnStart, e.agent, state.agentSession, state.workspaceDir))
 					if starter, ok := p.(PreviewStarter); ok {
@@ -6147,10 +6143,15 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			if e.display.ToolMessages {
 				// --- StreamingCard path ---
 				if streamCard != nil && !streamCard.Failed() {
-					toolInput := event.ToolInput
+					toolInput := formatToolInput(event.ToolName, event.ToolInput)
+					if toolInput != event.ToolInput {
+						toolInput = truncateIf(toolInput, e.display.ToolMaxLen)
+					}
 					var formattedInput string
 					if toolInput == "" {
 						formattedInput = ""
+					} else if strings.EqualFold(event.ToolName, "TodoWrite") && toolInput != event.ToolInput {
+						formattedInput = toolInput
 					} else if strings.Contains(toolInput, "```") {
 						formattedInput = toolInput
 					} else if strings.Contains(toolInput, "\n") || utf8.RuneCountInString(toolInput) > 200 {
@@ -6191,10 +6192,15 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				if previewActive {
 					sp.detachPreview() // keep frozen preview visible as permanent message
 				}
-				toolInput := event.ToolInput
+				toolInput := formatToolInput(event.ToolName, event.ToolInput)
+				if toolInput != event.ToolInput {
+					toolInput = truncateIf(toolInput, e.display.ToolMaxLen)
+				}
 				var formattedInput string
 				if toolInput == "" {
 					formattedInput = ""
+				} else if strings.EqualFold(event.ToolName, "TodoWrite") && toolInput != event.ToolInput {
+					formattedInput = toolInput
 				} else if strings.Contains(toolInput, "```") {
 					formattedInput = toolInput
 				} else if strings.Contains(toolInput, "\n") || utf8.RuneCountInString(toolInput) > 200 {
@@ -7294,7 +7300,7 @@ func mergeRichToolResult(steps []ToolStep, event Event, result string, maxLen in
 		}
 	}
 	if idx == -1 {
-		summary := strings.TrimSpace(event.ToolInput)
+		summary := strings.TrimSpace(formatToolInput(toolName, event.ToolInput))
 		if summary != "" {
 			summary = truncateIf(summary, maxLen)
 		}
@@ -7313,7 +7319,7 @@ func mergeRichToolResult(steps []ToolStep, event Event, result string, maxLen in
 		steps[idx].Kind = ToolStepKindTool
 	}
 	if strings.TrimSpace(steps[idx].Summary) == "" && strings.TrimSpace(event.ToolInput) != "" {
-		steps[idx].Summary = truncateIf(strings.TrimSpace(event.ToolInput), maxLen)
+		steps[idx].Summary = truncateIf(strings.TrimSpace(formatToolInput(toolName, event.ToolInput)), maxLen)
 	}
 	steps[idx].Result = result
 	steps[idx].Status = strings.TrimSpace(event.ToolStatus)
