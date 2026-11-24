@@ -44,6 +44,17 @@ type Platform interface {
 	Stop() error
 }
 
+// FinalReplyOnlyPlatform marks reply surfaces which cannot display intermediate
+// agent output. The engine keeps other platforms' display settings unchanged.
+type FinalReplyOnlyPlatform interface {
+	FinalReplyOnly() bool
+}
+
+func finalReplyOnly(p Platform) bool {
+	capability, ok := p.(FinalReplyOnlyPlatform)
+	return ok && capability.FinalReplyOnly()
+}
+
 // ErrNotSupported indicates a platform doesn't support a particular operation.
 var ErrNotSupported = errors.New("operation not supported by this platform")
 
