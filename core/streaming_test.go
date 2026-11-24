@@ -609,3 +609,19 @@ func TestStreamPreview_UnfreezeIdempotent(t *testing.T) {
 		t.Fatal("canPreview() = false after no-op unfreeze, want true")
 	}
 }
+
+// A replace that shrinks the body is sent as soon as the interval allows,
+// even though it adds fewer than MinDeltaChars characters.
+func TestStreamPreview_ReplaceTextSendsShorterBody(t *testing.T) {
+	mp := &mockUpdaterPlatform{}
+	cfg := StreamPreviewCfg{Enabled: true, IntervalMs: 0, MinDeltaChars: 30, MaxChars: 500}
+	sp := newStreamPreview(cfg, mp, "ctx", context.Background(), nil)
+
+	sp.appendText("A long lead-in before the tool call runs.")
+	sp.replaceText("Answer.")
+
+	msgs := mp.getMessages()
+	if len(msgs) != 2 || msgs[1] != "update:Answer." {
+		t.Fatalf("messages = %q, want the lead-in then an update to %q", msgs, "Answer.")
+	}
+}

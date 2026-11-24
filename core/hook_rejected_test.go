@@ -41,7 +41,7 @@ func TestProcessInteractiveEvents_DropsStopHookRejectedDraft(t *testing.T) {
 func TestProcessInteractiveEvents_NoHookRejectionKeepsTextAcrossToolBoundary(t *testing.T) {
 	p := &stubPlatformEngine{n: "feishu"}
 	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
-	e.SetDisplayConfig(DisplayCfg{Mode: "quiet", ToolMessages: false})
+	e.SetDisplayConfig(DisplayCfg{Mode: "quiet", ToolMessages: false, PrependPreToolText: true})
 	sessionKey := "feishu:no-hook-rejection"
 	session := e.sessions.GetOrCreateActive(sessionKey)
 	agentSession := newControllableSession("no-hook-rejection")
