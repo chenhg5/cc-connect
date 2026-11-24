@@ -414,6 +414,8 @@ type Engine struct {
 
 	rateLimiter         *RateLimiter
 	outgoingRL          *OutgoingRateLimiter
+	dedupMu             sync.RWMutex
+	dedup               *MessageDedup
 	streamPreview       StreamPreviewCfg
 	instantReply        InstantReplyCfg
 	references          ReferenceRenderCfg
@@ -1374,6 +1376,24 @@ func (e *Engine) SetRateLimitCfg(cfg RateLimitCfg) {
 // SetOutgoingRateLimitCfg configures per-platform outgoing message throttling.
 func (e *Engine) SetOutgoingRateLimitCfg(defaults OutgoingRateLimitCfg, overrides map[string]OutgoingRateLimitCfg) {
 	e.outgoingRL = NewOutgoingRateLimiter(defaults, overrides)
+}
+
+// SetDedupConfig configures the engine-level retry window. A disabled cache
+// accepts every delivery; a non-positive window uses the package default.
+func (e *Engine) SetDedupConfig(enabled bool, window time.Duration) {
+	if window <= 0 {
+		window = DefaultDedupTTL
+	}
+	e.dedupMu.Lock()
+	defer e.dedupMu.Unlock()
+	if !enabled {
+		e.dedup = nil
+		return
+	}
+	if e.dedup != nil && e.dedup.TTL() == window {
+		return
+	}
+	e.dedup = NewMessageDedup(window)
 }
 
 // checkRateLimit returns true if the message is allowed, false if rate-limited.
@@ -3019,6 +3039,16 @@ func (e *Engine) handleMessage(p Platform, msg *Message) {
 	if msg.Recalled {
 		e.handleMessageRecall(p, msg)
 		return
+	}
+	if msg.MessageID != "" {
+		e.dedupMu.RLock()
+		dedup := e.dedup
+		e.dedupMu.RUnlock()
+		key := p.Name() + "\x00" + msg.SessionKey + "\x00" + msg.MessageID
+		if dedup.IsDuplicate(key) {
+			slog.Info("duplicate message dropped", "platform", p.Name(), "session", msg.SessionKey, "msg_id", msg.MessageID)
+			return
+		}
 	}
 
 	slog.Info("message received",

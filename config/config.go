@@ -104,6 +104,7 @@ type Config struct {
 	InstantReply       InstantReplyConfig      `toml:"instant_reply"`       // immediate confirmation reply
 	RateLimit          RateLimitConfig         `toml:"rate_limit"`          // per-session rate limiting
 	OutgoingRateLimit  OutgoingRateLimitConfig `toml:"outgoing_rate_limit"` // outgoing message throttling
+	Dedup              DedupConfig             `toml:"dedup"`               // engine-level message ID deduplication
 	Relay              RelayConfig             `toml:"relay"`               // bot-to-bot relay behavior
 	Cron               CronConfig              `toml:"cron"`
 	Queue              QueueConfig             `toml:"queue"`
@@ -246,6 +247,12 @@ type OutgoingRateLimitConfig struct {
 	MaxPerSecond *float64                               `toml:"max_per_second"` // messages per second; 0 = unlimited (default)
 	Burst        *int                                   `toml:"burst"`          // max burst size; default = ceil(max_per_second)
 	Platforms    map[string]OutgoingRateLimitPlatConfig `toml:"platforms"`      // per-platform overrides keyed by platform type name
+}
+
+// DedupConfig controls the engine-level duplicate delivery window.
+type DedupConfig struct {
+	Enabled    *bool `toml:"enabled"`     // default true
+	WindowSecs *int  `toml:"window_secs"` // default 30
 }
 
 // OutgoingRateLimitPlatConfig is a per-platform override for outgoing rate limiting.
