@@ -1,12 +1,33 @@
 package feishu
 
 import (
+	"net/http"
+	"net/http/httptest"
 	"testing"
 	"time"
 
 	"github.com/chenhg5/cc-connect/core"
 	callback "github.com/larksuite/oapi-sdk-go/v3/event/dispatcher/callback"
 )
+
+// stubOpenAPIDomain serves the Open API calls a dispatched card action makes
+// before reaching the handler (tenant token, user and chat name lookups) and
+// returns its URL for the "domain" option. Against the real Open API that
+// latency lands inside the tests' waits, so positive cases time out on slow
+// networks and negative cases (waitNoMessage) stop proving anything.
+func stubOpenAPIDomain(t *testing.T) string {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if r.URL.Path == "/open-apis/auth/v3/tenant_access_token/internal" {
+			writeJSON(t, w, map[string]any{"code": 0, "msg": "ok", "expire": 7200, "tenant_access_token": "t-test"})
+			return
+		}
+		writeJSON(t, w, map[string]any{"code": 0, "msg": "success"})
+	}))
+	t.Cleanup(srv.Close)
+	return srv.URL
+}
 
 // newAllowFromTestPlatform constructs an interactivePlatform with the given
 // allowFrom whitelist and a handler channel that lets the test assert whether
@@ -18,6 +39,7 @@ func newAllowFromTestPlatform(t *testing.T, allowFrom string) (*interactivePlatf
 		"app_secret":         "secret",
 		"allow_from":         allowFrom,
 		"enable_feishu_card": true,
+		"domain":             stubOpenAPIDomain(t),
 	})
 	if err != nil {
 		t.Fatalf("New() error = %v", err)
@@ -258,4 +280,19 @@ func TestOnCardAction_AllowFromMultiListRespectsExactMember(t *testing.T) {
 		t.Fatalf("onCardAction() error = %v", err)
 	}
 	waitNoMessage(t, msgCh, 200*time.Millisecond, "cmd:/bar from ou_d (not listed)")
+}
+
+// An askq option click is answered by replacing the card in the callback
+// response, so the dispatched message marks the answer rendered and the
+// engine must not echo it as a second chat message.
+func TestOnCardAction_AskqMarksAnswerRendered(t *testing.T) {
+	ip, msgCh := newAllowFromTestPlatform(t, "*")
+	_, err := ip.onCardAction(cardActionEvent("ou_owner", "askq:0:1"))
+	if err != nil {
+		t.Fatalf("onCardAction() error = %v", err)
+	}
+	msg := waitAnyMessage(t, msgCh, 3*time.Second, "askq option click")
+	if !msg.CardAnswerRendered {
+		t.Error("CardAnswerRendered = false, want true for an in-place replaced askq card")
+	}
 }

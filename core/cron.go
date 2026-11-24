@@ -456,6 +456,9 @@ type CronScheduler struct {
 	stop    chan struct{}
 	done    chan struct{}
 	running bool
+	// quit is closed by Stop so a job that is still running stops being
+	// waited on; shutdown must not block until the job finishes (#2313).
+	quit chan struct{}
 }
 
 func NewCronScheduler(store *CronStore) *CronScheduler {
@@ -511,6 +514,7 @@ func (cs *CronScheduler) Start() error {
 	cs.wakeUp = make(chan struct{}, 1)
 	cs.stop = make(chan struct{}, 1)
 	cs.done = make(chan struct{})
+	cs.quit = make(chan struct{})
 	cs.mu.Unlock()
 
 	jobs := cs.store.List()
@@ -537,6 +541,7 @@ func (cs *CronScheduler) Stop() {
 	cs.running = false
 	stopCh := cs.stop
 	doneCh := cs.done
+	close(cs.quit)
 	cs.mu.Unlock()
 
 	select {
@@ -544,6 +549,22 @@ func (cs *CronScheduler) Stop() {
 	default:
 	}
 	<-doneCh
+}
+
+// stopping reports whether Stop has been called since the last Start.
+func (cs *CronScheduler) stopping() bool {
+	cs.mu.RLock()
+	quit := cs.quit
+	cs.mu.RUnlock()
+	if quit == nil {
+		return false
+	}
+	select {
+	case <-quit:
+		return true
+	default:
+		return false
+	}
 }
 
 // signalWakeUp nudges the runLoop to re-evaluate the next firing time.
@@ -639,6 +660,9 @@ func (cs *CronScheduler) fireDueJobs() {
 	cs.mu.RUnlock()
 
 	for _, e := range due {
+		if cs.stopping() {
+			return
+		}
 		job := cs.store.Get(e.jobID)
 		if job != nil {
 			cs.runJob(job, false)
@@ -863,7 +887,11 @@ func (cs *CronScheduler) runJob(job *CronJob, manual bool) {
 
 	slog.Info("cron: executing job", "id", job.ID, "project", job.Project, "manual", manual, "prompt", truncateStr(job.Prompt, 60))
 
-	err := executeCronRun(engine, job, job.ExecutionTimeout())
+	cs.mu.RLock()
+	quit := cs.quit
+	cs.mu.RUnlock()
+
+	err := executeCronRun(engine, job, quit, job.ExecutionTimeout())
 
 	cs.store.MarkRun(job.ID, err)
 
@@ -894,8 +922,9 @@ const (
 // executeCronRun runs one cron invocation under timeout. When the timeout
 // elapses first it cancels exactly the turn that invocation started (carried
 // out of run creation via CronRunHandle) and waits a bounded time for the run
-// goroutine to unwind. A timeout <= 0 waits indefinitely.
-func executeCronRun(engine *Engine, job *CronJob, timeout time.Duration) error {
+// goroutine to unwind. A timeout <= 0 waits for completion or shutdown. A nil
+// quit channel disables shutdown interruption.
+func executeCronRun(engine *Engine, job *CronJob, quit chan struct{}, timeout time.Duration) error {
 	done := make(chan error, 1)
 	handles := make(chan CronRunHandle, 1)
 	go func() {
@@ -907,15 +936,20 @@ func executeCronRun(engine *Engine, job *CronJob, timeout time.Duration) error {
 		})
 	}()
 
-	if timeout <= 0 {
-		return <-done
+	var timeoutCh <-chan time.Time
+	if timeout > 0 {
+		timer := time.NewTimer(timeout)
+		defer timer.Stop()
+		timeoutCh = timer.C
 	}
 
 	select {
 	case err := <-done:
 		return err
-	case <-time.After(timeout):
+	case <-timeoutCh:
 		return stopTimedOutCronRun(engine, job, timeout, handles, done)
+	case <-quit:
+		return errors.New("job interrupted by shutdown")
 	}
 }
 

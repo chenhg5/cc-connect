@@ -1439,7 +1439,7 @@ func TestExecuteCronRun_TimeoutCancelsRunAndUnwinds(t *testing.T) {
 	job := &CronJob{ID: "job-timeout", SessionKey: "discord:channel-1:user-1", Prompt: "long task"}
 
 	start := time.Now()
-	err := executeCronRun(e, job, 100*time.Millisecond)
+	err := executeCronRun(e, job, nil, 100*time.Millisecond)
 	elapsed := time.Since(start)
 
 	if err == nil || !strings.Contains(err.Error(), "timed out") {
