@@ -345,9 +345,35 @@ func truncateStr(s string, maxLen int) string {
 	if len(s) <= maxLen {
 		return s
 	}
-	cut := maxLen
-	for cut > 0 && !utf8.RuneStart(s[cut]) {
-		cut--
+	return utf8Prefix(s, maxLen) + "..."
+}
+
+const defaultToolResultMaxLen = 4000
+
+func utf8Prefix(s string, limit int) string {
+	if limit <= 0 {
+		return ""
 	}
-	return s[:cut] + "..."
+	if len(s) <= limit {
+		return s
+	}
+	for limit > 0 && !utf8.RuneStart(s[limit]) {
+		limit--
+	}
+	return s[:limit]
+}
+
+// truncateToolResult includes the notice in the configured byte budget.
+func truncateToolResult(s string, maxLen int) string {
+	if maxLen <= 0 {
+		maxLen = defaultToolResultMaxLen
+	}
+	if len(s) <= maxLen {
+		return s
+	}
+	notice := fmt.Sprintf("… (truncated, %d bytes total)", len(s))
+	if len(notice) >= maxLen {
+		return utf8Prefix("...", maxLen)
+	}
+	return utf8Prefix(s, maxLen-len(notice)) + notice
 }

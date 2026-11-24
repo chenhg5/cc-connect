@@ -926,6 +926,13 @@ mode = "default" # "default" | "acceptEdits" (edit) | "plan" | "auto" | "bypassP
 # 或者想硬编码一个特定窗口时设置此选项。<= 0 保持上述默认行为。
 # context_window_tokens = 200000
 
+# Maximum bytes of a Claude Code tool result forwarded to the chat, including
+# its truncation notice. Defaults to 4000; 0 uses the default. The display
+# layer's tool_max_len setting may shorten it further for a given platform.
+# 转发到聊天的 Claude Code 工具结果最大字节数（包含截断提示）；默认 4000，0 使用默认值。
+# 平台显示层的 tool_max_len 仍可能进一步缩短内容。
+# tool_result_max_len = 4000
+
 # In default/acceptEdits mode, you can pre-approve specific tools:
 # 在 default/acceptEdits 模式下，可预授权特定工具：
 # allowed_tools = ["Read", "Grep", "Glob", "Bash", "Edit", "Write"]

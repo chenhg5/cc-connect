@@ -1365,3 +1365,19 @@ func setupSessionForHistory(t *testing.T, sessionID, src string) string {
 	}
 	return workDir
 }
+func TestToolResultMaxLenOption(t *testing.T) {
+	for _, tc := range []struct {
+		value any
+		want  int
+	}{
+		{nil, 4000}, {int64(0), 4000}, {int64(800), 800}, {float64(900), 900},
+	} {
+		agent, err := New(map[string]any{"work_dir": t.TempDir(), "tool_result_max_len": tc.value})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := agent.(*Agent).toolResultMaxLen; got != tc.want {
+			t.Fatalf("tool_result_max_len %v: got %d, want %d", tc.value, got, tc.want)
+		}
+	}
+}
