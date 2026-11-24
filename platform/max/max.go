@@ -10,6 +10,7 @@ import (
 	"log/slog"
 	"mime/multipart"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 	"sync"
@@ -271,7 +272,7 @@ func (p *Platform) Stop() error {
 		unsubCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 		if err := p.unsubscribe(unsubCtx, url); err != nil {
-			slog.Warn("max: unsubscribe webhook failed", "url", url, "err", err)
+			slog.Warn("max: unsubscribe webhook failed", "url", webhookLogURL(url), "err", err)
 		}
 	}
 	return nil
@@ -295,7 +296,7 @@ func (p *Platform) startWebhook(ctx context.Context) error {
 	p.webServer = srv
 
 	go func() {
-		slog.Info("max: webhook listening", "addr", p.webhookListen, "path", p.webhookPath, "url", p.webhookURL)
+		slog.Info("max: webhook listening", "addr", p.webhookListen, "path", p.webhookPath, "url", webhookLogURL(p.webhookURL))
 		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			slog.Error("max: webhook listener stopped", "err", err)
 		}
@@ -304,7 +305,7 @@ func (p *Platform) startWebhook(ctx context.Context) error {
 	if err := p.subscribe(ctx, p.webhookURL); err != nil {
 		return fmt.Errorf("subscribe: %w", err)
 	}
-	slog.Info("max: webhook subscribed", "url", p.webhookURL)
+	slog.Info("max: webhook subscribed", "url", webhookLogURL(p.webhookURL))
 
 	// MAX has been observed to silently drop the webhook subscription
 	// server-side without any delivery error. The documented 8h failure
@@ -334,6 +335,16 @@ func (p *Platform) resubscribeLoop(ctx context.Context) {
 			cancel()
 		}
 	}
+}
+
+// webhookLogURL keeps the endpoint useful for diagnostics without logging
+// query values, fragments, or userinfo that may contain credentials.
+func webhookLogURL(raw string) string {
+	u, err := url.Parse(raw)
+	if err != nil {
+		return "<invalid URL>"
+	}
+	return (&url.URL{Scheme: u.Scheme, Host: u.Host, Path: u.Path}).String()
 }
 
 // webhookCtx returns the parent context for an asynchronous webhook handler
@@ -419,8 +430,7 @@ func (p *Platform) subscribe(ctx context.Context, url string) error {
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode >= 300 {
-		respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
-		return fmt.Errorf("HTTP %d: %s", resp.StatusCode, respBody)
+		return fmt.Errorf("HTTP %d", resp.StatusCode)
 	}
 	return nil
 }
@@ -441,8 +451,7 @@ func (p *Platform) unsubscribe(ctx context.Context, url string) error {
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode >= 300 {
-		respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
-		return fmt.Errorf("HTTP %d: %s", resp.StatusCode, respBody)
+		return fmt.Errorf("HTTP %d", resp.StatusCode)
 	}
 	return nil
 }
