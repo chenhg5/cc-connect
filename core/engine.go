@@ -6631,7 +6631,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			} else if hasRichCard {
 				parts := []string{fullResponse}
 				if splitter, ok := p.(MarkdownTableSplitter); ok {
-					parts = splitter.SplitMarkdownByTables(fullResponse, 5)
+					parts = splitter.SplitMarkdownByTables(fullResponse)
 				}
 				richStatusFooter := e.composeRichStatusFooter(false, turnStart, e.agent, state.agentSession, state.workspaceDir)
 				if legacyStatusFooter != "" {

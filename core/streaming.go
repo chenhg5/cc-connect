@@ -114,7 +114,7 @@ type RichCardMarkdownResolver interface {
 // MarkdownTableSplitter is an optional interface for platforms that need
 // platform-specific markdown table chunking before final send.
 type MarkdownTableSplitter interface {
-	SplitMarkdownByTables(md string, maxTables int) []string
+	SplitMarkdownByTables(md string) []string
 }
 
 // RichCardTextStreamer is an optional interface for platforms that support
