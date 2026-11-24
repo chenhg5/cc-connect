@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -170,6 +171,10 @@ type appServerSession struct {
 	codexHome         string
 	promptPreamble    string
 
+	// requestUserInputTimeout bounds the wait for an AskUserQuestion answer;
+	// <= 0 means defaultRequestUserInputTimeout.
+	requestUserInputTimeout time.Duration
+
 	events       chan core.Event
 	eventsMu     sync.RWMutex // publishers share the lock; Close owns channel closure
 	eventsClosed bool
@@ -211,31 +216,46 @@ type appServerSession struct {
 const (
 	appServerRequestTimeout      = 120 * time.Second
 	appServerUsageRefreshTimeout = 1500 * time.Millisecond
+	// Longer stderr lines are logged truncated; the rest is discarded.
+	appServerStderrLineLimit = 64 * 1024
+
+	// defaultRequestUserInputTimeout is how long an item/tool/requestUserInput
+	// (AskUserQuestion) waits for the user's answer before declining.
+	defaultRequestUserInputTimeout = 5 * time.Minute
 )
 
+// userInputTimeout returns the configured AskUserQuestion wait, or the default.
+func (s *appServerSession) userInputTimeout() time.Duration {
+	if s.requestUserInputTimeout > 0 {
+		return s.requestUserInputTimeout
+	}
+	return defaultRequestUserInputTimeout
+}
+
 // newAppServerSession connects to Codex and verifies the requested permissions before returning a usable session.
-func newAppServerSession(ctx context.Context, cliBin string, cliExtraArgs []string, url, workDir, model, effort, mode, resumeID, baseURL, modelProvider string, extraEnv []string, codexHome string, systemPrompt string, appendPrompt string, permissionProfile string) (*appServerSession, error) {
+func newAppServerSession(ctx context.Context, cliBin string, cliExtraArgs []string, url, workDir, model, effort, mode, resumeID, baseURL, modelProvider string, extraEnv []string, codexHome string, systemPrompt string, appendPrompt string, permissionProfile string, requestUserInputTimeout time.Duration) (*appServerSession, error) {
 	sessionCtx, cancel := context.WithCancel(ctx)
 	s := &appServerSession{
-		cliBin:            cliBin,
-		cliExtraArgs:      append([]string(nil), cliExtraArgs...),
-		url:               url,
-		workDir:           workDir,
-		model:             model,
-		effort:            effort,
-		mode:              mode,
-		permissionProfile: permissionProfile,
-		baseURL:           baseURL,
-		modelProvider:     modelProvider,
-		extraEnv:          append([]string(nil), extraEnv...),
-		codexHome:         strings.TrimSpace(codexHome),
-		promptPreamble:    buildCodexPromptPreamble(systemPrompt, appendPrompt),
-		events:            make(chan core.Event, 128),
-		ctx:               sessionCtx,
-		cancel:            cancel,
-		pending:           make(map[int64]chan rpcResponseEnvelope),
-		pendingApprovals:  make(map[string]chan core.PermissionResult),
-		preambleSent:      resumeID != "" && resumeID != core.ContinueSession,
+		cliBin:                  cliBin,
+		cliExtraArgs:            append([]string(nil), cliExtraArgs...),
+		url:                     url,
+		workDir:                 workDir,
+		model:                   model,
+		effort:                  effort,
+		mode:                    mode,
+		permissionProfile:       permissionProfile,
+		baseURL:                 baseURL,
+		modelProvider:           modelProvider,
+		extraEnv:                append([]string(nil), extraEnv...),
+		codexHome:               strings.TrimSpace(codexHome),
+		promptPreamble:          buildCodexPromptPreamble(systemPrompt, appendPrompt),
+		requestUserInputTimeout: requestUserInputTimeout,
+		events:                  make(chan core.Event, 128),
+		ctx:                     sessionCtx,
+		cancel:                  cancel,
+		pending:                 make(map[int64]chan rpcResponseEnvelope),
+		pendingApprovals:        make(map[string]chan core.PermissionResult),
+		preambleSent:            resumeID != "" && resumeID != core.ContinueSession,
 	}
 	s.alive.Store(true)
 
@@ -384,6 +404,10 @@ func (s *appServerSession) ensureThread(resumeID string) error {
 	if resumeID != "" && resumeID != core.ContinueSession {
 		params := s.threadRequestParams()
 		params["threadId"] = resumeID
+		// cc-connect only needs the thread metadata; without this Codex
+		// hydrates every past turn into the response, which grows with the
+		// thread and can reach tens of MB on one JSON-RPC line.
+		params["excludeTurns"] = true
 
 		var resp threadResumeResponse
 		if err := s.request("thread/resume", params, &resp); err != nil {
@@ -917,7 +941,7 @@ func (s *appServerSession) handleRequestUserInput(rawID json.RawMessage, paramsR
 	})
 
 	go func() {
-		timer := time.NewTimer(5 * time.Minute)
+		timer := time.NewTimer(s.userInputTimeout())
 		defer timer.Stop()
 		var result core.PermissionResult
 		select {
@@ -1211,18 +1235,26 @@ func (s *appServerSession) readLoop(r io.Reader) {
 
 func (s *appServerSession) stderrLoop(r io.Reader) {
 	defer s.wg.Done()
-	scanner := bufio.NewScanner(r)
-	buf := make([]byte, 0, 64*1024)
-	scanner.Buffer(buf, 1024*1024)
-	for scanner.Scan() {
-		line := strings.TrimSpace(scanner.Text())
-		if line == "" {
-			continue
+	reader := bufio.NewReaderSize(r, appServerStderrLineLimit)
+	for {
+		chunk, err := reader.ReadSlice('\n')
+		line := strings.TrimSpace(string(chunk))
+		if errors.Is(err, bufio.ErrBufferFull) {
+			// Keep draining past an over-long line: once nobody reads the
+			// pipe, Codex blocks on its next stderr write and the session hangs.
+			for errors.Is(err, bufio.ErrBufferFull) {
+				_, err = reader.ReadSlice('\n')
+			}
+			slog.Debug("codex app-server stderr (truncated)", "line", line)
+		} else if line != "" {
+			slog.Debug("codex app-server stderr", "line", line)
 		}
-		slog.Debug("codex app-server stderr", "line", line)
-	}
-	if err := scanner.Err(); err != nil && s.ctx.Err() == nil {
-		slog.Debug("codex app-server stderr read failed", "error", err)
+		if err != nil {
+			if !errors.Is(err, io.EOF) && s.ctx.Err() == nil {
+				slog.Debug("codex app-server stderr read failed", "error", err)
+			}
+			return
+		}
 	}
 }
 

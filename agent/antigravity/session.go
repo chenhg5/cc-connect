@@ -47,6 +47,21 @@ type antigravitySession struct {
 }
 
 func newAntigravitySession(ctx context.Context, cmd string, extraArgs []string, workDir, model, mode, resumeID string, extraEnv []string, timeout time.Duration) (*antigravitySession, error) {
+	as := newAntigravitySessionState(ctx, cmd, extraArgs, workDir, model, mode, resumeID, extraEnv, timeout)
+	if mode == "default" {
+		bridge, err := newAgyPermissionBridge(as.ctx, as.events)
+		if err != nil {
+			as.cancel()
+			return nil, fmt.Errorf("antigravity: initialize permission bridge: %w", err)
+		}
+		as.permissionBridge = bridge
+	}
+
+	as.prepareUsageMeter(resumeID)
+	return as, nil
+}
+
+func newAntigravitySessionState(ctx context.Context, cmd string, extraArgs []string, workDir, model, mode, resumeID string, extraEnv []string, timeout time.Duration) *antigravitySession {
 	sessionCtx, cancel := context.WithCancel(ctx)
 
 	as := &antigravitySession{
@@ -63,22 +78,12 @@ func newAntigravitySession(ctx context.Context, cmd string, extraArgs []string, 
 	}
 	as.alive.Store(true)
 
-	if mode == "default" {
-		bridge, err := newAgyPermissionBridge(sessionCtx, as.events)
-		if err != nil {
-			cancel()
-			return nil, fmt.Errorf("antigravity: initialize permission bridge: %w", err)
-		}
-		as.permissionBridge = bridge
-	}
-
 	if resumeID != "" && resumeID != core.ContinueSession {
 		as.chatID.Store(resumeID)
 		as.resuming = true
 	}
 
-	as.prepareUsageMeter(resumeID)
-	return as, nil
+	return as
 }
 
 func (as *antigravitySession) Send(prompt string, messageID string, images []core.ImageAttachment, files []core.FileAttachment) error {

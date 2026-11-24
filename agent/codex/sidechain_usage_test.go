@@ -123,7 +123,7 @@ func TestCodexSidechainLiveCLI(t *testing.T) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 150*time.Second)
 	defer cancel()
-	s, err := newAppServerSession(ctx, cli, nil, "stdio://", workDir, model, "low", "suggest", "", "", "", []string{"CODEX_HOME=" + home}, "", "", "", "")
+	s, err := newAppServerSession(ctx, cli, nil, "stdio://", workDir, model, "low", "suggest", "", "", "", []string{"CODEX_HOME=" + home}, "", "", "", "", 0)
 	if err != nil {
 		t.Fatal(err)
 	}
