@@ -6542,10 +6542,18 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			var statusFooter string
 			var legacyStatusFooter string
 			if !isSilent {
-				footerContext := replyFooterContextText(replyFooterSessionContextUsage(state.agentSession), e.i18n)
+				contextUsage := replyFooterSessionContextUsage(state.agentSession)
+				footerContext := replyFooterContextText(contextUsage, e.i18n)
 				if e.showContextIndicator {
 					if sdkPlausible {
-						if text := contextIndicatorText(event.InputTokens); text != "" {
+						contextTokens, contextWindow := event.InputTokens, modelContextWindow
+						if contextUsage != nil && contextUsage.ContextWindow > 0 {
+							contextWindow = contextUsage.ContextWindow
+							if contextUsage.UsedTokens > 0 {
+								contextTokens = contextUsage.UsedTokens
+							}
+						}
+						if text := contextIndicatorText(contextTokens, contextWindow); text != "" {
 							footerContext = text
 						}
 					} else if selfPct > 0 {
@@ -18072,11 +18080,11 @@ func gitClone(repoURL, dest string) error {
 
 const modelContextWindow = 200_000 // generic fallback window for heuristic context estimates
 
-func contextIndicatorText(inputTokens int) string {
-	if inputTokens <= 0 {
+func contextIndicatorText(inputTokens, contextWindow int) string {
+	if inputTokens <= 0 || contextWindow <= 0 {
 		return ""
 	}
-	pct := inputTokens * 100 / modelContextWindow
+	pct := inputTokens * 100 / contextWindow
 	if pct > 100 {
 		pct = 100
 	}
