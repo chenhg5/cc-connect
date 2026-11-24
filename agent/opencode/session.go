@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -39,6 +40,7 @@ type opencodeSession struct {
 	alive             atomic.Bool
 	expectingContinue atomic.Bool // true when compaction_continue received, waiting for next step
 	resultSent        atomic.Bool // true when EventResult has been sent for this turn
+	sawStepFinish     atomic.Bool // true when the process reported at least one step_finish
 }
 
 func newOpencodeSession(ctx context.Context, cmd string, extraArgs []string, workDir, model, mode, agentName, resumeID string, extraEnv []string) (*opencodeSession, error) {
@@ -80,6 +82,7 @@ func (s *opencodeSession) Send(prompt string, messageID string, images []core.Im
 
 	s.resultSent.Store(false)
 	s.expectingContinue.Store(false)
+	s.sawStepFinish.Store(false)
 
 	chatID := s.CurrentSessionID()
 	isResume := chatID != ""
@@ -238,10 +241,23 @@ func (s *opencodeSession) readLoop(cmd *exec.Cmd, stdout io.ReadCloser, stderrBu
 
 	// exec copies stderr into stderrBuf from its own goroutine until Wait
 	// returns, so the buffer is only safe to read after that.
-	_ = cmd.Wait()
+	waitErr := cmd.Wait()
 	waited = true
 
-	stderrMsg := stderrBuf.String()
+	s.handleProcessExit(stderrBuf.String(), waitErr)
+}
+
+// errTurnEndedWithoutResult is reported when the opencode process ends a turn
+// without the step_finish{reason:stop} that normally closes it. That happens on
+// a crash, an external kill, or a step-finish with reason=unknown after an empty
+// model response. The previous code sent EventResult unconditionally, which
+// reported the turn as a normal completion and left the user with partial
+// output and no explanation.
+var errTurnEndedWithoutResult = errors.New("opencode: the process exited before the turn finished (no result event); the response may be incomplete")
+
+// handleProcessExit turns the end of the opencode process into the events the
+// engine expects: an error when the turn ended abnormally, then EventResult.
+func (s *opencodeSession) handleProcessExit(stderrMsg string, waitErr error) {
 	if stderrMsg != "" {
 		slog.Error("opencodeSession: process error", "stderr", truncate(stderrMsg, 500))
 		if strings.Contains(stderrMsg, "Session not found") {
@@ -263,6 +279,27 @@ func (s *opencodeSession) readLoop(cmd *exec.Cmd, stdout io.ReadCloser, stderrBu
 		slog.Info("opencodeSession: readLoop ended after compaction_continue, skipping EventResult", "session_id", s.CurrentSessionID())
 		s.expectingContinue.Store(false)
 		return
+	}
+
+	// A turn cancelled from our side (/stop, shutdown) is not a failure: the
+	// process is killed by the cancelled context and no result is expected.
+	//
+	// Only claim a failure when the process showed signs of an interrupted
+	// turn: it reported a step_finish (an older CLI that never emits step_finish
+	// keeps the plain fallback) or it exited non-zero. A clean exit with no
+	// step_finish stays a silent completion, as before.
+	if !s.resultSent.Load() && s.ctx.Err() == nil {
+		if !s.sawStepFinish.Load() && waitErr == nil {
+			slog.Debug("opencodeSession: process exited without a step_finish event; treating the turn as complete", "session_id", s.CurrentSessionID())
+		} else {
+			slog.Error("opencodeSession: turn ended without a result event", "session_id", s.CurrentSessionID(), "error", waitErr)
+			evt := core.Event{Type: core.EventError, Error: errTurnEndedWithoutResult}
+			select {
+			case s.events <- evt:
+			case <-s.ctx.Done():
+				return
+			}
+		}
 	}
 
 	slog.Debug("opencodeSession: readLoop complete, sending fallback EventResult", "session_id", s.CurrentSessionID())
@@ -495,6 +532,7 @@ func (s *opencodeSession) handleStepStart(raw map[string]any) {
 }
 
 func (s *opencodeSession) handleStepFinish(raw map[string]any) {
+	s.sawStepFinish.Store(true)
 	part, _ := raw["part"].(map[string]any)
 	reason := ""
 	if part != nil {
