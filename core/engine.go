@@ -2488,7 +2488,7 @@ func (e *Engine) steerBusySession(p Platform, msg *Message, interactiveKey strin
 	session.AddHistory("user", msg.Content)
 	sessions.Save()
 	if tc := stateTaskCard(state); tc != nil {
-		tc.SetStep(e.i18n.T(MsgTaskCardNewInstruction))
+		tc.SetStep(truncateStr(msg.Content, taskCardMaxStepLen))
 	}
 	// Both cues: emoji reaction on the message plus a short text so the user
 	// knows this went into the running task instead of starting a new one.
@@ -4373,7 +4373,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			toolCount++
 			if tc := stateTaskCard(state); tc != nil {
 				tc.EnsureStarted()
-				tc.SetStep(e.taskCardStepText(event.ToolName))
+				tc.SetStep(taskCardStepText(event.ToolName, event.ToolInput))
 			}
 			if hasRichCard {
 				// When tool messages are suppressed, skip card updates on tool events.
@@ -4652,7 +4652,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			}
 
 			if tc := stateTaskCard(state); tc != nil {
-				tc.SetStep(e.i18n.T(MsgTaskCardWaitingConfirm))
+				tc.SetStep(taskCardStepText(event.ToolName, e.i18n.T(MsgTaskCardWaitingConfirm)))
 			}
 			slog.Info("permission request",
 				"request_id", event.RequestID,

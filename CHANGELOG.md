@@ -11,7 +11,7 @@
 - **Progress card terminal state**: rate-limit-aware retries (230429/99991400), terminal backoff with plain-text fallback, and a visible notice when card updates degrade (the ticker is not permanently disabled).
 - **Error text**: one classification table drives localized user text, reset policy and redispatch image policy for agent/API errors; HTTP status codes take precedence over prose so wording changes cannot degrade classification.
 - **Progress card ticker**: an independent `[display] card_tick_ms` ticker (default 5s) keeps elapsed time moving during long tool calls; single-flight coalescing prevents PATCH pile-ups under rate limits; the ticker stays quiet while the agent is streaming; ticker updates use one attempt (terminal delivery keeps full retries); failures back off to 30s instead of freezing the card, and terminal states stop the ticker.
-- **Card step text**: shows human-readable actions (running a command, reading a file, …); raw commands, paths and regex never reach the card.
+- **Card step text**: shows the real command after compaction (shell wrappers stripped, `$HOME`→`~`, long paths collapsed, middle-truncated) so users can see what the agent is actually doing; commands are wrapped in a fenced code block (fence length adapts to backtick runs) and queued messages as inline code, so `<at>`, links, backticks and emphasis render literally instead of pinging or breaking the layout.
 - **Image notices**: single-image notices omit the index; multi-image notices say "image i of N" so users can locate the bad image.
 - **Startup resilience**: a config entry for a platform this build no longer ships is skipped with a warning instead of exiting the whole process.
 

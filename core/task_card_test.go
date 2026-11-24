@@ -126,13 +126,13 @@ func TestTurnCard_ReflectsStepQueueAndFinish(t *testing.T) {
 
 	card := p.last()
 	body := cardBody(t, card)
-	if !strings.Contains(body, "grep booking_check_fail_rate") {
-		t.Fatalf("body = %q, want current step", body)
+	if !strings.Contains(body, "```\nBash · grep booking_check_fail_rate\n```") {
+		t.Fatalf("body = %q, want fenced current step", body)
 	}
 	if !strings.Contains(body, "排队中 (2)") {
 		t.Fatalf("body = %q, want queue header", body)
 	}
-	if !strings.Contains(body, "2. 帮我看下 XX 订单") {
+	if !strings.Contains(body, "↳ 2. `帮我看下 XX 订单`") {
 		t.Fatalf("body = %q, want queued item", body)
 	}
 
@@ -235,29 +235,82 @@ func TestTurnCardAppearsOnFirstToolUse(t *testing.T) {
 	tc.Finish(taskCardDone, "")
 }
 
-// Card steps must be human-readable actions, never raw commands/paths/regex.
-func TestTaskCardStepTextHumanized(t *testing.T) {
-	e := NewEngine("test", &resultAgent{session: newResultAgentSession("ok")}, []Platform{&stubPlatformEngine{n: "test"}}, "", LangChinese)
-	t.Cleanup(e.cancel)
-
-	cases := []struct{ tool, want string }{
-		{"Bash", "执行命令"},
-		{"Read", "读取文件"},
-		{"Edit", "修改文件"},
-		{"Grep", "检索内容"},
-		{"Glob", "查找文件"},
-		{"WebSearch", "查询资料"},
-		{"mcp__jinkela__query", "调用工具"},
+// Card steps keep the raw tool + command so the card stays a useful trace.
+func TestTaskCardStepTextShowsRawCommand(t *testing.T) {
+	cases := []struct{ name, tool, input, want string }{
+		{"bash", "Bash", "git status", "Bash · git status"},
+		{"shell_wrapper", "Bash", `bash -lc "go test ./..."`, "Bash · go test ./..."},
+		{"drops_cd_prefix", "Bash", "cd /tmp/x && go test ./...", "Bash · go test ./..."},
+		{"shortens_long_path", "Bash", "cat /var/folders/aa/bb/cc/project/file.go", "Bash · cat …/project/file.go"},
+		{"tool_only", "Read", "", "Read"},
+		{"input_only", "", "ls -la", "ls -la"},
 	}
 	for _, c := range cases {
-		got := e.taskCardStepText(c.tool)
-		if !strings.Contains(got, c.want) {
-			t.Errorf("taskCardStepText(%q) = %q, want %q", c.tool, got, c.want)
-		}
-		if strings.Contains(got, "``") || strings.Contains(got, "/") {
-			t.Errorf("taskCardStepText(%q) leaked internal detail: %q", c.tool, got)
+		if got := taskCardStepText(c.tool, c.input); got != c.want {
+			t.Errorf("%s: taskCardStepText(%q, %q) = %q, want %q", c.name, c.tool, c.input, got, c.want)
 		}
 	}
+
+	long := strings.Repeat("x", 200)
+	got := taskCardStepText("Bash", long)
+	if !strings.Contains(got, "…") || len([]rune(got)) > taskCardMaxStepLen {
+		t.Errorf("long step not truncated to %d runes: %q", taskCardMaxStepLen, got)
+	}
+}
+
+func TestCardCodeBlock(t *testing.T) {
+	cases := []struct{ name, in, fence string }{
+		{"plain", "Bash · git status", "```"},
+		{"two_backticks", "echo ``x``", "```"},
+		{"triple_backticks", "echo ```x```", "````"},
+	}
+	for _, c := range cases {
+		got := cardCodeBlock(c.in)
+		want := c.fence + "\n" + c.in + "\n" + c.fence
+		if got != want {
+			t.Errorf("%s: cardCodeBlock(%q) = %q, want %q", c.name, c.in, got, want)
+		}
+	}
+}
+
+func TestCardInlineCode(t *testing.T) {
+	cases := []struct{ name, in, want string }{
+		{"plain", "hello [x](y) **b**", "`hello [x](y) **b**`"},
+		{"collapses_newlines", "a\nb\tc", "`a b c`"},
+		{"backtick_inside", "a `b`", "`` a `b` ``"},
+	}
+	for _, c := range cases {
+		if got := cardInlineCode(c.in); got != c.want {
+			t.Errorf("%s: cardInlineCode(%q) = %q, want %q", c.name, c.in, got, c.want)
+		}
+	}
+}
+
+func TestTaskCardCodeBlockAndInlinedQueue(t *testing.T) {
+	e := NewEngine("test", &resultAgent{session: newResultAgentSession("ok")}, []Platform{&stubPlatformEngine{n: "test"}}, "", LangChinese)
+	t.Cleanup(e.cancel)
+	p := &taskCardStubPlatform{stubPlatformEngine: stubPlatformEngine{n: "feishu"}}
+
+	tc := newTurnCard(e, p, "ctx", "k")
+	tc.SetStep("Bash · cat <at id=all></at>")
+	tc.SetQueue([]string{"[点我](http://x) **急**"})
+	tc.render(true)
+
+	card := p.last()
+	if card == nil || len(card.Elements) == 0 {
+		t.Fatal("no card rendered")
+	}
+	md, ok := card.Elements[0].(CardMarkdown)
+	if !ok {
+		t.Fatalf("first element = %T, want CardMarkdown", card.Elements[0])
+	}
+	if !strings.Contains(md.Content, "```\nBash · cat <at id=all></at>\n```") {
+		t.Fatalf("step is not fenced verbatim: %q", md.Content)
+	}
+	if !strings.Contains(md.Content, "↳ 1. `[点我](http://x) **急**`") {
+		t.Fatalf("queued markdown was not inlined literally: %q", md.Content)
+	}
+	tc.Finish(taskCardDone, "")
 }
 
 func withFastTerminalRetries(t *testing.T) {

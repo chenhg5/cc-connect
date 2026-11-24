@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"os"
 	"strings"
 	"sync"
 	"time"
@@ -569,14 +570,16 @@ func (tc *turnCard) buildCardLocked() *Card {
 	}
 
 	step := tc.step
-	if step == "" {
-		step = tc.e.i18n.T(MsgTaskCardPreparing)
-	}
 	stepKey := MsgTaskCardStep
 	if tc.finished {
 		stepKey = MsgTaskCardLastStep
 	}
-	body := tc.e.i18n.Tf(stepKey, step)
+	var body string
+	if step == "" {
+		body = tc.e.i18n.Tf(stepKey, tc.e.i18n.T(MsgTaskCardPreparing))
+	} else {
+		body = tc.e.i18n.Tf(stepKey, cardCodeBlock(step))
+	}
 
 	if len(tc.queue) > 0 && tc.status == taskCardRunning {
 		body += "\n" + tc.e.i18n.Tf(MsgTaskCardQueue, len(tc.queue))
@@ -586,7 +589,7 @@ func (tc *turnCard) buildCardLocked() *Card {
 				body += fmt.Sprintf("\n↳ 还有 %d 条未显示", len(tc.queue)-shown)
 				break
 			}
-			body += fmt.Sprintf("\n↳ %d. %s", i+1, truncateIf(item, taskCardMaxQueueItemLen))
+			body += fmt.Sprintf("\n↳ %d. %s", i+1, cardInlineCode(truncateIf(item, taskCardMaxQueueItemLen)))
 			shown++
 		}
 	}
@@ -601,6 +604,47 @@ func (tc *turnCard) buildCardLocked() *Card {
 		})
 	}
 	return card
+}
+
+// cardCodeBlock wraps user-controlled command text in a fenced code block so
+// it renders literally: <at>, backticks, asterisks and brackets stay inert.
+// The fence is longer than any backtick run inside the text, otherwise a
+// command containing "```" could close the block early.
+func cardCodeBlock(s string) string {
+	n := backtickRun(s) + 1
+	if n < 3 {
+		n = 3
+	}
+	fence := strings.Repeat("`", n)
+	return fence + "\n" + s + "\n" + fence
+}
+
+// cardInlineCode renders user text as a single-line code span: links, bold,
+// mentions and other markdown stay literal. Newlines are collapsed because an
+// inline span cannot span lines; the delimiter is longer than any backtick run
+// inside the text.
+func cardInlineCode(s string) string {
+	s = strings.Join(strings.Fields(s), " ")
+	fence := strings.Repeat("`", backtickRun(s)+1)
+	if strings.HasPrefix(s, "`") || strings.HasSuffix(s, "`") {
+		return fence + " " + s + " " + fence
+	}
+	return fence + s + fence
+}
+
+func backtickRun(s string) int {
+	maxRun, run := 0, 0
+	for _, r := range s {
+		if r == '`' {
+			run++
+			if run > maxRun {
+				maxRun = run
+			}
+			continue
+		}
+		run = 0
+	}
+	return maxRun
 }
 
 // formatElapsed renders a duration as m:ss (or h:mm:ss past an hour).
@@ -642,30 +686,86 @@ func (e *Engine) syncTaskCardQueue(state *interactiveState) {
 	tc.SetQueue(items)
 }
 
-// taskCardStepText turns a tool event into a human-readable action label.
-// Tool inputs (commands, paths, regex) are intentionally never shown to users;
-// they stay in the logs.
-func (e *Engine) taskCardStepText(tool string) string {
-	switch strings.ToLower(strings.TrimSpace(tool)) {
-	case "bash", "shell", "powershell", "terminal":
-		return e.i18n.T(MsgToolActionCommand)
-	case "read", "fileread":
-		return e.i18n.T(MsgToolActionRead)
-	case "write", "edit", "multiedit", "notebookedit":
-		return e.i18n.T(MsgToolActionWrite)
-	case "grep":
-		return e.i18n.T(MsgToolActionSearch)
-	case "glob":
-		return e.i18n.T(MsgToolActionFind)
-	case "webfetch", "websearch":
-		return e.i18n.T(MsgToolActionWeb)
-	case "task":
-		return e.i18n.T(MsgToolActionTask)
-	case "skill":
-		return e.i18n.T(MsgToolActionSkill)
-	default:
-		return e.i18n.T(MsgToolActionGeneric)
+// taskCardStepText turns a tool event into the one-line "current step" label:
+// the tool name plus its compacted input, so the card stays a raw, useful
+// trace of what the agent is actually doing.
+func taskCardStepText(tool, input string) string {
+	tool = strings.TrimSpace(tool)
+	input = compactCommand(input)
+	if tool == "" {
+		return truncateMiddle(input, taskCardMaxStepLen)
 	}
+	if input == "" {
+		return tool
+	}
+	return tool + " · " + truncateMiddle(input, 70)
+}
+
+// compactCommand collapses a raw tool input into a single readable line while
+// keeping the actual command intact.
+func compactCommand(input string) string {
+	s := strings.TrimSpace(strings.ReplaceAll(input, "\n", " "))
+	for _, prefix := range []string{"bash -lc \"", "bash -c \"", "sh -c \"", "zsh -c \""} {
+		if strings.HasPrefix(s, prefix) {
+			s = strings.TrimSuffix(strings.TrimPrefix(s, prefix), "\"")
+			break
+		}
+	}
+	for {
+		trimmed := strings.TrimSpace(s)
+		cut := -1
+		switch {
+		case strings.HasPrefix(trimmed, "cd "), strings.HasPrefix(trimmed, "export "):
+			if i := strings.Index(trimmed, "&&"); i >= 0 {
+				cut = i + 2
+			} else if i := strings.Index(trimmed, ";"); i >= 0 {
+				cut = i + 1
+			}
+		}
+		if cut < 0 {
+			break
+		}
+		s = trimmed[cut:]
+	}
+	s = strings.Join(strings.Fields(s), " ")
+	if home, err := os.UserHomeDir(); err == nil && home != "" {
+		s = strings.ReplaceAll(s, home, "~")
+	}
+	s = strings.ReplaceAll(s, "$HOME", "~")
+	return shortenPaths(s)
+}
+
+// shortenPaths collapses long path tokens to their last two segments.
+func shortenPaths(s string) string {
+	parts := strings.Fields(s)
+	for i, tok := range parts {
+		if len(tok) <= 28 || !strings.Contains(tok, "/") {
+			continue
+		}
+		segs := strings.Split(tok, "/")
+		if len(segs) < 4 {
+			continue
+		}
+		parts[i] = "…/" + strings.Join(segs[len(segs)-2:], "/")
+	}
+	return strings.Join(parts, " ")
+}
+
+// truncateMiddle keeps both ends of a long string so the tail (usually the
+// script name or arguments) stays readable.
+func truncateMiddle(s string, max int) string {
+	// Slice by runes, not bytes: a Chinese character is 3 bytes and cutting
+	// mid-rune renders as garbage in the card.
+	runes := []rune(s)
+	if max <= 0 || len(runes) <= max {
+		return s
+	}
+	head := max * 2 / 5
+	tail := max - head - 1
+	if tail < 0 {
+		tail = 0
+	}
+	return string(runes[:head]) + "…" + string(runes[len(runes)-tail:])
 }
 
 // Finished reports whether the card already reached a terminal state.

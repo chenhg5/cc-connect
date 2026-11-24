@@ -151,16 +151,6 @@ const (
 	MsgTaskCardStopBtn             MsgKey = "task_card_stop_btn"
 	MsgTaskCardWaitingConfirm      MsgKey = "task_card_waiting_confirm"
 	MsgTaskCardDegraded            MsgKey = "task_card_degraded"
-	MsgTaskCardNewInstruction      MsgKey = "task_card_new_instruction"
-	MsgToolActionCommand           MsgKey = "tool_action_command"
-	MsgToolActionRead              MsgKey = "tool_action_read"
-	MsgToolActionWrite             MsgKey = "tool_action_write"
-	MsgToolActionSearch            MsgKey = "tool_action_search"
-	MsgToolActionFind              MsgKey = "tool_action_find"
-	MsgToolActionWeb               MsgKey = "tool_action_web"
-	MsgToolActionTask              MsgKey = "tool_action_task"
-	MsgToolActionSkill             MsgKey = "tool_action_skill"
-	MsgToolActionGeneric           MsgKey = "tool_action_generic"
 	MsgSteerAck                    MsgKey = "steer_ack"
 	MsgAckProcessing               MsgKey = "ack_processing"
 	MsgNoExecution                 MsgKey = "no_execution"
@@ -701,12 +691,12 @@ var messages = map[MsgKey]map[Language]string{
 		LangChinese: "准备中",
 	},
 	MsgTaskCardStep: {
-		LangEnglish: "Current step: %s",
-		LangChinese: "当前步骤：%s",
+		LangEnglish: "Current step:\n%s",
+		LangChinese: "当前步骤：\n%s",
 	},
 	MsgTaskCardLastStep: {
-		LangEnglish: "Last step: %s",
-		LangChinese: "最后步骤：%s",
+		LangEnglish: "Last step:\n%s",
+		LangChinese: "最后步骤：\n%s",
 	},
 	MsgTaskCardQueue: {
 		LangEnglish: "📋 Queued (%d)",
@@ -731,46 +721,6 @@ var messages = map[MsgKey]map[Language]string{
 	MsgTaskCardDegraded: {
 		LangEnglish: "⚠️ Progress-card updates keep failing (possibly throttled). The task is still running; the final result will be sent as a normal message.",
 		LangChinese: "⚠️ 进度卡片连续更新失败（可能被限流），任务仍在继续；最终结果会以普通消息发送。",
-	},
-	MsgTaskCardNewInstruction: {
-		LangEnglish: "handling a new instruction",
-		LangChinese: "处理新指令",
-	},
-	MsgToolActionCommand: {
-		LangEnglish: "running a command",
-		LangChinese: "执行命令",
-	},
-	MsgToolActionRead: {
-		LangEnglish: "reading a file",
-		LangChinese: "读取文件",
-	},
-	MsgToolActionWrite: {
-		LangEnglish: "editing files",
-		LangChinese: "修改文件",
-	},
-	MsgToolActionSearch: {
-		LangEnglish: "searching content",
-		LangChinese: "检索内容",
-	},
-	MsgToolActionFind: {
-		LangEnglish: "finding files",
-		LangChinese: "查找文件",
-	},
-	MsgToolActionWeb: {
-		LangEnglish: "looking up information",
-		LangChinese: "查询资料",
-	},
-	MsgToolActionTask: {
-		LangEnglish: "running a subtask",
-		LangChinese: "执行子任务",
-	},
-	MsgToolActionSkill: {
-		LangEnglish: "running a skill",
-		LangChinese: "调用技能",
-	},
-	MsgToolActionGeneric: {
-		LangEnglish: "running a tool",
-		LangChinese: "调用工具",
 	},
 	MsgNoExecution: {
 		LangEnglish: "No execution in progress.",
