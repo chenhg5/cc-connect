@@ -10229,7 +10229,7 @@ func TestQueueMessage_NoState_ReturnsFalse(t *testing.T) {
 	}
 }
 
-func TestQueueMessage_DeadSession_ReturnsFalse(t *testing.T) {
+func TestQueueMessage_DeadSession_AcceptsForRestart(t *testing.T) {
 	p := &stubPlatformEngine{n: "test"}
 	sess := newQueuingSession("dead")
 	sess.alive = false
@@ -10247,8 +10247,16 @@ func TestQueueMessage_DeadSession_ReturnsFalse(t *testing.T) {
 
 	msg := &Message{SessionKey: key, Content: "hello"}
 	ok := e.queueMessageForBusySession(p, msg, key)
-	if ok {
-		t.Fatal("expected false for dead session")
+	if !ok {
+		t.Fatal("dead session must accept the message for restart")
+	}
+	state.mu.Lock()
+	defer state.mu.Unlock()
+	if len(state.pendingMessages) != 1 {
+		t.Fatalf("dead session queue: pending=%d, want 1", len(state.pendingMessages))
+	}
+	if sent := p.getSent(); len(sent) != 1 || !strings.Contains(sent[0], e.i18n.T(MsgMessageQueued)) {
+		t.Fatalf("queue notice = %v, want exactly one", sent)
 	}
 }
 
