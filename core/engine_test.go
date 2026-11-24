@@ -2141,6 +2141,36 @@ func TestProcessInteractiveEvents_RichCardCoalescesToolResult(t *testing.T) {
 	}
 }
 
+func TestProcessInteractiveEvents_RichCardKeepsPreToolTextAtDone(t *testing.T) {
+	p := &stubRichCardSilentPlatform{stubPlatformEngine: stubPlatformEngine{n: "feishu"}}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	e.SetDisplayConfig(DisplayCfg{
+		Mode: "full", CardMode: "rich", ToolMessages: true,
+		ThinkingMessages: true, ThinkingMaxLen: 300, ToolMaxLen: 500,
+	})
+	sessionKey := "feishu:user-rich-multiple-text"
+	session := e.sessions.GetOrCreateActive(sessionKey)
+	agentSession := newControllableSession("s-rich-multiple-text")
+	state := &interactiveState{agentSession: agentSession, platform: p, replyCtx: "ctx-rich-multiple-text"}
+	e.interactiveStates[sessionKey] = state
+
+	agentSession.events <- Event{Type: EventText, Content: "Before tool. "}
+	agentSession.events <- Event{Type: EventToolUse, ToolName: "Bash", ToolInput: "echo ok"}
+	agentSession.events <- Event{Type: EventToolResult, ToolName: "Bash", ToolResult: "ok"}
+	agentSession.events <- Event{Type: EventText, Content: "After tool."}
+	agentSession.events <- Event{Type: EventResult, Content: "After tool.", Done: true}
+
+	e.processInteractiveEvents(state, session, e.sessions, sessionKey, "m-rich-multiple-text", time.Now(), nil, nil, state.replyCtx, 0)
+	_, _, updates, _ := p.snapshot()
+	if len(updates) == 0 || !strings.Contains(updates[len(updates)-1], `body="Before tool. After tool."`) {
+		t.Fatalf("final rich card lost pre-tool text: updates=%q", updates)
+	}
+	history := session.GetHistory(0)
+	if len(history) == 0 || history[len(history)-1].Content != "Before tool. After tool." {
+		t.Fatalf("assistant history lost pre-tool text: %#v", history)
+	}
+}
+
 // stubRichCardSilentPlatform implements the full set of rich-card optional
 // interfaces (RichCardSupporter, PreviewStarter, MessageUpdater,
 // RichCardTextStreamer, PreviewCleaner) and tracks every call so tests can

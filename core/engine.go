@@ -6344,6 +6344,20 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			if e.display.HideAgentFooter {
 				fullResponse = stripAgentFooterLines(fullResponse)
 			}
+			// Rich cards stream every text segment into one body. Some agents put
+			// only the final segment in EventResult after a tool call; finalizing
+			// from that result would erase text already visible in the card and
+			// store an incomplete assistant turn in history.
+			if hasRichCard && partialText != "" {
+				streamedText := partialText
+				if e.display.HideAgentFooter {
+					streamedText = stripAgentFooterLines(streamedText)
+				}
+				if !isSilentReply(fullResponse) && len(streamedText) > len(fullResponse) &&
+					strings.HasSuffix(strings.TrimSpace(streamedText), strings.TrimSpace(fullResponse)) {
+					fullResponse = streamedText
+				}
+			}
 			// When tool progress is hidden, segmentStart stays 0 and textParts
 			// contains ALL text across tool boundaries. Prefer the full accumulated
 			// text over event.Content which only contains the last assistant segment.
