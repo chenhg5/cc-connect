@@ -18,6 +18,18 @@ import (
 	larkim "github.com/larksuite/oapi-sdk-go/v3/service/im/v1"
 )
 
+func TestInvalidNumericOptionsOmitRawInput(t *testing.T) {
+	const sentinel = "SENTINEL_FEISHU_CONFIG_CONTENT"
+	for _, key := range []string{"image_batch_window_ms", "resource_chunk_size_bytes"} {
+		_, err := newPlatform("feishu", lark.FeishuBaseUrl, map[string]any{
+			"app_id": "cli_test", "app_secret": "secret", key: sentinel,
+		})
+		if err == nil || strings.Contains(err.Error(), sentinel) {
+			t.Fatalf("unsafe %s option error: %v", key, err)
+		}
+	}
+}
+
 func TestOnMessageRecalledDispatchesCoreRecallMessage(t *testing.T) {
 	got := make(chan *core.Message, 1)
 	p := &Platform{

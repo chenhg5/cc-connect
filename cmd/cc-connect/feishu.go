@@ -456,7 +456,7 @@ func normalizeFeishuPlatformType(raw string) (string, error) {
 		return "", nil
 	}
 	if raw != "feishu" && raw != "lark" {
-		return "", fmt.Errorf("invalid --platform-type %q, want feishu or lark", raw)
+		return "", fmt.Errorf("invalid --platform-type; want feishu or lark")
 	}
 	return raw, nil
 }

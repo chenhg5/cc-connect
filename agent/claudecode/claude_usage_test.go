@@ -10,6 +10,14 @@ import (
 	"time"
 )
 
+func TestClaudeUsageResetErrorOmitsRawInput(t *testing.T) {
+	const sentinel = "SENTINEL_RESET_LABEL_CONTENT"
+	_, err := parseClaudeUsageResetTime(sentinel, time.Now())
+	if err == nil || strings.Contains(err.Error(), sentinel) {
+		t.Fatalf("unsafe usage reset error: %v", err)
+	}
+}
+
 func TestPromptActionForScreen_Claude2336FolderTrust(t *testing.T) {
 	const prompt = "Quick safety check: Is this a project you created or one you trust?\n"
 	const footer = "Enter to confirm · Esc to cancel"
