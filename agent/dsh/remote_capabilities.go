@@ -268,7 +268,7 @@ func (s *dshSession) sendNativeCommand(line string) error {
 		}
 		if err == nil {
 			if execution.Result.Kind == "error" {
-				err = fmt.Errorf("dsh: %s", execution.Result.Text)
+				err = fmt.Errorf("dsh: remote rejected the command")
 			} else if execution.Result.Text != "" {
 				s.emit(core.Event{Type: core.EventText, Content: execution.Result.Text})
 			}

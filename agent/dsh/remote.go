@@ -295,7 +295,7 @@ func (c *rpcClient) remoteCall(ctx context.Context, method string, payload any, 
 			return err
 		}
 		if execution != nil && execution.Result.Kind == "error" {
-			return fmt.Errorf("dsh: command rejected: %s", execution.Result.Text)
+			return fmt.Errorf("dsh: remote rejected the command")
 		}
 		return decodeRemoteValue(map[string]any{"matched": execution != nil}, out)
 	}

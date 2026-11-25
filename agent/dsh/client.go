@@ -479,13 +479,13 @@ func parseBaseURL(raw string) (string, error) {
 	}
 	u, err := url.Parse(raw)
 	if err != nil {
-		return "", fmt.Errorf("dsh: invalid base_url %q: %w", raw, err)
+		return "", fmt.Errorf("dsh: invalid base_url: malformed URL")
 	}
 	if (u.Scheme != "http" && u.Scheme != "https") || u.User != nil {
 		return "", fmt.Errorf("dsh: base_url must use HTTP(S) without user credentials")
 	}
 	if u.Host == "" {
-		return "", fmt.Errorf("dsh: invalid base_url %q: missing host", raw)
+		return "", fmt.Errorf("dsh: invalid base_url: missing host")
 	}
 	return strings.TrimRight(u.String(), "/"), nil
 }
