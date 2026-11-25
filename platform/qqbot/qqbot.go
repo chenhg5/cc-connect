@@ -354,8 +354,8 @@ func (p *Platform) apiRequestJSON(method, url string, body any, result any) erro
 		defer resp2.Body.Close()
 
 		if resp2.StatusCode >= 300 {
-			raw, _ := io.ReadAll(resp2.Body)
-			return fmt.Errorf("qqbot: api %s %s returned %d (after retry): %s", method, url, resp2.StatusCode, raw)
+			raw, _ := io.ReadAll(io.LimitReader(resp2.Body, 4096))
+			return core.HTTPError("qqbot: api "+method+" after retry", resp2.StatusCode, raw, token, p.appSecret)
 		}
 		if result != nil {
 			if err := json.NewDecoder(resp2.Body).Decode(result); err != nil {
@@ -366,8 +366,8 @@ func (p *Platform) apiRequestJSON(method, url string, body any, result any) erro
 	}
 
 	if resp.StatusCode >= 300 {
-		raw, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("qqbot: api %s %s returned %d: %s", method, url, resp.StatusCode, raw)
+		raw, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		return core.HTTPError("qqbot: api "+method, resp.StatusCode, raw, token, p.appSecret)
 	}
 	if result != nil {
 		if err := json.NewDecoder(resp.Body).Decode(result); err != nil {
@@ -578,8 +578,8 @@ func (p *Platform) refreshToken() error {
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		raw, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("token request returned %d: %s", resp.StatusCode, raw)
+		raw, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		return core.HTTPError("qqbot: token request", resp.StatusCode, raw, p.appSecret)
 	}
 
 	var result struct {
@@ -1467,15 +1467,15 @@ func (p *Platform) apiRequest(method, url string, body any) error {
 		defer resp2.Body.Close()
 
 		if resp2.StatusCode >= 300 {
-			raw, _ := io.ReadAll(resp2.Body)
-			return fmt.Errorf("qqbot: api %s %s returned %d (after retry): %s", method, url, resp2.StatusCode, raw)
+			raw, _ := io.ReadAll(io.LimitReader(resp2.Body, 4096))
+			return core.HTTPError("qqbot: api "+method+" after retry", resp2.StatusCode, raw, token, p.appSecret)
 		}
 		return nil
 	}
 
 	if resp.StatusCode >= 300 {
-		raw, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("qqbot: api %s %s returned %d: %s", method, url, resp.StatusCode, raw)
+		raw, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		return core.HTTPError("qqbot: api "+method, resp.StatusCode, raw, token, p.appSecret)
 	}
 	return nil
 }

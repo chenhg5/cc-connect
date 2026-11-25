@@ -48,6 +48,25 @@ func TestPlatform_Name(t *testing.T) {
 	}
 }
 
+func TestAPIRequestErrorRedactsResponse(t *testing.T) {
+	const sentinel = "SENTINEL_QQBOT_CREDENTIAL"
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = w.Write([]byte(`{"message":"` + sentinel + `"}`))
+	}))
+	defer server.Close()
+	p := &Platform{token: sentinel, tokenExpiry: time.Now().Add(time.Hour)}
+	for _, request := range []func() error{
+		func() error { return p.apiRequest(http.MethodPost, server.URL+"/api?secret="+sentinel, nil) },
+		func() error { return p.apiRequestJSON(http.MethodPost, server.URL+"/api?secret="+sentinel, nil, nil) },
+	} {
+		err := request()
+		if err == nil || strings.Contains(err.Error(), sentinel) || !strings.Contains(err.Error(), "400") {
+			t.Fatalf("unsafe QQBot error: %v", err)
+		}
+	}
+}
+
 func TestNew_MissingAppID(t *testing.T) {
 	_, err := New(map[string]any{
 		"app_secret": "test-secret",
