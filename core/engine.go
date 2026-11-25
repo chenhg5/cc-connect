@@ -5306,6 +5306,78 @@ type cardToolEntry struct {
 	Input string
 }
 
+// streamingCardContentFor builds the content string handed to StreamingCard.Update.
+// Payload-style platforms (Feishu) get a structured payload that grows the
+// foldable panels; markdown-fallback platforms (DingTalk/Slack) keep rendering
+// the streamed step text into the card body as before.
+func supportsStreamingCardPayload(streamCard StreamingCard) bool {
+	supp, ok := streamCard.(StreamingCardPayloadSupporter)
+	return ok && supp.SupportsStreamingCardPayload()
+}
+
+// updateStreamingCard pushes content to the streaming card, logging failures so
+// the turn's event loop can observe a broken card via Failed() and switch the
+// remainder to the aggregated progress card.
+func (e *Engine) updateStreamingCard(card StreamingCard, sessionKey string, content string) {
+	if card == nil {
+		return
+	}
+	if err := card.Update(e.ctx, content); err != nil {
+		slog.Warn("streaming card update failed", "session", sessionKey, "error", err)
+	}
+}
+
+func (e *Engine) streamingCardContentFor(streamCard StreamingCard, thinking string, stepTexts []string, tools []cardToolEntry, answer string, done bool) string {
+	if supportsStreamingCardPayload(streamCard) {
+		state := ProgressCardStateRunning
+		if done {
+			state = ProgressCardStateCompleted
+		}
+		return BuildStreamingCardPayload(thinking, stepTexts, tools, answer, e.agent.Name(), e.i18n.CurrentLang(), state)
+	}
+	fallbackAnswer := answer
+	if len(stepTexts) > 0 {
+		fallbackAnswer = strings.Join(stepTexts, "\n") + "\n" + fallbackAnswer
+	}
+	return buildCardContent(thinking, tools, fallbackAnswer)
+}
+
+// stripAnswerEchoes drops the trailing step-text entries that are the final
+// answer streamed back as ordinary text, so the process panel does not show the
+// reply a second time. Only a trailing run of entries that reproduces the END
+// of the delivered answer is dropped, walking backwards and stopping at the
+// first entry that no longer matches.
+func stripAnswerEchoes(stepTexts []string, answer string) []string {
+	answerNorm := squashWhitespace(answer)
+	if answerNorm == "" || len(stepTexts) == 0 {
+		return stepTexts
+	}
+	end := len(stepTexts)
+	tail := ""
+	for end > 0 {
+		entry := squashWhitespace(stepTexts[end-1])
+		if entry != "" {
+			candidate := entry + tail
+			if !strings.HasSuffix(answerNorm, candidate) {
+				break
+			}
+			tail = candidate
+		}
+		end--
+	}
+	if end == len(stepTexts) {
+		return stepTexts
+	}
+	return stepTexts[:end]
+}
+
+// squashWhitespace removes every whitespace character so a streamed chunk
+// compares equal to the same text in the assembled answer: adapters chunk and
+// wrap the text differently from the concatenation the engine ends up with.
+func squashWhitespace(s string) string {
+	return strings.Join(strings.Fields(s), "")
+}
+
 // buildCardContent constructs the full markdown for the streaming card.
 func buildCardContent(thinking string, tools []cardToolEntry, answer string) string {
 	var sb strings.Builder
@@ -5919,9 +5991,9 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 
 	// Streaming card: aggregate entire turn into a single updatable card.
 	var streamCard StreamingCard
-	var cardToolCalls []cardToolEntry  // track tool calls for card content
-	var cardThinkingText string        // latest thinking text
-	var cardAnswerText strings.Builder // accumulated answer text
+	var cardToolCalls []cardToolEntry // track tool calls for card content
+	var cardThinkingText string       // latest thinking text
+	var cardStepTexts []string        // accumulated step narration folded into the panel
 
 	if scp, ok := state.platform.(StreamingCardPlatform); ok {
 		if sc, err := scp.CreateStreamingCard(e.ctx, state.replyCtx); err != nil {
@@ -5933,6 +6005,12 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 	}
 	sp := newStreamPreview(e.streamPreview, state.platform, state.replyCtx, e.ctx, workspaceRenderer)
 	cp := newCompactProgressWriter(e.ctx, state.platform, state.replyCtx, e.agent.Name(), e.i18n.CurrentLang(), workspaceRenderer)
+	// A StreamingCard aggregates the entire turn into one card; the compact
+	// progress writer must not also post/update its own card, or the platform
+	// shows two independently-updated cards for the same turn.
+	if streamCard != nil && !streamCard.Failed() {
+		cp.disable()
+	}
 	state.mu.Unlock()
 
 	// Send instant confirmation reply if enabled and no streaming card is active.
@@ -5982,6 +6060,14 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 		case event, ok = <-events:
 			if !ok {
 				goto channelClosed
+			}
+			// The streaming card owns the turn's single aggregated card, so the
+			// compact progress writer was disabled above. If that card fails
+			// mid-turn every later event falls back to its own chat message —
+			// one card/text per thinking snapshot. Take the turn back so the
+			// remainder keeps updating one aggregated progress card.
+			if streamCard != nil && streamCard.Failed() {
+				cp.enable()
 			}
 		case err := <-pendingSend:
 			pendingSend = nil
@@ -6132,7 +6218,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			segmentStart = 0
 			silentHold = false
 			partialText = ""
-			cardAnswerText.Reset()
+			cardStepTexts = nil
 			lastRichCardUpdate = time.Time{}
 			lastRichCardLen = 0
 
@@ -6199,7 +6285,13 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				// --- StreamingCard path ---
 				if streamCard != nil && !streamCard.Failed() {
 					cardThinkingText = truncateIf(event.Content, e.display.ThinkingMaxLen)
-					_ = streamCard.Update(e.ctx, buildCardContent(cardThinkingText, cardToolCalls, cardAnswerText.String()))
+					// Accumulate EVERY thinking event into the foldable panel —
+					// cardThinkingText itself is latest-only (kept for the
+					// markdown fallback), but the streaming card must grow one
+					// panel entry per reasoning step. mergeCardStepText also
+					// collapses cumulative snapshots and repeats.
+					cardStepTexts = mergeCardStepText(cardStepTexts, cardThinkingText)
+					e.updateStreamingCard(streamCard, sessionKey, e.streamingCardContentFor(streamCard, cardThinkingText, cardStepTexts, cardToolCalls, "", false))
 					continue // skip original independent message sending
 				}
 				// --- Original path (fallback) ---
@@ -6310,7 +6402,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 						Name:  event.ToolName,
 						Input: formattedInput,
 					})
-					_ = streamCard.Update(e.ctx, buildCardContent(cardThinkingText, cardToolCalls, cardAnswerText.String()))
+					e.updateStreamingCard(streamCard, sessionKey, e.streamingCardContentFor(streamCard, cardThinkingText, cardStepTexts, cardToolCalls, "", false))
 					continue // skip original independent message sending
 				}
 				// --- Original path (fallback) ---
@@ -6437,15 +6529,17 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				releasedNow := prevHold && !silentHold
 
 				handledByStreamCard := false
-				if streamCard != nil && !streamCard.Failed() {
+				if streamCard != nil && !streamCard.Failed() && supportsStreamingCardPayload(streamCard) {
 					textParts = append(textParts, content) // always accumulate for history
-					if !silentHold {
-						if releasedNow {
-							cardAnswerText.WriteString(peekSegment)
-						} else {
-							cardAnswerText.WriteString(content)
+					// Step text is intermediate "thinking": only fold it into
+					// the panel when thinking messages are enabled, mirroring
+					// the EventThinking branch above. The answer is unaffected —
+					// it is accumulated in textParts and delivered at Finalize.
+					if !silentHold && e.display.ThinkingMessages {
+						if len(cardStepTexts) == 0 || cardStepTexts[len(cardStepTexts)-1] != content {
+							cardStepTexts = append(cardStepTexts, content)
 						}
-						_ = streamCard.Update(e.ctx, buildCardContent(cardThinkingText, cardToolCalls, cardAnswerText.String()))
+						e.updateStreamingCard(streamCard, sessionKey, e.streamingCardContentFor(streamCard, cardThinkingText, cardStepTexts, cardToolCalls, "", false))
 					}
 					handledByStreamCard = true
 				}
@@ -6972,17 +7066,32 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			if streamCard != nil && !streamCard.Failed() {
 				sp.finish("", "") // cleanup preview (should be no-op if card was active)
 				// Silent reply: never render the NO_REPLY marker into the card.
-				// cardAnswerText holds only the text streamed BEFORE the marker
-				// (empty for a bare NO_REPLY, since silentHold suppresses card
-				// writes while the segment is still a NO_REPLY prefix). Finalize
-				// with that instead of fullResponse so the card resolves to Done
-				// without leaking the marker, and skip the fallback send that
-				// would otherwise post the suppressed marker verbatim.
+				// Intermediate step text lives in the foldable thinking panel;
+				// the answer body stays empty for a silent reply. Finalize with
+				// the empty body so the card resolves to Done without leaking
+				// the marker, and skip the fallback send that would otherwise
+				// post the suppressed marker verbatim.
 				cardBody := fullResponse
 				if isSilent {
-					cardBody = strings.TrimRight(cardAnswerText.String(), " \t\r\n")
+					cardBody = ""
 				}
-				finalContent := buildCardContent(cardThinkingText, cardToolCalls, cardBody)
+				// Payload-style cards (Feishu) end the process card at the
+				// "本过程卡片已停止更新，完整答复见下一条消息。" footer and
+				// deliver the answer as a SEPARATE message carrying the status
+				// footer (model/ctx/cwd). Markdown-fallback platforms keep the
+				// body inside the card (they don't send a second message).
+				finalAnswer := cardBody
+				payloadCard := supportsStreamingCardPayload(streamCard)
+				if payloadCard {
+					finalAnswer = ""
+				}
+				// The panel lane must not echo the answer. Adapters other than
+				// opencode forward the assistant's text — which IS the final
+				// answer — as EventText, and every EventText is folded into the
+				// foldable thinking panel, so the reply would show up inside the
+				// process panel and then again as the separate answer message.
+				finalStepTexts := stripAnswerEchoes(cardStepTexts, fullResponse)
+				finalContent := e.streamingCardContentFor(streamCard, cardThinkingText, finalStepTexts, cardToolCalls, finalAnswer, true)
 				if err := streamCard.Finalize(e.ctx, finalContent); err != nil {
 					slog.Error("streaming card finalize failed, sending fallback", "error", err)
 					// Fallback: send the response as a normal message — but never
@@ -6993,6 +7102,11 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 								return
 							}
 						}
+					}
+				} else if payloadCard && !isSilent {
+					// Independent final reply with the status footer.
+					if !sendChunksWithStatusFooter(e.ctx, p, replyCtx, fullResponse, statusFooter, sendWorkspaceWithError) {
+						return
 					}
 				}
 				if isSilent {
@@ -7276,7 +7390,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				streamCard = nil
 				cardToolCalls = nil
 				cardThinkingText = ""
-				cardAnswerText.Reset()
+				cardStepTexts = nil
 
 				// Try to create a new streaming card for the queued turn
 				if scp, ok := queued.platform.(StreamingCardPlatform); ok {
