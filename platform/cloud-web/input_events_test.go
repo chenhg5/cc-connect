@@ -198,3 +198,43 @@ func TestInputReceiptBackgroundRetriesAfterOutage(t *testing.T) {
 		t.Fatalf("attempts=%d, want recovery beyond three failures", calls.Load())
 	}
 }
+
+func TestInjectedWithoutTargetRetiresPendingMarker(t *testing.T) {
+	ctx := context.Background()
+	tp := newPollTransport("", "", "cloud_web", "project", "", "", 1000)
+	tp.setCaps(capabilitySet([]string{"input_receipts_v1"}))
+	path := filepath.Join(t.TempDir(), "receipts.sqlite")
+	q, err := openInputReceipts(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := &Platform{tp: tp, inputReceipts: q}
+	rc := replyContext{SessionKey: "session", ReplyCtx: "supplement"}
+	other := replyContext{SessionKey: "session", ReplyCtx: "still-queued"}
+	p.ReportInputQueued(ctx, rc)
+	p.ReportInputQueued(ctx, other)
+	var pending int
+	if err := q.db.QueryRow("SELECT pending FROM receipts WHERE session=? AND message=?", rc.SessionKey, rc.ReplyCtx).Scan(&pending); err != nil || pending != 1 {
+		t.Fatalf("missing pending fixture: pending=%d err=%v", pending, err)
+	}
+	p.ReportInjected(ctx, rc, "")
+	if err := q.db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	reopened, err := openInputReceipts(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		if err := reopened.db.Close(); err != nil {
+			t.Error(err)
+		}
+	}()
+	var count int
+	if err := reopened.db.QueryRow("SELECT COUNT(*) FROM receipts WHERE session=? AND message=?", rc.SessionKey, rc.ReplyCtx).Scan(&count); err != nil || count != 0 {
+		t.Fatalf("success with no target retained a receipt across restart: count=%d err=%v", count, err)
+	}
+	if err := reopened.db.QueryRow("SELECT pending FROM receipts WHERE session=? AND message=?", other.SessionKey, other.ReplyCtx).Scan(&pending); err != nil || pending != 0 {
+		t.Fatalf("unrelated pending input was not recoverable: pending=%d err=%v", pending, err)
+	}
+}
