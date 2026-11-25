@@ -3870,6 +3870,10 @@ found:
 
 		curIdx := pending.CurrentQuestion
 		q := pending.Questions[curIdx]
+		if option, ok := selectedAskQuestionOption(q, content); ok && isCustomAnswerOption(option) {
+			e.reply(p, msg.ReplyCtx, e.i18n.T(MsgAskQuestionCustomInput))
+			return true
+		}
 		answer := e.resolveAskQuestionAnswer(q, content)
 
 		if pending.Answers == nil {
@@ -4040,6 +4044,51 @@ func (e *Engine) dropStaleAskQuestionCallback(p Platform, msg *Message, content 
 	slog.Info("dropping stale ask-question callback",
 		"session", msg.SessionKey, "content", content)
 	e.reply(p, msg.ReplyCtx, e.i18n.T(MsgAskQuestionStale))
+}
+
+func selectedAskQuestionOption(q UserQuestion, input string) (UserQuestionOption, bool) {
+	input = strings.TrimSpace(input)
+	if strings.HasPrefix(input, "askq:") {
+		parts := strings.Split(input, ":")
+		input = parts[len(parts)-1]
+	}
+	if q.MultiSelect {
+		for _, part := range strings.FieldsFunc(input, func(r rune) bool { return r == ',' || r == '，' || r == ' ' }) {
+			if index, err := strconv.Atoi(part); err == nil && index >= 1 && index <= len(q.Options) && isCustomAnswerOption(q.Options[index-1]) {
+				return q.Options[index-1], true
+			}
+		}
+	}
+	if index, err := strconv.Atoi(input); err == nil && index >= 1 && index <= len(q.Options) {
+		return q.Options[index-1], true
+	}
+	for _, option := range q.Options {
+		if strings.EqualFold(input, option.Label) {
+			return option, true
+		}
+	}
+	return UserQuestionOption{}, false
+}
+
+func isCustomAnswerOption(option UserQuestionOption) bool {
+	label := strings.ToLower(strings.TrimSpace(option.Label))
+	for {
+		trimmed := label
+		for _, suffix := range []string{"...", "…", ":", "："} {
+			trimmed = strings.TrimSuffix(trimmed, suffix)
+		}
+		if trimmed == label {
+			break
+		}
+		label = strings.TrimSpace(trimmed)
+	}
+	switch label {
+	case "other", "others", "custom", "custom answer", "something else", "type your own",
+		"其他", "其它", "自定义", "自由输入", "その他", "自由入力",
+		"otro", "otra", "personalizado", "personalizada":
+		return true
+	}
+	return false
 }
 
 // resolveAskQuestionAnswer converts user input into answer text.
@@ -13168,6 +13217,9 @@ func (e *Engine) sendAskQuestionPrompt(p Platform, replyCtx any, questions []Use
 				if opt.Description != "" {
 					body += " — " + opt.Description
 				}
+				if isCustomAnswerOption(opt) {
+					body += " — " + e.i18n.T(MsgAskQuestionCustomInput)
+				}
 				body += "\n"
 			}
 			cb.Markdown(body)
@@ -13191,6 +13243,10 @@ func (e *Engine) sendAskQuestionPrompt(p Platform, replyCtx any, questions []Use
 				desc := opt.Label
 				if opt.Description != "" {
 					desc += " — " + opt.Description
+				}
+				if isCustomAnswerOption(opt) {
+					cb.Markdown("**" + desc + "** — " + e.i18n.T(MsgAskQuestionCustomInput))
+					continue
 				}
 				answerData := answerValue(i + 1)
 				cb.Markdown("**" + desc + "**")
@@ -13223,7 +13279,7 @@ func (e *Engine) sendAskQuestionPrompt(p Platform, replyCtx any, questions []Use
 		}
 		hasDesc := false
 		for _, opt := range q.Options {
-			if opt.Description != "" {
+			if opt.Description != "" || isCustomAnswerOption(opt) {
 				hasDesc = true
 				break
 			}
@@ -13241,7 +13297,14 @@ func (e *Engine) sendAskQuestionPrompt(p Platform, replyCtx any, questions []Use
 		}
 		var rows [][]ButtonOption
 		for i, opt := range q.Options {
+			if isCustomAnswerOption(opt) {
+				continue
+			}
 			rows = append(rows, []ButtonOption{{Text: opt.Label, Data: answerValue(i + 1)}})
+		}
+		if len(rows) != len(q.Options) {
+			textBuf.WriteString("\n")
+			textBuf.WriteString(e.i18n.T(MsgAskQuestionCustomInput))
 		}
 		if err := e.waitOutgoing(p); err != nil {
 			slog.Warn("sendAskQuestionPrompt: outgoing wait cancelled", "platform", p.Name(), "error", err)
@@ -13267,6 +13330,10 @@ func (e *Engine) sendAskQuestionPrompt(p Platform, replyCtx any, questions []Use
 		if opt.Description != "" {
 			sb.WriteString(" — ")
 			sb.WriteString(opt.Description)
+		}
+		if isCustomAnswerOption(opt) {
+			sb.WriteString(" — ")
+			sb.WriteString(e.i18n.T(MsgAskQuestionCustomInput))
 		}
 		sb.WriteString("\n")
 	}

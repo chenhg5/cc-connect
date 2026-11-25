@@ -458,13 +458,14 @@ const (
 	MsgPermCardBody    MsgKey = "perm_card_body"
 	MsgPermCardNote    MsgKey = "perm_card_note"
 
-	MsgAskQuestionTitle     MsgKey = "ask_question_title"
-	MsgAskQuestionNote      MsgKey = "ask_question_note"
-	MsgAskQuestionNoteMulti MsgKey = "ask_question_note_multi"
-	MsgAskQuestionMulti     MsgKey = "ask_question_multi"
-	MsgAskQuestionPrompt    MsgKey = "ask_question_prompt"
-	MsgAskQuestionAnswered  MsgKey = "ask_question_answered"
-	MsgAskQuestionStale     MsgKey = "ask_question_stale"
+	MsgAskQuestionTitle       MsgKey = "ask_question_title"
+	MsgAskQuestionNote        MsgKey = "ask_question_note"
+	MsgAskQuestionNoteMulti   MsgKey = "ask_question_note_multi"
+	MsgAskQuestionMulti       MsgKey = "ask_question_multi"
+	MsgAskQuestionPrompt      MsgKey = "ask_question_prompt"
+	MsgAskQuestionAnswered    MsgKey = "ask_question_answered"
+	MsgAskQuestionStale       MsgKey = "ask_question_stale"
+	MsgAskQuestionCustomInput MsgKey = "ask_question_custom_input"
 
 	MsgCommandsTitle        MsgKey = "commands_title"
 	MsgCommandsEmpty        MsgKey = "commands_empty"
@@ -2855,6 +2856,13 @@ var messages = map[MsgKey]map[Language]string{
 		LangTraditionalChinese: "請回覆逗號分隔的選項編號（如 1,3）或直接輸入你的回答",
 		LangJapanese:           "カンマ区切りの番号（例: 1,3）で返信するか、直接回答を入力してください",
 		LangSpanish:            "Responda con los números de opción separados por comas (ej. 1,3) o escriba su respuesta",
+	},
+	MsgAskQuestionCustomInput: {
+		LangEnglish:            "Type your custom answer in chat; choosing this option does not submit it.",
+		LangChinese:            "请在聊天中输入自定义回答；选择此项不会直接提交。",
+		LangTraditionalChinese: "請在聊天中輸入自訂回答；選擇此項不會直接提交。",
+		LangJapanese:           "カスタム回答をチャットに入力してください。この選択肢だけでは送信されません。",
+		LangSpanish:            "Escriba su respuesta personalizada en el chat; elegir esta opción no la envía.",
 	},
 	MsgAskQuestionMulti: {
 		LangEnglish:            " (multiple selections allowed, separate with commas)",
