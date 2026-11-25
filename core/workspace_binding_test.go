@@ -1,8 +1,10 @@
 package core
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
@@ -37,6 +39,27 @@ func TestWorkspaceBindingManager_RetainsPreviouslyBoundWorkspace(t *testing.T) {
 	mgr.Unbind("project:multi", key)
 	if b := NewWorkspaceBindingManager(storePath).Lookup("project:multi", key); b != nil {
 		t.Fatalf("unbind should remove active and previous workspaces: %+v", b)
+	}
+}
+
+func TestWorkspaceBindingManager_PreviousWorkspacesKeepsRecentFive(t *testing.T) {
+	storePath := filepath.Join(t.TempDir(), "bindings.json")
+	key := workspaceChannelKey("test", "channel")
+	mgr := NewWorkspaceBindingManager(storePath)
+	for i := 0; i < 8; i++ {
+		mgr.Bind("project:multi", key, "channel", fmt.Sprintf("/projects/w%d", i))
+	}
+	for _, binding := range []*WorkspaceBinding{
+		mgr.Lookup("project:multi", key),
+		NewWorkspaceBindingManager(storePath).Lookup("project:multi", key),
+	} {
+		if binding == nil || binding.Workspace != "/projects/w7" {
+			t.Fatalf("active binding = %+v, want /projects/w7", binding)
+		}
+		want := []string{"/projects/w2", "/projects/w3", "/projects/w4", "/projects/w5", "/projects/w6"}
+		if !reflect.DeepEqual(binding.PreviousWorkspaces, want) {
+			t.Fatalf("previous workspaces = %v, want %v", binding.PreviousWorkspaces, want)
+		}
 	}
 }
 
