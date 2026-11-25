@@ -577,7 +577,7 @@ func (e *EspeakTTS) Synthesize(ctx context.Context, text string, opts TTSSynthes
 	cmd := exec.CommandContext(ctx, e.Path, args...)
 	output, err := cmd.Output()
 	if err != nil {
-		return nil, "", fmt.Errorf("espeak: voice=%s text=%q: %w", voice, text, err)
+		return nil, "", fmt.Errorf("espeak: voice=%s text_bytes=%d: %w", voice, len(text), err)
 	}
 
 	return output, "wav", nil
@@ -637,7 +637,7 @@ func (p *PicoTTS) Synthesize(ctx context.Context, text string, opts TTSSynthesis
 	cmd := exec.CommandContext(ctx, p.Path, args...)
 	output, err := cmd.CombinedOutput()
 	if err != nil {
-		return nil, "", fmt.Errorf("pico2wave: voice=%s text=%q: %w, output: %s", voice, text, err, string(output))
+		return nil, "", fmt.Errorf("pico2wave: voice=%s text_bytes=%d output_bytes=%d: %w", voice, len(text), len(output), err)
 	}
 
 	// Read the generated WAV file
@@ -706,7 +706,7 @@ func (e *EdgeTTS) Synthesize(ctx context.Context, text string, opts TTSSynthesis
 	cmd := exec.CommandContext(ctx, path, args...)
 	output, err := cmd.CombinedOutput()
 	if err != nil {
-		return nil, "", fmt.Errorf("edge-tts: voice=%s text=%q: %w, output: %s", voice, text, err, string(output))
+		return nil, "", fmt.Errorf("edge-tts: voice=%s text_bytes=%d output_bytes=%d: %w", voice, len(text), len(output), err)
 	}
 
 	// Read the generated MP3 file
