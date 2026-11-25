@@ -343,8 +343,7 @@ func (s *opencodeSession) handleEvent(raw map[string]any) {
 	case "error":
 		s.handleError(raw)
 	default:
-		b, _ := json.Marshal(raw)
-		slog.Debug("opencodeSession: unhandled event", "type", eventType, "raw", string(b))
+		slog.Debug("opencodeSession: unhandled event", "type", eventType, "raw_fields", len(raw))
 	}
 }
 

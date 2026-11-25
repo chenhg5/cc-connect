@@ -1231,7 +1231,7 @@ func (cs *claudeSession) handleUser(raw map[string]any) {
 				result = strings.Join(parts, "\n")
 			}
 			if isError {
-				slog.Debug("claudeSession: tool error", "content", result)
+				slog.Debug("claudeSession: tool error", "content_bytes", len(result))
 			}
 			success := !isError
 			code := 0
