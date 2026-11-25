@@ -1,9 +1,11 @@
 package qqbot
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -12,6 +14,32 @@ import (
 
 	"github.com/chenhg5/cc-connect/core"
 )
+
+func TestAttachmentDownloadLogsDoNotExposeSignedURL(t *testing.T) {
+	const secret = "SIGNED-URL-SENTINEL"
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusForbidden)
+	}))
+	defer server.Close()
+
+	var logs bytes.Buffer
+	previous := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logs, nil)))
+	t.Cleanup(func() { slog.SetDefault(previous) })
+
+	signedURL := server.URL + "/private-" + secret + "?sig=" + secret
+	downloadAttachmentImages([]attachment{{ContentType: "image/png", URL: signedURL}})
+	downloadAttachmentFiles([]attachment{{ContentType: "application/pdf", URL: signedURL}})
+	server.Close()
+	downloadAttachmentImages([]attachment{{ContentType: "image/png", URL: signedURL}})
+	downloadAttachmentFiles([]attachment{{ContentType: "application/pdf", URL: signedURL}})
+	if strings.Contains(logs.String(), secret) {
+		t.Fatal("attachment download log exposed signed URL")
+	}
+	if !strings.Contains(logs.String(), "status=403") {
+		t.Fatal("attachment download log lost HTTP status")
+	}
+}
 
 func TestPlatform_Name(t *testing.T) {
 	p := &Platform{}

@@ -1545,11 +1545,11 @@ func downloadAttachmentImages(attachments []attachment) []core.ImageAttachment {
 		}
 		resp, err := core.HTTPClient.Get(url)
 		if err != nil {
-			slog.Warn("qqbot: download image failed", "url", url, "error", err)
+			slog.Warn("qqbot: download image failed", "host", core.SafeURLHost(url), "error_type", fmt.Sprintf("%T", err))
 			continue
 		}
 		if resp.StatusCode != http.StatusOK {
-			slog.Warn("qqbot: download image returned non-200 status", "url", url, "status", resp.StatusCode)
+			slog.Warn("qqbot: download image returned non-200 status", "host", core.SafeURLHost(url), "status", resp.StatusCode)
 			resp.Body.Close()
 			continue
 		}
@@ -1588,11 +1588,11 @@ func downloadAttachmentFiles(attachments []attachment) []core.FileAttachment {
 		}
 		resp, err := core.HTTPClient.Get(url)
 		if err != nil {
-			slog.Warn("qqbot: download file failed", "url", url, "error", err)
+			slog.Warn("qqbot: download file failed", "host", core.SafeURLHost(url), "error_type", fmt.Sprintf("%T", err))
 			continue
 		}
 		if resp.StatusCode != http.StatusOK {
-			slog.Warn("qqbot: download file returned non-200 status", "url", url, "status", resp.StatusCode)
+			slog.Warn("qqbot: download file returned non-200 status", "host", core.SafeURLHost(url), "status", resp.StatusCode)
 			resp.Body.Close()
 			continue
 		}
