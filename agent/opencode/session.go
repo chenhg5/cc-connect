@@ -592,6 +592,15 @@ func (s *opencodeSession) CurrentSessionID() string {
 	return v
 }
 
+// SpawnsProcessPerTurn reports that each Send runs its own `opencode run`.
+// A second one on a busy conversation pre-empts the running turn (its tool
+// call loses its work) instead of joining it, so /ps queues instead.
+func (s *opencodeSession) SpawnsProcessPerTurn() bool {
+	return true
+}
+
+var _ core.PerTurnProcessSession = (*opencodeSession)(nil)
+
 func (s *opencodeSession) Alive() bool {
 	return s.alive.Load()
 }

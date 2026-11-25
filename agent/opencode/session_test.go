@@ -500,3 +500,13 @@ func TestHandleToolUseErrorNoMessageNoText(t *testing.T) {
 
 // verify Agent implements core.Agent
 var _ core.Agent = (*Agent)(nil)
+
+// Each Send starts its own `opencode run`, so /ps must queue rather than
+// start a second one on a busy conversation.
+func TestOpencodeSessionSpawnsProcessPerTurn(t *testing.T) {
+	var session core.AgentSession = &opencodeSession{}
+	perTurn, ok := session.(core.PerTurnProcessSession)
+	if !ok || !perTurn.SpawnsProcessPerTurn() {
+		t.Fatal("opencode run session must report one process per turn")
+	}
+}

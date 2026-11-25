@@ -1270,6 +1270,15 @@ func (s *piSession) CurrentSessionID() string {
 	return v
 }
 
+// SpawnsProcessPerTurn reports whether each Send runs its own one-shot
+// `pi --mode json`. RPC mode keeps one process and steers the running turn
+// (streamingBehavior "steer"), so /ps reaches that turn directly.
+func (s *piSession) SpawnsProcessPerTurn() bool {
+	return !s.rpc
+}
+
+var _ core.PerTurnProcessSession = (*piSession)(nil)
+
 func (s *piSession) Alive() bool {
 	return s.alive.Load()
 }
