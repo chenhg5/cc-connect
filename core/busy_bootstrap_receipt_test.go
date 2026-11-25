@@ -21,7 +21,12 @@ func (p *bootstrapReceiptPlatform) ReportInputStarted(_ context.Context, reply a
 }
 
 func TestBusyInputStartedBeforeBootstrappedTurn(t *testing.T) {
-	env := newCUJEnv(t)
+	// This test checks receipt ordering and prompt delivery, not persistence.
+	// Disable persistence so asynchronous saves cannot race temp-directory cleanup.
+	plat := &stubPlatformEngine{n: "test"}
+	agent := &cujAgent{}
+	engine := NewEngine("test", agent, []Platform{plat}, "", LangEnglish)
+	env := &cujEnv{t: t, engine: engine, plat: plat, agent: agent}
 	key := "test:alice"
 	session := env.engine.sessions.GetOrCreateActive(key)
 	session.AddHistory("user", "prior request")
@@ -50,7 +55,7 @@ func TestBusyInputStartedBeforeBootstrappedTurn(t *testing.T) {
 	case <-time.After(2 * time.Second):
 		t.Fatal("receipt missing on bootstrapped history send")
 	}
-	env.waitFor("successful persisted bootstrap", 2*time.Second, func() bool {
+	env.waitFor("successful bootstrap", 2*time.Second, func() bool {
 		session.mu.Lock()
 		defer session.mu.Unlock()
 		return session.HistoryBootstrappedAgentType == env.agent.Name()
