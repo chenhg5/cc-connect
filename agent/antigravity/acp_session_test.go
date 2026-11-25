@@ -809,6 +809,31 @@ func TestAgyACPToolCompletionWithNonObjectRawOutput(t *testing.T) {
 	}
 }
 
+func TestAgyACPUsageUpdateWhileIdle(t *testing.T) {
+	s := newUnitAgyACPSession()
+	defer s.cancel()
+	send := func(sessionID, update string) {
+		s.dispatchACP([]byte(`{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"` + sessionID + `","update":` + update + `}}`))
+	}
+	const usage = `{"sessionUpdate":"usage_update","used":1200.0,"size":2097152.0}`
+	s.ready = false
+	send("unit-session", usage)
+	s.ready = true
+	send("different-session", usage)
+	if got := s.GetContextUsage(); got != nil {
+		t.Fatalf("accepted usage before ready or for another session: %+v", got)
+	}
+	send("unit-session", `{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"idle text"}}`)
+	send("unit-session", `{"sessionUpdate":"tool_call","toolCallId":"read","name":"read_file"}`)
+	send("unit-session", usage)
+	if got := s.GetContextUsage(); got == nil || got.UsedTokens != 1200 || got.ContextWindow != 2097152 {
+		t.Fatalf("missing idle context usage: %+v", got)
+	}
+	if s.text.Len() != 0 || len(drainACPEvents(s.events)) != 0 {
+		t.Fatal("idle turn events must remain suppressed")
+	}
+}
+
 func TestAgyACPUsageUpdateAndPlan(t *testing.T) {
 	s := newUnitAgyACPSession()
 	defer s.cancel()
@@ -847,10 +872,6 @@ func TestAgyACPUsageUpdateAndPlan(t *testing.T) {
 	})
 	s.dispatchACP(replyRaw)
 	_ = drainACPEvents(s.events)
-	// Next turn starts before late usage_update arrives (matching len(s.prompts) > 0 guard).
-	s.stateMu.Lock()
-	s.prompts["2"] = &agyACPPrompt{}
-	s.stateMu.Unlock()
 	sendUpdate(map[string]any{"sessionUpdate": "usage_update", "used": 1200, "size": 2097152})
 	usage = s.GetContextUsage()
 	if usage == nil || usage.UsedTokens != 1200 || usage.ContextWindow != 2097152 ||
@@ -859,6 +880,10 @@ func TestAgyACPUsageUpdateAndPlan(t *testing.T) {
 		t.Fatalf("late usage_update clobbered reply breakdown: %+v", usage)
 	}
 
+	// Plan updates are still scoped to a prompt turn.
+	s.stateMu.Lock()
+	s.prompts["2"] = &agyACPPrompt{}
+	s.stateMu.Unlock()
 	sendUpdate(map[string]any{
 		"sessionUpdate": "plan",
 		"entries": []any{

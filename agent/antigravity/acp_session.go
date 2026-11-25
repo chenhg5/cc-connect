@@ -449,7 +449,7 @@ func (s *agyACPSession) dispatchACP(line []byte) {
 		return
 	}
 	if message.Method != "" {
-		if message.Method == "session/update" && s.ready && len(s.prompts) > 0 {
+		if message.Method == "session/update" && s.ready {
 			s.updateACP(message.Params)
 		}
 		if message.Method == "session/request_permission" {
@@ -572,6 +572,10 @@ func (s *agyACPSession) updateACP(params json.RawMessage) {
 		return
 	}
 	u := notification.Update
+	// Context usage describes the session, even between prompt turns.
+	if len(s.prompts) == 0 && u.Kind != "usage_update" {
+		return
+	}
 	switch u.Kind {
 	case "agent_thought_chunk":
 		if text, ok := extractACPTextBlock(u.Content); ok {
