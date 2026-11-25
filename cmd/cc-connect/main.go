@@ -637,9 +637,14 @@ func main() {
 
 		// Wire instant reply
 		if cfg.InstantReply.Enabled != nil && *cfg.InstantReply.Enabled {
+			autoRecall := true // default: recall when real response arrives
+			if cfg.InstantReply.AutoRecall != nil {
+				autoRecall = *cfg.InstantReply.AutoRecall
+			}
 			engine.SetInstantReply(core.InstantReplyCfg{
-				Enabled: true,
-				Content: cfg.InstantReply.Content,
+				Enabled:    true,
+				Content:    cfg.InstantReply.Content,
+				AutoRecall: autoRecall,
 			})
 		}
 
@@ -1918,9 +1923,14 @@ func reloadConfig(configPath, projName string, engine *core.Engine) (*core.Confi
 
 	// Reload instant reply
 	if cfg.InstantReply.Enabled != nil && *cfg.InstantReply.Enabled {
+		autoRecall := true
+		if cfg.InstantReply.AutoRecall != nil {
+			autoRecall = *cfg.InstantReply.AutoRecall
+		}
 		engine.SetInstantReply(core.InstantReplyCfg{
-			Enabled: true,
-			Content: cfg.InstantReply.Content,
+			Enabled:    true,
+			Content:    cfg.InstantReply.Content,
+			AutoRecall: autoRecall,
 		})
 	} else {
 		engine.SetInstantReply(core.InstantReplyCfg{})
