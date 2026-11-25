@@ -58,6 +58,26 @@ func TestAICardResponseReadIsBounded(t *testing.T) {
 	}
 }
 
+func TestAICardDeliveryErrorKeepsSafeMessage(t *testing.T) {
+	const marker = "SENSITIVE_SENTINEL"
+	var logs bytes.Buffer
+	previous := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logs, nil)))
+	t.Cleanup(func() { slog.SetDefault(previous) })
+	client := &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+		body := `{"result":{"cardInstanceId":"card","deliverResults":[{"success":false,"errorMsg":"quota exceeded ` + marker + `"}]}}`
+		return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(body)), Header: make(http.Header)}, nil
+	})}
+	p := &Platform{httpClient: client, accessToken: "test", clientSecret: marker, tokenExpiry: time.Now().Add(time.Hour)}
+	_, err := p.createAICard(context.Background(), replyContext{})
+	if err == nil || !strings.Contains(err.Error(), "quota exceeded") || !strings.Contains(logs.String(), "quota exceeded") {
+		t.Fatalf("safe diagnostic was lost: error=%v logs=%q", err, logs.String())
+	}
+	if strings.Contains(err.Error(), marker) || strings.Contains(logs.String(), marker) {
+		t.Fatal("delivery error exposed a credential")
+	}
+}
+
 type countingReader struct {
 	remaining int
 	read      int
