@@ -2068,7 +2068,12 @@ app_secret = "your-feishu-app-secret"
 # Optional: set the OpenCode reasoning variant / 可选：指定 OpenCode 推理档位
 # The value also becomes the initial level for `/reasoning` runtime switching.
 # / 该值也会作为 `/reasoning` 运行时切换的初始档位。
-# reasoning_effort = "high"  # "low" | "medium" | "high" | "xhigh" | "max" | "ultra"
+# OpenCode only honours a variant on a model that declares `variants`; cc-connect
+# adds one variant per level to every model in OPENCODE_CONFIG_CONTENT, so a
+# custom openai-compatible model works too. / OpenCode 只对声明了 `variants`
+# 的模型应用档位；cc-connect 会给 OPENCODE_CONFIG_CONTENT 里每个模型补齐各档位，
+# 自定义 openai 兼容模型同样可用。
+# reasoning_effort = "high"  # "none" | "minimal" | "low" | "medium" | "high" | "xhigh"
 #
 # Optional: transport used to drive OpenCode / 可选：驱动 OpenCode 的传输方式
 # - "run" (default): one `opencode run --format json` process per turn.

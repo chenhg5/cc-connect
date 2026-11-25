@@ -127,21 +127,16 @@ func New(opts map[string]any) (core.Agent, error) {
 	}, nil
 }
 
-func normalizeOpencodeReasoningEffort(raw string) string {
-	effort := strings.ToLower(strings.TrimSpace(raw))
-	switch effort {
-	case "low", "medium", "high", "xhigh", "max", "ultra":
-		return effort
-	default:
-		return ""
-	}
-}
-
 func (a *Agent) SetReasoningEffort(effort string) {
+	normalized := normalizeOpencodeReasoningEffort(effort)
+	if normalized == "" {
+		slog.Warn("opencode: ignoring unknown reasoning effort", "reasoning_effort", effort)
+		return
+	}
 	a.mu.Lock()
-	defer a.mu.Unlock()
-	a.reasoningEffort = normalizeOpencodeReasoningEffort(effort)
-	slog.Info("opencode: reasoning effort changed", "reasoning_effort", a.reasoningEffort)
+	a.reasoningEffort = normalized
+	a.mu.Unlock()
+	slog.Info("opencode: reasoning effort changed", "reasoning_effort", normalized)
 }
 
 func (a *Agent) GetReasoningEffort() string {
@@ -150,8 +145,16 @@ func (a *Agent) GetReasoningEffort() string {
 	return a.reasoningEffort
 }
 
+// AvailableReasoningEfforts lists the levels /reasoning may switch to. OpenCode
+// only honours a variant on a model it already knows, so an agent that lets
+// OpenCode pick its own default model has no variant to switch.
 func (a *Agent) AvailableReasoningEfforts() []string {
-	return []string{"low", "medium", "high", "xhigh", "max", "ultra"}
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	if !a.hasConfiguredModelLocked() {
+		return nil
+	}
+	return append([]string(nil), opencodeReasoningEfforts...)
 }
 
 func opencodeProjectModelCachePath(dataDir, project string) string {
@@ -592,6 +595,10 @@ func (a *Agent) StartSession(ctx context.Context, sessionID string) (core.AgentS
 	extraEnv := append([]string(nil), a.configEnv...)
 	extraEnv = append(extraEnv, a.providerEnvLocked()...)
 	extraEnv = append(extraEnv, a.sessionEnv...)
+	// OpenCode only applies --variant (and the API's model.variant) to models
+	// that declare `variants`; a custom openai-compatible model declares none,
+	// so annotate the provider config with one variant per level.
+	extraEnv = injectReasoningVariants(extraEnv, reasoningEffort)
 	if a.activeIdx >= 0 && a.activeIdx < len(a.providers) {
 		if m := a.providers[a.activeIdx].Model; m != "" {
 			model = m

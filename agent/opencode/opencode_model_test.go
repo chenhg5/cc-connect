@@ -28,7 +28,14 @@ func TestOpenCodeReasoningEffortSwitcher(t *testing.T) {
 	if got := switcher.GetReasoningEffort(); got != "high" {
 		t.Fatalf("initial reasoning effort = %q, want high", got)
 	}
-	want := []string{"low", "medium", "high", "xhigh", "max", "ultra"}
+	// No model is configured, so OpenCode picks its own default and there is
+	// no model to attach a variant to.
+	if got := switcher.AvailableReasoningEfforts(); got != nil {
+		t.Fatalf("available reasoning efforts = %v, want nil without a configured model", got)
+	}
+
+	agent.(*Agent).SetModel("aiapi/deepseek-v4.1-flash")
+	want := []string{"none", "minimal", "low", "medium", "high", "xhigh"}
 	if got := switcher.AvailableReasoningEfforts(); !reflect.DeepEqual(got, want) {
 		t.Fatalf("available reasoning efforts = %v, want %v", got, want)
 	}
