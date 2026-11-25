@@ -23,7 +23,7 @@ func parseOutboundQuota(opts map[string]any) (outboundQuotaConfig, error) {
 	cfg := outboundQuotaConfig{messages: quotaLimits{20, 900}, uploads: quotaLimits{20, 900}}
 	for _, key := range []string{"burst_limit", "burst_window_secs"} {
 		if _, exists := opts[key]; exists {
-			return cfg, fmt.Errorf("wecom: %s is no longer supported; replace legacy burst settings with outbound_quota", key)
+			return cfg, fmt.Errorf("wecom: %s is not a WeCom option; configure outbound_quota instead", key)
 		}
 	}
 	raw, exists := opts["outbound_quota"]

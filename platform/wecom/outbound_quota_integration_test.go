@@ -524,7 +524,6 @@ func TestWSQuota_CardSendAndReplyShareMessageBudget(t *testing.T) {
 	}
 }
 
-
 func TestHTTPQuota_CardSendSharesMessageBudget(t *testing.T) {
 	f := newHTTPQuotaFixture(t)
 	p := f.platform(t, quotaOptions(1, 100))

@@ -290,6 +290,59 @@ func TestOutboundQuota_ConcurrentReservationsDoNotOvershoot(t *testing.T) {
 	})
 }
 
+func TestOutboundQuota_CompletedSendsAndInFlightReservationsShareBudget(t *testing.T) {
+	for _, testCase := range []struct {
+		name   string
+		limits quotaLimits
+		window time.Duration
+	}{
+		{"minute", quotaLimits{4, 100}, time.Minute},
+		{"hour", quotaLimits{100, 4}, time.Hour},
+	} {
+		for _, target := range []quotaTarget{{recipient: "chat"}, {upload: true}} {
+			kind := "messages"
+			if target.upload {
+				kind = "uploads"
+			}
+			t.Run(testCase.name+"/"+kind, func(t *testing.T) {
+				synctest.Test(t, func(t *testing.T) {
+					quota := testQuota(t, &quotaRegistry{}, testLimits(testCase.limits.minute, testCase.limits.hour), "bot")
+					for range 2 {
+						takeQuota(t, quota, target).finish(true)
+					}
+					for range 2 {
+						permit := takeQuota(t, quota, target)
+						defer permit.finish(false)
+					}
+					ctx, cancel := context.WithCancel(context.Background())
+					defer cancel()
+					done := make(chan error, 1)
+					go func() {
+						permit, err := quota.acquire(ctx, target)
+						permit.finish(false)
+						done <- err
+					}()
+					synctest.Wait()
+					assertNoQuotaResult(t, done)
+					time.Sleep(testCase.window - time.Nanosecond)
+					synctest.Wait()
+					assertNoQuotaResult(t, done)
+					time.Sleep(time.Nanosecond)
+					synctest.Wait()
+					select {
+					case err := <-done:
+						if err != nil {
+							t.Fatal(err)
+						}
+					default:
+						t.Fatal("acquire stayed blocked after completed sends expired")
+					}
+				})
+			})
+		}
+	}
+}
+
 func TestOutboundQuota_ConfigConflictReportsDifferences(t *testing.T) {
 	for _, tt := range []struct {
 		name   string
