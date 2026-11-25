@@ -403,11 +403,11 @@ func parseDocumentHeader(line string) (string, bool, error) {
 	}
 	end := strings.Index(line[open:], strings.Repeat("]", close))
 	if end < 0 {
-		return "", false, fmt.Errorf("unsupported TOML header: %q", line)
+		return "", false, fmt.Errorf("unsupported TOML header")
 	}
 	end += open
 	if tail := strings.TrimSpace(line[end+close:]); tail != "" && !strings.HasPrefix(tail, "#") {
-		return "", false, fmt.Errorf("unsupported TOML header suffix: %q", line)
+		return "", false, fmt.Errorf("unsupported TOML header suffix")
 	}
 	parts, err := parseDocumentName(line[open:end])
 	if err != nil {
@@ -439,12 +439,12 @@ func parseDocumentAssignment(line string) (string, int, error) {
 		if c == '=' {
 			parts, err := parseDocumentName(line[:i])
 			if err != nil {
-				return "", 0, fmt.Errorf("unsupported TOML assignment key: %q", line[:i])
+				return "", 0, fmt.Errorf("unsupported TOML assignment key")
 			}
 			return strings.Join(parts, "."), i, nil
 		}
 	}
-	return "", 0, fmt.Errorf("unsupported TOML line: %q", line)
+	return "", 0, fmt.Errorf("unsupported TOML line")
 }
 
 func parseDocumentName(raw string) ([]string, error) {
@@ -465,7 +465,7 @@ func parseDocumentName(raw string) ([]string, error) {
 				escaped = false
 			}
 			if i >= len(s) {
-				return nil, fmt.Errorf("unterminated TOML name %q", raw)
+				return nil, fmt.Errorf("unterminated TOML name")
 			}
 			if quote == '"' {
 				v, err := strconv.Unquote(s[:i+1])
@@ -486,20 +486,20 @@ func parseDocumentName(raw string) ([]string, error) {
 			for _, c := range part {
 				valid := c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9' || c == '_' || c == '-'
 				if !valid {
-					return nil, fmt.Errorf("unsupported TOML name %q", raw)
+					return nil, fmt.Errorf("unsupported TOML name")
 				}
 			}
 			s = strings.TrimSpace(s[i:])
 		}
 		if part == "" {
-			return nil, fmt.Errorf("empty TOML name in %q", raw)
+			return nil, fmt.Errorf("empty TOML name")
 		}
 		parts = append(parts, part)
 		if s == "" {
 			break
 		}
 		if s[0] != '.' {
-			return nil, fmt.Errorf("unsupported TOML name %q", raw)
+			return nil, fmt.Errorf("unsupported TOML name")
 		}
 		s = strings.TrimSpace(s[1:])
 	}
