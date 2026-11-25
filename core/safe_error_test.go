@@ -26,6 +26,10 @@ func TestSafeErrorFiltersOtherErrors(t *testing.T) {
 	if got := SafeError(errors.New("credential="+sentinel), sentinel); strings.Contains(got, sentinel) {
 		t.Fatalf("credential leaked: %q", got)
 	}
+	urlErr := &url.Error{Op: "Get", URL: "https://" + sentinel + ".example/private", Err: errors.New("connection refused")}
+	if got := SafeError(urlErr, sentinel); strings.Contains(got, sentinel) || !strings.Contains(got, "connection refused") {
+		t.Fatalf("known secret in URL host leaked or diagnosis lost: %q", got)
+	}
 	if got := SafeError(nil); got != "" {
 		t.Fatalf("nil error = %q", got)
 	}

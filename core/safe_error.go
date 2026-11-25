@@ -15,7 +15,11 @@ func SafeError(err error, secrets ...string) string {
 	}
 	var urlErr *url.Error
 	if errors.As(err, &urlErr) {
-		parts := []string{HTTPErrorMessage(urlErr.Op, secrets...), RedactURL(urlErr.URL)}
+		safeURL := RedactURL(urlErr.URL)
+		for _, secret := range secrets {
+			safeURL = RedactToken(safeURL, secret)
+		}
+		parts := []string{HTTPErrorMessage(urlErr.Op, secrets...), safeURL}
 		if urlErr.Err != nil {
 			parts = append(parts, SafeError(urlErr.Err, secrets...))
 		}
