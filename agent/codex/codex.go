@@ -163,7 +163,7 @@ func parseRequestUserInputTimeoutMins(raw any) time.Duration {
 	}
 	if !ok || mins <= 0 || mins > int64(math.MaxInt64/time.Minute) {
 		slog.Warn("codex: invalid request_user_input_timeout_mins, using default",
-			"value", raw, "default_mins", int64(defaultRequestUserInputTimeout/time.Minute))
+			"value_type", fmt.Sprintf("%T", raw), "default_mins", int64(defaultRequestUserInputTimeout/time.Minute))
 		return defaultRequestUserInputTimeout
 	}
 	return time.Duration(mins) * time.Minute

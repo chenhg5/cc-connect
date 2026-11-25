@@ -3833,7 +3833,7 @@ func (e *Engine) handlePendingPermission(p Platform, msg *Message, content strin
 		// through to the normal message handler below.
 		if msg.IsPermissionResponse {
 			slog.Debug("dropping stale permission callback (no interactive state)",
-				"session", msg.SessionKey, "content", content)
+				"session", msg.SessionKey, "content_len", len(content))
 			return true
 		}
 		// Same for an AskUserQuestion option click that arrives after its
@@ -4042,7 +4042,7 @@ func (e *Engine) askQuestionCallbackLive(sessionKey, content string) bool {
 // the click on to the agent.
 func (e *Engine) dropStaleAskQuestionCallback(p Platform, msg *Message, content string) {
 	slog.Info("dropping stale ask-question callback",
-		"session", msg.SessionKey, "content", content)
+		"session", msg.SessionKey, "content_len", len(content))
 	e.reply(p, msg.ReplyCtx, e.i18n.T(MsgAskQuestionStale))
 }
 

@@ -789,9 +789,8 @@ func (p *Platform) sendChatAction(ctx context.Context, chatID, action string) er
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode >= 300 {
-		respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 256))
 		slog.Debug("max: chat action non-2xx",
-			"chat", chatID, "action", action, "status", resp.StatusCode, "body", string(respBody))
+			"chat", chatID, "action", action, "status", resp.StatusCode)
 		return fmt.Errorf("max: chat action %s: status %d", action, resp.StatusCode)
 	}
 	return nil
