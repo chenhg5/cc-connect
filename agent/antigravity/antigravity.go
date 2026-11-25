@@ -150,7 +150,7 @@ func normalizeEffort(raw string) string {
 		}
 	}
 	if effort != "" {
-		slog.Warn("antigravity: ignoring unknown reasoning effort", "effort", raw)
+		slog.Warn("antigravity: ignoring unknown reasoning effort", "input_len", len(raw))
 	}
 	return ""
 }
