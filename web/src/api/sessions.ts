@@ -18,8 +18,12 @@ export interface Session {
   updated_at: string;
   history_count: number;
   last_message: LastMessage | null;
+	user_id?: string;
   user_name?: string;
+	chat_id?: string;
   chat_name?: string;
+	chat_type?: string;
+  agent_session_id?: string;
 }
 
 export interface SessionDetail extends Session {

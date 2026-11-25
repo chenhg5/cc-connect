@@ -96,14 +96,21 @@ func moduleRoot() (string, error) {
 	return filepath.Dir(mod), nil
 }
 
-func freePort(t *testing.T) int {
+// freePortPair keeps both listeners open while selecting ports so the bridge
+// and gateway in one binary test cannot receive the same ephemeral port.
+func freePortPair(t *testing.T) (int, int) {
 	t.Helper()
-	l, err := net.Listen("tcp", "127.0.0.1:0")
+	bridge, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
-		t.Fatalf("blackbox: free port: %v", err)
+		t.Fatalf("blackbox: free bridge port: %v", err)
 	}
-	defer func() { _ = l.Close() }()
-	return l.Addr().(*net.TCPAddr).Port
+	defer func() { _ = bridge.Close() }()
+	gateway, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("blackbox: free gateway port: %v", err)
+	}
+	defer func() { _ = gateway.Close() }()
+	return bridge.Addr().(*net.TCPAddr).Port, gateway.Addr().(*net.TCPAddr).Port
 }
 
 // binaryConfig is the config.toml written for one Env. Only the fields the
@@ -168,7 +175,7 @@ func newBinaryEnv(t *testing.T, agentType string, agentOpts map[string]any, prof
 	home := t.TempDir()
 	dataDir := filepath.Join(home, ".cc-connect")
 	workDir, _ := agentOpts["work_dir"].(string)
-	bridgePort := freePort(t)
+	bridgePort, gatewayPort := freePortPair(t)
 	token := randomToken(t)
 
 	opts := make(map[string]any, len(agentOpts)+1)
@@ -203,7 +210,7 @@ func newBinaryEnv(t *testing.T, agentType string, agentOpts map[string]any, prof
 					"transport": "gateway",
 					"token":     token,
 					"base_url":  "http://127.0.0.1:9",
-					"listen":    fmt.Sprintf("127.0.0.1:%d", freePort(t)),
+					"listen":    fmt.Sprintf("127.0.0.1:%d", gatewayPort),
 				},
 			}},
 		}},
