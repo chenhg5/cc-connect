@@ -15,6 +15,7 @@ func f(body []byte, raw []byte, content string, payload string) {
  slog.Info("response", "body", body)
  slog.Debug("response", slog.Any("raw", raw))
  _ = fmt.Errorf("upstream: %s", string(body))
+	_ = fmt.Errorf("direct: %s", body)
  _ = fmt.Errorf("data: " + content)
  slog.Warn("response", "formatted", fmt.Sprintf("%s", payload))
  slog.Info("response", "bytes", len(body), "status", 500)
@@ -30,8 +31,8 @@ func safeHost([]byte) string { return "example.com" }
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(findings) != 5 {
-		t.Fatalf("findings = %+v, want five unsafe uses", findings)
+	if len(findings) != 6 {
+		t.Fatalf("findings = %+v, want six unsafe uses", findings)
 	}
 	for _, f := range findings {
 		if !strings.Contains(f.file, "fixture.go") || f.line < 1 {

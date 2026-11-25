@@ -2,6 +2,7 @@ package config
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -64,7 +65,7 @@ func saveDocumentPatch(original []byte, expected *Config, patch func(string) (st
 	if patchErr == nil {
 		var actual Config
 		if err := toml.Unmarshal([]byte(patched), &actual); err != nil {
-			patchErr = fmt.Errorf("parse patched document: %w", err)
+			patchErr = safePatchedDocumentError(err)
 		} else if !reflect.DeepEqual(&actual, expected) {
 			patchErr = fmt.Errorf("patched settings differ from requested configuration")
 		}
@@ -90,6 +91,16 @@ func saveDocumentPatch(original []byte, expected *Config, patch func(string) (st
 		return nil
 	}
 	return writeConfigAtomically(original, []byte(patched))
+}
+
+// BurntSushi's parse error may include a source key or value. Keep its line
+// number for the operator without copying any TOML content into the log.
+func safePatchedDocumentError(err error) error {
+	var parseErr toml.ParseError
+	if errors.As(err, &parseErr) && parseErr.Position.Line > 0 {
+		return fmt.Errorf("parse patched document: line %d: invalid TOML", parseErr.Position.Line)
+	}
+	return fmt.Errorf("parse patched document: invalid TOML")
 }
 
 func validateLegacySettingsSave(expected *Config) error {
@@ -336,7 +347,7 @@ func scanConfigDocument(raw string) ([]documentEntry, []documentTable, error) {
 		if strings.HasPrefix(line, "[") {
 			name, array, err := parseDocumentHeader(line)
 			if err != nil {
-				return nil, nil, err
+				return nil, nil, fmt.Errorf("line %d: %w", 1+strings.Count(raw[:at], "\n"), err)
 			}
 			tables[len(tables)-1].end = at
 			if name == "projects" && array {
@@ -379,7 +390,7 @@ func scanConfigDocument(raw string) ([]documentEntry, []documentTable, error) {
 		}
 		key, eq, err := parseDocumentAssignment(raw[at:lineEnd])
 		if err != nil {
-			return nil, nil, err
+			return nil, nil, fmt.Errorf("line %d: %w", 1+strings.Count(raw[:at], "\n"), err)
 		}
 		valueAt := at + eq + 1
 		for valueAt < len(raw) && (raw[valueAt] == ' ' || raw[valueAt] == '\t') {
@@ -387,7 +398,7 @@ func scanConfigDocument(raw string) ([]documentEntry, []documentTable, error) {
 		}
 		valueEnd, assignmentEnd, err := scanDocumentValue(raw, valueAt)
 		if err != nil {
-			return nil, nil, err
+			return nil, nil, fmt.Errorf("line %d: %w", 1+strings.Count(raw[:at], "\n"), err)
 		}
 		entries = append(entries, documentEntry{table: table, project: project, platform: platform, provider: provider, key: key, lineStart: at, valueAt: valueAt, valueEnd: valueEnd, lineEnd: assignmentEnd})
 		at = assignmentEnd
