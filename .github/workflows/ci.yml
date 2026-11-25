@@ -34,6 +34,21 @@ jobs:
           pnpm install --frozen-lockfile
           pnpm build
 
+      - name: Reject browser console and debugger statements
+        run: |
+          set -euo pipefail
+          # Print paths only: a matching source line may itself contain a secret.
+          status=0
+          matches=$(grep -RIlE --include='*.ts' --include='*.tsx' --include='*.js' --include='*.jsx' \
+            'console[[:space:]]*(\.|\[)|(^|[^[:alnum:]_$])debugger([^[:alnum:]_$]|$)' web/src) || status=$?
+          if [ "$status" -gt 1 ]; then
+            exit "$status"
+          fi
+          if [ -n "$matches" ]; then
+            printf 'Remove console/debugger usage from:\n%s\n' "$matches" >&2
+            exit 1
+          fi
+
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
