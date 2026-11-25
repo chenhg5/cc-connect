@@ -1397,7 +1397,7 @@ func (p *Platform) handleCallback(ctx context.Context, cb *maxCallback) {
 	sessionKey := fmt.Sprintf("max:%s:%s", chatID, userID)
 	rctx := replyContext{chatID: chatID, userID: userID, messageID: cb.Message.Body.Mid}
 
-	slog.Debug("max: callback received", "user", cb.User.Name, "payload", cb.Payload)
+	slog.Debug("max: callback received", "user", cb.User.Name, "payload_len", len(cb.Payload))
 
 	// Translate permission payloads like the Telegram platform does, and flag the
 	// message so a stale click is dropped instead of reaching the agent as user
