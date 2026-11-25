@@ -15,6 +15,8 @@ import (
 	"strings"
 	"time"
 	"unicode/utf8"
+
+	"github.com/chenhg5/cc-connect/core"
 )
 
 const (
@@ -113,7 +115,7 @@ func (c *apiClient) post(ctx context.Context, endpoint string, body []byte, time
 		return nil, fmt.Errorf("weixin: %s: response body exceeds %d bytes", label, maxIlinkHTTPResponseBody)
 	}
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("weixin: %s: http %d: %s", label, resp.StatusCode, truncateForLog(raw, 512))
+		return nil, core.HTTPError("weixin: "+label, resp.StatusCode, raw, c.token)
 	}
 	return raw, nil
 }
@@ -182,7 +184,7 @@ func (c *apiClient) sendMessage(ctx context.Context, msg *sendMessageReq) error 
 	}
 	var resp sendMessageResp
 	if err := json.Unmarshal(raw, &resp); err != nil {
-		return fmt.Errorf("weixin: sendMessage: response json: %w: %s", err, truncateForLog(raw, 256))
+		return fmt.Errorf("weixin: sendMessage: response json: %w (body_bytes=%d)", err, len(raw))
 	}
 	if resp.Ret != 0 {
 		slog.Warn("weixin: sendMessage declined by API",
@@ -211,7 +213,7 @@ func (c *apiClient) getUploadURL(ctx context.Context, req getUploadURLRequest) (
 	// 兼容微信 iLink API 变更：新版返回 upload_full_url 而非 upload_param
 	// upload_full_url 是完整的 CDN 上传地址，可独立作为成功路径
 	if strings.TrimSpace(out.UploadParam) == "" && strings.TrimSpace(out.UploadFullURL) == "" {
-		return nil, fmt.Errorf("weixin: getUploadUrl: empty upload_param and upload_full_url in %s", truncateForLog(raw, 512))
+		return nil, fmt.Errorf("weixin: getUploadUrl: empty upload_param and upload_full_url (body_bytes=%d)", len(raw))
 	}
 	return &out, nil
 }
