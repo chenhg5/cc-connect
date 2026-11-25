@@ -69,6 +69,31 @@ func TestWeixinSetupDebugLogsOmitResponseCredentials(t *testing.T) {
 	}
 }
 
+func TestWeixinSetupErrorsRedactResponseBody(t *testing.T) {
+	const sentinel = "SENTINEL_WEIXIN_CREDENTIAL"
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusForbidden)
+		_, _ = w.Write([]byte(`{"bot_token":"` + sentinel + `"}`))
+	}))
+	defer server.Close()
+	for _, request := range []func() error{
+		func() error {
+			_, err := weixinFetchBotQRCode(context.Background(), server.URL, "3", "", false)
+			return err
+		},
+		func() error {
+			_, err := weixinPollQRStatus(context.Background(), server.URL, "key", "", false)
+			return err
+		},
+		func() error { return verifyWeixinToken(context.Background(), server.URL, sentinel, "", false) },
+	} {
+		err := request()
+		if err == nil || strings.Contains(err.Error(), sentinel) || !strings.Contains(err.Error(), "403") {
+			t.Fatalf("unsafe Weixin setup error: %v", err)
+		}
+	}
+}
+
 func TestFeishuSetupDebugLogsOmitResponseCredentials(t *testing.T) {
 	const marker = "SENSITIVE_SENTINEL"
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {

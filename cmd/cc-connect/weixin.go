@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/chenhg5/cc-connect/config"
+	"github.com/chenhg5/cc-connect/core"
 )
 
 const (
@@ -411,7 +412,7 @@ func weixinHTTPGet(ctx context.Context, fullURL, routeTag string, debug bool) ([
 		fmt.Fprintf(os.Stderr, "[debug] get_bot_qrcode status=%d bytes=%d\n", resp.StatusCode, len(body))
 	}
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("http %d: %s", resp.StatusCode, weixinTruncateBody(body, 256))
+		return nil, core.HTTPError("weixin setup", resp.StatusCode, body)
 	}
 	return body, nil
 }
@@ -489,7 +490,7 @@ func weixinPollQRStatus(ctx context.Context, apiBase, qrKey, routeTag string, de
 		fmt.Fprintf(os.Stderr, "[debug] get_qrcode_status status=%d bytes=%d\n", resp.StatusCode, len(body))
 	}
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("get_qrcode_status http %d: %s", resp.StatusCode, weixinTruncateBody(body, 256))
+		return nil, core.HTTPError("get_qrcode_status", resp.StatusCode, body)
 	}
 	var out weixinQRStatusResponse
 	if err := json.Unmarshal(body, &out); err != nil {
@@ -528,7 +529,7 @@ func verifyWeixinToken(ctx context.Context, apiBase, token, routeTag string, deb
 		fmt.Fprintf(os.Stderr, "[debug] verify getUpdates status=%d bytes=%d\n", resp.StatusCode, len(raw))
 	}
 	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("http %d: %s", resp.StatusCode, weixinTruncateBody(raw, 256))
+		return core.HTTPError("weixin token verification", resp.StatusCode, raw, token)
 	}
 	var parsed map[string]any
 	if err := json.Unmarshal(raw, &parsed); err != nil {
