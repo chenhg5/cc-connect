@@ -1585,7 +1585,7 @@ func classifyAttachments(atts []*discordgo.MessageAttachment, download func(stri
 		case strings.HasPrefix(ct, "audio/"):
 			data, err := download(att.URL)
 			if err != nil {
-				slog.Error("discord: download audio failed", "url", att.URL, "error", err)
+				slog.Error("discord: download audio failed", "host", core.SafeURLHost(att.URL), "error_type", fmt.Sprintf("%T", err))
 				continue
 			}
 			format := "ogg"
@@ -1596,14 +1596,14 @@ func classifyAttachments(atts []*discordgo.MessageAttachment, download func(stri
 		case strings.HasPrefix(ct, "image/"), ct == "" && att.Width > 0 && att.Height > 0:
 			data, err := download(att.URL)
 			if err != nil {
-				slog.Error("discord: download image failed", "url", att.URL, "file_name", att.Filename, "error", err)
+				slog.Error("discord: download image failed", "host", core.SafeURLHost(att.URL), "error_type", fmt.Sprintf("%T", err))
 				continue
 			}
 			images = append(images, core.ImageAttachment{MimeType: att.ContentType, Data: data, FileName: att.Filename})
 		default:
 			data, err := download(att.URL)
 			if err != nil {
-				slog.Error("discord: download file failed", "url", att.URL, "file_name", att.Filename, "error", err)
+				slog.Error("discord: download file failed", "host", core.SafeURLHost(att.URL), "error_type", fmt.Sprintf("%T", err))
 				continue
 			}
 			files = append(files, core.FileAttachment{MimeType: att.ContentType, Data: data, FileName: att.Filename})
@@ -1621,7 +1621,7 @@ func downloadURL(u string) ([]byte, error) {
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("download %s: status %d", u, resp.StatusCode)
+		return nil, fmt.Errorf("download failed: status %d", resp.StatusCode)
 	}
 	return io.ReadAll(io.LimitReader(resp.Body, maxDownloadBytes+1))
 }
@@ -1640,7 +1640,7 @@ func applyReferencedMessage(ref *discordgo.Message, content string, images []cor
 		if att.Width > 0 && att.Height > 0 {
 			data, err := download(att.URL)
 			if err != nil {
-				slog.Error("discord: download referenced attachment failed", "url", att.URL, "error", err)
+				slog.Error("discord: download referenced attachment failed", "host", core.SafeURLHost(att.URL), "error_type", fmt.Sprintf("%T", err))
 				continue
 			}
 			images = append([]core.ImageAttachment{{

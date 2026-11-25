@@ -1,10 +1,12 @@
 package discord
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"reflect"
@@ -17,6 +19,27 @@ import (
 	"github.com/bwmarrin/discordgo"
 	"github.com/chenhg5/cc-connect/core"
 )
+
+func TestAttachmentDownloadLogsDoNotExposeSignedURL(t *testing.T) {
+	const secret = "SIGNED-URL-SENTINEL"
+	var logs bytes.Buffer
+	previous := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logs, nil)))
+	t.Cleanup(func() { slog.SetDefault(previous) })
+
+	signedURL := "https://cdn.example/private-" + secret + "?sig=" + secret
+	failed := func(string) ([]byte, error) { return nil, fmt.Errorf("download %s failed", signedURL) }
+	for _, contentType := range []string{"audio/ogg", "image/png", "application/pdf"} {
+		classifyAttachments([]*discordgo.MessageAttachment{{URL: signedURL, ContentType: contentType}}, failed)
+	}
+	applyReferencedMessage(&discordgo.Message{Attachments: []*discordgo.MessageAttachment{{URL: signedURL, Width: 1, Height: 1}}}, "", nil, failed)
+	if strings.Contains(logs.String(), secret) {
+		t.Fatal("attachment download log exposed signed URL or transport error")
+	}
+	if !strings.Contains(logs.String(), "cdn.example") {
+		t.Fatal("attachment download log lost safe source host")
+	}
+}
 
 // ── Thread tests (upstream) ──────────────────────────────────
 
