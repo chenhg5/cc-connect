@@ -30,3 +30,20 @@ func TestPostMessageErrorOmitsResponseSecret(t *testing.T) {
 		t.Fatal("MAX send error exposed response secret")
 	}
 }
+
+func TestUpdateMessageErrorOmitsResponseSecret(t *testing.T) {
+	const marker = "SENSITIVE_SENTINEL"
+	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusBadGateway)
+		_, _ = w.Write([]byte(`{"message":"temporary failure","secret":"` + marker + `"}`))
+	}))
+	defer api.Close()
+	p := &Platform{apiBase: api.URL, token: marker, client: api.Client()}
+	err := p.UpdateMessage(context.Background(), replyContext{messageID: "msg"}, "hello")
+	if err == nil || !strings.Contains(err.Error(), "502") {
+		t.Fatalf("update error = %v, want HTTP status", err)
+	}
+	if strings.Contains(err.Error(), marker) {
+		t.Fatal("MAX edit error exposed response secret")
+	}
+}

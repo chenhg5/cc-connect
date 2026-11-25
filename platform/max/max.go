@@ -598,7 +598,7 @@ func (p *Platform) UpdateMessage(ctx context.Context, replyCtx any, content stri
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
-		return fmt.Errorf("max: edit message: HTTP %d: %s", resp.StatusCode, respBody)
+		return core.HTTPError("max: edit message", resp.StatusCode, respBody, p.token, content)
 	}
 	return nil
 }
@@ -632,7 +632,7 @@ func (p *Platform) uploadAttachment(ctx context.Context, kind string, data []byt
 	defer urlResp.Body.Close()
 	if urlResp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(io.LimitReader(urlResp.Body, 512))
-		return "", fmt.Errorf("upload url: HTTP %d: %s", urlResp.StatusCode, body)
+		return "", core.HTTPError("max: upload url", urlResp.StatusCode, body, p.token)
 	}
 	var urlInfo struct {
 		URL   string `json:"url"`
@@ -675,7 +675,7 @@ func (p *Platform) uploadAttachment(ctx context.Context, kind string, data []byt
 	defer cdnResp.Body.Close()
 	if cdnResp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(io.LimitReader(cdnResp.Body, 512))
-		return "", fmt.Errorf("cdn upload: HTTP %d: %s", cdnResp.StatusCode, body)
+		return "", core.HTTPError("max: cdn upload", cdnResp.StatusCode, body, p.token, urlInfo.Token)
 	}
 	cdnBody, err := io.ReadAll(io.LimitReader(cdnResp.Body, 64*1024))
 	if err != nil {
@@ -1016,7 +1016,7 @@ func (p *Platform) poll(ctx context.Context, marker *int64) (*int64, error) {
 
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
-		return nil, fmt.Errorf("poll: HTTP %d: %s", resp.StatusCode, body)
+		return nil, core.HTTPError("max: poll", resp.StatusCode, body, p.token)
 	}
 
 	var result maxUpdatesResponse
@@ -1335,7 +1335,7 @@ func (p *Platform) resolveMediaURL(ctx context.Context, kind, token string) (str
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
-		return "", "", fmt.Errorf("HTTP %d: %s", resp.StatusCode, body)
+		return "", "", core.HTTPError("max: attachment info", resp.StatusCode, body, p.token, token)
 	}
 	var info struct {
 		URL   string `json:"url"`
