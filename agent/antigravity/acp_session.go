@@ -560,7 +560,7 @@ func (s *agyACPSession) updateACP(params json.RawMessage) {
 			Title     string          `json:"title"`
 			Status    string          `json:"status"`
 			RawInput  map[string]any  `json:"rawInput"`
-			RawOutput map[string]any  `json:"rawOutput"`
+			RawOutput json.RawMessage `json:"rawOutput"`
 			Content   json.RawMessage `json:"content"`
 			Entries   []acpPlanEntry  `json:"entries"`
 			Used      int             `json:"used"`
@@ -599,13 +599,16 @@ func (s *agyACPSession) updateACP(params json.RawMessage) {
 			return
 		}
 		s.flushACPThought()
-		exitCode := extractACPExitCode(u.RawOutput)
+		// ACP rawOutput can be any JSON value, not just an object.
+		var outputFields map[string]any
+		_ = json.Unmarshal(u.RawOutput, &outputFields)
+		exitCode := extractACPExitCode(outputFields)
 		success := u.Status == "completed" && (exitCode == nil || *exitCode == 0)
 		s.emitACP(core.Event{
 			Type:         core.EventToolResult,
 			ToolName:     firstNonEmptyACP(u.Name, u.Title),
 			ToolStatus:   u.Status,
-			ToolResult:   extractACPToolResult(u.Content, u.RawOutput),
+			ToolResult:   extractACPToolResult(u.Content, u.RawOutput, outputFields),
 			ToolExitCode: exitCode,
 			ToolSuccess:  &success,
 		})
@@ -758,16 +761,18 @@ func extractACPToolContentText(raw json.RawMessage) string {
 	return ""
 }
 
-func extractACPToolResult(content json.RawMessage, rawOutput map[string]any) string {
+func extractACPToolResult(content, rawOutput json.RawMessage, outputFields map[string]any) string {
 	if text := extractACPToolContentText(content); text != "" {
 		return text
 	}
-	if len(rawOutput) == 0 {
-		return ""
+	if len(outputFields) == 0 {
+		var plain string
+		_ = json.Unmarshal(rawOutput, &plain)
+		return plain
 	}
 	var parts []string
 	for _, key := range []string{"output", "stdout", "stderr", "error", "message", "result"} {
-		if val, ok := rawOutput[key].(string); ok && val != "" {
+		if val, ok := outputFields[key].(string); ok && val != "" {
 			parts = append(parts, val)
 		}
 	}

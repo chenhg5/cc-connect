@@ -760,6 +760,36 @@ func TestAgyACPToolCallAndResultExtraction(t *testing.T) {
 	}
 }
 
+func TestAgyACPToolCompletionWithNonObjectRawOutput(t *testing.T) {
+	for _, tt := range []struct {
+		name string
+		raw  string
+		want string
+	}{
+		{"string", `"3 lines"`, "3 lines"},
+		{"array", `["line one", "line two"]`, ""},
+		{"number", "3", ""},
+		{"boolean", "true", ""},
+		{"null", "null", ""},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			s := newUnitAgyACPSession()
+			defer s.cancel()
+			s.prompts["1"] = &agyACPPrompt{}
+			s.dispatchACP([]byte(`{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"unit-session","update":{"sessionUpdate":"tool_call","toolCallId":"c-read","name":"read_file","status":"in_progress"}}}`))
+			s.dispatchACP([]byte(`{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"unit-session","update":{"sessionUpdate":"tool_call_update","toolCallId":"c-read","name":"read_file","status":"completed","rawOutput":` + tt.raw + `}}}`))
+			events := drainACPEvents(s.events)
+			if len(events) != 2 || events[0].Type != core.EventToolUse {
+				t.Fatalf("want tool start and completion, got %+v", events)
+			}
+			got := events[1]
+			if got.Type != core.EventToolResult || got.ToolResult != tt.want || got.ToolSuccess == nil || !*got.ToolSuccess || got.ToolExitCode != nil {
+				t.Fatalf("unexpected completion: %+v", got)
+			}
+		})
+	}
+}
+
 func TestAgyACPUsageUpdateAndPlan(t *testing.T) {
 	s := newUnitAgyACPSession()
 	defer s.cancel()
