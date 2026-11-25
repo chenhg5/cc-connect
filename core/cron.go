@@ -890,7 +890,7 @@ func (cs *CronScheduler) runJob(job *CronJob, manual bool) {
 		return
 	}
 
-	slog.Info("cron: executing job", "id", job.ID, "project", job.Project, "manual", manual, "prompt", truncateStr(job.Prompt, 60))
+	slog.Info("cron: executing job", "id", job.ID, "project", job.Project, "manual", manual, "prompt_len", len(job.Prompt))
 
 	cs.mu.RLock()
 	quit := cs.quit
