@@ -1046,12 +1046,14 @@ func TestCronScheduler_SleepRecovery_PastDueFiresImmediately(t *testing.T) {
 	}
 	entry.nextRun = time.Now().Add(-8 * time.Hour)
 	cs.mu.Unlock()
+	// Capture the baseline before waking the scheduler. The job may fire
+	// immediately, so reading it afterward can miss the result entirely.
+	startSent := len(platform.getSent())
 	cs.signalWakeUp()
 
 	// Should fire within maxCronTimerSpan (30s) of the wake-up signal,
 	// not 8 hours from now (the naive pre-fix behavior).
 	deadline := time.Now().Add(maxCronTimerSpan + 5*time.Second)
-	startSent := len(platform.getSent())
 	for time.Now().Before(deadline) {
 		if len(platform.getSent()) > startSent+1 {
 			return
