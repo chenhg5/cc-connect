@@ -13,6 +13,19 @@ import (
 	"github.com/gorilla/websocket"
 )
 
+func TestStartFailureRedactsURLAndKeepsCause(t *testing.T) {
+	const sentinel = "SENTINEL_QQ_QUERY"
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusForbidden)
+	}))
+	defer server.Close()
+	p := &Platform{wsURL: "ws" + strings.TrimPrefix(server.URL, "http") + "/private?token=" + sentinel}
+	err := p.Start(nil)
+	if err == nil || strings.Contains(err.Error(), sentinel) || !strings.Contains(err.Error(), "bad handshake") {
+		t.Fatalf("unsafe or unhelpful websocket error: %v", err)
+	}
+}
+
 func TestPlatform_Name(t *testing.T) {
 	p := &Platform{}
 	if got := p.Name(); got != "qq" {

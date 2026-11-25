@@ -1545,7 +1545,7 @@ func downloadAttachmentImages(attachments []attachment) []core.ImageAttachment {
 		}
 		resp, err := core.HTTPClient.Get(url)
 		if err != nil {
-			slog.Warn("qqbot: download image failed", "host", core.SafeURLHost(url), "error_type", fmt.Sprintf("%T", err))
+			slog.Warn("qqbot: download image failed", "host", core.SafeURLHost(url), "error", core.SafeError(err))
 			continue
 		}
 		if resp.StatusCode != http.StatusOK {
@@ -1588,7 +1588,7 @@ func downloadAttachmentFiles(attachments []attachment) []core.FileAttachment {
 		}
 		resp, err := core.HTTPClient.Get(url)
 		if err != nil {
-			slog.Warn("qqbot: download file failed", "host", core.SafeURLHost(url), "error_type", fmt.Sprintf("%T", err))
+			slog.Warn("qqbot: download file failed", "host", core.SafeURLHost(url), "error", core.SafeError(err))
 			continue
 		}
 		if resp.StatusCode != http.StatusOK {
