@@ -192,9 +192,14 @@ func (p *Platform) createAICard(ctx context.Context, rc replyContext) (*aiCard, 
 	if err := json.Unmarshal(respBody, &deliverCheck); err == nil {
 		for _, dr := range deliverCheck.Result.DeliverResults {
 			if !dr.Success {
+				message := core.HTTPErrorMessage(dr.ErrorMsg, token, p.clientSecret)
 				slog.Warn("dingtalk: AI card delivery failed",
 					"outTrackId", outTrackId,
-					"isGroup", isGroup)
+					"isGroup", isGroup,
+					"errmsg", message)
+				if message != "" {
+					return nil, fmt.Errorf("AI card delivery failed: %s", message)
+				}
 				return nil, fmt.Errorf("AI card delivery failed")
 			}
 		}

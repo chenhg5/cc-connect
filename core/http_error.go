@@ -21,6 +21,15 @@ func HTTPError(op string, status int, body []byte, secrets ...string) error {
 	if message == "" {
 		message = response.Message
 	}
+	message = HTTPErrorMessage(message, secrets...)
+	if message == "" {
+		return fmt.Errorf("%s: HTTP %d (body_bytes=%d)", op, status, len(body))
+	}
+	return fmt.Errorf("%s: HTTP %d (body_bytes=%d, errmsg=%q)", op, status, len(body), message)
+}
+
+// HTTPErrorMessage bounds and filters a response message before it reaches logs or errors.
+func HTTPErrorMessage(message string, secrets ...string) string {
 	for _, secret := range secrets {
 		message = RedactToken(message, secret)
 	}
@@ -43,8 +52,5 @@ func HTTPError(op string, status int, body []byte, secrets ...string) error {
 	if len(runes) > maxHTTPErrorMessageRunes {
 		message = string(runes[:maxHTTPErrorMessageRunes]) + "…"
 	}
-	if message == "" {
-		return fmt.Errorf("%s: HTTP %d (body_bytes=%d)", op, status, len(body))
-	}
-	return fmt.Errorf("%s: HTTP %d (body_bytes=%d, errmsg=%q)", op, status, len(body), message)
+	return message
 }
