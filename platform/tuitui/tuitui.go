@@ -726,7 +726,7 @@ func (p *Platform) postJSON(ctx context.Context, apiPath string, payload any, ou
 		return fmt.Errorf("tuitui: %s response exceeds %d bytes", apiPath, maxJSONResponseBytes)
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return fmt.Errorf("HTTP %d: %s", resp.StatusCode, body)
+		return core.HTTPError("tuitui: "+apiPath, resp.StatusCode, body, p.appSecret)
 	}
 	var apiResp struct {
 		ErrCode int    `json:"errcode"`
@@ -787,7 +787,7 @@ func (p *Platform) uploadMedia(ctx context.Context, data []byte, mimeType, filen
 	defer func() { _ = resp.Body.Close() }()
 	respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return "", "", fmt.Errorf("HTTP %d: %s", resp.StatusCode, respBody)
+		return "", "", core.HTTPError("tuitui: upload", resp.StatusCode, respBody, p.appSecret)
 	}
 	var parsed struct {
 		ErrCode int    `json:"errcode"`
