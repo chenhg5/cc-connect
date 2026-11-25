@@ -125,9 +125,24 @@ func (s *Session) unlock(update bool, gen uint64) {
 // deliberately above the 120s stop-hook wait cap so a graceful stop can
 // never collide with it. (custom 2026-09-12: busy stale-lock self-heal)
 func (s *Session) BreakStaleLock(maxHeld time.Duration) (time.Time, bool) {
+	return s.breakStaleLockIfGeneration(maxHeld, 0)
+}
+
+// busyLockSnapshot identifies the current holder so a delayed recovery cannot
+// break a different turn that acquired the lock while the timer was waiting.
+func (s *Session) busyLockSnapshot() (uint64, time.Time) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if !s.busy || s.busySince.IsZero() {
+	if !s.busy {
+		return 0, time.Time{}
+	}
+	return s.lockGen, s.busySince
+}
+
+func (s *Session) breakStaleLockIfGeneration(maxHeld time.Duration, expected uint64) (time.Time, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if !s.busy || s.busySince.IsZero() || (expected != 0 && s.lockGen != expected) {
 		return time.Time{}, false
 	}
 	if time.Since(s.busySince) > maxHeld {

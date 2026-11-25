@@ -18,6 +18,64 @@ type dyingQueueSession struct {
 
 func (s *dyingQueueSession) Alive() bool { return !s.dead.Load() }
 
+// Issue #1920: if a process is already dead but the old busy lock is still
+// inside the grace window, queueing must arrange a later drain. No foreground
+// goroutine exists in this fixture to release the lock for us.
+func TestDeadSessionGraceWindowEventuallyDrainsQueue(t *testing.T) {
+	p := &stubPlatformEngine{n: "test"}
+	dead := newQueuingSession("dead-grace")
+	dead.alive = false
+	fresh := newQueuingSession("fresh-grace")
+	agent := &controllableAgent{nextSession: fresh}
+	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+	e.staleLockBreakAfter = 40 * time.Millisecond
+	key := "test:dead-grace"
+	session := e.sessions.GetOrCreateActive(key)
+	if _, ok := session.TryLock(); !ok {
+		t.Fatal("failed to lock old session")
+	}
+	state := &interactiveState{agentSession: dead, platform: p, busySession: session}
+	e.interactiveMu.Lock()
+	e.interactiveStates[key] = state
+	e.interactiveMu.Unlock()
+
+	e.handleMessage(p, &Message{SessionKey: key, Platform: "test", UserID: "user", Content: "second", MessageID: "grace-second", ReplyCtx: "reply"})
+	deadline := time.After(2 * time.Second)
+	for {
+		fresh.sendMu.Lock()
+		sends := append([]string(nil), fresh.sendCalls...)
+		fresh.sendMu.Unlock()
+		if len(sends) > 0 {
+			if len(sends) != 1 || !strings.Contains(sends[0], "second") {
+				t.Fatalf("fresh session sends = %v, want second exactly once", sends)
+			}
+			fresh.events <- Event{Type: EventResult, Content: "answer", Done: true}
+			break
+		}
+		select {
+		case <-deadline:
+			t.Fatalf("dead session queue never drained; platform replies = %v", p.getSent())
+		default:
+			time.Sleep(time.Millisecond)
+		}
+	}
+	for {
+		sent := p.getSent()
+		if len(sent) >= 2 {
+			if sent[0] != e.i18n.T(MsgMessageQueued) || sent[1] != "answer" {
+				t.Fatalf("platform replies = %v, want one queue notice then answer", sent)
+			}
+			break
+		}
+		select {
+		case <-deadline:
+			t.Fatalf("fresh session never replied; platform replies = %v", sent)
+		default:
+			time.Sleep(time.Millisecond)
+		}
+	}
+}
+
 func TestDeadSessionQueuedMessageRestartsOnce(t *testing.T) {
 	p := &stubPlatformEngine{n: "test"}
 	dead := newQueuingSession("dead")
