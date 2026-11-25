@@ -40,6 +40,9 @@ jobs:
           go-version-file: 'go.mod'
           cache: true
 
+      - name: Check direct payload logging
+        run: go run ./cmd/logcheck .
+
       - name: Lint code
         run: |
           set -euo pipefail
