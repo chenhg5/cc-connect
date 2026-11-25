@@ -582,19 +582,19 @@ func (s *piSession) handleEvent(raw map[string]any) {
 		if id, _ := raw["id"].(string); id == stateProbeID {
 			success, _ := raw["success"].(bool)
 			if !success {
-				errMsg, _ := raw["error"].(string)
+				_, hasError := raw["error"]
 				slog.Warn("piSession: get_state probe returned failure; session id will be empty",
-					"error", errMsg, "raw", raw)
+					"error_present", hasError, "raw_fields", len(raw))
 				break
 			}
 			data, ok := raw["data"].(map[string]any)
 			if !ok {
-				slog.Warn("piSession: get_state probe response missing data field; session id will be empty", "raw", raw)
+				slog.Warn("piSession: get_state probe response missing data field; session id will be empty", "raw_fields", len(raw))
 				break
 			}
 			sid, _ := data["sessionId"].(string)
 			if sid == "" {
-				slog.Warn("piSession: get_state probe data.sessionId is empty", "raw", raw)
+				slog.Warn("piSession: get_state probe data.sessionId is empty", "data_fields", len(data))
 				break
 			}
 			s.sessionID.Store(sid)
@@ -719,7 +719,7 @@ func (s *piSession) handleEvent(raw map[string]any) {
 		s.rpcResultSent.Store(false)
 	case "turn_start", "turn_end", "message_start", "extension_error":
 	default:
-		slog.Debug("piSession: unrecognized event type", "type", eventType, "raw", raw)
+		slog.Debug("piSession: unrecognized event type", "type", eventType, "raw_fields", len(raw))
 	}
 }
 
