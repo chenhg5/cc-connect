@@ -1,4 +1,4 @@
-package pi_test
+package pi
 
 import (
 	"os"
@@ -6,7 +6,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/chenhg5/cc-connect/agent/pi"
 	"github.com/chenhg5/cc-connect/core"
 )
 
@@ -20,7 +19,7 @@ func TestPiEngine_StartFailureDeliversLocalizedVersionGuidance(t *testing.T) {
 	} {
 		for _, version := range []string{"0.98.9", "wrapper 0.99.0", "fail"} {
 			t.Run(string(language)+"/"+version, func(t *testing.T) {
-				agent, err := pi.New(map[string]any{
+				agent, err := New(map[string]any{
 					"cmd": []string{executable, "-test.run=^TestRPCVersionCLIHelper$", "--", "wrapper-option"},
 					"rpc": true, "language": string(language), "work_dir": t.TempDir(),
 					"env": map[string]string{"CC_PI_VERSION_HELPER": "1", "CC_PI_VERSION": version},

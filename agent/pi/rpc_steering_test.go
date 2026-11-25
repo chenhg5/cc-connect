@@ -211,7 +211,8 @@ func TestPiRPCSend_SteersWhileStreaming(t *testing.T) {
 }
 
 // Block the first final delivery after Pi has emitted agent_settled. The engine
-// still considers this turn busy, so /ps must also handle Pi already being idle.
+// still considers this turn busy. A late /ps becomes an ordinary queued
+// follow-up instead of racing the foreground reader with a native prompt.
 type rpcSteeringPlatform struct {
 	blocked     chan struct{}
 	release     chan struct{}
@@ -289,26 +290,23 @@ func TestPiRPCPs_AfterRemoteTurnEnds(t *testing.T) {
 		}
 	})
 	marker := filepath.Join(agent.workDir, "supplement-received")
-	ticker := time.NewTicker(5 * time.Millisecond)
-	defer ticker.Stop()
-	arrivalDeadline := time.NewTimer(3 * time.Second)
-	defer arrivalDeadline.Stop()
-	for {
-		if _, err := os.Stat(marker); err == nil {
-			break
-		}
-		select {
-		case <-ticker.C:
-		case <-arrivalDeadline.C:
-			t.Fatal("/ps never reached the RPC peer during final platform delivery")
-		}
-	}
-	p.unblock()
 	select {
 	case <-supplementDone:
 	case <-time.After(3 * time.Second):
-		t.Fatal("/ps did not return after final delivery was released")
+		t.Fatal("/ps did not return after queue admission")
 	}
+	select {
+	case message := <-p.messages:
+		if !strings.Contains(message, "queue") {
+			t.Fatalf("expected queue notice, got %q", message)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("missing queue notice")
+	}
+	if _, err := os.Stat(marker); err == nil {
+		t.Fatal("/ps reached RPC before foreground final delivery finished")
+	}
+	p.unblock()
 	deadline := time.NewTimer(3 * time.Second)
 	defer deadline.Stop()
 	var messages []string

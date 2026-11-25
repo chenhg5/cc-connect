@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -250,6 +251,53 @@ func TestIssue2161Lifecycle_SourceDerivedSequences(t *testing.T) {
 			s.handleEvent(end)
 			s.handleEvent(map[string]any{"type": "compaction_end", "reason": "threshold"})
 			issue2161UnitNoTerminal(t, s, "duplicate completion")
+		})
+	}
+}
+
+func TestIssue2161Lifecycle_ManualCompactCorrelatesResponse(t *testing.T) {
+	for _, tc := range []struct{ name, prompt, wantInstructions, wantError string }{
+		{"success", "/compact", "", ""},
+		{"custom_instructions", "/compact preserve code decisions", "preserve code decisions", ""},
+		{"failure", "/compact", "", "Compaction failed: Nothing to compact"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s, wire := issue2161UnitSession(t)
+			command, sendDone := issue2161UnitStartSend(t, s, wire, tc.prompt)
+			issue2161UnitWaitSend(t, sendDone, "")
+			if command["type"] != "compact" || command["message"] != nil {
+				t.Fatalf("manual compact must use native RPC, got %v", command)
+			}
+			instructions, _ := command["customInstructions"].(string)
+			if instructions != tc.wantInstructions {
+				t.Fatalf("customInstructions=%q, want %q", instructions, tc.wantInstructions)
+			}
+			s.handleEvent(map[string]any{"type": "compaction_start", "reason": "manual"})
+			s.handleEvent(map[string]any{"type": "compaction_end", "reason": "manual", "errorMessage": tc.wantError})
+			s.handleEvent(map[string]any{"type": "agent_settled"})
+			wrongID := issue2161UnitResponse(command, true, "")
+			wrongID["id"] = "unrelated-request"
+			s.handleEvent(wrongID)
+			wrongCommand := issue2161UnitResponse(command, true, "")
+			wrongCommand["command"] = "prompt"
+			s.handleEvent(wrongCommand)
+			issue2161UnitNoTerminal(t, s, "manual operation before matching response")
+			response := issue2161UnitResponse(command, tc.wantError == "", tc.wantError)
+			s.handleEvent(response)
+			events := drainEvents(s)
+			if len(events) != 1 {
+				t.Fatalf("manual result events=%+v, want exactly one terminal", events)
+			}
+			if tc.wantError == "" {
+				if events[0].Type != core.EventResult || !events[0].Done {
+					t.Fatalf("manual success event=%+v", events[0])
+				}
+			} else if events[0].Type != core.EventError || events[0].Error == nil || events[0].Error.Error() != tc.wantError {
+				t.Fatalf("manual failure event=%+v", events[0])
+			}
+			s.handleEvent(response)
+			s.handleEvent(map[string]any{"type": "agent_settled"})
+			issue2161UnitNoTerminal(t, s, "duplicate compact response")
 		})
 	}
 }
@@ -527,6 +575,48 @@ func TestIssue2161Lifecycle_WriteFailureAndCancellationUnblockSend(t *testing.T)
 		s.cancel()
 		issue2161UnitWaitSend(t, done, "context canceled")
 	})
+}
+
+func TestIssue2161Lifecycle_ConfigAndWorkspacePropagation(t *testing.T) {
+	t.Setenv("PI_CODING_AGENT_DIR", t.TempDir())
+	executable, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, rpc := range []bool{false, true} {
+		t.Run(fmt.Sprintf("rpc_%t", rpc), func(t *testing.T) {
+			agent, err := New(map[string]any{"cmd": executable, "rpc": rpc, "model": "fake-model", "language": "zh"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			a := agent.(*Agent)
+			wantCompact := ""
+			if rpc {
+				wantCompact = "/compact"
+			}
+			if a.CompressCommand() != wantCompact {
+				t.Fatalf("compress=%q", a.CompressCommand())
+			}
+			for _, workspace := range []string{"workspace-a", "workspace-b"} {
+				opts := a.WorkspaceAgentOptions()
+				if _, present := opts["rpc_completion"]; present {
+					t.Fatal("obsolete completion switch propagated")
+				}
+				opts["work_dir"] = workspace
+				clone, err := New(opts)
+				if err != nil {
+					t.Fatal(err)
+				}
+				b := clone.(*Agent)
+				if b.rpc != rpc || b.workDir != workspace || b.language != "zh" {
+					t.Fatalf("workspace clone lost protocol or language: %+v", opts)
+				}
+				if b.CompressCommand() != wantCompact {
+					t.Fatalf("workspace clone lost native compaction: %q", b.CompressCommand())
+				}
+			}
+		})
+	}
 }
 
 func TestIssue2161Lifecycle_HandledACKKeepsAnAlreadyStartedRunOpen(t *testing.T) {
