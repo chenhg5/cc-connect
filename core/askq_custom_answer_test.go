@@ -16,6 +16,50 @@ func customAnswerQuestion() []UserQuestion {
 	}}
 }
 
+func TestIssue1076_CustomAnswerLabelsMatchWholeOption(t *testing.T) {
+	for _, label := range []string{"Other", " Others... ", "OTHER…", "Custom:", "Custom Answer：", "Something Else", "Type Your Own", "其他", "其它", "自定义", "自由输入", "その他", "自由入力", "Otro", "Otra", "Personalizado", "Personalizada"} {
+		if !isCustomAnswerOption(UserQuestionOption{Label: label}) {
+			t.Errorf("%q should request a typed answer", label)
+		}
+	}
+	for _, label := range []string{"Use another library", "Other approach is faster", "Customize settings"} {
+		if isCustomAnswerOption(UserQuestionOption{Label: label}) {
+			t.Errorf("%q should remain a selectable option", label)
+		}
+	}
+}
+
+func TestIssue1076_OrdinaryOptionsRemainSelectable(t *testing.T) {
+	labels := []string{"Use another library", "Other approach is faster", "Customize settings"}
+	questions := []UserQuestion{{Question: "Choose an approach", Options: []UserQuestionOption{{Label: labels[0]}, {Label: labels[1]}, {Label: labels[2]}}}}
+	e := newTestEngine()
+	inline := &stubInlineButtonPlatform{stubPlatformEngine: stubPlatformEngine{n: "telegram"}}
+	e.sendAskQuestionPrompt(inline, "ctx", questions, 0)
+	if got := len(inline.buttonRows); got != len(labels) {
+		t.Fatalf("inline buttons=%d, want %d", got, len(labels))
+	}
+	card := &stubCardPlatform{stubPlatformEngine: stubPlatformEngine{n: "feishu"}}
+	e.sendAskQuestionPrompt(card, "ctx", questions, 0)
+	if got := countCardActionValues(card.sentCards[0], "askq:"); got != len(labels) {
+		t.Fatalf("card buttons=%d, want %d", got, len(labels))
+	}
+	for i, label := range labels {
+		p := &stubPlatformEngine{n: "test"}
+		rec := &recordingAgentSession{}
+		pending := &pendingPermission{RequestID: "req-ordinary", ToolName: "AskUserQuestion", Questions: questions, ToolInput: map[string]any{}, Resolved: make(chan struct{})}
+		key := "test:ordinary:user"
+		e.interactiveMu.Lock()
+		e.interactiveStates[key] = &interactiveState{agentSession: rec, pending: pending}
+		e.interactiveMu.Unlock()
+		if !e.handlePendingPermission(p, &Message{SessionKey: key, ReplyCtx: "ctx"}, string(rune('1'+i)), key) {
+			t.Fatalf("option %q was not handled", label)
+		}
+		if rec.calls != 1 {
+			t.Errorf("option %q: RespondPermission calls=%d, want 1", label, rec.calls)
+		}
+	}
+}
+
 func TestIssue1076_CustomOptionRequiresTypedAnswer(t *testing.T) {
 	e := newTestEngine()
 	p := &stubPlatformEngine{n: "test"}

@@ -4023,10 +4023,21 @@ func selectedAskQuestionOption(q UserQuestion, input string) (UserQuestionOption
 
 func isCustomAnswerOption(option UserQuestionOption) bool {
 	label := strings.ToLower(strings.TrimSpace(option.Label))
-	for _, marker := range []string{"other", "custom", "something else", "其他", "其它", "自定义", "自由输入", "その他", "自由入力", "otro", "otra", "personaliz"} {
-		if strings.Contains(label, marker) {
-			return true
+	for {
+		trimmed := label
+		for _, suffix := range []string{"...", "…", ":", "："} {
+			trimmed = strings.TrimSuffix(trimmed, suffix)
 		}
+		if trimmed == label {
+			break
+		}
+		label = strings.TrimSpace(trimmed)
+	}
+	switch label {
+	case "other", "others", "custom", "custom answer", "something else", "type your own",
+		"其他", "其它", "自定义", "自由输入", "その他", "自由入力",
+		"otro", "otra", "personalizado", "personalizada":
+		return true
 	}
 	return false
 }
