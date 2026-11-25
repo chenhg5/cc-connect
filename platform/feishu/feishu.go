@@ -1983,9 +1983,21 @@ func extractInteractiveCardText(content string) string {
 				Title struct {
 					Content string `json:"content"`
 				} `json:"title"`
+				// Schema 2.0 card_header nests the title under property.
+				Property struct {
+					Title struct {
+						Property struct {
+							Content string `json:"content"`
+						} `json:"property"`
+					} `json:"title"`
+				} `json:"property"`
 			}
-			if json.Unmarshal(raw, &header) == nil && header.Title.Content != "" {
-				parts = append(parts, header.Title.Content)
+			if json.Unmarshal(raw, &header) == nil {
+				if header.Title.Content != "" {
+					parts = append(parts, header.Title.Content)
+				} else if header.Property.Title.Property.Content != "" {
+					parts = append(parts, header.Property.Title.Property.Content)
+				}
 			}
 		}
 		if len(parts) == 0 {
@@ -2090,7 +2102,13 @@ func extractCardElements(elements []json.RawMessage, parts *[]string) {
 			}
 			extractCardColumns(columns, parts)
 		case "div":
-			// div may have text or nested elements; process recursively
+			// div may carry text (2.0: property.text wraps a plain_text/markdown
+			// element) or columns (user_dsl); process both recursively. Text is
+			// only added when present, so cards that already parsed keep their
+			// exact output.
+			if len(elem.Property.Text) > 0 {
+				extractCardElements([]json.RawMessage{elem.Property.Text}, parts)
+			}
 			extractCardColumns(elem.Columns, parts)
 		default:
 			content := elem.Property.Content
