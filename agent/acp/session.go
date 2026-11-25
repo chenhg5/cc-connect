@@ -604,8 +604,7 @@ func (s *acpSession) onNotification(method string, params json.RawMessage) {
 	s.maybeAbsorbUsageUpdate(params)
 	s.maybeAbsorbConfigOptionUpdate(params)
 	sid := s.currentACPSessionID()
-	// Debug log to capture raw session/update JSON for troubleshooting vendor compatibility
-	slog.Debug("acp: session/update", "session_id", sid, "params", string(params))
+	slog.Debug("acp: session/update", "session_id", sid, "params_bytes", len(params))
 	hasVisible := false
 	for _, ev := range mapSessionUpdate(sid, params) {
 		if ev.Type == core.EventToolResult && toolName != "" {
@@ -761,7 +760,7 @@ func (s *acpSession) cacheToolCallInput(params json.RawMessage) {
 		input := summarizeACPToolInput(tc.Kind, tc.RawInput)
 		s.toolInputByID[tc.ToolCallID] = input
 		s.toolInputMu.Unlock()
-		slog.Info("acp: cached tool_call input", "toolCallId", tc.ToolCallID, "kind", tc.Kind, "input", input)
+		slog.Info("acp: cached tool_call input", "toolCallId", tc.ToolCallID, "kind", tc.Kind, "input_bytes", len(input))
 	case "tool_call_update":
 		var tc struct {
 			ToolCallID string          `json:"toolCallId"`
@@ -778,7 +777,7 @@ func (s *acpSession) cacheToolCallInput(params json.RawMessage) {
 		s.evictToolInputCacheIfNeededLocked()
 		s.toolInputByID[tc.ToolCallID] = input
 		s.toolInputMu.Unlock()
-		slog.Info("acp: cached tool_call_update input", "toolCallId", tc.ToolCallID, "input", input)
+		slog.Info("acp: cached tool_call_update input", "toolCallId", tc.ToolCallID, "input_bytes", len(input))
 	}
 }
 
@@ -818,7 +817,7 @@ func (s *acpSession) handlePermissionRequest(id json.RawMessage, params json.Raw
 		_ = s.tr.respondError(id, -32602, "invalid params")
 		return
 	}
-	slog.Debug("acp: permission request raw params", "params", string(params))
+	slog.Debug("acp: permission request", "params_bytes", len(params))
 	reqKey := jsonIDKey(id)
 	toolName := p.ToolCall.Title
 	if toolName == "" {
@@ -868,7 +867,7 @@ func (s *acpSession) handlePermissionRequest(id json.RawMessage, params json.Raw
 			toolInput = p.ToolCall.ToolCallID
 		}
 
-		slog.Info("acp: permission request", "request_id", reqKey, "tool", toolName, "input", toolInput)
+		slog.Info("acp: permission request", "request_id", reqKey, "tool", toolName, "input_bytes", len(toolInput))
 		s.emit(core.Event{
 			Type:         core.EventPermissionRequest,
 			RequestID:    reqKey,
