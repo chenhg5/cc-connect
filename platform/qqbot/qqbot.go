@@ -1065,7 +1065,7 @@ func (p *Platform) handleInteractionCreate(data json.RawMessage) {
 	if d.ID == "" {
 		return
 	}
-	slog.Debug("qqbot: INTERACTION_CREATE", "id", d.ID, "button_data", d.Data.Resolved.ButtonData)
+	slog.Debug("qqbot: INTERACTION_CREATE", "id", d.ID, "button_data_len", len(d.Data.Resolved.ButtonData))
 
 	// ACK the interaction (required by QQ Bot API to prevent "请求超时" on buttons)
 	_ = p.ackInteraction(d.ID)
@@ -1073,7 +1073,7 @@ func (p *Platform) handleInteractionCreate(data json.RawMessage) {
 	// Parse button_data: perm:<decision>:<session_key>
 	buttonData := d.Data.Resolved.ButtonData
 	if !strings.HasPrefix(buttonData, buttonDataPrefix) {
-		slog.Debug("qqbot: unknown interaction button_data format", "data", buttonData)
+		slog.Debug("qqbot: unknown interaction button_data format", "data_len", len(buttonData))
 		return
 	}
 
@@ -1081,13 +1081,13 @@ func (p *Platform) handleInteractionCreate(data json.RawMessage) {
 	// rest = "<decision>:<session_key>"
 	colonIdx := strings.Index(rest, ":")
 	if colonIdx < 0 {
-		slog.Warn("qqbot: invalid interaction button_data", "data", buttonData)
+		slog.Warn("qqbot: invalid interaction button_data", "data_len", len(buttonData))
 		return
 	}
 	decision := rest[:colonIdx]
 	sessionKey := rest[colonIdx+1:]
 	if decision == "" || sessionKey == "" {
-		slog.Warn("qqbot: empty decision or session_key in button_data", "data", buttonData)
+		slog.Warn("qqbot: empty decision or session_key in button_data", "data_len", len(buttonData))
 		return
 	}
 
