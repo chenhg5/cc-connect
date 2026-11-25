@@ -576,7 +576,7 @@ func drainACPEvents(ch <-chan core.Event) []core.Event {
 
 func TestAgyACPThoughtChunksCoalesceAndFlushAtBoundaries(t *testing.T) {
 	s := newUnitAgyACPSession()
-	defer s.antigravitySession.cancel()
+	defer s.cancel()
 
 	sendUpdate := func(upd map[string]any) {
 		raw, err := json.Marshal(map[string]any{
@@ -648,7 +648,7 @@ func TestAgyACPThoughtChunksCoalesceAndFlushAtBoundaries(t *testing.T) {
 
 func TestAgyACPToolCallAndResultExtraction(t *testing.T) {
 	s := newUnitAgyACPSession()
-	defer s.antigravitySession.cancel()
+	defer s.cancel()
 
 	s.stateMu.Lock()
 	s.prompts["1"] = &agyACPPrompt{}
@@ -762,7 +762,7 @@ func TestAgyACPToolCallAndResultExtraction(t *testing.T) {
 
 func TestAgyACPUsageUpdateAndPlan(t *testing.T) {
 	s := newUnitAgyACPSession()
-	defer s.antigravitySession.cancel()
+	defer s.cancel()
 
 	s.stateMu.Lock()
 	s.prompts["1"] = &agyACPPrompt{}
