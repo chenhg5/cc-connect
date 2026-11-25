@@ -11,6 +11,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/chenhg5/cc-connect/core"
 )
 
 type pollTransport struct {
@@ -111,7 +113,7 @@ func (t *pollTransport) register(ctx context.Context) (map[string]bool, error) {
 		return nil, err
 	}
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("cloud_web: register HTTP %d: %s", resp.StatusCode, string(raw))
+		return nil, core.HTTPError("cloud_web: register", resp.StatusCode, raw, t.token)
 	}
 	return parseRegisterAck(raw)
 }
@@ -159,7 +161,7 @@ func (t *pollTransport) pollOnce(ctx context.Context) error {
 		return err
 	}
 	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("cloud_web: events HTTP %d: %s", resp.StatusCode, string(raw))
+		return core.HTTPError("cloud_web: events", resp.StatusCode, raw, t.token)
 	}
 	return t.dispatchBatch(raw)
 }
@@ -251,7 +253,7 @@ func (t *pollTransport) Send(ctx context.Context, msg map[string]any) error {
 	defer func() { _ = resp.Body.Close() }()
 	raw, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 	if resp.StatusCode >= 300 {
-		return fmt.Errorf("cloud_web: send HTTP %d: %s", resp.StatusCode, string(raw))
+		return core.HTTPError("cloud_web: send", resp.StatusCode, raw, t.token)
 	}
 	// Handle inline preview_ack in send response.
 	var ack wirePreviewAck

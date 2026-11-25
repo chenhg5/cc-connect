@@ -262,6 +262,29 @@ func TestSession_BreakStaleLockThreshold(t *testing.T) {
 	}
 }
 
+func TestSession_BreakStaleLockIfGenerationKeepsNewTurn(t *testing.T) {
+	s := &Session{}
+	oldGen, ok := s.TryLock()
+	if !ok {
+		t.Fatal("old turn could not lock")
+	}
+	s.Unlock(oldGen)
+	newGen, ok := s.TryLock()
+	if !ok {
+		t.Fatal("new turn could not lock")
+	}
+	s.mu.Lock()
+	s.busySince = time.Now().Add(-time.Hour)
+	s.mu.Unlock()
+	if _, broken := s.breakStaleLockIfGeneration(time.Minute, oldGen); broken {
+		t.Fatal("stale recovery broke a newer turn")
+	}
+	if !s.Busy() {
+		t.Fatal("new turn lost its lock")
+	}
+	s.Unlock(newGen)
+}
+
 func TestSession_History(t *testing.T) {
 	s := &Session{}
 	s.AddHistory("user", "hello")

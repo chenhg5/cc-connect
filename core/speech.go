@@ -93,7 +93,7 @@ func (w *OpenAIWhisper) Transcribe(ctx context.Context, audio []byte, format str
 	}
 
 	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("whisper API %d: %s", resp.StatusCode, string(body))
+		return "", HTTPError("whisper API", resp.StatusCode, body, w.APIKey)
 	}
 
 	// response_format=text returns plain text; try to handle JSON fallback
@@ -180,7 +180,7 @@ func (q *QwenASR) Transcribe(ctx context.Context, audio []byte, format string, l
 	}
 
 	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("qwen asr API %d: %s", resp.StatusCode, string(body))
+		return "", HTTPError("qwen asr API", resp.StatusCode, body, q.APIKey)
 	}
 
 	var result struct {
@@ -274,7 +274,7 @@ func (g *GeminiSTT) Transcribe(ctx context.Context, audio []byte, format string,
 	}
 
 	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("gemini stt API %d: %s", resp.StatusCode, string(body))
+		return "", HTTPError("gemini stt API", resp.StatusCode, body, g.APIKey)
 	}
 
 	var result struct {
@@ -375,8 +375,8 @@ func ConvertAudioToAMR(ctx context.Context, audio []byte, srcFormat string) ([]b
 	args := []string{
 		"-i", "pipe:0",
 		"-c:a", "amr_nb",
-		"-ar", "8000",   // 8kHz sample rate (AMR-NB standard)
-		"-ac", "1",      // mono
+		"-ar", "8000", // 8kHz sample rate (AMR-NB standard)
+		"-ac", "1", // mono
 		"-b:a", "12.2k", // 12.2 kbps bitrate (AMR-NB max)
 		"-f", "amr",
 		"-y",
@@ -408,9 +408,9 @@ func ConvertMP3ToOGG(ctx context.Context, mp3Data []byte) ([]byte, error) {
 	args := []string{
 		"-i", "pipe:0",
 		"-c:a", "libopus",
-		"-ar", "16000",       // 16kHz sample rate for voice
-		"-ac", "1",           // mono
-		"-b:a", "32k",        // 32 kbps bitrate (voice quality)
+		"-ar", "16000", // 16kHz sample rate for voice
+		"-ac", "1", // mono
+		"-b:a", "32k", // 32 kbps bitrate (voice quality)
 		"-application", "voip", // optimize for voice
 		"-f", "ogg",
 		"-y",
@@ -439,9 +439,9 @@ func ConvertMP3ToAMR(ctx context.Context, mp3Data []byte) ([]byte, error) {
 	args := []string{
 		"-i", "pipe:0",
 		"-c:a", "amr_nb",
-		"-ar", "8000",     // 8kHz sample rate (AMR-NB standard)
-		"-ac", "1",        // mono
-		"-b:a", "12.2k",   // 12.2 kbps bitrate (AMR-NB max)
+		"-ar", "8000", // 8kHz sample rate (AMR-NB standard)
+		"-ac", "1", // mono
+		"-b:a", "12.2k", // 12.2 kbps bitrate (AMR-NB max)
 		"-f", "amr",
 		"-y",
 		"pipe:1",
