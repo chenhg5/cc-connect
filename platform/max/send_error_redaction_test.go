@@ -31,6 +31,26 @@ func TestPostMessageErrorOmitsResponseSecret(t *testing.T) {
 	}
 }
 
+func TestChatActionDebugLogOmitsResponseBody(t *testing.T) {
+	const sentinel = "SENTINEL_MAX_ACTION_RESPONSE"
+	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusBadGateway)
+		_, _ = w.Write([]byte(`{"secret":"` + sentinel + `"}`))
+	}))
+	defer api.Close()
+	var logs bytes.Buffer
+	previous := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logs, &slog.HandlerOptions{Level: slog.LevelDebug})))
+	t.Cleanup(func() { slog.SetDefault(previous) })
+	p := &Platform{apiBase: api.URL, token: "test", client: api.Client()}
+	if err := p.sendChatAction(context.Background(), "123", "typing_on"); err == nil {
+		t.Fatal("want HTTP error")
+	}
+	if strings.Contains(logs.String(), sentinel) {
+		t.Fatal("chat action debug log exposed response body")
+	}
+}
+
 func TestUpdateMessageErrorOmitsResponseSecret(t *testing.T) {
 	const marker = "SENSITIVE_SENTINEL"
 	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
