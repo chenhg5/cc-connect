@@ -12,6 +12,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/chenhg5/cc-connect/core"
 )
 
 const (
@@ -157,7 +159,7 @@ func fetchToken(appKey, appSecret, apiDomain, routeEnv string) (*tokenData, erro
 		respBody, _ := io.ReadAll(resp.Body)
 		_ = resp.Body.Close()
 		if resp.StatusCode != http.StatusOK {
-			lastErr = fmt.Errorf("yuanbao: sign token API returned %d: %s", resp.StatusCode, string(respBody))
+			lastErr = core.HTTPError("yuanbao: sign token", resp.StatusCode, respBody, appKey, appSecret)
 			continue
 		}
 
