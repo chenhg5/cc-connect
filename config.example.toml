@@ -912,7 +912,7 @@ mode = "default" # "default" | "acceptEdits" (edit) | "plan" | "auto" | "bypassP
 
 # Optional: set reasoning effort level (passed to claude --effort)
 # 可选：设置推理强度等级（传递给 claude --effort）
-# reasoning_effort = "high"  # "low" | "medium" | "high" | "max"
+# reasoning_effort = "high"  # "low" | "medium" | "high" | "xhigh" | "max"
 
 # Optional: override the context-window size used by the "ctx N%" indicator
 # in IM replies. By default cc-connect uses the window Claude Code reports
