@@ -36,7 +36,7 @@ type ProviderProxy struct {
 func NewProviderProxy(targetURL, thinkingOverride string) (*ProviderProxy, string, error) {
 	target, err := url.Parse(strings.TrimRight(targetURL, "/"))
 	if err != nil {
-		return nil, "", fmt.Errorf("providerproxy: parse target: %T", err)
+		return nil, "", fmt.Errorf("providerproxy: parse target: %s", SafeError(err))
 	}
 
 	listener, err := net.Listen("tcp", "127.0.0.1:0")

@@ -384,7 +384,7 @@ func (m *ManagementServer) handleSetupWeixinPoll(w http.ResponseWriter, r *http.
 	client := &http.Client{Timeout: 40 * time.Second}
 	resp, err := client.Do(httpReq)
 	if err != nil {
-		slog.Warn("weixin poll: request error", "error_type", fmt.Sprintf("%T", err))
+		slog.Warn("weixin poll: request error", "error", SafeError(err))
 		mgmtJSON(w, http.StatusOK, map[string]any{"status": "wait"})
 		return
 	}

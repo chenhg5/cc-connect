@@ -210,7 +210,7 @@ func (hm *HookManager) executeHTTP(h *HookConfig, event HookEvent) {
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, h.URL, bytes.NewReader(body))
 	if err != nil {
-		slog.Warn("hooks: create request failed", "url", RedactURL(h.URL), "error_type", fmt.Sprintf("%T", err))
+		slog.Warn("hooks: create request failed", "url", RedactURL(h.URL), "error", SafeError(err))
 		return
 	}
 	req.Header.Set("Content-Type", "application/json")
@@ -221,7 +221,7 @@ func (hm *HookManager) executeHTTP(h *HookConfig, event HookEvent) {
 	if err != nil {
 		slog.Warn("hooks: http request failed",
 			"project", hm.project, "event", event.Event,
-			"url", RedactURL(h.URL), "error_type", fmt.Sprintf("%T", err),
+			"url", RedactURL(h.URL), "error", SafeError(err),
 		)
 		return
 	}

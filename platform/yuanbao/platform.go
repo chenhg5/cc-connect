@@ -161,12 +161,12 @@ func (p *Platform) connect() bool {
 	}
 	u, err := url.Parse(p.wsURL)
 	if err != nil {
-		slog.Error("yuanbao: invalid ws url", "url", core.RedactURL(p.wsURL), "error_type", fmt.Sprintf("%T", err))
+		slog.Error("yuanbao: invalid ws url", "url", core.RedactURL(p.wsURL), "error", core.SafeError(err))
 		return false
 	}
 	conn, _, err := websocket.DefaultDialer.Dial(u.String(), nil)
 	if err != nil {
-		slog.Error("yuanbao: websocket dial failed", "host", core.RedactURL(p.wsURL), "error_type", fmt.Sprintf("%T", err))
+		slog.Error("yuanbao: websocket dial failed", "host", core.RedactURL(p.wsURL), "error", core.SafeError(err))
 		return false
 	}
 	p.mu.Lock()
