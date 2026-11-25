@@ -3352,6 +3352,7 @@ func (e *Engine) handleMessage(p Platform, msg *Message) {
 		e.interactiveMu.Lock()
 		st, hasSt := e.interactiveStates[interactiveKey]
 		agentAlive := hasSt && st != nil && st.agentSession != nil && st.agentSession.Alive()
+		establishedDead := hasSt && st != nil && st.agentSession != nil && !agentAlive
 		e.interactiveMu.Unlock()
 		if !agentAlive && e.staleLockBreakAfter > 0 {
 			if since, broken := session.BreakStaleLock(e.staleLockBreakAfter); broken {
@@ -3361,7 +3362,6 @@ func (e *Engine) handleMessage(p Platform, msg *Message) {
 					"interactive_key", interactiveKey,
 					"held_for", heldFor,
 				)
-				e.reply(p, msg.ReplyCtx, fmt.Sprintf("⚠️ 会话卡锁已自动恢复（进程已退出但锁未释放，挂了 %s），本条消息继续处理。", heldFor))
 				// Dump only when a break actually fired: a message arriving
 				// while the lock is busy-but-not-yet-breakable must not churn
 				// megabyte dumps, and only the goroutine that won the break
@@ -3369,6 +3369,7 @@ func (e *Engine) handleMessage(p Platform, msg *Message) {
 				dumpStaleLockStacks(msg.SessionKey)
 				if g, ok := session.TryLock(); ok {
 					lockGen = g
+					e.reply(p, msg.ReplyCtx, fmt.Sprintf("⚠️ 会话卡锁已自动恢复（进程已退出但锁未释放，挂了 %s），本条消息继续处理。", heldFor))
 					goto sessionLocked
 				}
 			}
@@ -3383,6 +3384,10 @@ func (e *Engine) handleMessage(p Platform, msg *Message) {
 			// draining the queue so we must start a processor ourselves.
 			if g, ok := session.TryLock(); ok {
 				go e.drainOrphanedQueue(session, sessions, interactiveKey, agent, resolvedWorkspace, g)
+			} else if establishedDead && e.staleLockBreakAfter > 0 {
+				// The foreground turn may already be gone. Wake the queue when
+				// the grace period ends if its lock is still held by this turn.
+				e.scheduleDeadQueueRecovery(session, sessions, st, interactiveKey, agent, resolvedWorkspace)
 			}
 			return
 		}
@@ -3429,6 +3434,50 @@ sessionLocked:
 	)
 
 	go e.processInteractiveMessageWith(p, msg, session, agent, sessions, interactiveKey, resolvedWorkspace, msg.SessionKey, lockGen)
+}
+
+// scheduleDeadQueueRecovery covers a dead foreground turn that never releases
+// its lock. The generation and state checks prevent a late timer from breaking
+// a newer turn or a replacement agent session.
+func (e *Engine) scheduleDeadQueueRecovery(session *Session, sessions *SessionManager, expected *interactiveState, interactiveKey string, agent Agent, workspaceDir string) {
+	gen, since := session.busyLockSnapshot()
+	if gen == 0 || since.IsZero() {
+		return
+	}
+	wait := time.Until(since.Add(e.staleLockBreakAfter)) + time.Millisecond
+	if wait < time.Millisecond {
+		wait = time.Millisecond
+	}
+	go func() {
+		timer := time.NewTimer(wait)
+		defer timer.Stop()
+		select {
+		case <-e.ctx.Done():
+			return
+		case <-timer.C:
+		}
+		e.interactiveMu.Lock()
+		state := e.interactiveStates[interactiveKey]
+		if state != expected {
+			e.interactiveMu.Unlock()
+			return
+		}
+		state.mu.Lock()
+		dead := state.agentSession != nil && !state.agentSession.Alive() && len(state.pendingMessages) > 0
+		var broken bool
+		if dead {
+			_, broken = session.breakStaleLockIfGeneration(e.staleLockBreakAfter, gen)
+		}
+		state.mu.Unlock()
+		e.interactiveMu.Unlock()
+		if !broken {
+			return
+		}
+		slog.Warn("dead session queue lock recovered after grace period", "session", interactiveKey)
+		if nextGen, ok := session.TryLock(); ok {
+			e.drainOrphanedQueue(session, sessions, interactiveKey, agent, workspaceDir, nextGen)
+		}
+	}()
 }
 
 func runMessageAccepted(msg *Message) {
