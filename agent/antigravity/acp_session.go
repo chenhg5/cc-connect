@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"math"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -559,12 +560,12 @@ func (s *agyACPSession) updateACP(params json.RawMessage) {
 			Name      string          `json:"name"`
 			Title     string          `json:"title"`
 			Status    string          `json:"status"`
-			RawInput  map[string]any  `json:"rawInput"`
+			RawInput  json.RawMessage `json:"rawInput"`
 			RawOutput json.RawMessage `json:"rawOutput"`
 			Content   json.RawMessage `json:"content"`
-			Entries   []acpPlanEntry  `json:"entries"`
-			Used      int             `json:"used"`
-			Size      int             `json:"size"`
+			Entries   json.RawMessage `json:"entries"`
+			Used      json.RawMessage `json:"used"`
+			Size      json.RawMessage `json:"size"`
 		} `json:"update"`
 	}
 	if json.Unmarshal(params, &notification) != nil || notification.SessionID != s.CurrentSessionID() {
@@ -588,11 +589,12 @@ func (s *agyACPSession) updateACP(params json.RawMessage) {
 		if toolName == "invoke_subagent" || toolName == "manage_subagents" || toolName == "swarm" {
 			s.usageIncomplete = true
 		}
+		toolInput, rawInputMap := formatACPToolInput(u.RawInput)
 		s.emitACP(core.Event{
 			Type:         core.EventToolUse,
 			ToolName:     toolName,
-			ToolInput:    formatACPToolInput(u.RawInput),
-			ToolInputRaw: u.RawInput,
+			ToolInput:    toolInput,
+			ToolInputRaw: rawInputMap,
 		})
 	case "tool_call_update":
 		if u.Status != "completed" && u.Status != "failed" {
@@ -600,8 +602,7 @@ func (s *agyACPSession) updateACP(params json.RawMessage) {
 		}
 		s.flushACPThought()
 		// ACP rawOutput can be any JSON value, not just an object.
-		var outputFields map[string]any
-		_ = json.Unmarshal(u.RawOutput, &outputFields)
+		outputFields := decodeACPObject(u.RawOutput)
 		exitCode := extractACPExitCode(outputFields)
 		success := u.Status == "completed" && (exitCode == nil || *exitCode == 0)
 		s.emitACP(core.Event{
@@ -613,25 +614,43 @@ func (s *agyACPSession) updateACP(params json.RawMessage) {
 			ToolSuccess:  &success,
 		})
 	case "plan":
-		if formatted := formatACPPlan(u.Entries); formatted != "" {
-			s.flushACPThought()
-			s.emitACP(core.Event{Type: core.EventThinking, Content: formatted})
+		var entries []acpPlanEntry
+		if json.Unmarshal(u.Entries, &entries) == nil {
+			if formatted := formatACPPlan(entries); formatted != "" {
+				s.flushACPThought()
+				s.emitACP(core.Event{Type: core.EventThinking, Content: formatted})
+			}
 		}
 	case "usage_update":
-		if u.Size > 0 {
-			s.reportedContextWindow = u.Size
+		size, hasSize := parseACPInt(u.Size)
+		if hasSize && size > 0 {
+			s.reportedContextWindow = size
 		}
-		if u.Used > 0 {
-			ctxWin := s.acpContextWindow()
-			s.usageMu.Lock()
-			s.lastUsage = &core.ContextUsage{
-				UsedTokens:    u.Used,
-				TotalTokens:   u.Used,
-				InputTokens:   u.Used,
-				ContextWindow: ctxWin,
+		used, hasUsed := parseACPInt(u.Used)
+		ctxWin := s.acpContextWindow()
+		s.usageMu.Lock()
+		if hasUsed && used > 0 {
+			if s.lastUsage == nil {
+				s.lastUsage = &core.ContextUsage{
+					UsedTokens:    used,
+					TotalTokens:   used,
+					ContextWindow: ctxWin,
+				}
+			} else {
+				updated := *s.lastUsage
+				updated.UsedTokens = used
+				if used > updated.TotalTokens {
+					updated.TotalTokens = used
+				}
+				updated.ContextWindow = ctxWin
+				s.lastUsage = &updated
 			}
-			s.usageMu.Unlock()
+		} else if hasSize && size > 0 && s.lastUsage != nil {
+			updated := *s.lastUsage
+			updated.ContextWindow = ctxWin
+			s.lastUsage = &updated
 		}
+		s.usageMu.Unlock()
 	}
 }
 
@@ -639,9 +658,9 @@ func (s *agyACPSession) permissionACP(id json.RawMessage, params json.RawMessage
 	var request struct {
 		SessionID string `json:"sessionId"`
 		Tool      struct {
-			Name     string         `json:"name"`
-			Title    string         `json:"title"`
-			RawInput map[string]any `json:"rawInput"`
+			Name     string          `json:"name"`
+			Title    string          `json:"title"`
+			RawInput json.RawMessage `json:"rawInput"`
 		} `json:"toolCall"`
 		Options []struct {
 			ID   string `json:"optionId"`
@@ -655,12 +674,13 @@ func (s *agyACPSession) permissionACP(id json.RawMessage, params json.RawMessage
 	s.flushACPThought()
 	key := string(id)
 	s.permissions[key] = agyACPPermission{id: id, options: request.Options}
+	toolInput, rawInputMap := formatACPToolInput(request.Tool.RawInput)
 	s.emitACP(core.Event{
 		Type:         core.EventPermissionRequest,
 		RequestID:    key,
 		ToolName:     firstNonEmptyACP(request.Tool.Name, request.Tool.Title),
-		ToolInput:    formatACPToolInput(request.Tool.RawInput),
-		ToolInputRaw: request.Tool.RawInput,
+		ToolInput:    toolInput,
+		ToolInputRaw: rawInputMap,
 	})
 }
 
@@ -671,13 +691,14 @@ var acpToolInputKeys = []string{
 	"path",
 	"TargetFile",
 	"file_path",
-	"DirectoryPath",
-	"SearchPath",
-	"SearchDirectory",
-	"AbsolutePath",
 	"Query",
 	"query",
 	"Pattern",
+	"pattern",
+	"SearchPath",
+	"SearchDirectory",
+	"DirectoryPath",
+	"AbsolutePath",
 	"Url",
 	"url",
 }
@@ -691,6 +712,29 @@ func firstNonEmptyACP(vals ...string) string {
 	return ""
 }
 
+func decodeACPObject(raw json.RawMessage) map[string]any {
+	if len(raw) == 0 {
+		return nil
+	}
+	var obj map[string]any
+	if json.Unmarshal(raw, &obj) != nil {
+		return nil
+	}
+	return obj
+}
+
+func parseACPInt(raw json.RawMessage) (int, bool) {
+	trimmed := strings.TrimSpace(string(raw))
+	if trimmed == "" || trimmed == "null" {
+		return 0, false
+	}
+	var n float64
+	if err := json.Unmarshal([]byte(trimmed), &n); err != nil || math.IsNaN(n) || math.IsInf(n, 0) {
+		return 0, false
+	}
+	return int(n), true
+}
+
 func extractACPTextBlock(raw json.RawMessage) (string, bool) {
 	var block struct {
 		Type string `json:"type"`
@@ -702,9 +746,43 @@ func extractACPTextBlock(raw json.RawMessage) (string, bool) {
 	return "", false
 }
 
-func formatACPToolInput(input map[string]any) string {
+func formatACPToolInput(raw json.RawMessage) (string, map[string]any) {
+	trimmed := strings.TrimSpace(string(raw))
+	if trimmed == "" || trimmed == "null" {
+		return "", nil
+	}
+	if obj := decodeACPObject(raw); obj != nil {
+		return formatACPToolInputMap(obj), obj
+	}
+	var s string
+	if json.Unmarshal(raw, &s) == nil {
+		return strings.TrimSpace(s), nil
+	}
+	if trimmed == "{}" || trimmed == "[]" {
+		return "", nil
+	}
+	return trimmed, nil
+}
+
+func formatACPToolInputMap(input map[string]any) string {
 	if len(input) == 0 {
 		return ""
+	}
+	var queryVal, pathVal string
+	for _, k := range []string{"Query", "query", "Pattern", "pattern"} {
+		if val, ok := input[k].(string); ok && strings.TrimSpace(val) != "" {
+			queryVal = val
+			break
+		}
+	}
+	for _, k := range []string{"SearchPath", "SearchDirectory", "DirectoryPath"} {
+		if val, ok := input[k].(string); ok && strings.TrimSpace(val) != "" {
+			pathVal = val
+			break
+		}
+	}
+	if queryVal != "" && pathVal != "" {
+		return queryVal + " @ " + pathVal
 	}
 	for _, key := range acpToolInputKeys {
 		if val, ok := input[key].(string); ok && strings.TrimSpace(val) != "" {

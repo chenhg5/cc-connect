@@ -758,6 +758,25 @@ func TestAgyACPToolCallAndResultExtraction(t *testing.T) {
 	if events[5].ToolResult != "command failed" || events[5].ToolExitCode == nil || *events[5].ToolExitCode != 2 || events[5].ToolSuccess == nil || *events[5].ToolSuccess {
 		t.Fatalf("failed tool_result = %+v", events[5])
 	}
+
+	sendUpdate(map[string]any{
+		"sessionUpdate": "tool_call",
+		"toolCallId":    "c-grep",
+		"name":          "grep_search",
+		"status":        "in_progress",
+		"rawInput":      map[string]any{"SearchPath": "/repo", "Query": "needle"},
+	})
+	sendUpdate(map[string]any{
+		"sessionUpdate": "tool_call",
+		"toolCallId":    "c-str-in",
+		"name":          "custom_tool",
+		"status":        "in_progress",
+		"rawInput":      "raw string input",
+	})
+	more := drainACPEvents(s.events)
+	if len(more) != 2 || more[0].ToolInput != "needle @ /repo" || more[1].ToolInput != "raw string input" {
+		t.Fatalf("grep/rawInput batch = %+v", more)
+	}
 }
 
 func TestAgyACPToolCompletionWithNonObjectRawOutput(t *testing.T) {
@@ -807,15 +826,37 @@ func TestAgyACPUsageUpdateAndPlan(t *testing.T) {
 		s.dispatchACP(raw)
 	}
 
-	sendUpdate(map[string]any{"sessionUpdate": "usage_update", "used": 16786, "size": 1048576})
+	sendUpdate(map[string]any{"sessionUpdate": "usage_update", "used": 16786.0, "size": 1048576.0})
 	usage := s.GetContextUsage()
-	if usage == nil || usage.UsedTokens != 16786 || usage.ContextWindow != 1048576 {
+	if usage == nil || usage.UsedTokens != 16786 || usage.ContextWindow != 1048576 || usage.InputTokens != 0 {
 		t.Fatalf("usage after usage_update = %+v", usage)
 	}
 	sendUpdate(map[string]any{"sessionUpdate": "usage_update", "used": 0, "size": 1048576})
 	usage = s.GetContextUsage()
 	if usage == nil || usage.UsedTokens != 16786 {
 		t.Fatalf("usage overwritten by zero usage_update = %+v", usage)
+	}
+
+	replyRaw, _ := json.Marshal(map[string]any{
+		"jsonrpc": "2.0",
+		"id":      1,
+		"result": map[string]any{
+			"stopReason": "end_turn",
+			"usage":      map[string]any{"inputTokens": 100, "cachedReadTokens": 900, "outputTokens": 50, "thoughtTokens": 12},
+		},
+	})
+	s.dispatchACP(replyRaw)
+	_ = drainACPEvents(s.events)
+	// Next turn starts before late usage_update arrives (matching len(s.prompts) > 0 guard).
+	s.stateMu.Lock()
+	s.prompts["2"] = &agyACPPrompt{}
+	s.stateMu.Unlock()
+	sendUpdate(map[string]any{"sessionUpdate": "usage_update", "used": 1200, "size": 2097152})
+	usage = s.GetContextUsage()
+	if usage == nil || usage.UsedTokens != 1200 || usage.ContextWindow != 2097152 ||
+		usage.InputTokens != 100 || usage.CachedInputTokens != 900 || usage.OutputTokens != 50 || usage.ReasoningOutputTokens != 12 ||
+		usage.TotalTokens != 1200 {
+		t.Fatalf("late usage_update clobbered reply breakdown: %+v", usage)
 	}
 
 	sendUpdate(map[string]any{
