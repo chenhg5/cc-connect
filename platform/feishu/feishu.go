@@ -1388,6 +1388,17 @@ func (p *Platform) dispatchMessage(ctx context.Context, msgType, content string,
 
 	case "interactive":
 		text := extractInteractiveCardText(content)
+		if cardTextLooksIncomplete(content, text) {
+			// The event payload is a simplified card; when only the title
+			// survives, pull the full schema 2.0 card and extract again.
+			slog.Info(p.tag()+": interactive card body missing in event payload, retrying with raw_card_content",
+				"message_id", messageID, "text_len", len(text), "event_content_len", len(content))
+			slog.Debug(p.tag()+": interactive card event payload", "message_id", messageID,
+				"content", fmt.Sprintf("%.500s", content))
+			if raw := p.fetchRawCardText(ctx, messageID); raw != "" && raw != "[interactive card]" && len(raw) > len(text) {
+				text = raw
+			}
+		}
 		text = stripCardAtTags(text)
 		slog.Info(p.tag()+": interactive card received", "message_id", messageID, "user", userID, "text_len", len(text))
 		if text == "" || text == "[interactive card]" {
@@ -1660,6 +1671,33 @@ func (p *Platform) resolveBotSenderName(appID string) string {
 		return alias
 	}
 	return "Bot[" + appID + "]"
+}
+
+// fetchRawCardText retrieves a card message with raw_card_content and
+// extracts its text. Used as a fallback when the simplified event payload
+// did not yield the card body.
+func (p *Platform) fetchRawCardText(ctx context.Context, messageID string) string {
+	apiPath := fmt.Sprintf("/open-apis/im/v1/messages/%s?card_msg_content_type=raw_card_content", messageID)
+	apiResp, err := p.client.Get(ctx, apiPath, nil, larkcore.AccessTokenTypeTenant)
+	if err != nil {
+		slog.Debug(p.tag()+": fetch raw card failed", "message_id", messageID, "error", err)
+		return ""
+	}
+	var resp struct {
+		Code int `json:"code"`
+		Data struct {
+			Items []struct {
+				Body struct {
+					Content string `json:"content"`
+				} `json:"body"`
+			} `json:"items"`
+		} `json:"data"`
+	}
+	if json.Unmarshal(apiResp.RawBody, &resp) != nil || resp.Code != 0 || len(resp.Data.Items) == 0 {
+		slog.Debug(p.tag()+": fetch raw card: parse failed or no data", "message_id", messageID)
+		return ""
+	}
+	return extractInteractiveCardText(resp.Data.Items[0].Body.Content)
 }
 
 // fetchSingleMessage retrieves one message by ID from the Feishu API and
@@ -1976,38 +2014,8 @@ func extractInteractiveCardText(content string) string {
 		}
 	}
 
-	// Legacy: direct title string + flat/nested elements.
+	// Legacy: flat/nested elements. The title is prepended once at the end.
 	if len(parts) == 0 {
-		if raw, ok := card["header"]; ok {
-			var header struct {
-				Title struct {
-					Content string `json:"content"`
-				} `json:"title"`
-				// Schema 2.0 card_header nests the title under property.
-				Property struct {
-					Title struct {
-						Property struct {
-							Content string `json:"content"`
-						} `json:"property"`
-					} `json:"title"`
-				} `json:"property"`
-			}
-			if json.Unmarshal(raw, &header) == nil {
-				if header.Title.Content != "" {
-					parts = append(parts, header.Title.Content)
-				} else if header.Property.Title.Property.Content != "" {
-					parts = append(parts, header.Property.Title.Property.Content)
-				}
-			}
-		}
-		if len(parts) == 0 {
-			if raw, ok := card["title"]; ok {
-				var title string
-				if json.Unmarshal(raw, &title) == nil && title != "" {
-					parts = append(parts, title)
-				}
-			}
-		}
 		var elements []json.RawMessage
 		if raw, ok := card["elements"]; ok {
 			var nested [][]json.RawMessage
@@ -2019,21 +2027,139 @@ func extractInteractiveCardText(content string) string {
 				_ = json.Unmarshal(raw, &elements)
 			}
 		}
-		for _, raw := range elements {
-			var elem struct {
-				Tag  string `json:"tag"`
-				Text string `json:"text"`
-			}
-			if json.Unmarshal(raw, &elem) == nil && elem.Tag == "text" && strings.TrimSpace(elem.Text) != "" {
-				parts = append(parts, elem.Text)
-			}
-		}
+		extractLegacyCardElements(elements, &parts)
+	}
+
+	// Prepend the card title (v1 title/header, schema 2.0 card_header) so
+	// quoted raw_card_content cards keep their header as well. Skipped when
+	// the body already carries the same line (e.g. user_dsl header).
+	if title := extractCardTitle(card); title != "" && !stringSliceContains(parts, title) {
+		parts = append([]string{title}, parts...)
 	}
 
 	if len(parts) == 0 {
 		return "[interactive card]"
 	}
 	return strings.Join(parts, "\n")
+}
+
+// extractCardTitle returns the card title from either the v1 shape
+// (top-level "title" string, or header.title.content) or the schema 2.0
+// card_header shape (header.property.title.property.content).
+func extractCardTitle(card map[string]json.RawMessage) string {
+	if raw, ok := card["header"]; ok {
+		var header struct {
+			Title struct {
+				Content string `json:"content"`
+			} `json:"title"`
+			Property struct {
+				Title struct {
+					Content  string `json:"content"`
+					Property struct {
+						Content string `json:"content"`
+					} `json:"property"`
+				} `json:"title"`
+			} `json:"property"`
+		}
+		if json.Unmarshal(raw, &header) == nil {
+			for _, t := range []string{
+				header.Title.Content,
+				header.Property.Title.Property.Content,
+				header.Property.Title.Content,
+			} {
+				if strings.TrimSpace(t) != "" {
+					return strings.TrimSpace(t)
+				}
+			}
+		}
+	}
+	if raw, ok := card["title"]; ok {
+		var title string
+		if json.Unmarshal(raw, &title) == nil && strings.TrimSpace(title) != "" {
+			return strings.TrimSpace(title)
+		}
+		var titleObj struct {
+			Content string `json:"content"`
+		}
+		if json.Unmarshal(raw, &titleObj) == nil && strings.TrimSpace(titleObj.Content) != "" {
+			return strings.TrimSpace(titleObj.Content)
+		}
+	}
+	return ""
+}
+
+func stringSliceContains(items []string, want string) bool {
+	for _, s := range items {
+		if s == want {
+			return true
+		}
+	}
+	return false
+}
+
+// extractLegacyCardElements extracts text from v1 card elements. The v1
+// "text" field may be a plain string or a nested {tag, content} object, and
+// key/value pairs may live in "fields" instead of top-level elements.
+func extractLegacyCardElements(elements []json.RawMessage, parts *[]string) {
+	for _, raw := range elements {
+		var elem struct {
+			Tag      string            `json:"tag"`
+			Text     json.RawMessage   `json:"text"`
+			Content  string            `json:"content"`
+			Fields   []json.RawMessage `json:"fields"`
+			Elements []json.RawMessage `json:"elements"`
+		}
+		if json.Unmarshal(raw, &elem) != nil {
+			continue
+		}
+		if len(elem.Text) > 0 {
+			var s string
+			if json.Unmarshal(elem.Text, &s) == nil {
+				if strings.TrimSpace(s) != "" {
+					*parts = append(*parts, s)
+				}
+			} else {
+				var obj struct {
+					Content string `json:"content"`
+				}
+				if json.Unmarshal(elem.Text, &obj) == nil && strings.TrimSpace(obj.Content) != "" {
+					*parts = append(*parts, obj.Content)
+				}
+			}
+		} else if strings.TrimSpace(elem.Content) != "" {
+			*parts = append(*parts, elem.Content)
+		}
+		if len(elem.Fields) > 0 {
+			extractLegacyCardElements(elem.Fields, parts)
+		}
+		if len(elem.Elements) > 0 {
+			extractLegacyCardElements(elem.Elements, parts)
+		}
+	}
+}
+
+// cardTextLooksIncomplete reports whether extraction produced nothing beyond
+// the card title (or the placeholder), i.e. the body was not understood. The
+// caller then retries with raw_card_content, which carries the full schema
+// 2.0 card instead of the simplified event payload.
+func cardTextLooksIncomplete(content, text string) bool {
+	trimmed := strings.TrimSpace(text)
+	if trimmed == "" || trimmed == "[interactive card]" {
+		return true
+	}
+	cardJSON := content
+	var wrapper struct {
+		JsonCard string `json:"json_card"`
+	}
+	if json.Unmarshal([]byte(content), &wrapper) == nil && wrapper.JsonCard != "" {
+		cardJSON = wrapper.JsonCard
+	}
+	var card map[string]json.RawMessage
+	if json.Unmarshal([]byte(cardJSON), &card) != nil {
+		return false
+	}
+	title := extractCardTitle(card)
+	return title != "" && trimmed == title
 }
 
 // extractCardElements recursively extracts text from schema 2.0 card elements.
