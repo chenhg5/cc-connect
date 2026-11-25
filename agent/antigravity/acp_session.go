@@ -75,26 +75,28 @@ type agyACPPermission struct {
 
 type agyACPSession struct {
 	*antigravitySession
-	effort            string
-	ctxWindowOverride int
-	usageMu           sync.Mutex
-	lastUsage         *core.ContextUsage
-	stdin             io.WriteCloser
-	writeMu           sync.Mutex
-	stateMu           sync.Mutex
-	nextID            int64
-	waiters           map[string]chan agyACPReply
-	prompts           map[string]*agyACPPrompt
-	permissions       map[string]agyACPPermission
-	ready             bool
-	text              strings.Builder
-	usage             agyACPTokenUsage
-	turnError         error
-	turnTimer         *time.Timer
-	turnSequence      uint64
-	turnDeadline      time.Time
-	usageIncomplete   bool
-	contextPrompt     int64
+	effort                string
+	ctxWindowOverride     int
+	usageMu               sync.Mutex
+	lastUsage             *core.ContextUsage
+	stdin                 io.WriteCloser
+	writeMu               sync.Mutex
+	stateMu               sync.Mutex
+	nextID                int64
+	waiters               map[string]chan agyACPReply
+	prompts               map[string]*agyACPPrompt
+	permissions           map[string]agyACPPermission
+	ready                 bool
+	thought               strings.Builder
+	text                  strings.Builder
+	usage                 agyACPTokenUsage
+	turnError             error
+	turnTimer             *time.Timer
+	turnSequence          uint64
+	turnDeadline          time.Time
+	usageIncomplete       bool
+	contextPrompt         int64
+	reportedContextWindow int
 }
 
 func newAgyACPSession(ctx context.Context, command string, extraArgs []string, workDir, model, effort, mode, resumeID string, env []string, timeout time.Duration, window int) (*agyACPSession, error) {
@@ -371,12 +373,32 @@ func (s *agyACPSession) emitACP(event core.Event) {
 	}
 }
 
+func (s *agyACPSession) flushACPThought() {
+	if s.thought.Len() == 0 {
+		return
+	}
+	if content := strings.TrimRight(s.thought.String(), "\r\n"); strings.TrimSpace(content) != "" {
+		s.emitACP(core.Event{Type: core.EventThinking, Content: content})
+	}
+	s.thought.Reset()
+}
+
 func (s *agyACPSession) flushACPText(kind core.EventType) {
 	if s.text.Len() == 0 {
 		return
 	}
 	s.emitACP(core.Event{Type: kind, Content: s.text.String()})
 	s.text.Reset()
+}
+
+func (s *agyACPSession) acpContextWindow() int {
+	if s.ctxWindowOverride > 0 {
+		return s.ctxWindowOverride
+	}
+	if s.reportedContextWindow > 0 {
+		return s.reportedContextWindow
+	}
+	return antigravityContextWindow(s.model, 0)
 }
 
 func (s *agyACPSession) readACP(cmd *exec.Cmd, stdout io.ReadCloser) {
@@ -489,7 +511,7 @@ func (s *agyACPSession) dispatchACP(line []byte) {
 		if promptID >= s.contextPrompt {
 			s.contextPrompt = promptID
 			s.usageMu.Lock()
-			s.lastUsage = &core.ContextUsage{UsedTokens: u.Input + u.Cache, TotalTokens: u.Input + u.Cache + u.Output, InputTokens: u.Input, CachedInputTokens: u.Cache, OutputTokens: u.Output, ReasoningOutputTokens: u.Thought, ContextWindow: antigravityContextWindow(s.model, s.ctxWindowOverride)}
+			s.lastUsage = &core.ContextUsage{UsedTokens: u.Input + u.Cache, TotalTokens: u.Input + u.Cache + u.Output, InputTokens: u.Input, CachedInputTokens: u.Cache, OutputTokens: u.Output, ReasoningOutputTokens: u.Thought, ContextWindow: s.acpContextWindow()}
 			s.usageMu.Unlock()
 		}
 	} else {
@@ -509,6 +531,7 @@ func (s *agyACPSession) finishACPTurn() {
 		s.turnTimer.Stop()
 		s.turnTimer = nil
 	}
+	s.flushACPThought()
 	s.flushACPText(core.EventText)
 	if s.turnError != nil {
 		s.emitACP(core.Event{Type: core.EventError, Error: s.turnError})
@@ -522,17 +545,26 @@ func (s *agyACPSession) finishACPTurn() {
 	clear(s.permissions)
 }
 
+type acpPlanEntry struct {
+	Content string `json:"content"`
+	Status  string `json:"status"`
+}
+
 func (s *agyACPSession) updateACP(params json.RawMessage) {
 	var notification struct {
 		SessionID string `json:"sessionId"`
 		Update    struct {
-			Kind     string          `json:"sessionUpdate"`
-			ID       string          `json:"toolCallId"`
-			Name     string          `json:"name"`
-			Title    string          `json:"title"`
-			Status   string          `json:"status"`
-			RawInput map[string]any  `json:"rawInput"`
-			Content  json.RawMessage `json:"content"`
+			Kind      string          `json:"sessionUpdate"`
+			ID        string          `json:"toolCallId"`
+			Name      string          `json:"name"`
+			Title     string          `json:"title"`
+			Status    string          `json:"status"`
+			RawInput  map[string]any  `json:"rawInput"`
+			RawOutput map[string]any  `json:"rawOutput"`
+			Content   json.RawMessage `json:"content"`
+			Entries   []acpPlanEntry  `json:"entries"`
+			Used      int             `json:"used"`
+			Size      int             `json:"size"`
 		} `json:"update"`
 	}
 	if json.Unmarshal(params, &notification) != nil || notification.SessionID != s.CurrentSessionID() {
@@ -540,24 +572,62 @@ func (s *agyACPSession) updateACP(params json.RawMessage) {
 	}
 	u := notification.Update
 	switch u.Kind {
-	case "agent_message_chunk":
-		var content struct {
-			Type string `json:"type"`
-			Text string `json:"text"`
+	case "agent_thought_chunk":
+		if text, ok := extractACPTextBlock(u.Content); ok {
+			s.thought.WriteString(text)
 		}
-		if json.Unmarshal(u.Content, &content) == nil && content.Type == "text" {
-			s.text.WriteString(content.Text)
+	case "agent_message_chunk":
+		s.flushACPThought()
+		if text, ok := extractACPTextBlock(u.Content); ok {
+			s.text.WriteString(text)
 		}
 	case "tool_call":
+		s.flushACPThought()
 		s.flushACPText(core.EventText)
-		if u.Name == "invoke_subagent" || u.Name == "manage_subagents" || u.Name == "swarm" {
+		toolName := firstNonEmptyACP(u.Name, u.Title)
+		if toolName == "invoke_subagent" || toolName == "manage_subagents" || toolName == "swarm" {
 			s.usageIncomplete = true
 		}
-		input, _ := json.Marshal(u.RawInput)
-		s.emitACP(core.Event{Type: core.EventToolUse, ToolName: u.Name, ToolInput: string(input), ToolInputRaw: u.RawInput})
+		s.emitACP(core.Event{
+			Type:         core.EventToolUse,
+			ToolName:     toolName,
+			ToolInput:    formatACPToolInput(u.RawInput),
+			ToolInputRaw: u.RawInput,
+		})
 	case "tool_call_update":
-		if u.Status == "completed" || u.Status == "failed" {
-			s.emitACP(core.Event{Type: core.EventToolResult, ToolName: u.Name, ToolStatus: u.Status, ToolResult: string(u.Content)})
+		if u.Status != "completed" && u.Status != "failed" {
+			return
+		}
+		s.flushACPThought()
+		exitCode := extractACPExitCode(u.RawOutput)
+		success := u.Status == "completed" && (exitCode == nil || *exitCode == 0)
+		s.emitACP(core.Event{
+			Type:         core.EventToolResult,
+			ToolName:     firstNonEmptyACP(u.Name, u.Title),
+			ToolStatus:   u.Status,
+			ToolResult:   extractACPToolResult(u.Content, u.RawOutput),
+			ToolExitCode: exitCode,
+			ToolSuccess:  &success,
+		})
+	case "plan":
+		if formatted := formatACPPlan(u.Entries); formatted != "" {
+			s.flushACPThought()
+			s.emitACP(core.Event{Type: core.EventThinking, Content: formatted})
+		}
+	case "usage_update":
+		if u.Size > 0 {
+			s.reportedContextWindow = u.Size
+		}
+		if u.Used > 0 {
+			ctxWin := s.acpContextWindow()
+			s.usageMu.Lock()
+			s.lastUsage = &core.ContextUsage{
+				UsedTokens:    u.Used,
+				TotalTokens:   u.Used,
+				InputTokens:   u.Used,
+				ContextWindow: ctxWin,
+			}
+			s.usageMu.Unlock()
 		}
 	}
 }
@@ -579,10 +649,170 @@ func (s *agyACPSession) permissionACP(id json.RawMessage, params json.RawMessage
 		_ = s.writeACP(map[string]any{"jsonrpc": "2.0", "id": id, "result": map[string]any{"outcome": map[string]any{"outcome": "cancelled"}}})
 		return
 	}
+	s.flushACPThought()
 	key := string(id)
 	s.permissions[key] = agyACPPermission{id: id, options: request.Options}
-	input, _ := json.Marshal(request.Tool.RawInput)
-	s.emitACP(core.Event{Type: core.EventPermissionRequest, RequestID: key, ToolName: request.Tool.Name, ToolInput: string(input), ToolInputRaw: request.Tool.RawInput})
+	s.emitACP(core.Event{
+		Type:         core.EventPermissionRequest,
+		RequestID:    key,
+		ToolName:     firstNonEmptyACP(request.Tool.Name, request.Tool.Title),
+		ToolInput:    formatACPToolInput(request.Tool.RawInput),
+		ToolInputRaw: request.Tool.RawInput,
+	})
+}
+
+var acpToolInputKeys = []string{
+	"CommandLine",
+	"command",
+	"Path",
+	"path",
+	"TargetFile",
+	"file_path",
+	"DirectoryPath",
+	"SearchPath",
+	"SearchDirectory",
+	"AbsolutePath",
+	"Query",
+	"query",
+	"Pattern",
+	"Url",
+	"url",
+}
+
+func firstNonEmptyACP(vals ...string) string {
+	for _, v := range vals {
+		if strings.TrimSpace(v) != "" {
+			return v
+		}
+	}
+	return ""
+}
+
+func extractACPTextBlock(raw json.RawMessage) (string, bool) {
+	var block struct {
+		Type string `json:"type"`
+		Text string `json:"text"`
+	}
+	if json.Unmarshal(raw, &block) == nil && block.Type == "text" {
+		return block.Text, true
+	}
+	return "", false
+}
+
+func formatACPToolInput(input map[string]any) string {
+	if len(input) == 0 {
+		return ""
+	}
+	for _, key := range acpToolInputKeys {
+		if val, ok := input[key].(string); ok && strings.TrimSpace(val) != "" {
+			return val
+		}
+	}
+	raw, err := json.Marshal(input)
+	if err != nil {
+		return ""
+	}
+	return string(raw)
+}
+
+func extractACPToolContentText(raw json.RawMessage) string {
+	if len(raw) == 0 {
+		return ""
+	}
+	type contentItem struct {
+		Type    string          `json:"type"`
+		Text    string          `json:"text"`
+		Content json.RawMessage `json:"content"`
+	}
+	extractItem := func(item contentItem) string {
+		if item.Type == "text" && item.Text != "" {
+			return item.Text
+		}
+		if item.Type == "content" && len(item.Content) > 0 {
+			if text, ok := extractACPTextBlock(item.Content); ok {
+				return text
+			}
+		}
+		return ""
+	}
+	var items []contentItem
+	if json.Unmarshal(raw, &items) == nil {
+		var parts []string
+		for _, item := range items {
+			if text := extractItem(item); text != "" {
+				parts = append(parts, text)
+			}
+		}
+		return strings.Join(parts, "\n")
+	}
+	var single contentItem
+	if json.Unmarshal(raw, &single) == nil {
+		if text := extractItem(single); text != "" {
+			return text
+		}
+	}
+	var plain string
+	if json.Unmarshal(raw, &plain) == nil {
+		return plain
+	}
+	return ""
+}
+
+func extractACPToolResult(content json.RawMessage, rawOutput map[string]any) string {
+	if text := extractACPToolContentText(content); text != "" {
+		return text
+	}
+	if len(rawOutput) == 0 {
+		return ""
+	}
+	var parts []string
+	for _, key := range []string{"output", "stdout", "stderr", "error", "message", "result"} {
+		if val, ok := rawOutput[key].(string); ok && val != "" {
+			parts = append(parts, val)
+		}
+	}
+	return strings.Join(parts, "\n")
+}
+
+func extractACPExitCode(rawOutput map[string]any) *int {
+	for _, key := range []string{"exit_code", "exitCode"} {
+		val, ok := rawOutput[key]
+		if !ok || val == nil {
+			continue
+		}
+		switch n := val.(type) {
+		case float64:
+			code := int(n)
+			return &code
+		case int:
+			code := n
+			return &code
+		case int64:
+			code := int(n)
+			return &code
+		}
+	}
+	return nil
+}
+
+func formatACPPlan(entries []acpPlanEntry) string {
+	if len(entries) == 0 {
+		return ""
+	}
+	var lines []string
+	for _, entry := range entries {
+		content := strings.TrimSpace(entry.Content)
+		if content == "" {
+			continue
+		}
+		status := strings.TrimSpace(entry.Status)
+		if status != "" {
+			lines = append(lines, "["+status+"] "+content)
+		} else {
+			lines = append(lines, content)
+		}
+	}
+	return strings.Join(lines, "\n")
 }
 
 func (s *agyACPSession) RespondPermission(id string, result core.PermissionResult) error {
