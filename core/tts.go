@@ -154,7 +154,7 @@ func (q *QwenTTS) Synthesize(ctx context.Context, text string, opts TTSSynthesis
 		return nil, "", fmt.Errorf("qwen tts: read response: %w", err)
 	}
 	if resp.StatusCode != http.StatusOK {
-		return nil, "", fmt.Errorf("qwen tts API %d: %s", resp.StatusCode, body)
+		return nil, "", HTTPError("qwen tts API", resp.StatusCode, body, q.APIKey)
 	}
 
 	var result struct {
@@ -260,7 +260,7 @@ func (o *OpenAITTS) Synthesize(ctx context.Context, text string, opts TTSSynthes
 
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
-		return nil, "", fmt.Errorf("openai tts API %d: %s", resp.StatusCode, body)
+		return nil, "", HTTPError("openai tts API", resp.StatusCode, body, o.APIKey)
 	}
 
 	mp3Data, err := io.ReadAll(resp.Body)
@@ -346,7 +346,7 @@ func (m *MiniMaxTTS) Synthesize(ctx context.Context, text string, opts TTSSynthe
 
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
-		return nil, "", fmt.Errorf("minimax tts API %d: %s", resp.StatusCode, body)
+		return nil, "", HTTPError("minimax tts API", resp.StatusCode, body, m.APIKey)
 	}
 
 	// Parse SSE stream: each line is "data: {...}" with hex-encoded audio chunks.
@@ -490,7 +490,7 @@ func (m *MimoTTS) Synthesize(ctx context.Context, text string, opts TTSSynthesis
 		return nil, "", fmt.Errorf("mimo tts: read response: %w", err)
 	}
 	if resp.StatusCode != http.StatusOK {
-		return nil, "", fmt.Errorf("mimo tts API %d: %s", resp.StatusCode, body)
+		return nil, "", HTTPError("mimo tts API", resp.StatusCode, body, m.APIKey)
 	}
 
 	var result struct {
