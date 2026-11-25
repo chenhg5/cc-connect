@@ -383,7 +383,7 @@ func (p *Platform) handleEvent(evt socketmode.Event) {
 			Content:  content,
 			ReplyCtx: replyContext{channel: cmd.ChannelID},
 		}
-		slog.Debug("slack: slash command", "command", cmd.Command, "text", cmd.Text, "user", cmd.UserID)
+		slog.Debug("slack: slash command", "command", cmd.Command, "text_len", len(cmd.Text), "user", cmd.UserID)
 		p.handler(p, msg)
 
 	case socketmode.EventTypeConnecting:

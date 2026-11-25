@@ -478,7 +478,7 @@ func (p *Platform) handleMessage(ctx context.Context, msg *models.Message) {
 	}
 
 	if isGroup && !p.groupReplyAll {
-		slog.Debug("telegram: checking group message", "text", msg.Text, "is_command", isCommand(msg))
+		slog.Debug("telegram: checking group message", "text_len", len(msg.Text), "is_command", isCommand(msg))
 		if !p.isDirectedAtBot(msg) {
 			return
 		}
@@ -1034,7 +1034,7 @@ func (p *Platform) handleCallbackQuery(ctx context.Context, cb *models.CallbackQ
 	case "perm:allow_all":
 		responseText = "allow all"
 	default:
-		slog.Debug("telegram: unknown callback data", "data", data)
+		slog.Debug("telegram: unknown callback data", "data_len", len(data))
 		return
 	}
 
@@ -1100,10 +1100,10 @@ func (p *Platform) isDirectedAtBot(msg *models.Message) bool {
 		}
 		if atIdx > 0 && atIdx < cmdEnd {
 			target := msg.Text[atIdx+1 : cmdEnd]
-			slog.Debug("telegram: command with @suffix", "bot", botName, "target", target, "match", strings.EqualFold(target, botName))
+			slog.Debug("telegram: command with @suffix", "bot", botName, "target_len", len(target), "match", strings.EqualFold(target, botName))
 			return strings.EqualFold(target, botName)
 		}
-		slog.Debug("telegram: command without @suffix, accepting", "bot", botName, "text", msg.Text)
+		slog.Debug("telegram: command without @suffix, accepting", "bot", botName, "text_len", len(msg.Text))
 		return true // /cmd without @suffix — accept
 	}
 
@@ -1112,7 +1112,7 @@ func (p *Platform) isDirectedAtBot(msg *models.Message) bool {
 		for _, e := range msg.Entities {
 			if e.Type == models.MessageEntityTypeMention {
 				mention := extractEntityText(msg.Text, e.Offset, e.Length)
-				slog.Debug("telegram: checking mention", "bot", botName, "mention", mention, "match", strings.EqualFold(mention, "@"+botName))
+				slog.Debug("telegram: checking mention", "bot", botName, "mention_len", len(mention), "match", strings.EqualFold(mention, "@"+botName))
 				if strings.EqualFold(mention, "@"+botName) {
 					return true
 				}
@@ -1140,7 +1140,7 @@ func (p *Platform) isDirectedAtBot(msg *models.Message) bool {
 		}
 	}
 
-	slog.Debug("telegram: ignoring group message not directed at bot", "chat", msg.Chat.ID, "bot", botName, "text", msg.Text, "entities", msg.Entities)
+	slog.Debug("telegram: ignoring group message not directed at bot", "chat", msg.Chat.ID, "bot", botName, "text_len", len(msg.Text), "entity_count", len(msg.Entities))
 	return false
 }
 
