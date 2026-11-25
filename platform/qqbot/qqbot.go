@@ -379,9 +379,13 @@ func (p *Platform) apiRequestJSON(method, url string, body any, result any) erro
 
 var _ core.ImageSender = (*Platform)(nil)
 
-// buttonDataPrefix is the prefix for QQ Bot keyboard button_data values.
-// Format: perm:<decision>:<session_key>
-const buttonDataPrefix = "perm:"
+// buttonData prefix constants for QQ Bot keyboard button_data values.
+// Each interaction type has its own prefix so the INTERACTION_CREATE
+// dispatcher can route the click to the correct handler (#1859).
+const (
+	buttonDataPermPrefix = "perm:"  // Format: perm:<decision>:<session_key>
+	buttonDataAskPrefix  = "askq:"  // Format: askq:<qIdx>:<optIdx>:<session_key>
+)
 
 // SendFile uploads and sends a file via QQ Bot rich media API.
 // Implements core.FileSender.
@@ -440,15 +444,26 @@ func (p *Platform) SendWithButtons(ctx context.Context, replyCtx any, content st
 	for i, row := range buttons {
 		var btns []map[string]any
 		for j, btn := range row {
-			// Encode decision + session key into button_data so we can route
-			// the INTERACTION_CREATE event back to the right session.
-			// btn.Data is already "perm:allow", "perm:deny", or "perm:allow_all"
+			// Encode the interaction prefix + payload + session_key into button_data
+			// so we can route the INTERACTION_CREATE event back to the right session.
+			//
+			// btn.Data already carries an interaction prefix:
+			//   - "perm:allow", "perm:deny", "perm:allow_all" — permission decisions
+			//   - "askq:<qIdx>:<optIdx>" — AskUserQuestion option clicks (#1859)
+			// The session_key is appended as a trailing field so the dispatcher
+			// can always recover the routing key, regardless of prefix.
 			buttonData := btn.Data + ":" + sessionKey
 
 			btnID := fmt.Sprintf("b_%d_%d", i, j)
 			visitedLabel := "已操作"
 			style := 1 // blue
-			if strings.Contains(btn.Data, "deny") {
+			groupID := "perm"
+			if strings.HasPrefix(btn.Data, buttonDataAskPrefix) {
+				// AskUserQuestion: keep style/visited neutral (yellow for "selected")
+				visitedLabel = "已选择"
+				style = 2 // yellow
+				groupID = "askq"
+			} else if strings.Contains(btn.Data, "deny") {
 				visitedLabel = "已拒绝"
 				style = 0 // grey
 			} else if strings.Contains(btn.Data, "allow_all") || strings.Contains(btn.Data, "allow all") {
@@ -470,7 +485,7 @@ func (p *Platform) SendWithButtons(ctx context.Context, replyCtx any, content st
 					"permission":  map[string]int{"type": 2},
 					"click_limit": 1,
 				},
-				"group_id": "perm",
+				"group_id": groupID,
 			})
 		}
 		rows = append(rows, map[string]any{"buttons": btns})
@@ -1039,24 +1054,17 @@ func (p *Platform) handleDispatch(eventType string, data json.RawMessage) {
 
 // handleInteractionCreate handles inline keyboard button click events.
 // When a user clicks a button on a message with keyboard, QQ Bot dispatches
-// an INTERACTION_CREATE event. This method parses the button_data to extract
-// the permission decision and session key, then creates a synthetic message
-// so the engine can process it as a permission response.
+// an INTERACTION_CREATE event. This method parses the button_data prefix and
+// routes the click to the right handler — permission decisions become
+// synthetic permission-response messages; AskUserQuestion option clicks
+// are forwarded as regular user messages so the engine's existing
+// `askq:<qIdx>:<optIdx>` resolver (core/engine.go) can map them to labels.
+//
+// Supported button_data shapes:
+//   perm:<decision>:<session_key>   — permission card click (#1131)
+//   askq:<qIdx>:<optIdx>:<session_key> — AskUserQuestion option click (#1859)
 func (p *Platform) handleInteractionCreate(data json.RawMessage) {
-	var d struct {
-		ID                string `json:"id"`
-		GroupOpenID       string `json:"group_openid"`
-		GroupMemberOpenID string `json:"group_member_openid"`
-		UserOpenID        string `json:"user_openid"`
-		ChatType          int    `json:"chat_type"` // 1=group, 2=c2c
-		Data              struct {
-			Type     int `json:"type"`
-			Resolved struct {
-				ButtonData string `json:"button_data"`
-				ButtonID   string `json:"button_id"`
-			} `json:"resolved"`
-		} `json:"data"`
-	}
+	var d interactionCreateEvent
 	if err := json.Unmarshal(data, &d); err != nil {
 		slog.Warn("qqbot: failed to parse interaction create event", "error", err)
 		return
@@ -1070,18 +1078,89 @@ func (p *Platform) handleInteractionCreate(data json.RawMessage) {
 	// ACK the interaction (required by QQ Bot API to prevent "请求超时" on buttons)
 	_ = p.ackInteraction(d.ID)
 
-	// Parse button_data: perm:<decision>:<session_key>
 	buttonData := d.Data.Resolved.ButtonData
-	if !strings.HasPrefix(buttonData, buttonDataPrefix) {
-		slog.Debug("qqbot: unknown interaction button_data format", "data", buttonData)
+
+	// AskUserQuestion option click (#1859): forward the raw "askq:..." payload
+	// to the engine as a regular user message. The engine already knows how to
+	// resolve `askq:<qIdx>:<optIdx>` against the pending question's options
+	// (see core.engine.resolveAskQuestionAnswer).
+	if strings.HasPrefix(buttonData, buttonDataAskPrefix) {
+		p.forwardAskQuestionClick(&d, buttonData)
 		return
 	}
 
-	rest := strings.TrimPrefix(buttonData, buttonDataPrefix)
+	// Permission decision click (#1131): synthesize a permission response.
+	if strings.HasPrefix(buttonData, buttonDataPermPrefix) {
+		p.forwardPermissionClick(&d, buttonData)
+		return
+	}
+
+	slog.Debug("qqbot: unknown interaction button_data format", "data", buttonData)
+}
+
+// forwardAskQuestionClick dispatches an AskUserQuestion option click as a
+// regular user message so the engine treats it identically to a typed answer.
+// The encoded payload already contains the engine-recognized "askq:..." form,
+// so we strip only the trailing session_key suffix (which the engine doesn't
+// need and would otherwise reject) and forward the remainder.
+func (p *Platform) forwardAskQuestionClick(d *interactionCreateEvent, buttonData string) {
+	// Strip the session_key suffix added by SendWithButtons:
+	//   askq:<qIdx>:<optIdx>:<session_key> -> askq:<qIdx>:<optIdx>
+	parts := strings.SplitN(buttonData, ":", 4)
+	if len(parts) < 4 || parts[3] == "" {
+		slog.Warn("qqbot: askq interaction missing session_key", "data", buttonData)
+		return
+	}
+	sessionKey := parts[3]
+	answerPayload := strings.Join(parts[:3], ":")
+
+	var rctx *replyContext
+	var userID string
+	switch d.ChatType {
+	case 1: // group
+		rctx = &replyContext{
+			messageType: "group",
+			groupOpenID: d.GroupOpenID,
+			userOpenID:  d.GroupMemberOpenID,
+			sessionKey:  sessionKey,
+		}
+		userID = d.GroupMemberOpenID
+	case 2: // c2c
+		rctx = &replyContext{
+			messageType: "c2c",
+			userOpenID:  d.UserOpenID,
+			sessionKey:  sessionKey,
+		}
+		userID = d.UserOpenID
+	default:
+		slog.Warn("qqbot: askq interaction unknown chat_type", "chat_type", d.ChatType)
+		return
+	}
+
+	msg := &core.Message{
+		SessionKey: sessionKey,
+		Platform:   "qqbot",
+		MessageID:  d.ID,
+		UserID:     userID,
+		Content:    answerPayload,
+		ReplyCtx:   rctx,
+	}
+
+	slog.Debug("qqbot: forwarding AskUserQuestion option click",
+		"answer", answerPayload, "session_key", sessionKey, "chat_type", d.ChatType)
+	p.handler(p, msg)
+}
+
+// forwardPermissionClick synthesizes a permission-response message from a
+// perm:<decision>:<session_key> click. This preserves the behavior added in
+// #1131; the engine treats the synthesized message as a typed permission
+// answer (allow / deny / allow all).
+func (p *Platform) forwardPermissionClick(d *interactionCreateEvent, buttonData string) {
+	rest := strings.TrimPrefix(buttonData, buttonDataPermPrefix)
 	// rest = "<decision>:<session_key>"
 	colonIdx := strings.Index(rest, ":")
 	if colonIdx < 0 {
-		slog.Warn("qqbot: invalid interaction button_data", "data", buttonData)
+		slog.Warn("qqbot: invalid permission interaction button_data", "data", buttonData)
 		return
 	}
 	decision := rest[:colonIdx]
@@ -1143,6 +1222,25 @@ func (p *Platform) handleInteractionCreate(data json.RawMessage) {
 	slog.Debug("qqbot: forwarding button click as permission response",
 		"decision", decision, "session_key", sessionKey, "chat_type", d.ChatType)
 	p.handler(p, msg)
+}
+
+// interactionCreateEvent mirrors the JSON payload QQ Bot delivers for
+// INTERACTION_CREATE events. We use a named type so the dispatcher's
+// per-prefix helpers can accept a typed pointer without re-declaring
+// the schema at each call site.
+type interactionCreateEvent struct {
+	ID                string `json:"id"`
+	GroupOpenID       string `json:"group_openid"`
+	GroupMemberOpenID string `json:"group_member_openid"`
+	UserOpenID        string `json:"user_openid"`
+	ChatType          int    `json:"chat_type"` // 1=group, 2=c2c
+	Data              struct {
+		Type     int `json:"type"`
+		Resolved struct {
+			ButtonData string `json:"button_data"`
+			ButtonID   string `json:"button_id"`
+		} `json:"resolved"`
+	} `json:"data"`
 }
 
 // ackInteraction acknowledges an INTERACTION_CREATE event.
