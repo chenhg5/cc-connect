@@ -3576,6 +3576,12 @@ func (e *Engine) maybeAutoResetSessionOnIdle(p Platform, msg *Message, sessions 
 // the event loop sends it after the current turn's EventResult is received.
 // Returns true if the message was successfully queued, false otherwise.
 func (e *Engine) queueMessageForBusySession(p Platform, msg *Message, interactiveKey string) bool {
+	return e.queueBusySessionMessage(p, msg, interactiveKey, MsgMessageQueued)
+}
+
+// queueBusySessionMessage is queueMessageForBusySession with the reply sent
+// once the message is queued.
+func (e *Engine) queueBusySessionMessage(p Platform, msg *Message, interactiveKey string, notice MsgKey) bool {
 	e.interactiveMu.Lock()
 	state, hasState := e.interactiveStates[interactiveKey]
 	if !hasState || state == nil {
@@ -3653,7 +3659,7 @@ func (e *Engine) queueMessageForBusySession(p Platform, msg *Message, interactiv
 		"user", msg.UserName,
 		"queue_depth", queueDepth,
 	)
-	e.reply(p, msg.ReplyCtx, e.i18n.T(MsgMessageQueued))
+	e.reply(p, msg.ReplyCtx, e.i18n.T(notice))
 	return true
 }
 
@@ -7688,9 +7694,16 @@ func (e *Engine) cmdPs(p Platform, msg *Message, args []string) {
 	// When the session is idle, injecting via agentSession.Send bypasses the
 	// session lock and races with concurrent normal messages on the CLI's
 	// stdin, so reject instead.
-	_, sessions := e.sessionContextForKey(msg.SessionKey)
-	if session := sessions.GetOrCreateActive(msg.SessionKey); !session.Busy() {
+	agent, sessions := e.sessionContextForKey(msg.SessionKey)
+	session := sessions.GetOrCreateActive(msg.SessionKey)
+	if !session.Busy() {
 		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgPsNoSession))
+		return
+	}
+	if perTurn, ok := state.agentSession.(PerTurnProcessSession); ok && perTurn.SpawnsProcessPerTurn() {
+		// Send would start a second agent process on the same conversation
+		// (see PerTurnProcessSession): run the P.S. as the next turn instead.
+		e.queuePsAsNextTurn(p, msg, text, iKey, session, sessions, agent)
 		return
 	}
 	if err := state.agentSession.Send(text, "", nil, nil); err != nil {
@@ -7699,6 +7712,27 @@ func (e *Engine) cmdPs(p Platform, msg *Message, args []string) {
 		return
 	}
 	e.reply(p, msg.ReplyCtx, e.i18n.T(MsgPsSent))
+}
+
+// queuePsAsNextTurn queues a /ps text like a message sent while the session
+// is busy, telling the user it runs after the current turn rather than in it.
+func (e *Engine) queuePsAsNextTurn(p Platform, msg *Message, text, interactiveKey string, session *Session, sessions *SessionManager, agent Agent) {
+	queued := *msg
+	queued.Content = text
+	queued.Images, queued.Files = nil, nil
+	if !e.queueBusySessionMessage(p, &queued, interactiveKey, MsgPsQueued) {
+		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgPsSendFailed))
+		return
+	}
+	// As for a queued message: the turn may have ended between the Busy
+	// check and the append, leaving no event loop to drain the queue.
+	if g, ok := session.TryLock(); ok {
+		workspace := strings.TrimSuffix(interactiveKey, ":"+msg.SessionKey)
+		if workspace == interactiveKey {
+			workspace = ""
+		}
+		go e.drainOrphanedQueue(session, sessions, interactiveKey, agent, workspace, g)
+	}
 }
 
 // matchPrefix finds a unique command matching the given prefix.

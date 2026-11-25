@@ -444,6 +444,17 @@ func (as *antigravitySession) Alive() bool {
 	return as.alive.Load()
 }
 
+// SpawnsProcessPerTurn reports that each Send runs its own `agy -p` process.
+// Two of them on one conversation each keep their own copy of it: steps
+// written by both under the same index overwrite each other, and the later
+// process consumes the inbox notices (background task results) the earlier
+// one is waiting on, leaving it running until --print-timeout.
+func (as *antigravitySession) SpawnsProcessPerTurn() bool {
+	return true
+}
+
+var _ core.PerTurnProcessSession = (*antigravitySession)(nil)
+
 func (as *antigravitySession) Close() error {
 	as.alive.Store(false)
 	as.cancel()

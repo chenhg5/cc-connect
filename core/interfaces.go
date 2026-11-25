@@ -426,6 +426,17 @@ type UserInputSteerer interface {
 	SteerUserInput(prompt string) (bool, error)
 }
 
+// PerTurnProcessSession is an optional interface for agent sessions whose
+// Send starts a new CLI process for every turn. A Send while a turn is still
+// running would start a second process on the same agent conversation; the
+// two processes then overwrite each other's steps in the conversation store
+// (losing one side from the agent's memory), and before the conversation ID
+// is known the second one opens a separate conversation. /ps therefore queues
+// the text as the next turn for these sessions instead of sending it.
+type PerTurnProcessSession interface {
+	SpawnsProcessPerTurn() bool
+}
+
 // ToolAuthorizer is an optional interface for agents that support dynamic tool authorization.
 type ToolAuthorizer interface {
 	AddAllowedTools(tools ...string) error

@@ -260,6 +260,12 @@ func (s *agyACPSession) Send(prompt, messageID string, images []core.ImageAttach
 	return s.sendACPPrompt(prompt, messageID, images, files, false)
 }
 
+// SpawnsProcessPerTurn overrides the embedded print-mode session: every
+// prompt goes to the one long-lived `agy acp` process.
+func (s *agyACPSession) SpawnsProcessPerTurn() bool {
+	return false
+}
+
 func (s *agyACPSession) SendMidTurn(prompt, messageID string, images []core.ImageAttachment, files []core.FileAttachment) error {
 	return s.sendACPPrompt(prompt, messageID, images, files, true)
 }
