@@ -49,6 +49,8 @@ type WorkspaceBinding struct {
 	BoundAt            FlexTime `json:"bound_at"`
 }
 
+const maxPreviousWorkspaces = 5
+
 // WorkspaceBindingManager persists channel->workspace mappings.
 // Top-level key is "project:<name>", second-level key is a workspace channel key.
 type WorkspaceBindingManager struct {
@@ -118,6 +120,9 @@ func (m *WorkspaceBindingManager) Bind(projectKey, channelKey, channelName, work
 		if old.Workspace != workspace {
 			previous = append(previous, old.Workspace)
 		}
+	}
+	if len(previous) > maxPreviousWorkspaces {
+		previous = previous[len(previous)-maxPreviousWorkspaces:]
 	}
 	m.bindings[projectKey][channelKey] = &WorkspaceBinding{
 		ChannelName:        channelName,
