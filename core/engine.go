@@ -571,6 +571,7 @@ type queuedMessage struct {
 // interactiveState tracks a running interactive agent session and its permission state.
 type interactiveState struct {
 	agentSession AgentSession
+	startErr     error
 	// busySession is the core.Session whose busy lock guards the in-flight
 	// turn. Set by getOrCreateInteractiveStateWith so /stop can release the
 	// lock after tearing the turn down (#1830).
@@ -4362,7 +4363,14 @@ func (e *Engine) processInteractiveMessageWith(p Platform, msg *Message, session
 	defer stopRecallMonitor()
 
 	if state.agentSession == nil {
-		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgFailedToStartAgentSession))
+		message := e.i18n.T(MsgFailedToStartAgentSession)
+		var userErr UserFacingError
+		if errors.As(state.startErr, &userErr) {
+			if guidance := userErr.UserMessage(); guidance != "" {
+				message = guidance
+			}
+		}
+		e.reply(p, msg.ReplyCtx, message)
 		e.notifyDroppedQueuedMessages(state, fmt.Errorf("failed to start agent session"))
 		return
 	}
@@ -4815,7 +4823,7 @@ func (e *Engine) getOrCreateInteractiveStateWith(sessionKey string, p Platform, 
 				Platform:   p.Name(),
 				Error:      fmt.Sprintf("failed to start session: %v", err),
 			})
-			newState := &interactiveState{platform: p, replyCtx: replyCtx, agent: agent, eventsNeedResync: true, busySession: session}
+			newState := &interactiveState{platform: p, replyCtx: replyCtx, agent: agent, startErr: err, eventsNeedResync: true, busySession: session}
 			adoptPendingFromPlaceholder(e.interactiveStates[sessionKey], newState)
 			state = newState
 			e.interactiveStates[sessionKey] = state
@@ -5992,9 +6000,15 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 					stopTyping()
 					stopTyping = nil
 				}
-				e.notifyDroppedQueuedMessages(state, err)
-				if state.agentSession == nil || !state.agentSession.Alive() {
-					e.cleanupInteractiveState(sessionKey, state)
+				// A correlated RPC Send reports an unacknowledged primary's
+				// EOF here, not as EventError. Recover only the unsent queue.
+				state.mu.Lock()
+				dead := state.agentSession == nil || !state.agentSession.Alive()
+				state.mu.Unlock()
+				if dead {
+					e.cleanupInteractiveStateForRestart(sessionKey, state)
+				} else {
+					e.notifyDroppedQueuedMessages(state, err)
 				}
 				state.mu.Lock()
 				p := state.platform
@@ -17466,6 +17480,13 @@ func (e *Engine) HandleRelay(ctx context.Context, fromProject, sourceSessionKey,
 			agentSession, err = agent.StartSession(e.ctx, "")
 		}
 		if err != nil {
+			// Surface only the safe user-facing guidance (e.g. the agent
+			// version-upgrade instruction); keep probe diagnostics in the log.
+			var userErr UserFacingError
+			if errors.As(err, &userErr) && userErr.UserMessage() != "" {
+				slog.Warn("relay: session start failed", "relay_key", relaySessionKey, "error", err)
+				return "", errors.New(userErr.UserMessage())
+			}
 			return "", fmt.Errorf("start relay session: %w", err)
 		}
 	}

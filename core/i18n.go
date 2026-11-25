@@ -695,6 +695,8 @@ const (
 	MsgWsInitInvalidTarget      MsgKey = "ws_init_invalid_target"
 	MsgWsInitLocalPathsDisabled MsgKey = "ws_init_local_paths_disabled"
 	MsgBackgroundAutoDenied     MsgKey = "background_auto_denied"
+	MsgAgentVersionRequired     MsgKey = "agent_version_required"
+	MsgAgentVersionUnreadable   MsgKey = "agent_version_unreadable"
 
 	// Agent system-prompt tool sections (Issue #1655). These are appended
 	// to the agent's own system prompt by core/interfaces.go AgentSystemPromptForLang
@@ -709,6 +711,20 @@ const (
 )
 
 var messages = map[MsgKey]map[Language]string{
+	MsgAgentVersionRequired: {
+		LangEnglish:            "%s requires %s %s or newer (stable). Upgrade with `%s`; custom command wrappers must forward `--version` and return the plain CLI version.",
+		LangChinese:            "%s 需要 %s %s 或更高的稳定版本。请运行 `%s` 升级；自定义命令包装器必须透传 `--version` 并返回纯 CLI 版本号。",
+		LangTraditionalChinese: "%s 需要 %s %s 或更新的穩定版本。請執行 `%s` 升級；自訂命令包裝器必須轉送 `--version` 並回傳純 CLI 版本號。",
+		LangJapanese:           "%s には %s %s 以降の安定版が必要です。`%s` で更新してください。カスタムコマンドのラッパーは `--version` を転送し、CLI のバージョン番号のみを返す必要があります。",
+		LangSpanish:            "%s requiere %s %s o una versión estable posterior. Actualice con `%s`; los comandos envoltorios deben reenviar `--version` y devolver solo la versión de la CLI.",
+	},
+	MsgAgentVersionUnreadable: {
+		LangEnglish:            "%s could not read the %s version: `--version` did not print a plain version number such as 1.2.3. Version %s or newer (stable) is required; custom command wrappers must forward `--version` unchanged. Install or upgrade with `%s`.",
+		LangChinese:            "%s 无法读取 %s 的版本号：`--version` 未返回类似 1.2.3 的纯版本号。需要 %s 或更高的稳定版本；自定义命令包装器必须原样透传 `--version`。请运行 `%s` 安装或升级。",
+		LangTraditionalChinese: "%s 無法讀取 %s 的版本號：`--version` 未回傳類似 1.2.3 的純版本號。需要 %s 或更新的穩定版本；自訂命令包裝器必須原樣轉送 `--version`。請執行 `%s` 安裝或升級。",
+		LangJapanese:           "%s は %s のバージョンを判別できませんでした。`--version` が 1.2.3 のような単純なバージョン番号を返しませんでした。%s 以降の安定版が必要です。カスタムコマンドのラッパーは `--version` をそのまま転送する必要があります。`%s` でインストールまたは更新してください。",
+		LangSpanish:            "%s no pudo leer la versión de %s: `--version` no devolvió un número de versión simple como 1.2.3. Se requiere la versión %s o una posterior estable; los comandos envoltorios deben reenviar `--version` sin cambios. Instale o actualice con `%s`.",
+	},
 	MsgStarting: {
 		LangEnglish:            "⏳ Processing...",
 		LangChinese:            "⏳ 处理中...",
