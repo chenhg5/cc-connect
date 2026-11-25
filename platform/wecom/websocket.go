@@ -489,7 +489,7 @@ func (p *WSPlatform) Reply(ctx context.Context, rctx any, content string) error 
 			"stream": map[string]any{
 				"id":      streamID,
 				"finish":  true,
-				"content": content,
+				"content": repairBoldFlanking(content),
 			},
 		},
 	}
@@ -516,7 +516,7 @@ func (p *WSPlatform) Send(ctx context.Context, rctx any, content string) error {
 		return fmt.Errorf("wecom-ws: chatID is empty, cannot send proactive message")
 	}
 
-	chunks := splitByBytes(content, 2000)
+	chunks := splitByBytes(repairBoldFlanking(content), 2000)
 	for i, chunk := range chunks {
 		reqID := p.generateReqID("aibot_send_msg")
 		frame := map[string]any{
