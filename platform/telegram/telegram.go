@@ -1686,7 +1686,7 @@ func (p *Platform) ReconstructReplyCtx(sessionKey string) (any, error) {
 			// telegram:{chatID}:{threadID}
 			threadID, err = strconv.Atoi(parts[2])
 			if err != nil {
-				slog.Warn("telegram: invalid thread ID", "raw", parts[2], "error", err)
+				slog.Warn("telegram: invalid thread ID", "raw_len", len(parts[2]), "error_type", fmt.Sprintf("%T", err))
 			}
 		}
 		// else: telegram:{chatID}:{userID} — no threadID
@@ -1694,7 +1694,7 @@ func (p *Platform) ReconstructReplyCtx(sessionKey string) (any, error) {
 		// telegram:{chatID}:{threadID}:{userID}
 		threadID, err = strconv.Atoi(parts[2])
 		if err != nil {
-			slog.Warn("telegram: invalid thread ID", "raw", parts[2], "error", err)
+			slog.Warn("telegram: invalid thread ID", "raw_len", len(parts[2]), "error_type", fmt.Sprintf("%T", err))
 		}
 	}
 
