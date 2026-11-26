@@ -1,11 +1,14 @@
 package antigravity
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 	"time"
 
@@ -302,5 +305,26 @@ func awaitCatalogFixtureFile(t *testing.T, dir, name string) {
 			t.Fatalf("fixture did not create %s", name)
 		}
 		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+// An unknown reasoning effort comes straight from user input (/reasoning or
+// config); the warning must report that it was ignored without echoing it.
+func TestNormalizeEffortWarningDoesNotLogRawInput(t *testing.T) {
+	var buf bytes.Buffer
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+
+	const secret = "test-effort-input-must-not-leak"
+	if got := normalizeEffort("  " + secret + "  "); got != "" {
+		t.Fatalf("normalizeEffort(unknown) = %q, want empty", got)
+	}
+	out := buf.String()
+	if !strings.Contains(out, "ignoring unknown reasoning effort") {
+		t.Fatalf("expected an ignored-effort warning, got log:\n%s", out)
+	}
+	if strings.Contains(strings.ToLower(out), secret) {
+		t.Fatalf("raw reasoning effort input leaked into log output:\n%s", out)
 	}
 }
