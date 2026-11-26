@@ -47,6 +47,14 @@ type Platform interface {
 // ErrNotSupported indicates a platform doesn't support a particular operation.
 var ErrNotSupported = errors.New("operation not supported by this platform")
 
+// ErrMaybeDelivered marks a send error where the platform reported a failure
+// but the message may in fact have reached the chat. A caller must NOT blindly
+// re-send on such an error, or it will post a second copy of the same reply.
+// Platforms wrap this sentinel (e.g. fmt.Errorf("...: %w", core.ErrMaybeDelivered))
+// for transient failures like Feishu's code=2200 "internal error" that are
+// returned after the message was actually delivered.
+var ErrMaybeDelivered = errors.New("message may have been delivered")
+
 // ReplyContextReconstructor is an optional interface for platforms that can
 // recreate a reply context from a session key. This is needed for cron jobs
 // to send messages to users without an incoming message.

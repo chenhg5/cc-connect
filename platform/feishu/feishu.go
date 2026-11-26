@@ -24,6 +24,7 @@ import (
 	"time"
 
 	"github.com/chenhg5/cc-connect/core"
+	"github.com/google/uuid"
 
 	lark "github.com/larksuite/oapi-sdk-go/v3"
 	larkcore "github.com/larksuite/oapi-sdk-go/v3/core"
@@ -4753,9 +4754,21 @@ func (p *Platform) sendNewMessageToChat(ctx context.Context, rc replyContext, ms
 }
 
 func (p *Platform) buildReplyMessageReqBody(rc replyContext, msgType, content string) *larkim.ReplyMessageReqBody {
+	return p.buildReplyMessageReqBodyWithUUID(rc, msgType, content, "")
+}
+
+// buildReplyMessageReqBodyWithUUID builds a reply body carrying a Feishu
+// idempotency key when idempotencyKey is non-empty. Feishu accepts the same
+// Uuid at most once per hour, so a transport-level retry after a response we
+// could not read does not post a second message when the first attempt already
+// reached the chat.
+func (p *Platform) buildReplyMessageReqBodyWithUUID(rc replyContext, msgType, content, idempotencyKey string) *larkim.ReplyMessageReqBody {
 	body := larkim.NewReplyMessageReqBodyBuilder().
 		MsgType(msgType).
 		Content(content)
+	if idempotencyKey != "" {
+		body.Uuid(idempotencyKey)
+	}
 	if p.shouldReplyInThread(rc) {
 		body.ReplyInThread(true)
 	}
@@ -4763,9 +4776,14 @@ func (p *Platform) buildReplyMessageReqBody(rc replyContext, msgType, content st
 }
 
 func (p *Platform) replyMessage(ctx context.Context, rc replyContext, msgType, content string) error {
+	// One idempotency key for every attempt of this send. Feishu dedupes on
+	// Uuid, so a transient retry (or a caller re-send that reuses the same
+	// logical send) does not post a duplicate when an earlier attempt already
+	// delivered despite returning code=2200 "internal error".
+	replyUUID := uuid.NewString()
 	req := larkim.NewReplyMessageReqBuilder().
 		MessageId(rc.messageID).
-		Body(p.buildReplyMessageReqBody(rc, msgType, content)).
+		Body(p.buildReplyMessageReqBodyWithUUID(rc, msgType, content, replyUUID)).
 		Build()
 	return p.withTransientRetry(ctx, "reply", func() error {
 		return p.withFreshTenantAccessTokenRetry(ctx, "reply", func(client *lark.Client, options ...larkcore.RequestOptionFunc) error {
@@ -4774,6 +4792,12 @@ func (p *Platform) replyMessage(ctx context.Context, rc replyContext, msgType, c
 				return fmt.Errorf("%s: reply api call: %w", p.tag(), err)
 			}
 			if !resp.Success() {
+				// Code 2200 is Feishu's "internal error" and may be returned
+				// after the message was already delivered. Mark it so callers
+				// do not treat the reply as safely un-sent and re-post it.
+				if resp.Code == 2200 {
+					return fmt.Errorf("%s: reply failed code=%d msg=%s: %w", p.tag(), resp.Code, resp.Msg, core.ErrMaybeDelivered)
+				}
 				return fmt.Errorf("%s: reply failed code=%d msg=%s", p.tag(), resp.Code, resp.Msg)
 			}
 			return nil
