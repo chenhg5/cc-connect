@@ -227,3 +227,70 @@ func TestAntigravityCommentary_ProductionConfigPreservesNarration(t *testing.T) 
 		}
 	}
 }
+
+// A tool-only turn whose only assistant text is the pre-tool narration: AGY
+// echoes that narration in the result envelope. Through the real adapter and
+// Engine the user must see it exactly once, with neither the adapter's "no
+// response" error nor the engine's empty-response fallback, both with the
+// default (legacy) setting and with standalone commentary enabled.
+func TestAntigravityCommentary_ToolOnlyTurnDeliversNarrationOnce(t *testing.T) {
+	if os.Getenv("CC_AGY_TOOL_ONLY_HELPER") == "1" {
+		exitOnAgyVersionProbe()
+		_, _ = io.WriteString(os.Stdout, `{"event":"init","conversation_id":"tool-only-session"}`+"\n"+
+			`{"event":"step_update","step_update":{"step_index":0,"step_type":"agent_response","text_delta":"Working"}}`+"\n"+
+			`{"event":"step_update","step_update":{"step_index":1,"state":"ACTIVE","step_type":"tool","tool_name":"run_command"}}`+"\n"+
+			`{"event":"step_update","step_update":{"step_index":1,"state":"DONE","step_type":"tool","tool_name":"run_command"}}`+"\n"+
+			`{"event":"result","result":{"status":"SUCCESS","response":"Working"}}`+"\n")
+		os.Exit(0)
+	}
+	t.Setenv("HOME", t.TempDir())
+	for _, tc := range []struct {
+		name       string
+		commentary *bool
+	}{
+		{name: "absent"},
+		{name: "false", commentary: new(bool)},
+		{name: "true", commentary: func() *bool { v := true; return &v }()},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			workDir := t.TempDir()
+			a := &Agent{workDir: workDir, mode: "yolo", cmd: os.Args[0], activeIdx: -1,
+				cliExtraArgs: []string{"-test.run=^TestAntigravityCommentary_ToolOnlyTurnDeliversNarrationOnce$", "--"},
+				configEnv:    []string{"CC_AGY_TOOL_ONLY_HELPER=1"}}
+			p := &commentaryPlatform{sent: make(chan string, 32), cards: make(chan struct{}, 8)}
+			e := core.NewEngine("tool-only", a, []core.Platform{p}, "", core.LangEnglish)
+			t.Cleanup(func() { _ = e.Stop() })
+			e.SetDisplayConfig(core.DisplayCfg{Mode: "full", CardMode: "legacy", ToolMessages: true, CommentaryMessages: tc.commentary})
+			e.SetReplyFooterEnabled(false)
+			e.SetShowContextIndicator(false)
+			e.SetStreamPreviewCfg(core.StreamPreviewCfg{Enabled: false})
+			e.ReceiveMessage(p, &core.Message{SessionKey: "test:tool-only:user", Platform: "test", UserID: "user", Content: "Run it", ReplyCtx: "ctx"})
+
+			var messages []string
+			timeout := time.After(5 * time.Second)
+		collect:
+			for {
+				wait := time.Second
+				if len(messages) == 0 {
+					wait = 5 * time.Second
+				}
+				select {
+				case text := <-p.sent:
+					messages = append(messages, text)
+				case <-time.After(wait):
+					break collect
+				case <-timeout:
+					break collect
+				}
+			}
+			t.Logf("delivered messages: %q", messages)
+			all := strings.Join(messages, "\n")
+			if strings.Count(all, "Working") != 1 {
+				t.Fatalf("narration delivered %d times, want once: %q", strings.Count(all, "Working"), messages)
+			}
+			if strings.Contains(all, "without producing a response") || strings.Contains(all, "(empty response)") {
+				t.Fatalf("delivered narration was misreported as no response: %q", messages)
+			}
+		})
+	}
+}

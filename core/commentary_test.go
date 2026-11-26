@@ -119,3 +119,40 @@ func TestProcessCompressEvents_CommentaryOnlyForManualCompression(t *testing.T) 
 		})
 	}
 }
+
+// A turn whose only output was standalone commentary (for example a tool-only
+// turn where the narration was the last assistant text) delivered content, so
+// the result must not add the "(empty response)" fallback. With commentary
+// disabled the narration is ordinary text and becomes the final answer.
+func TestProcessInteractiveEvents_CommentaryOnlyTurnIsNotEmpty(t *testing.T) {
+	for _, enabled := range []bool{true, false} {
+		t.Run(map[bool]string{true: "enabled", false: "disabled"}[enabled], func(t *testing.T) {
+			p := &stubPlatformEngine{n: "test"}
+			e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+			e.SetDisplayConfig(DisplayCfg{Mode: "full", ToolMessages: true, CommentaryMessages: &enabled})
+			session := e.sessions.GetOrCreateActive("test:commentary-only")
+			s := newControllableSession("commentary-only")
+			state := &interactiveState{agentSession: s, platform: p, replyCtx: "ctx"}
+			done := make(chan struct{})
+			go func() {
+				e.processInteractiveEvents(state, session, e.sessions, "test:commentary-only", "m", time.Now(), nil, nil, "ctx", 0)
+				close(done)
+			}()
+			t.Cleanup(func() {
+				e.cancel()
+				<-done
+			})
+			s.events <- Event{Type: EventCommentary, Content: "Working"}
+			s.events <- Event{Type: EventResult, Done: true}
+			select {
+			case <-done:
+			case <-time.After(2 * time.Second):
+				t.Fatal("turn did not complete")
+			}
+			sent := strings.Join(p.getSent(), "\n")
+			if strings.Count(sent, "Working") != 1 || strings.Contains(sent, e.i18n.T(MsgEmptyResponse)) {
+				t.Fatalf("commentary-only turn sent %q, want the narration once and no empty-response fallback", sent)
+			}
+		})
+	}
+}

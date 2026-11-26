@@ -13,6 +13,10 @@ type agyOutputParser struct {
 	toolSteps       map[int]bool
 	pendingResponse strings.Builder
 	responseStep    int
+	// commentary records text already delivered as EventCommentary in this
+	// turn, so the result-envelope fallback cannot deliver it a second time.
+	commentary     strings.Builder
+	lastCommentary string
 }
 
 type agyOutputEnvelope struct {
@@ -145,7 +149,7 @@ func (p *agyOutputParser) parseLine(line []byte) (recognized bool, events []core
 		}
 	case "result":
 		events = append(events, p.flushResponse(core.EventText)...)
-		if !p.hasText && envelope.Result.Response != "" {
+		if !p.hasText && envelope.Result.Response != "" && !p.deliveredAsCommentary(envelope.Result.Response) {
 			p.hasText = true
 			events = append(events, core.Event{Type: core.EventText, Content: envelope.Result.Response})
 		}
@@ -160,10 +164,27 @@ func (p *agyOutputParser) flushResponse(kind core.EventType) []core.Event {
 	}
 	text := p.pendingResponse.String()
 	p.pendingResponse.Reset()
-	if kind == core.EventText {
+	switch kind {
+	case core.EventText:
 		p.hasText = true
+	case core.EventCommentary:
+		p.commentary.WriteString(text)
+		p.lastCommentary = text
 	}
 	return []core.Event{{Type: kind, Content: text}}
+}
+
+// deliveredAsCommentary reports whether a result-envelope response only
+// repeats text that was already delivered as commentary. In a tool-only turn
+// the last assistant text is the pre-tool narration, and AGY echoes it as the
+// result response; re-emitting it as EventText would show it twice.
+func (p *agyOutputParser) deliveredAsCommentary(response string) bool {
+	response = strings.TrimSpace(response)
+	if response == "" || p.commentary.Len() == 0 {
+		return false
+	}
+	return response == strings.TrimSpace(p.lastCommentary) ||
+		response == strings.TrimSpace(p.commentary.String())
 }
 
 func formatAgyOutputValue(value any) string {

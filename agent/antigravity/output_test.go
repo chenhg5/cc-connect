@@ -2,6 +2,7 @@ package antigravity
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
 
 	"github.com/chenhg5/cc-connect/core"
@@ -111,5 +112,44 @@ func TestAgyOutputParser_LateToolResultDoesNotConsumeFinalAnswer(t *testing.T) {
 	}
 	if events = p.flushResponse(core.EventText); len(events) != 0 {
 		t.Fatalf("EOF duplicated final: %+v", events)
+	}
+}
+
+func TestAgyOutputParser_ResultEchoOfCommentaryIsNotRedelivered(t *testing.T) {
+	for _, tt := range []struct {
+		name     string
+		response string
+	}{
+		{"last_commentary", "Working"},
+		{"whitespace_variant", "Working\n"},
+		{"all_commentary", "Checking build Working"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			p := newAgyOutputParser()
+			var delivered []core.Event
+			for _, line := range []string{
+				`{"event":"step_update","step_update":{"step_index":0,"step_type":"agent_response","text_delta":"Checking build "}}`,
+				`{"event":"step_update","step_update":{"step_index":1,"step_type":"tool","tool_name":"run_command"}}`,
+				`{"event":"step_update","step_update":{"step_index":2,"step_type":"agent_response","text_delta":"Working"}}`,
+				`{"event":"step_update","step_update":{"step_index":3,"step_type":"tool","tool_name":"run_command"}}`,
+			} {
+				_, events := p.parseLine([]byte(line))
+				delivered = append(delivered, events...)
+			}
+			result, _ := json.Marshal(map[string]any{"event": "result", "result": map[string]any{"status": "SUCCESS", "response": tt.response}})
+			_, events := p.parseLine(result)
+			delivered = append(delivered, events...)
+			delivered = append(delivered, p.flushResponse(core.EventText)...)
+			var texts []string
+			for _, event := range delivered {
+				if event.Type == core.EventText || event.Type == core.EventCommentary {
+					texts = append(texts, string(event.Type)+":"+event.Content)
+				}
+			}
+			want := []string{"commentary:Checking build ", "commentary:Working"}
+			if strings.Join(texts, "|") != strings.Join(want, "|") {
+				t.Fatalf("delivered = %q, want %q (result echo must not repeat commentary)", texts, want)
+			}
+		})
 	}
 }

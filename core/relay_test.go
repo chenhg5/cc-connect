@@ -669,16 +669,33 @@ func TestHandleRelay_MultiWorkspaceRequiresWorkspaceBinding(t *testing.T) {
 }
 
 func TestHandleRelay_CommentaryDoesNotEnterFinalResponse(t *testing.T) {
-	e := newTestEngine()
-	defer func() { _ = e.Stop() }()
-	session := newControllableSession("relay-commentary")
-	e.agent = &controllableAgent{nextSession: session}
-	session.events <- Event{Type: EventCommentary, Content: "Progress only"}
-	session.events <- Event{Type: EventText, Content: "Final answer"}
-	session.events <- Event{Type: EventResult, Done: true}
-	resp, err := e.HandleRelay(context.Background(), "source", "test:chat:user", "hello")
-	if err != nil || resp != "Final answer" {
-		t.Fatalf("relay = %q, %v", resp, err)
+	enabled, disabled := true, false
+	for _, tc := range []struct {
+		name       string
+		commentary *bool
+		want       string
+	}{
+		// Standalone commentary is progress, not part of the relay answer.
+		{name: "enabled", commentary: &enabled, want: "Final answer"},
+		// Disabled (the default) keeps the legacy answer: the text the agent
+		// would previously have emitted as EventText is not dropped.
+		{name: "absent", want: "Progress onlyFinal answer"},
+		{name: "disabled", commentary: &disabled, want: "Progress onlyFinal answer"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			e := newTestEngine()
+			defer func() { _ = e.Stop() }()
+			e.SetDisplayConfig(DisplayCfg{CommentaryMessages: tc.commentary})
+			session := newControllableSession("relay-commentary")
+			e.agent = &controllableAgent{nextSession: session}
+			session.events <- Event{Type: EventCommentary, Content: "Progress only"}
+			session.events <- Event{Type: EventText, Content: "Final answer"}
+			session.events <- Event{Type: EventResult, Done: true}
+			resp, err := e.HandleRelay(context.Background(), "source", "test:chat:user", "hello")
+			if err != nil || resp != tc.want {
+				t.Fatalf("relay = %q, %v; want %q", resp, err, tc.want)
+			}
+		})
 	}
 }
 

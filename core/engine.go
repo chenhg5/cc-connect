@@ -5874,6 +5874,9 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 		state.mu.Unlock()
 	}
 
+	// commentarySent records that standalone commentary reached the user this turn.
+	commentarySent := false
+
 	var textParts []string
 	var segmentStart int // index into textParts: text before this has been sent/displayed
 	silentHold := false  // true while accumulated segment text could still resolve to a bare NO_REPLY marker
@@ -6141,7 +6144,9 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			lastRichCardLen = 0
 
 		case EventCommentary:
-			e.relayCommentary(p, replyCtx, event.Content, workspaceDir)
+			if e.relayCommentary(p, replyCtx, event.Content, workspaceDir) {
+				commentarySent = true
+			}
 
 		case EventThinking:
 			if isEllipsisOnly(event.Content) {
@@ -6750,10 +6755,12 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				stopped := state.stopped
 				silentEmpty := state.silentEmpty
 				state.mu.Unlock()
-				if cancelled || stopped || silentEmpty {
+				if cancelled || stopped || silentEmpty || commentarySent {
 					// User-aborted/cancelled mid-turn with no agent output: stay silent —
 					// the /stop ack already told the user. Reuses the NO_REPLY
 					// silent-delivery path so no "(empty response)" noise is sent.
+					// A turn that already delivered standalone commentary (e.g. a
+					// tool-only turn whose only text was the narration) is not empty.
 					fullResponse = "NO_REPLY"
 				} else {
 					fullResponse = e.i18n.T(MsgEmptyResponse)
@@ -7251,6 +7258,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				// Reset per-turn state for the next turn
 				msgID = queued.messageID
 				textParts = nil
+				commentarySent = false
 				segmentStart = 0
 				toolCount = 0
 				turnStart = time.Now()
@@ -17511,10 +17519,12 @@ func (e *Engine) HandleRelay(ctx context.Context, fromProject, sourceSessionKey,
 
 	var textParts []string
 	for event := range agentSession.Events() {
-		switch event.Type {
+		// With standalone commentary disabled (the default), commentary is
+		// rewritten to EventText so relay answers match the legacy behavior.
+		switch e.commentaryEventType(event.Type) {
 		case EventCommentary:
-			// Relay returns one final answer to the calling agent; progress
-			// must not be accumulated into that answer or its history.
+			// Relay returns one final answer to the calling agent; enabled
+			// progress must not be accumulated into that answer or its history.
 
 		case EventText:
 			if event.Content != "" {
