@@ -47,7 +47,7 @@ func readBoundedFile(path string, maxBytes int64) (string, bool, error) {
 	if err != nil {
 		return "", false, err
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 
 	return readBoundedReader(f, maxBytes)
 }
@@ -110,7 +110,7 @@ func readAutoMemoryDir(root *os.Root) ([]os.DirEntry, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer dir.Close()
+	defer func() { _ = dir.Close() }()
 	return dir.ReadDir(-1)
 }
 
@@ -167,11 +167,11 @@ func openAutoMemoryEntry(root *os.Root, name string) (*os.File, error) {
 	}
 	opened, err := f.Stat()
 	if err != nil {
-		f.Close()
+		_ = f.Close()
 		return nil, err
 	}
 	if !opened.Mode().IsRegular() || !os.SameFile(info, opened) {
-		f.Close()
+		_ = f.Close()
 		return nil, errInvalidAutoMemoryName
 	}
 	return f, nil
@@ -183,7 +183,7 @@ func (listing *autoMemoryListing) inspect(root *os.Root, name string, includeInd
 	if err != nil {
 		return err
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 	if len(listing.Entries) < autoMemoryListLimit {
 		entry := autoMemoryEntry{Name: name}
 		if includeIndexPreview && len(listing.Entries) == 0 && strings.EqualFold(name, "MEMORY.md") {
@@ -213,7 +213,7 @@ func listAutoMemoryFiles(dir string, includeIndexPreview bool) (autoMemoryListin
 	if err != nil {
 		return listing, err
 	}
-	defer root.Close()
+	defer func() { _ = root.Close() }()
 	entries, err := readAutoMemoryDir(root)
 	if os.IsNotExist(err) {
 		return listing, nil
@@ -269,7 +269,7 @@ func resolveAutoMemoryFile(dir, requested string) (string, *os.File, error) {
 	if err != nil {
 		return "", nil, err
 	}
-	defer root.Close()
+	defer func() { _ = root.Close() }()
 	entries, err := readAutoMemoryDir(root)
 	if err != nil {
 		return "", nil, err
@@ -374,7 +374,7 @@ func (e *Engine) showAutoMemoryFile(p Platform, msg *Message, dir, requested str
 		}
 		return
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 	data, _, err := readBoundedReader(f, autoMemoryMaxReadBytes)
 	if err != nil {
 		e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgMemoryAutoReadFailed, safeAutoMemoryError(err)))
