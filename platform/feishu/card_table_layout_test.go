@@ -204,6 +204,41 @@ func TestBuildCardJSON_TooManyColumnsBecomeScrollingNativeTable(t *testing.T) {
 	}
 }
 
+func TestBuildCardJSON_SixWideTablesCapsNativeComponents(t *testing.T) {
+	var content strings.Builder
+	for table := 1; table <= 6; table++ {
+		if table > 1 {
+			content.WriteString("\n\n")
+		}
+		for col := 1; col <= 12; col++ {
+			fmt.Fprintf(&content, "| T%d-C%d ", table, col)
+		}
+		content.WriteString("|\n")
+		for col := 0; col < 12; col++ {
+			content.WriteString("| --- ")
+		}
+		content.WriteString("|\n")
+		for col := 0; col < 12; col++ {
+			content.WriteString("| value ")
+		}
+		content.WriteString("|")
+	}
+	card := decodeTestReplyCard(t, buildCardJSON(content.String()))
+	native := 0
+	code := 0
+	for _, element := range card.Body.Elements {
+		if element.Tag == "table" {
+			native++
+		}
+		if element.Tag == "markdown" && strings.Contains(element.Content, "```\n| T6-C1") {
+			code++
+		}
+	}
+	if native != maxCardTables || code != 1 {
+		t.Fatalf("native tables = %d, code fallbacks = %d, want 5 and 1: %+v", native, code, card.Body.Elements)
+	}
+}
+
 func TestFoldCardCell(t *testing.T) {
 	sentence := "这是一句用于测试折叠位置的中文句子。"
 	url := "https://example.com/very/long/path/that/must/stay/whole/" + strings.Repeat("segment-", 30) + "end"
