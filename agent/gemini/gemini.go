@@ -629,3 +629,57 @@ func extractSessionSummary(sf *sessionFile) string {
 	}
 	return sf.SessionID
 }
+
+// GetSessionHistory reads the saved Gemini conversation for /history after a switch.
+func (a *Agent) GetSessionHistory(ctx context.Context, sessionID string, limit int) ([]core.HistoryEntry, error) {
+	homeDir, err := os.UserHomeDir()
+	if err != nil {
+		return nil, fmt.Errorf("gemini: cannot determine home dir: %w", err)
+	}
+	chatsDir := filepath.Join(homeDir, ".gemini", "tmp", geminiProjectSlug(a.GetWorkDir()), "chats")
+	files, err := os.ReadDir(chatsDir)
+	if os.IsNotExist(err) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("gemini: read chats dir: %w", err)
+	}
+
+	for _, file := range files {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		if file.IsDir() || !strings.HasSuffix(file.Name(), ".json") {
+			continue
+		}
+		path := filepath.Join(chatsDir, file.Name())
+		data, err := os.ReadFile(path)
+		if err != nil {
+			slog.Warn("gemini: skip unreadable session file", "path", path, "error", err)
+			continue
+		}
+		var sf sessionFile
+		if err := json.Unmarshal(data, &sf); err != nil || sf.SessionID != sessionID || sf.Kind == "subagent" {
+			continue
+		}
+		var history []core.HistoryEntry
+		for _, msg := range sf.Messages {
+			role := "assistant"
+			switch msg.Type {
+			case "user":
+				role = "user"
+			case "gemini", "assistant":
+			default:
+				continue
+			}
+			if content := strings.TrimSpace(msg.textContent()); content != "" {
+				history = append(history, core.HistoryEntry{Role: role, Content: content})
+			}
+		}
+		if limit > 0 && len(history) > limit {
+			history = history[len(history)-limit:]
+		}
+		return history, nil
+	}
+	return nil, fmt.Errorf("gemini: session %q not found", sessionID)
+}

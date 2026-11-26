@@ -8,11 +8,13 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"math"
 	"net/http"
 	"net/url"
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 	"unicode/utf16"
 	"unicode/utf8"
@@ -106,13 +108,15 @@ func (t *stdlibTypingTicker) C() <-chan time.Time { return t.Ticker.C }
 type botFactory func(token string, onUpdate func(context.Context, *models.Update), httpClient *http.Client) (telegramBot, *models.User, func(context.Context), error)
 
 type Platform struct {
-	token                 string
-	allowFrom             string
-	groupReplyAll         bool
-	shareSessionInChannel bool
-	enableReactions       bool
-	progressStyle         string // "legacy" | "compact" — telegram has no rich card, so "card" is mapped to "compact"
-	httpClient            *http.Client
+	token                  string
+	allowFrom              string
+	groupReplyAll          bool
+	shareSessionInChannel  bool
+	enableReactions        bool
+	progressStyle          string // "legacy" | "compact" — telegram has no rich card, so "card" is mapped to "compact"
+	httpClient             *http.Client
+	offlineMessageMaxAge   time.Duration
+	skippedOfflineMessages atomic.Int64
 
 	mu                  sync.RWMutex
 	bot                 telegramBot
@@ -130,9 +134,10 @@ type Platform struct {
 }
 
 const (
-	initialReconnectBackoff = time.Second
-	maxReconnectBackoff     = 30 * time.Second
-	stableConnectionWindow  = 10 * time.Second
+	initialReconnectBackoff     = time.Second
+	maxReconnectBackoff         = 30 * time.Second
+	stableConnectionWindow      = 10 * time.Second
+	defaultOfflineMessageMaxAge = 10 * time.Minute
 )
 
 func New(opts map[string]any) (core.Platform, error) {
@@ -145,8 +150,52 @@ func New(opts map[string]any) (core.Platform, error) {
 
 	// Build HTTP client with optional proxy support.
 	// Timeout must exceed the server-side long-poll duration (pollTimeout − 1s = 59s)
-	// to avoid the HTTP client racing with Telegram's response. 90s gives 30s headroom.
-	httpClient := &http.Client{Timeout: 90 * time.Second}
+	// to avoid the HTTP client racing with Telegram's response. 90s gives 30s
+	// headroom; larger uploads may need more time on slower connections (#539).
+	httpTimeout := 90 * time.Second
+	if raw, ok := opts["http_timeout_secs"]; ok {
+		var seconds int64
+		switch value := raw.(type) {
+		case int:
+			seconds = int64(value)
+		case int64:
+			seconds = value
+		case float64:
+			if value != math.Trunc(value) {
+				return nil, fmt.Errorf("telegram: http_timeout_secs must be an integer between 61 and 3600")
+			}
+			seconds = int64(value)
+		default:
+			return nil, fmt.Errorf("telegram: http_timeout_secs must be an integer between 61 and 3600")
+		}
+		if seconds < 61 || seconds > 3600 {
+			return nil, fmt.Errorf("telegram: http_timeout_secs must be between 61 and 3600")
+		}
+		httpTimeout = time.Duration(seconds) * time.Second
+	}
+	offlineMessageMaxAge := defaultOfflineMessageMaxAge
+	if raw, ok := opts["offline_message_max_age_mins"]; ok {
+		const maxMinutes = int64(math.MaxInt64 / int64(time.Minute))
+		var minutes int64
+		switch value := raw.(type) {
+		case int:
+			minutes = int64(value)
+		case int64:
+			minutes = value
+		case float64:
+			if math.IsNaN(value) || value != math.Trunc(value) || value < 0 || value > float64(maxMinutes) {
+				return nil, fmt.Errorf("telegram: offline_message_max_age_mins must be a non-negative integer")
+			}
+			minutes = int64(value)
+		default:
+			return nil, fmt.Errorf("telegram: offline_message_max_age_mins must be a non-negative integer")
+		}
+		if minutes < 0 || minutes > maxMinutes {
+			return nil, fmt.Errorf("telegram: offline_message_max_age_mins is out of range")
+		}
+		offlineMessageMaxAge = time.Duration(minutes) * time.Minute
+	}
+	httpClient := &http.Client{Timeout: httpTimeout}
 	if proxyURL, _ := opts["proxy"].(string); proxyURL != "" {
 		u, err := url.Parse(proxyURL)
 		if err != nil {
@@ -191,6 +240,7 @@ func New(opts map[string]any) (core.Platform, error) {
 		enableReactions:       enableReactions,
 		progressStyle:         progressStyle,
 		httpClient:            httpClient,
+		offlineMessageMaxAge:  offlineMessageMaxAge,
 	}, nil
 }
 
@@ -272,42 +322,9 @@ func defaultNewBot(token string, onUpdate func(context.Context, *models.Update),
 		return nil, nil, nil, fmt.Errorf("getMe: %w", err)
 	}
 
-	// Drain pending updates before starting polling to avoid 409 Conflict.
-	// This clears any outstanding long-poll request from a previous instance.
-	drainPendingUpdates(token, httpClient)
-
+	// Start polling with Telegram's pending updates intact. A getUpdates call
+	// with offset=-1 acknowledges earlier offline messages before we see them.
 	return newRateLimitRetryBot(b), me, b.Start, nil
-}
-
-// drainPendingUpdates clears any pending updates on Telegram's side by calling
-// getUpdates with offset=-1. This terminates any outstanding long-poll request
-// from a previous bot instance, preventing 409 Conflict errors on restart.
-func drainPendingUpdates(token string, httpClient *http.Client) {
-	apiURL := "https://api.telegram.org/bot" + token + "/getUpdates?offset=-1&timeout=0"
-	client := httpClient
-	if client == nil {
-		client = http.DefaultClient
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, apiURL, nil)
-	if err != nil {
-		slog.Debug("telegram: drain updates request creation failed", "error", err)
-		return
-	}
-
-	resp, err := client.Do(req)
-	if err != nil {
-		slog.Debug("telegram: drain updates request failed", "error", err)
-		return
-	}
-	defer resp.Body.Close()
-
-	// Read and discard response body to ensure connection is properly closed
-	_, _ = io.Copy(io.Discard, resp.Body)
-
-	slog.Debug("telegram: drained pending updates", "status", resp.StatusCode)
 }
 
 func (p *Platform) connectLoop(ctx context.Context) {
@@ -380,9 +397,27 @@ func (p *Platform) runConnection(ctx context.Context) error {
 
 	slog.Info("telegram: connected", "bot", me.Username)
 	p.emitReady(gen)
+	summaryDone := make(chan struct{})
+	stopSummary := make(chan struct{})
+	go func() {
+		defer close(summaryDone)
+		ticker := time.NewTicker(10 * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ticker.C:
+				p.logSkippedOfflineMessages()
+			case <-stopSummary:
+				p.logSkippedOfflineMessages()
+				return
+			}
+		}
+	}()
 
 	// Start polling — blocks until ctx is cancelled or connection drops.
 	startPoll(ctx)
+	close(stopSummary)
+	<-summaryDone
 
 	p.clearBot(gen, b)
 	return nil
@@ -401,9 +436,10 @@ func (p *Platform) processUpdate(ctx context.Context, update *models.Update) {
 }
 
 func (p *Platform) handleMessage(ctx context.Context, msg *models.Message) {
-	msgTime := time.Unix(int64(msg.Date), 0)
-	if core.IsOldMessage(msgTime) {
-		slog.Debug("telegram: ignoring old message after restart", "date", msgTime)
+	// Telegram retains updates while the bot is offline, so their timestamps
+	// can predate this process. Message IDs are deduplicated by the engine.
+	if p.offlineMessageMaxAge > 0 && msg.Date > 0 && time.Since(time.Unix(int64(msg.Date), 0)) > p.offlineMessageMaxAge {
+		p.skippedOfflineMessages.Add(1)
 		return
 	}
 	if msg.From == nil {
@@ -442,7 +478,7 @@ func (p *Platform) handleMessage(ctx context.Context, msg *models.Message) {
 	}
 
 	if isGroup && !p.groupReplyAll {
-		slog.Debug("telegram: checking group message", "text", msg.Text, "is_command", isCommand(msg))
+		slog.Debug("telegram: checking group message", "text_len", len(msg.Text), "is_command", isCommand(msg))
 		if !p.isDirectedAtBot(msg) {
 			return
 		}
@@ -592,6 +628,12 @@ func (p *Platform) handleMessage(ctx context.Context, msg *models.Message) {
 		ChannelKey: channelKey,
 		ReplyCtx:   rctx,
 	}, msg)
+}
+
+func (p *Platform) logSkippedOfflineMessages() {
+	if count := p.skippedOfflineMessages.Swap(0); count > 0 {
+		slog.Info("telegram: skipped stale offline messages", "count", count)
+	}
 }
 
 func (p *Platform) dispatchMessage(msg *core.Message, tgMsg *models.Message) {
@@ -992,7 +1034,7 @@ func (p *Platform) handleCallbackQuery(ctx context.Context, cb *models.CallbackQ
 	case "perm:allow_all":
 		responseText = "allow all"
 	default:
-		slog.Debug("telegram: unknown callback data", "data", data)
+		slog.Debug("telegram: unknown callback data", "data_len", len(data))
 		return
 	}
 
@@ -1058,10 +1100,10 @@ func (p *Platform) isDirectedAtBot(msg *models.Message) bool {
 		}
 		if atIdx > 0 && atIdx < cmdEnd {
 			target := msg.Text[atIdx+1 : cmdEnd]
-			slog.Debug("telegram: command with @suffix", "bot", botName, "target", target, "match", strings.EqualFold(target, botName))
+			slog.Debug("telegram: command with @suffix", "bot", botName, "target_len", len(target), "match", strings.EqualFold(target, botName))
 			return strings.EqualFold(target, botName)
 		}
-		slog.Debug("telegram: command without @suffix, accepting", "bot", botName, "text", msg.Text)
+		slog.Debug("telegram: command without @suffix, accepting", "bot", botName, "text_len", len(msg.Text))
 		return true // /cmd without @suffix — accept
 	}
 
@@ -1070,7 +1112,7 @@ func (p *Platform) isDirectedAtBot(msg *models.Message) bool {
 		for _, e := range msg.Entities {
 			if e.Type == models.MessageEntityTypeMention {
 				mention := extractEntityText(msg.Text, e.Offset, e.Length)
-				slog.Debug("telegram: checking mention", "bot", botName, "mention", mention, "match", strings.EqualFold(mention, "@"+botName))
+				slog.Debug("telegram: checking mention", "bot", botName, "mention_len", len(mention), "match", strings.EqualFold(mention, "@"+botName))
 				if strings.EqualFold(mention, "@"+botName) {
 					return true
 				}
@@ -1098,7 +1140,7 @@ func (p *Platform) isDirectedAtBot(msg *models.Message) bool {
 		}
 	}
 
-	slog.Debug("telegram: ignoring group message not directed at bot", "chat", msg.Chat.ID, "bot", botName, "text", msg.Text, "entities", msg.Entities)
+	slog.Debug("telegram: ignoring group message not directed at bot", "chat", msg.Chat.ID, "bot", botName, "text_len", len(msg.Text), "entity_count", len(msg.Entities))
 	return false
 }
 
@@ -1644,7 +1686,7 @@ func (p *Platform) ReconstructReplyCtx(sessionKey string) (any, error) {
 			// telegram:{chatID}:{threadID}
 			threadID, err = strconv.Atoi(parts[2])
 			if err != nil {
-				slog.Warn("telegram: invalid thread ID", "raw", parts[2], "error", err)
+				slog.Warn("telegram: invalid thread ID", "raw_len", len(parts[2]), "error", core.SafeError(err, parts[2]))
 			}
 		}
 		// else: telegram:{chatID}:{userID} — no threadID
@@ -1652,7 +1694,7 @@ func (p *Platform) ReconstructReplyCtx(sessionKey string) (any, error) {
 		// telegram:{chatID}:{threadID}:{userID}
 		threadID, err = strconv.Atoi(parts[2])
 		if err != nil {
-			slog.Warn("telegram: invalid thread ID", "raw", parts[2], "error", err)
+			slog.Warn("telegram: invalid thread ID", "raw_len", len(parts[2]), "error", core.SafeError(err, parts[2]))
 		}
 	}
 

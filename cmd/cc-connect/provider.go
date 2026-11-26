@@ -504,6 +504,7 @@ func listCCSwitchProvidersForWeb() ([]core.CCSwitchProviderInfo, error) {
 			continue
 		}
 		result = append(result, core.CCSwitchProviderInfo{
+			ID:        row.ID,
 			Name:      p.Name,
 			AppType:   row.AppType,
 			APIKey:    p.APIKey,

@@ -842,8 +842,8 @@ func (p *Platform) getAccessToken() (string, error) {
 	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
-		return "", fmt.Errorf("api returned status %d: %s", resp.StatusCode, body)
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 8<<10))
+		return "", core.HTTPError("dingtalk: access token", resp.StatusCode, body, p.clientSecret)
 	}
 
 	var tokenResp struct {
@@ -1100,7 +1100,7 @@ func (p *Platform) sendEmotion(ctx context.Context, rc replyContext, emoji strin
 
 	respBody, _ := io.ReadAll(resp.Body)
 	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("dingtalk: emotion returned status %d: %s", resp.StatusCode, string(respBody))
+		return core.HTTPError("dingtalk: emotion", resp.StatusCode, respBody, token)
 	}
 	if len(respBody) == 0 {
 		return nil
@@ -1197,10 +1197,10 @@ func (p *Platform) SendImage(ctx context.Context, rctx any, img core.ImageAttach
 	defer func() { _ = resp.Body.Close() }()
 
 	respBody, _ := io.ReadAll(resp.Body)
-	slog.Debug("dingtalk: image message response", "status", resp.StatusCode, "body", string(respBody))
+	slog.Debug("dingtalk: image message response", "status", resp.StatusCode, "body_bytes", len(respBody))
 
 	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("dingtalk: send image failed: status=%d, body=%s", resp.StatusCode, string(respBody))
+		return core.HTTPError("dingtalk: send image", resp.StatusCode, respBody, token)
 	}
 
 	slog.Info("dingtalk: image message sent", "media_id", mediaID, "user", rc.senderStaffId)
@@ -1296,10 +1296,10 @@ func (p *Platform) SendFile(ctx context.Context, rctx any, file core.FileAttachm
 	defer func() { _ = resp.Body.Close() }()
 
 	respBody, _ := io.ReadAll(resp.Body)
-	slog.Debug("dingtalk: file message response", "status", resp.StatusCode, "body", string(respBody))
+	slog.Debug("dingtalk: file message response", "status", resp.StatusCode, "body_bytes", len(respBody))
 
 	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("dingtalk: send file failed: status=%d, body=%s", resp.StatusCode, string(respBody))
+		return core.HTTPError("dingtalk: send file", resp.StatusCode, respBody, token)
 	}
 
 	slog.Info("dingtalk: file message sent", "media_id", mediaID, "name", name, "user", rc.senderStaffId)
@@ -1442,10 +1442,10 @@ func (p *Platform) SendAudio(ctx context.Context, rctx any, audio []byte, format
 	defer func() { _ = resp.Body.Close() }()
 
 	respBody, _ := io.ReadAll(resp.Body)
-	slog.Debug("dingtalk: oToMessages API response", "status", resp.StatusCode, "body", string(respBody))
+	slog.Debug("dingtalk: oToMessages API response", "status", resp.StatusCode, "body_bytes", len(respBody))
 
 	if resp.StatusCode != 200 {
-		return fmt.Errorf("dingtalk: send audio failed: status=%d, body=%s", resp.StatusCode, string(respBody))
+		return core.HTTPError("dingtalk: send audio", resp.StatusCode, respBody, token)
 	}
 
 	slog.Info("dingtalk: voice message sent successfully", "media_id", mediaID, "conversation_id", rc.conversationId)
@@ -1538,10 +1538,10 @@ func (p *Platform) uploadMedia(ctx context.Context, data []byte, fileName, media
 	}
 
 	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("upload returned status %d: %s", resp.StatusCode, respBody)
+		return "", core.HTTPError("dingtalk: upload media", resp.StatusCode, respBody, token)
 	}
 
-	slog.Debug("dingtalk: media upload response", "status", resp.StatusCode, "body", string(respBody))
+	slog.Debug("dingtalk: media upload response", "status", resp.StatusCode, "body_bytes", len(respBody))
 
 	var uploadResp struct {
 		ErrCode int    `json:"errcode"`
@@ -1550,15 +1550,15 @@ func (p *Platform) uploadMedia(ctx context.Context, data []byte, fileName, media
 		Type    string `json:"type"`
 	}
 	if err := json.Unmarshal(respBody, &uploadResp); err != nil {
-		return "", fmt.Errorf("decode upload response: %w, body: %s", err, respBody)
+		return "", fmt.Errorf("decode upload response: %w (body_bytes=%d)", err, len(respBody))
 	}
 
 	if uploadResp.ErrCode != 0 {
-		return "", fmt.Errorf("upload API error %d: %s", uploadResp.ErrCode, uploadResp.ErrMsg)
+		return "", fmt.Errorf("upload API error %d", uploadResp.ErrCode)
 	}
 
 	if uploadResp.MediaID == "" {
-		return "", fmt.Errorf("empty media_id in upload response: %s", respBody)
+		return "", fmt.Errorf("empty media_id in upload response (body_bytes=%d)", len(respBody))
 	}
 
 	slog.Debug("dingtalk: media uploaded successfully", "media_id", uploadResp.MediaID, "type", mediaType, "size", len(data))
