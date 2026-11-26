@@ -2817,3 +2817,66 @@ type reasoningJourneyPlatform struct {
 func (p *reasoningJourneyPlatform) SetCardNavigationHandler(h CardNavigationHandler) {
 	p.navigation = h
 }
+
+// Discover both memory sources, inspect a topic, then update and redisplay project memory.
+func TestCUJ_F5_MemoryAutoDiscoveryAndInspection(t *testing.T) {
+	root := t.TempDir()
+	project := filepath.Join(root, "CLAUDE.md")
+	dir := filepath.Join(root, "auto")
+	if err := os.Mkdir(dir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	const rule = "Run tests before release."
+	const preview = "Index of learned preferences."
+	const style = "Prefer short paragraphs."
+	const outside = "synthetic private fixture"
+	writeMemoryFixture(t, project, rule)
+	writeMemoryFixture(t, filepath.Join(dir, "MEMORY.md"), preview)
+	writeMemoryFixture(t, filepath.Join(dir, "feedback_style.md"), style)
+	writeMemoryFixture(t, filepath.Join(root, "secret.md"), outside)
+
+	p := &stubPlatformEngine{n: "test"}
+	agent := &projectAndAutoTestAgent{stubMemoryAgentFull: stubMemoryAgentFull{projectFile: project}, dir: dir}
+	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+	defer e.cancel()
+	send := func(command string) string {
+		t.Helper()
+		p.clearSent()
+		e.ReceiveMessage(p, &Message{SessionKey: "test:f5:user", UserID: "user", Platform: "test", Content: command, ReplyCtx: "ctx"})
+		sent := p.getSent()
+		if len(sent) != 1 {
+			t.Fatalf("%s produced %d replies, want one", command, len(sent))
+		}
+		if strings.Contains(sent[0], outside) {
+			t.Fatalf("%s exposed the outside fixture", command)
+		}
+		return sent[0]
+	}
+
+	requireMemoryFragments(t, send("/memory"), "CLAUDE.md", rule, "Auto Memory", "MEMORY.md", "feedback_style.md")
+	requireMemoryFragments(t, send("/memory auto"), "MEMORY.md", "feedback_style.md", preview)
+	requireMemoryFragments(t, send("/memory auto feedback_style"), "feedback_style.md", style)
+	if got, want := send("/memory auto ../secret.md"), e.i18n.T(MsgMemoryAutoInvalidFile); got != want {
+		t.Fatalf("invalid filename reply = %q, want %q", got, want)
+	}
+	if got, want := send("/memory add keep diffs minimal"), e.i18n.Tf(MsgMemoryAdded, project); got != want {
+		t.Fatalf("add reply = %q, want %q", got, want)
+	}
+	requireMemoryFragments(t, send("/memory"), "CLAUDE.md", rule, "keep diffs minimal", "Auto Memory", "MEMORY.md", "feedback_style.md")
+	second := memoryWorkspaceFixture(t, "second_store")
+	bindMemoryWorkspace(t, e, "test:f5:user", second)
+	for _, tc := range []struct{ command, want string }{
+		{"/memory", "second_store project"},
+		{"/memory auto", "second_store index"},
+		{"/memory auto topic", "second_store topic"},
+		{"/memory auto feedback_style", e.i18n.Tf(MsgMemoryAutoFileNotFound, "feedback_style")},
+	} {
+		got := send(tc.command)
+		requireMemoryFragments(t, got, tc.want)
+		for _, private := range []string{rule, preview, style, "keep diffs minimal"} {
+			if strings.Contains(got, private) {
+				t.Fatalf("%s exposed the previous workspace's memory", tc.command)
+			}
+		}
+	}
+}

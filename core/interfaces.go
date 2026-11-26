@@ -468,6 +468,13 @@ type MemoryFileProvider interface {
 	GlobalMemoryFile() string  // user-level instruction file (e.g., ~/.claude/CLAUDE.md)
 }
 
+// AutoMemoryProvider is an optional interface for agents that maintain an
+// automatic memory directory (e.g., Claude Code's ~/.claude/projects/<key>/memory/)
+// containing an index file (such as MEMORY.md) and topic memory files.
+type AutoMemoryProvider interface {
+	AutoMemoryDir() string
+}
+
 // ModelSwitcher is an optional interface for agents that support runtime model switching.
 // Model changes take effect on the next session (existing sessions keep their model).
 type ModelSwitcher interface {
