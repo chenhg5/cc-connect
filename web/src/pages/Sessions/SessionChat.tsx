@@ -7,11 +7,25 @@ import {
 } from 'lucide-react';
 import { Badge, Button } from '@/components/ui';
 import { getSession, type SessionDetail } from '@/api/sessions';
-import { useBridgeSocket, fetchBridgeConfig, type BridgeConfig, type BridgeIncoming, type BridgeStatus } from '@/hooks/useBridgeSocket';
+import { useBridgeSocket, fetchBridgeConfig, type BridgeConfigResult, type BridgeIncoming, type BridgeStatus } from '@/hooks/useBridgeSocket';
 import Markdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import rehypeHighlight from 'rehype-highlight';
 import { cn } from '@/lib/utils';
+
+function IdentityField({ label, value, copyLabel }: { label: string; value?: string; copyLabel: string }) {
+  if (!value) return null;
+  return (
+    <div className="flex items-center gap-1.5 min-w-0 text-xs text-gray-500 dark:text-gray-400">
+      <span className="shrink-0">{label}:</span>
+      <span className="truncate" title={value}>{value}</span>
+      <button type="button" onClick={() => void navigator.clipboard.writeText(value)}
+        className="shrink-0 hover:text-accent" title={`${copyLabel} ${label}`} aria-label={`${copyLabel} ${label}`}>
+        <Copy size={12} />
+      </button>
+    </div>
+  );
+}
 
 // ── Markdown renderers ───────────────────────────────────────
 
@@ -266,7 +280,8 @@ export default function SessionChat() {
   const [sending, setSending] = useState(false);
   const [loading, setLoading] = useState(true);
   const [typing, setTyping] = useState(false);
-  const [bridgeCfg, setBridgeCfg] = useState<BridgeConfig | null>(null);
+  const [bridgeAvailability, setBridgeAvailability] = useState<BridgeConfigResult>({ config: null, unavailable: 'disabled' });
+  const bridgeCfg = bridgeAvailability.config;
   const messagesEnd = useRef<HTMLDivElement>(null);
   const streamBufRef = useRef<Map<string, string>>(new Map());
   const previewHandleCounter = useRef(0);
@@ -283,7 +298,7 @@ export default function SessionChat() {
         fetchBridgeConfig(),
       ]);
       setSession(data);
-      setBridgeCfg(cfg);
+      setBridgeAvailability(cfg);
       if (data.history) {
         setMessages(data.history.map((h, i) => ({
           id: `hist-${i}`,
@@ -458,8 +473,19 @@ export default function SessionChat() {
             <div className="flex items-center gap-2 mt-0.5">
               <Badge>{project}</Badge>
               {session?.platform && <Badge variant="info">{session.platform}</Badge>}
-              <span className="text-xs text-gray-500">{session?.session_key}</span>
             </div>
+            {session && (
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-x-4 gap-y-1 mt-2">
+                <IdentityField label={t('sessions.userName')} value={session.user_name} copyLabel={t('sessions.copy')} />
+                <IdentityField label={t('sessions.userId')} value={session.user_id} copyLabel={t('sessions.copy')} />
+                <IdentityField label={t('sessions.chatName')} value={session.chat_name} copyLabel={t('sessions.copy')} />
+                <IdentityField label={t('sessions.chatId')} value={session.chat_id} copyLabel={t('sessions.copy')} />
+                <IdentityField label={t('sessions.chatType')} value={session.chat_type === 'group' ? t('sessions.chatTypeGroup') : session.chat_type === 'single' ? t('sessions.chatTypeSingle') : session.chat_type} copyLabel={t('sessions.copy')} />
+                <IdentityField label={t('sessions.sessionId')} value={session.id} copyLabel={t('sessions.copy')} />
+                <IdentityField label={t('sessions.sessionKey')} value={session.session_key} copyLabel={t('sessions.copy')} />
+                <IdentityField label={t('sessions.agentSessionId')} value={session.agent_session_id} copyLabel={t('sessions.copy')} />
+              </div>
+            )}
           </div>
         </div>
         <Button size="sm" variant="ghost" onClick={fetchSession}>
@@ -563,7 +589,11 @@ export default function SessionChat() {
         ) : !bridgeCfg ? (
           <div className="flex items-center gap-2 px-4 py-3 text-sm text-amber-600 dark:text-amber-400 bg-amber-50 dark:bg-amber-900/20 rounded-xl">
             <WifiOff size={14} />
-            <span>{t('sessions.bridgeNotAvailable', 'Bridge not available. Enable [bridge] in config.toml to chat from web.')}</span>
+            <span>{bridgeAvailability.unavailable === 'management-error'
+              ? t('sessions.managementUnavailable')
+              : bridgeAvailability.unavailable === 'start-failed'
+                ? t('sessions.bridgeStartFailed', { detail: bridgeAvailability.detail ? `: ${bridgeAvailability.detail}` : '' })
+                : t('sessions.bridgeNotAvailable')}</span>
           </div>
         ) : bridgeStatus === 'disconnected' || bridgeStatus === 'error' ? (
           <div className="flex items-center gap-2 px-4 py-3 text-sm text-amber-600 dark:text-amber-400 bg-amber-50 dark:bg-amber-900/20 rounded-xl">

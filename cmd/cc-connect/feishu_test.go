@@ -3,8 +3,17 @@ package main
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
+
+func TestNormalizeFeishuPlatformTypeErrorOmitsRawInput(t *testing.T) {
+	const sentinel = "sentinel_platform_type_content"
+	_, err := normalizeFeishuPlatformType(sentinel)
+	if err == nil || strings.Contains(err.Error(), sentinel) {
+		t.Fatalf("unsafe platform type error: %v", err)
+	}
+}
 
 func TestResolveFeishuSetupInputs_AutoModeWithoutCredentialsUsesNew(t *testing.T) {
 	mode, appID, appSecret, err := resolveFeishuSetupInputs(feishuSetupModeAuto, "", "", "")

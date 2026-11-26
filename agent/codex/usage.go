@@ -107,7 +107,7 @@ func (a *Agent) fetchUsage(ctx context.Context, client *http.Client, tokens code
 
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
-		return nil, fmt.Errorf("usage endpoint returned status %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
+		return nil, core.HTTPError("usage endpoint", resp.StatusCode, body, tokens.AccessToken, tokens.AccountID)
 	}
 
 	var payload codexUsageResponse
