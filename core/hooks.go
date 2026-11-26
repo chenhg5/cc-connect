@@ -62,16 +62,20 @@ func (h *HookConfig) timeoutDuration() time.Duration {
 
 // HookEvent is the payload delivered to hook handlers.
 type HookEvent struct {
-	Event      HookEventType  `json:"event"`
-	Timestamp  time.Time      `json:"timestamp"`
-	Project    string         `json:"project"`
-	SessionKey string         `json:"session_key,omitempty"`
-	Platform   string         `json:"platform,omitempty"`
-	UserID     string         `json:"user_id,omitempty"`
-	UserName   string         `json:"user_name,omitempty"`
-	Content    string         `json:"content,omitempty"`
-	Error      string         `json:"error,omitempty"`
-	Extra      map[string]any `json:"extra,omitempty"`
+	Event      HookEventType `json:"event"`
+	Timestamp  time.Time     `json:"timestamp"`
+	Project    string        `json:"project"`
+	SessionKey string        `json:"session_key,omitempty"`
+	Platform   string        `json:"platform,omitempty"`
+	UserID     string        `json:"user_id,omitempty"`
+	UserName   string        `json:"user_name,omitempty"`
+	Content    string        `json:"content,omitempty"`
+	// ExtraContent is the platform context sent to the agent ahead of
+	// Content, such as the message the user quoted. A reply that only
+	// mentions the bot carries its whole request here.
+	ExtraContent string         `json:"extra_content,omitempty"`
+	Error        string         `json:"error,omitempty"`
+	Extra        map[string]any `json:"extra,omitempty"`
 }
 
 // HookManager dispatches lifecycle events to configured hook handlers.
@@ -261,6 +265,9 @@ func eventToEnv(e HookEvent) []string {
 	}
 	if e.Content != "" {
 		env = append(env, "CC_HOOK_CONTENT="+e.Content)
+	}
+	if e.ExtraContent != "" {
+		env = append(env, "CC_HOOK_EXTRA_CONTENT="+e.ExtraContent)
 	}
 	if e.Error != "" {
 		env = append(env, "CC_HOOK_ERROR="+e.Error)

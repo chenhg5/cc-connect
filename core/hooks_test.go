@@ -381,15 +381,16 @@ func TestEmit_CommandTimeout(t *testing.T) {
 
 func TestEventToEnv(t *testing.T) {
 	e := HookEvent{
-		Event:      HookEventCronTriggered,
-		Timestamp:  time.Date(2026, 4, 18, 12, 0, 0, 0, time.UTC),
-		Project:    "myproj",
-		SessionKey: "tg:1:1",
-		Platform:   "telegram",
-		UserID:     "U123",
-		UserName:   "alice",
-		Content:    "hello world",
-		Error:      "oops",
+		Event:        HookEventCronTriggered,
+		Timestamp:    time.Date(2026, 4, 18, 12, 0, 0, 0, time.UTC),
+		Project:      "myproj",
+		SessionKey:   "tg:1:1",
+		Platform:     "telegram",
+		UserID:       "U123",
+		UserName:     "alice",
+		Content:      "hello world",
+		ExtraContent: "[Quoted message from bob]:\nthe task",
+		Error:        "oops",
 	}
 	env := eventToEnv(e)
 	m := make(map[string]string)
@@ -401,14 +402,15 @@ func TestEventToEnv(t *testing.T) {
 	}
 
 	checks := map[string]string{
-		"CC_HOOK_EVENT":       "cron.triggered",
-		"CC_HOOK_PROJECT":     "myproj",
-		"CC_HOOK_SESSION_KEY": "tg:1:1",
-		"CC_HOOK_PLATFORM":    "telegram",
-		"CC_HOOK_USER_ID":     "U123",
-		"CC_HOOK_USER_NAME":   "alice",
-		"CC_HOOK_CONTENT":     "hello world",
-		"CC_HOOK_ERROR":       "oops",
+		"CC_HOOK_EVENT":         "cron.triggered",
+		"CC_HOOK_PROJECT":       "myproj",
+		"CC_HOOK_SESSION_KEY":   "tg:1:1",
+		"CC_HOOK_PLATFORM":      "telegram",
+		"CC_HOOK_USER_ID":       "U123",
+		"CC_HOOK_USER_NAME":     "alice",
+		"CC_HOOK_CONTENT":       "hello world",
+		"CC_HOOK_EXTRA_CONTENT": "[Quoted message from bob]:\nthe task",
+		"CC_HOOK_ERROR":         "oops",
 	}
 	for k, want := range checks {
 		if got := m[k]; got != want {
@@ -430,7 +432,8 @@ func TestEventToEnv_EmptyFieldsOmitted(t *testing.T) {
 		if strings.HasPrefix(kv, "CC_HOOK_SESSION_KEY=") ||
 			strings.HasPrefix(kv, "CC_HOOK_PLATFORM=") ||
 			strings.HasPrefix(kv, "CC_HOOK_USER_ID=") ||
-			strings.HasPrefix(kv, "CC_HOOK_CONTENT=") {
+			strings.HasPrefix(kv, "CC_HOOK_CONTENT=") ||
+			strings.HasPrefix(kv, "CC_HOOK_EXTRA_CONTENT=") {
 			t.Errorf("expected empty field to be omitted: %s", kv)
 		}
 	}
@@ -530,5 +533,45 @@ func TestEmit_TimestampAutoFilled(t *testing.T) {
 
 	if receivedTime.Before(before) {
 		t.Errorf("expected auto-filled timestamp >= %v, got %v", before, receivedTime)
+	}
+}
+
+// A reply that only mentions the bot has no text of its own: the request is
+// the quoted message. The message.received hook must see it, or a hook that
+// files the message as a task finds nothing to file.
+func TestHandleMessage_HookGetsQuotedContextOfMentionOnlyReply(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Unix shell commands (env) not available on Windows")
+	}
+	outFile := filepath.Join(t.TempDir(), "env_out")
+	p := &stubPlatformEngine{n: "feishu"}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	e.SetHooks(NewHookManager("test", []HookConfig{{
+		Event:   "message.received",
+		Type:    "command",
+		Command: "env > " + outFile,
+		Async:   boolPtr(false),
+	}}, "sh", "-c", ""))
+
+	e.handleMessage(p, &Message{
+		SessionKey:   "feishu:oc:root:om_reply",
+		Platform:     "feishu",
+		MessageID:    "om_reply",
+		UserID:       "ou_asker",
+		UserName:     "asker",
+		Content:      "",
+		ExtraContent: "[Quoted message from writer]:\nread enable_odometry_net\n\n",
+		ReplyCtx:     "ctx",
+	})
+
+	data, err := os.ReadFile(outFile)
+	if err != nil {
+		t.Fatalf("hook did not run: %v", err)
+	}
+	if !strings.Contains(string(data), "CC_HOOK_EXTRA_CONTENT=[Quoted message from writer]:\nread enable_odometry_net") {
+		t.Fatalf("hook env lacks the quoted request:\n%s", data)
+	}
+	if strings.Contains(string(data), "CC_HOOK_CONTENT=") {
+		t.Fatalf("hook content should stay the user's own (empty) text:\n%s", data)
 	}
 }
