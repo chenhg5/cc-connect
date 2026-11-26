@@ -469,7 +469,7 @@ func TestAgent_DeleteSession_FailuresNeverReportSuccess(t *testing.T) {
 		want string
 	}{
 		{"ping_error", "ping rejected"},
-		{"unsupported", "method not found"},
+		{"unsupported", "does not support session deletion"},
 		{"invalid_request", "invalid request"},
 		{"delete_error", "delete rejected"},
 		{"malformed_result", "decode response"},
@@ -485,6 +485,9 @@ func TestAgent_DeleteSession_FailuresNeverReportSuccess(t *testing.T) {
 			err := a.DeleteSession(ctx, "sess-001")
 			if err == nil || !strings.Contains(err.Error(), tc.want) {
 				t.Fatalf("DeleteSession() = %v, want error containing %q", err, tc.want)
+			}
+			if got, want := errors.Is(err, core.ErrSessionDeletionNotSupported), tc.name == "unsupported"; got != want {
+				t.Fatalf("errors.Is(%v, ErrSessionDeletionNotSupported) = %v, want %v", err, got, want)
 			}
 		})
 	}

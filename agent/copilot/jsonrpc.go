@@ -34,6 +34,9 @@ type jsonRPCResponse struct {
 	Error   *jsonRPCError   `json:"error,omitempty"`
 }
 
+// jsonRPCMethodNotFound is the JSON-RPC 2.0 "method not found" error code.
+const jsonRPCMethodNotFound = -32601
+
 // jsonRPCError is the error object in a JSON-RPC 2.0 response.
 type jsonRPCError struct {
 	Code    int    `json:"code"`

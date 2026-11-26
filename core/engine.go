@@ -12233,7 +12233,7 @@ func (e *Engine) cmdProviderAdd(p Platform, msg *Message, switcher ProviderSwitc
 	raw = strings.TrimSpace(raw)
 
 	if strings.HasPrefix(raw, "{") {
-		// The JSON form accepts provider fields including api_key.
+		// JSON format: /provider add {"name":"relay","api_key":"sk-xxx",...}
 		var jp struct {
 			Name    string            `json:"name"`
 			APIKey  string            `json:"api_key"`
@@ -17240,6 +17240,8 @@ func (e *Engine) deleteSingleSessionReply(msg *Message, deleter SessionDeleter, 
 		return e.i18n.T(MsgDeleteActiveDenied)
 	case errors.Is(err, ErrAgentSessionActiveElsewhere):
 		return e.i18n.Tf(MsgDeleteInUseDenied, displayName)
+	case errors.Is(err, ErrSessionDeletionNotSupported):
+		return e.i18n.T(MsgDeleteNotSupported)
 	case err != nil:
 		return e.i18n.Tf(MsgFailedToDeleteSession, displayName, err)
 	}

@@ -477,6 +477,11 @@ func (a *Agent) DeleteSession(ctx context.Context, sessionID string) error {
 	}
 
 	if delResp.Error != nil {
+		if delResp.Error.Code == jsonRPCMethodNotFound {
+			// An older CLI without session.delete: still an error, so core keeps
+			// local state, but users get the localized "not supported" reply.
+			return fmt.Errorf("copilot: session.delete: %w", core.ErrSessionDeletionNotSupported)
+		}
 		return fmt.Errorf("copilot: session.delete: %s", delResp.Error.Message)
 	}
 

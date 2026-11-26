@@ -504,7 +504,9 @@ type SessionManager struct {
 
 	// Tombstones reject activation from a session list or agent event obtained
 	// before deletion. They need only live as long as this manager: stale work
-	// cannot survive a process restart. Protected by mu.
+	// cannot survive a process restart. An uncertain outcome quarantines the ID
+	// until a later deletion attempt confirms it; quarantined sessions are left
+	// out of pruning instead of disabling it. Protected by mu.
 	deletedAgentSessionIDs  map[string]struct{}
 	deletingAgentSessions   map[string]chan struct{}
 	uncertainAgentDeletions map[string]error
@@ -680,15 +682,19 @@ func waitSessionDeletion(done <-chan struct{}, deadline time.Time) bool {
 // of the reserved ID waits; unrelated chats can read and update their sessions
 // while an agent's deletion performs filesystem, RPC, or subprocess I/O.
 func (sm *SessionManager) lockAgentSessionActivation(agentSID string) bool {
-	ok, _ := sm.lockAgentSessionActivationResult(agentSID)
+	ok, _ := sm.lockAgentSessionResult(agentSID, false)
 	return ok
 }
 
-func (sm *SessionManager) lockAgentSessionActivationResult(agentSID string) (bool, error) {
+// lockAgentSessionResult is lockAgentSessionActivation with the reason for a
+// refusal. retryUncertain lets a deletion re-check a quarantined ID: deleting
+// again cannot resurrect it, and only a confirmed deletion lifts the
+// quarantine. Activation never passes retryUncertain.
+func (sm *SessionManager) lockAgentSessionResult(agentSID string, retryUncertain bool) (bool, error) {
 	deadline := sm.deletionDeadline()
 	for {
 		sm.mu.Lock()
-		if err := sm.uncertainAgentDeletions[agentSID]; err != nil {
+		if err := sm.uncertainAgentDeletions[agentSID]; err != nil && !retryUncertain {
 			sm.mu.Unlock()
 			return false, err
 		}
@@ -765,11 +771,13 @@ var (
 // the target against activation. Agent I/O runs without the manager lock; only
 // attempts to activate this ID wait for deletion and local cleanup to finish.
 // The callback must not activate the reserved ID or recursively delete it.
+// A quarantined (uncertain) ID may be deleted again; that attempt is the
+// re-check that lifts the quarantine once it confirms the deletion.
 func (sm *SessionManager) DeleteAgentSessionIfInactive(agentSessionID, userKey string, deleteAgentSession func() error) error {
 	if agentSessionID == "" {
 		return errors.New("agent session ID is empty")
 	}
-	if ok, err := sm.lockAgentSessionActivationResult(agentSessionID); !ok {
+	if ok, err := sm.lockAgentSessionResult(agentSessionID, true); !ok {
 		return err // nil only when a concurrent deletion completed successfully.
 	}
 	if s := sm.sessions[sm.activeSession[userKey]]; s != nil && s.GetAgentSessionID() == agentSessionID {
@@ -802,6 +810,7 @@ func (sm *SessionManager) DeleteAgentSessionIfInactive(agentSessionID, userKey s
 		sm.uncertainAgentDeletions[agentSessionID] = err
 	}
 	if err == nil {
+		delete(sm.uncertainAgentDeletions, agentSessionID)
 		sm.deletedAgentSessionIDs[agentSessionID] = struct{}{}
 		sm.deleteByAgentSessionIDLocked(agentSessionID)
 		delete(sm.sessionNames, agentSessionID)
@@ -1282,15 +1291,13 @@ type PruneResult struct {
 // When mergeHistory=true, history entries from removed sessions are appended
 // to the kept session (sorted by timestamp). When false, only empty sessions
 // are removed.
+//
+// Sessions mapped to a quarantined (uncertain) agent session ID are left
+// untouched: they are neither kept and activated, nor merged and removed.
 func (sm *SessionManager) PruneDuplicateSessions(mergeHistory bool) PruneResult {
 	deadline := sm.deletionDeadline()
 	for {
 		sm.mu.Lock()
-		if len(sm.uncertainAgentDeletions) != 0 {
-			sm.mu.Unlock()
-			slog.Warn("session pruning deferred until uncertain deletion is reconciled")
-			return PruneResult{}
-		}
 		var deleting <-chan struct{}
 		for _, done := range sm.deletingAgentSessions {
 			deleting = done
@@ -1311,6 +1318,7 @@ func (sm *SessionManager) PruneDuplicateSessions(mergeHistory bool) PruneResult 
 	chatSessions := make(map[string][]*Session)  // baseChat -> sessions
 	sessionToBaseChat := make(map[string]string) // session.ID -> baseChat
 
+	quarantined := 0
 	for userKey, sessionIDs := range sm.userSessions {
 		_, baseChat, _ := ParseSessionKey(userKey)
 		for _, sid := range sessionIDs {
@@ -1318,9 +1326,17 @@ func (sm *SessionManager) PruneDuplicateSessions(mergeHistory bool) PruneResult 
 			if !ok || s == nil {
 				continue
 			}
+			if sm.uncertainAgentDeletions[s.GetAgentSessionID()] != nil {
+				quarantined++
+				continue
+			}
 			chatSessions[baseChat] = append(chatSessions[baseChat], s)
 			sessionToBaseChat[sid] = baseChat
 		}
+	}
+
+	if quarantined > 0 {
+		slog.Warn("session pruning skipped sessions with an uncertain deletion", "sessions", quarantined)
 	}
 
 	result := PruneResult{}

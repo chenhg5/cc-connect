@@ -4482,6 +4482,27 @@ func TestCmdDelete_RefusesAnotherChatsActiveSession(t *testing.T) {
 	}
 }
 
+func TestCmdDelete_UnsupportedDeletionShowsLocalizedMessage(t *testing.T) {
+	p := &stubPlatformEngine{n: "plain"}
+	agent := &stubDeleteAgent{
+		stubListAgent: stubListAgent{sessions: []AgentSessionInfo{{ID: "session-1", Summary: "One"}}},
+		errByID:       map[string]error{"session-1": fmt.Errorf("copilot: session.delete: %w", ErrSessionDeletionNotSupported)},
+	}
+	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+	victim := e.sessions.NewSession("test:user2", "victim")
+	victim.SetAgentSessionID("session-1", "stub")
+	e.sessions.NewSession("test:user2", "current")
+
+	e.cmdDelete(p, &Message{SessionKey: "test:user1", ReplyCtx: "ctx"}, []string{"1"})
+
+	if want := e.i18n.T(MsgDeleteNotSupported); len(p.sent) != 1 || p.sent[0] != want {
+		t.Fatalf("sent = %q, want %q", p.sent, want)
+	}
+	if e.sessions.FindByID(victim.ID) == nil {
+		t.Fatal("unsupported deletion removed the local session")
+	}
+}
+
 func TestCmdDelete_BatchSkipsAnotherChatsActiveSession(t *testing.T) {
 	p := &stubPlatformEngine{n: "plain"}
 	agent := &stubDeleteAgent{stubListAgent: stubListAgent{sessions: []AgentSessionInfo{
