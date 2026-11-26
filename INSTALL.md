@@ -58,7 +58,7 @@ xattr -d com.apple.quarantine cc-connect
 
 ### Option D: Build from source
 
-Requires Go 1.22+.
+Requires Go 1.26+.
 
 ```bash
 git clone https://github.com/chenhg5/cc-connect.git
