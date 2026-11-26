@@ -494,13 +494,13 @@ func waitForServerURL(ctx context.Context, stdout io.Reader, tail *tailBuffer, c
 	case r := <-ch:
 		if r.err != nil {
 			if tail != nil && tail.String() != "" {
-				return "", fmt.Errorf("%w: %s", r.err, strings.TrimSpace(tail.String()))
+				return "", fmt.Errorf("%w: %s", r.err, redactTail(tail.String()))
 			}
 			return "", r.err
 		}
 		return r.url, nil
 	case <-timeout.C:
-		return "", fmt.Errorf("opencode server: did not start within %s: %s", opencodeServerStartTimeout, strings.TrimSpace(tail.String()))
+		return "", fmt.Errorf("opencode server: did not start within %s: %s", opencodeServerStartTimeout, redactTail(tail.String()))
 	case <-ctx.Done():
 		return "", ctx.Err()
 	}
@@ -534,6 +534,20 @@ func ensureLoopbackURL(raw string) (string, error) {
 		return u.String(), nil
 	}
 	return "", fmt.Errorf("opencode server: refusing to talk to non-loopback address %q", core.SafeURLHost(raw))
+}
+
+// tailURLUserinfoRe matches the userinfo part of any URL token in captured
+// output, e.g. "user:pass@" in "http://user:pass@host:4096". The scrape regex
+// can capture a listen address carrying the basic-auth password, and that line
+// also lands in the stdout tail appended to startup errors.
+var tailURLUserinfoRe = regexp.MustCompile(`(?i)\b([a-z][a-z0-9+.-]*://)[^/@\s]+@`)
+
+// redactTail trims captured server output and strips URL userinfo from it before
+// it is embedded in an error. These strings reach logs and the chat platform, so
+// a scraped listen address must not carry its credentials along.
+func redactTail(tail string) string {
+	tail = strings.TrimSpace(tail)
+	return tailURLUserinfoRe.ReplaceAllString(tail, "${1}***@")
 }
 
 // opencodeHTTPClient is used for every call to the local server. Redirects are
@@ -598,7 +612,7 @@ func (srv *opencodeServer) diagnostics() string {
 	if srv.logTail == nil {
 		return ""
 	}
-	tail := strings.TrimSpace(srv.logTail.String())
+	tail := redactTail(srv.logTail.String())
 	if srv.password != "" {
 		tail = strings.ReplaceAll(tail, srv.password, "***")
 	}

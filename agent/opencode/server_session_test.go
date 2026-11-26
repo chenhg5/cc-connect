@@ -1445,6 +1445,23 @@ func TestEnsureLoopbackURL_DoesNotLeakCredentials(t *testing.T) {
 	}
 }
 
+// The stdout tail appended to startup failures can contain the scraped listen
+// address, whose userinfo carries the basic-auth password. redactTail must strip
+// it while leaving the rest of the diagnostic readable.
+func TestRedactTail_StripsURLUserinfo(t *testing.T) {
+	in := "starting server\nlistening on http://user:s3cr3t@127.0.0.1:4096\nready"
+	got := redactTail(in)
+	if strings.Contains(got, "s3cr3t") || strings.Contains(got, "user:") {
+		t.Errorf("redactTail left credentials in output: %q", got)
+	}
+	if !strings.Contains(got, "http://***@127.0.0.1:4096") {
+		t.Errorf("redactTail should keep host and mark userinfo, got: %q", got)
+	}
+	if !strings.Contains(got, "starting server") || !strings.Contains(got, "ready") {
+		t.Errorf("redactTail dropped non-URL lines: %q", got)
+	}
+}
+
 // Every request carries the server password, so a redirect must not be followed:
 // whatever host the server points at would receive the credentials.
 func TestServerRequestsAreNotRedirected(t *testing.T) {
