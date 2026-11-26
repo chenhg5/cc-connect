@@ -1251,6 +1251,10 @@ func resolveDisabledCmds(cmds []string) map[string]bool {
 	m := make(map[string]bool, len(cmds))
 	for _, c := range cmds {
 		c = strings.ToLower(strings.TrimPrefix(c, "/"))
+		if c == "delete-mode" {
+			// The delete-mode card performs /delete; see cardActionCommandID.
+			c = "delete"
+		}
 		if c == "*" {
 			for _, bc := range builtinCommands {
 				m[bc.id] = true
@@ -7820,6 +7824,21 @@ func cardActionCommandID(cmd string) string {
 	return ""
 }
 
+// cardActionNeedsActor reports whether a card action needs the clicker's
+// identity when user roles are configured. Only read-only views that show
+// nothing beyond the card's own session may render for legacy adapters that
+// cannot identify the clicker; everything else fails closed there.
+func cardActionNeedsActor(prefix, cmdID string) bool {
+	if prefix != "nav" {
+		return true
+	}
+	switch cmdID {
+	case "help", "status", "list", "current", "whoami", "version":
+		return false
+	}
+	return true
+}
+
 func (e *Engine) handleCommand(p Platform, msg *Message, raw string) bool {
 	parts := splitCommandArgs(raw)
 	cmd := strings.ToLower(strings.TrimPrefix(parts[0], "/"))
@@ -12255,7 +12274,7 @@ func (e *Engine) cmdProviderAdd(p Platform, msg *Message, switcher ProviderSwitc
 	raw = strings.TrimSpace(raw)
 
 	if strings.HasPrefix(raw, "{") {
-		// JSON format: /provider add {"name":"relay",...}
+		// JSON format: /provider add {"name":"relay","api_key":"sk-xxx",...}
 		var jp struct {
 			Name    string            `json:"name"`
 			APIKey  string            `json:"api_key"`
@@ -13645,7 +13664,7 @@ func (e *Engine) handleCardNavForUser(action, sessionKey, userID string) *Card {
 			e.userRolesMu.RLock()
 			hasRoles := e.userRoles != nil
 			e.userRolesMu.RUnlock()
-			if hasRoles || privileged {
+			if privileged || (hasRoles && cardActionNeedsActor(prefix, cmdID)) {
 				slog.Info("audit: command_blocked",
 					"project", e.name, "command", cmdID,
 					"reason", "missing_actor", "via", "card")
@@ -13660,6 +13679,14 @@ func (e *Engine) handleCardNavForUser(action, sessionKey, userID string) *Card {
 				"command", cmdID, "reason", "unauthorized", "via", "card")
 			return e.simpleCard("/"+cmdID, "red", fmt.Sprintf(e.i18n.T(MsgAdminRequired), "/"+cmdID))
 		}
+	}
+
+	// Legacy adapters pass no clicker. The read-only /status and /whoami views
+	// keep showing the user the session key names, as before; it is used for
+	// display only, never for the checks above.
+	displayUserID := userID
+	if displayUserID == "" {
+		displayUserID = extractUserID(sessionKey)
 	}
 
 	if prefix == "act" && cmd == "/model" {
@@ -13683,7 +13710,7 @@ func (e *Engine) handleCardNavForUser(action, sessionKey, userID string) *Card {
 	case "/lang":
 		return e.renderLangCard()
 	case "/status":
-		return e.renderStatusCard(sessionKey, userID)
+		return e.renderStatusCard(sessionKey, displayUserID)
 	case "/list":
 		page := 1
 		if args != "" {
@@ -13727,7 +13754,7 @@ func (e *Engine) handleCardNavForUser(action, sessionKey, userID string) *Card {
 	case "/whoami":
 		return e.renderWhoamiCard(&Message{
 			SessionKey: sessionKey,
-			UserID:     userID,
+			UserID:     displayUserID,
 			Platform:   extractPlatformName(sessionKey),
 		})
 	case "/version":
@@ -13742,7 +13769,7 @@ func (e *Engine) handleCardNavForUser(action, sessionKey, userID string) *Card {
 		}
 		return e.renderDeleteModeCard(sessionKey)
 	case "/stop":
-		return e.renderStatusCard(sessionKey, userID)
+		return e.renderStatusCard(sessionKey, displayUserID)
 	case "/upgrade":
 		return e.renderUpgradeCard()
 	}

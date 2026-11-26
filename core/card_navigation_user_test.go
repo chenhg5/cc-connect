@@ -182,3 +182,132 @@ func TestBridge_CardNavigationUsesCommandIdentity(t *testing.T) {
 		t.Fatalf("legacy navigation = (%q, %q)", gotAction, gotKey)
 	}
 }
+
+func TestHandleCardNav_LegacyRendersReadOnlyViewsWithRoles(t *testing.T) {
+	agent := &stubProviderAgent{providers: []ProviderConfig{{Name: "a"}, {Name: "b"}}, active: "a"}
+	e := NewEngine("test", agent, nil, "", LangEnglish)
+	t.Cleanup(func() { _ = e.Stop() })
+	roles := NewUserRoleManager()
+	roles.Configure("", []RoleInput{
+		{Name: "admin", UserIDs: []string{"u_admin"}},
+		{Name: "member", UserIDs: []string{"u_member"}, DisabledCommands: []string{"provider"}},
+	})
+	e.SetUserRoles(roles)
+	const key = "test:chat1:u_member"
+	refused := e.i18n.T(MsgCardActorRequired)
+
+	for _, action := range []string{"nav:/help", "nav:/help agent", "nav:/status", "nav:/list", "nav:/current", "nav:/whoami", "nav:/version"} {
+		card := e.handleCardNav(action, key)
+		if card == nil || strings.Contains(card.RenderText(), refused) {
+			t.Fatalf("%s: card = %v, want the read-only view", action, card)
+		}
+	}
+	// Anything that changes state or shows more than the card's own session
+	// still needs an identified clicker.
+	for _, action := range []string{"act:/help", "act:/list 1", "act:/provider b", "nav:/provider", "nav:/history", "nav:/cron", "act:/stop", "act:/new"} {
+		card := e.handleCardNav(action, key)
+		if card == nil || !strings.Contains(card.RenderText(), refused) {
+			t.Fatalf("%s: card = %v, want actor-required notice", action, card)
+		}
+	}
+	if agent.active != "a" {
+		t.Fatalf("legacy callback switched provider to %q", agent.active)
+	}
+}
+
+func TestHandleCardNav_LegacyIdentityViewsShowSessionUser(t *testing.T) {
+	for _, withRoles := range []bool{false, true} {
+		t.Run(fmt.Sprintf("roles=%v", withRoles), func(t *testing.T) {
+			e := NewEngine("test", &stubAgent{}, nil, "", LangEnglish)
+			t.Cleanup(func() { _ = e.Stop() })
+			if withRoles {
+				roles := NewUserRoleManager()
+				roles.Configure("", []RoleInput{{Name: "member", UserIDs: []string{"*"}}})
+				e.SetUserRoles(roles)
+			}
+			const key = "test:chat1:u_member"
+			whoami := e.handleCardNav("nav:/whoami", key)
+			if whoami == nil || !strings.Contains(whoami.RenderText(), "`u_member`") {
+				t.Fatalf("legacy whoami = %v, want session user u_member", whoami)
+			}
+			status := e.handleCardNav("nav:/status", key)
+			if status == nil || !strings.Contains(status.RenderText(), e.i18n.Tf(MsgStatusUserID, "u_member")) {
+				t.Fatalf("legacy status = %v, want user id line for u_member", status)
+			}
+			// A user-aware callback shows the clicker, not the session owner.
+			whoami = e.handleCardNavForUser("nav:/whoami", key, "u_admin")
+			if whoami == nil || !strings.Contains(whoami.RenderText(), "`u_admin`") {
+				t.Fatalf("user-aware whoami = %v, want clicker u_admin", whoami)
+			}
+		})
+	}
+}
+
+func TestCmdHelp_HidesCommandsDisabledForSender(t *testing.T) {
+	newEngine := func() (*Engine, *stubCardPlatform) {
+		p := &stubCardPlatform{stubPlatformEngine: stubPlatformEngine{n: "test"}}
+		e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+		t.Cleanup(func() { _ = e.Stop() })
+		return e, p
+	}
+	helpFor := func(e *Engine, p *stubCardPlatform, userID string) *Card {
+		t.Helper()
+		before := len(p.repliedCards)
+		e.handleCommand(p, &Message{SessionKey: "test:chat1:" + userID, UserID: userID, ReplyCtx: "ctx"}, "/help")
+		if len(p.repliedCards) != before+1 {
+			t.Fatalf("/help from %s replied %d cards, want 1", userID, len(p.repliedCards)-before)
+		}
+		return p.repliedCards[len(p.repliedCards)-1]
+	}
+
+	t.Run("project", func(t *testing.T) {
+		e, p := newEngine()
+		e.SetDisabledCommands([]string{"delete"})
+		card := helpFor(e, p, "u1")
+		if _, ok := findCardAction(card, "cmd:/delete"); ok {
+			t.Fatal("text /help lists the disabled /delete")
+		}
+		if _, ok := findCardAction(card, "nav:/list"); !ok {
+			t.Fatal("text /help should keep enabled commands")
+		}
+	})
+	t.Run("role", func(t *testing.T) {
+		e, p := newEngine()
+		roles := NewUserRoleManager()
+		roles.Configure("", []RoleInput{
+			{Name: "admin", UserIDs: []string{"u_admin"}},
+			{Name: "member", UserIDs: []string{"u_member"}, DisabledCommands: []string{"delete"}},
+		})
+		e.SetUserRoles(roles)
+		if _, ok := findCardAction(helpFor(e, p, "u_member"), "cmd:/delete"); ok {
+			t.Fatal("member's text /help lists /delete disabled by the member role")
+		}
+		if _, ok := findCardAction(helpFor(e, p, "u_admin"), "cmd:/delete"); !ok {
+			t.Fatal("admin's text /help should list /delete")
+		}
+	})
+}
+
+func TestDisabledCommands_DeleteModeDisablesDelete(t *testing.T) {
+	e := NewEngine("test", &stubAgent{}, nil, "", LangEnglish)
+	t.Cleanup(func() { _ = e.Stop() })
+	e.SetDisabledCommands([]string{"delete-mode"})
+	if !e.disabledCmdsFor("u1")["delete"] {
+		t.Fatalf("disabled set = %v, want delete", e.disabledCmdsFor("u1"))
+	}
+	card := e.handleCardNavForUser("act:/delete-mode submit", "test:chat1:u1", "u1")
+	if card == nil || !strings.Contains(card.RenderText(), "Command `/delete` is disabled") {
+		t.Fatalf("delete-mode card = %v, want disabled notice", card)
+	}
+	if _, ok := findCardAction(e.handleCardNavForUser("nav:/help session", "test:chat1:u1", "u1"), "cmd:/delete"); ok {
+		t.Fatal("help card lists /delete disabled as delete-mode")
+	}
+
+	roles := NewUserRoleManager()
+	roles.Configure("", []RoleInput{{Name: "member", UserIDs: []string{"*"}, DisabledCommands: []string{"delete-mode"}}})
+	e.SetDisabledCommands(nil)
+	e.SetUserRoles(roles)
+	if !e.disabledCmdsFor("u1")["delete"] {
+		t.Fatalf("role disabled set = %v, want delete", e.disabledCmdsFor("u1"))
+	}
+}

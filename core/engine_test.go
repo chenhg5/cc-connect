@@ -6922,13 +6922,19 @@ func TestHandleCardNav_DisabledDirAndDeleteAreRefused(t *testing.T) {
 	e.dirHistory.Add("test", d1)
 	e.dirHistory.Add("test", d2)
 	e.SetDisabledCommands([]string{"dir", "delete"})
+	// The clicker is an admin, so only the disabled-command gate can refuse
+	// /dir here; the privilege and missing-actor gates cannot fire.
+	e.SetAdminFrom("user1")
 	sk := "test:user1"
 
-	_ = e.handleCardNav("act:/dir select 2", sk)
+	card := e.handleCardNavForUser("act:/dir select 2", sk, "user1")
+	if card == nil || !strings.Contains(card.RenderText(), "Command `/dir` is disabled") {
+		t.Fatalf("dir card = %v, want disabled notice", card)
+	}
 	if agent.workDir != d2 {
 		t.Fatalf("workDir = %q, want unchanged %q", agent.workDir, d2)
 	}
-	card := e.handleCardNav("act:/delete-mode submit", sk)
+	card = e.handleCardNav("act:/delete-mode submit", sk)
 	if card == nil || !strings.Contains(card.RenderText(), "Command `/delete` is disabled") {
 		t.Fatalf("delete-mode card = %v, want disabled notice", card)
 	}

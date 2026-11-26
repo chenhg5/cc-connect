@@ -316,8 +316,9 @@ type CardSender interface {
 // CardNavigationHandler is called by platforms to render a card for in-place
 // card updates (e.g. Feishu card.action.trigger callback). The action string
 // uses prefixes like "nav:/model" or "act:/model 3". This legacy API does not
-// carry authenticated identity; role-based and privileged commands require
-// UserAwareCardNavigable and are refused when the clicker is unavailable.
+// carry authenticated identity: privileged commands, and with user roles
+// configured every action except read-only views such as nav:/help and
+// nav:/status, require UserAwareCardNavigable and are refused without it.
 type CardNavigationHandler func(action string, sessionKey string) *Card
 
 // UserAwareCardNavigationHandler receives the authenticated clicker separately
