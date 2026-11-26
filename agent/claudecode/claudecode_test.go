@@ -1365,3 +1365,21 @@ func setupSessionForHistory(t *testing.T, sessionID, src string) string {
 	}
 	return workDir
 }
+func TestToolResultMaxLenOption(t *testing.T) {
+	for _, tc := range []struct {
+		value any
+		want  int
+	}{
+		{nil, 4000}, {int64(0), 4000}, {int64(800), 800}, {float64(900), 900},
+	} {
+		// Constructing the agent checks the configured CLI path; the option
+		// parser does not need a real Claude installation.
+		agent, err := New(map[string]any{"work_dir": t.TempDir(), "cmd": os.Args[0], "tool_result_max_len": tc.value})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := agent.(*Agent).toolResultMaxLen; got != tc.want {
+			t.Fatalf("tool_result_max_len %v: got %d, want %d", tc.value, got, tc.want)
+		}
+	}
+}

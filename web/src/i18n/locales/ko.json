@@ -81,6 +81,16 @@
     "title": "세션",
     "id": "ID",
     "sessionKey": "세션 키",
+    "userName": "사용자 이름",
+    "userId": "사용자 ID",
+    "chatName": "채팅 이름",
+    "chatId": "채팅 ID",
+    "chatType": "채팅 유형",
+    "chatTypeGroup": "그룹 채팅",
+    "chatTypeSingle": "개인 채팅",
+    "sessionId": "세션 ID",
+    "agentSessionId": "Agent 세션 ID",
+    "copy": "복사",
     "name": "이름",
     "platform": "플랫폼",
     "active": "활성",
@@ -100,7 +110,9 @@
     "bridgeConnected": "연결됨",
     "bridgeConnecting": "연결 중...",
     "bridgeDisconnected": "연결 끊김",
-    "bridgeNotAvailable": "브리지를 사용할 수 없습니다. 웹에서 채팅하려면 config.toml에서 [bridge]를 사용 설정하세요."
+    "bridgeNotAvailable": "브리지를 사용할 수 없습니다. 웹에서 채팅하려면 config.toml에서 [bridge]를 사용 설정하세요.",
+    "managementUnavailable": "관리 API에 연결할 수 없거나 인증에 실패했습니다. 연결과 토큰을 확인하세요.",
+    "bridgeStartFailed": "브리지 시작에 실패했습니다{{detail}}. 서버 로그를 확인하세요."
   },
   "providers": {
     "title": "제공업체",

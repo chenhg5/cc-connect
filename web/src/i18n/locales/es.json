@@ -81,6 +81,16 @@
     "title": "Sesiones",
     "id": "ID",
     "sessionKey": "Clave de sesión",
+    "userName": "Nombre de usuario",
+    "userId": "ID de usuario",
+    "chatName": "Nombre del chat",
+    "chatId": "ID del chat",
+    "chatType": "Tipo de chat",
+    "chatTypeGroup": "Grupo",
+    "chatTypeSingle": "Chat privado",
+    "sessionId": "ID de sesión",
+    "agentSessionId": "ID de sesión del agente",
+    "copy": "Copiar",
     "name": "Nombre",
     "platform": "Plataforma",
     "active": "Activa",
@@ -100,7 +110,9 @@
     "bridgeConnected": "conectado",
     "bridgeConnecting": "conectando...",
     "bridgeDisconnected": "desconectado",
-    "bridgeNotAvailable": "Bridge no disponible. Habilite [bridge] en config.toml para chatear desde la web."
+    "bridgeNotAvailable": "Bridge no disponible. Habilite [bridge] en config.toml para chatear desde la web.",
+    "managementUnavailable": "No se puede conectar con la API de administración o falló la autenticación. Compruebe la conexión y el token.",
+    "bridgeStartFailed": "No se pudo iniciar el bridge{{detail}}. Consulte los registros del servidor."
   },
   "providers": {
     "title": "Proveedores",

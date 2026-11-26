@@ -238,10 +238,10 @@ func (s *TimerStore) ListPending() []*TimerJob {
 
 // TimerScheduler runs one-shot timer jobs using time.AfterFunc.
 type TimerScheduler struct {
-	store    *TimerStore
-	engines  map[string]*Engine
-	mu       sync.RWMutex
-	timers   map[string]*time.Timer // job ID → active timer
+	store              *TimerStore
+	engines            map[string]*Engine
+	mu                 sync.RWMutex
+	timers             map[string]*time.Timer // job ID → active timer
 	defaultSilent      bool
 	defaultSessionMode string
 }
@@ -406,7 +406,7 @@ func (ts *TimerScheduler) executeJob(jobID string) {
 		return
 	}
 
-	slog.Info("timer: executing job", "id", jobID, "project", job.Project, "prompt", truncateStr(job.Prompt, 60))
+	slog.Info("timer: executing job", "id", jobID, "project", job.Project, "prompt_len", len(job.Prompt))
 
 	done := make(chan error, 1)
 	go func() {

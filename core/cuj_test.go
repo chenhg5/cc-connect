@@ -309,6 +309,7 @@ type cujAgentSession struct {
 	// observed
 	sentPrompts []string
 	sentImages  [][]ImageAttachment
+	sentFiles   [][]FileAttachment
 	closeCount  int
 }
 
@@ -329,10 +330,11 @@ func newCUJAgentSession() *cujAgentSession {
 	}
 }
 
-func (s *cujAgentSession) Send(prompt string, _ string, images []ImageAttachment, _ []FileAttachment) error {
+func (s *cujAgentSession) Send(prompt string, _ string, images []ImageAttachment, files []FileAttachment) error {
 	s.mu.Lock()
 	s.sentPrompts = append(s.sentPrompts, prompt)
 	s.sentImages = append(s.sentImages, cloneCUJImages(images))
+	s.sentFiles = append(s.sentFiles, cloneCUJFiles(files))
 	reply := s.reply
 	delay := s.delayMs
 	override := s.nextEventOverride
@@ -411,6 +413,25 @@ func (s *cujAgentSession) getSentImages() [][]ImageAttachment {
 	out := make([][]ImageAttachment, len(s.sentImages))
 	for i, images := range s.sentImages {
 		out[i] = cloneCUJImages(images)
+	}
+	return out
+}
+
+func cloneCUJFiles(files []FileAttachment) []FileAttachment {
+	out := make([]FileAttachment, len(files))
+	for i, file := range files {
+		out[i] = file
+		out[i].Data = append([]byte(nil), file.Data...)
+	}
+	return out
+}
+
+func (s *cujAgentSession) getSentFiles() [][]FileAttachment {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := make([][]FileAttachment, len(s.sentFiles))
+	for i, files := range s.sentFiles {
+		out[i] = cloneCUJFiles(files)
 	}
 	return out
 }
@@ -1419,6 +1440,7 @@ func TestCUJ_A5_FileReachesAgent(t *testing.T) {
 	agent := &cujAgent{}
 	dir := t.TempDir()
 	e := NewEngine("test", agent, []Platform{plat}, dir+"/sessions.json", LangEnglish)
+	t.Cleanup(func() { _ = e.Stop() })
 
 	msg := &Message{
 		SessionKey: "test:file", Platform: "test", MessageID: "f1",
@@ -1432,10 +1454,18 @@ func TestCUJ_A5_FileReachesAgent(t *testing.T) {
 	deadline := time.After(2 * time.Second)
 	for {
 		agent.mu.Lock()
-		n := len(agent.sessions)
+		var session *cujAgentSession
+		if len(agent.sessions) > 0 {
+			session = agent.sessions[0]
+		}
 		agent.mu.Unlock()
-		if n > 0 {
-			return
+		if session != nil {
+			for _, send := range session.getSentFiles() {
+				if len(send) == 1 && send[0].FileName == "note.txt" && string(send[0].Data) == "hello world" &&
+					len(plat.getSent()) > 0 && !e.sessions.GetOrCreateActive("test:file").Busy() {
+					return
+				}
+			}
 		}
 		select {
 		case <-deadline:
@@ -2313,8 +2343,11 @@ func TestCUJ_H2_TwoPlatformsConcurrentNoBleed(t *testing.T) {
 	pB := &stubPlatformEngine{n: "platB"}
 	agent := &cujAgent{}
 	e := NewEngine("test", agent, []Platform{pA, pB}, dir+"/sessions.json", LangEnglish)
+	t.Cleanup(func() { _ = e.Stop() })
 
-	// Fire 5 messages on each platform concurrently.
+	// Use distinct sessions so this test isolates cross-platform routing.
+	// Same-session queueing has separate coverage and can otherwise swallow
+	// result events before this test reaches its isolation assertions.
 	var wg sync.WaitGroup
 	for i := 0; i < 5; i++ {
 		wg.Add(2)
@@ -2322,79 +2355,67 @@ func TestCUJ_H2_TwoPlatformsConcurrentNoBleed(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			e.ReceiveMessage(pA, &Message{
-				SessionKey: "platA:userA", Platform: "platA",
+				SessionKey: fmt.Sprintf("platA:userA-%d", i), Platform: "platA",
 				MessageID: "A" + string(rune('0'+i)), UserID: "userA",
-				UserName: "userA", Content: "from A " + string(rune('0'+i)),
+				UserName: "userA", Content: fmt.Sprintf("from A %d", i),
 				ReplyCtx: "ctxA",
 			})
 		}()
 		go func() {
 			defer wg.Done()
 			e.ReceiveMessage(pB, &Message{
-				SessionKey: "platB:userB", Platform: "platB",
+				SessionKey: fmt.Sprintf("platB:userB-%d", i), Platform: "platB",
 				MessageID: "B" + string(rune('0'+i)), UserID: "userB",
-				UserName: "userB", Content: "from B " + string(rune('0'+i)),
+				UserName: "userB", Content: fmt.Sprintf("from B %d", i),
 				ReplyCtx: "ctxB",
 			})
 		}()
 	}
 	wg.Wait()
 
-	// Wait for all turns to finish. Generous deadline so this stays green
-	// when the whole core package is run with `-race -parallel=N` on
-	// constrained CI hosts; the in-isolation run finishes < 2s.
+	// Wait for all ten independent turns to finish before inspecting history.
 	deadline := time.After(30 * time.Second)
 	for {
-		histA := e.sessions.GetOrCreateActive("platA:userA").GetHistory(0)
-		histB := e.sessions.GetOrCreateActive("platB:userB").GetHistory(0)
-		// Each user sent 5 messages — expect each session to have ≥5 user
-		// entries when fully drained.
-		userA := 0
-		for _, h := range histA {
-			if h.Role == "user" {
-				userA++
+		complete := 0
+		for i := 0; i < 5; i++ {
+			for _, key := range []string{fmt.Sprintf("platA:userA-%d", i), fmt.Sprintf("platB:userB-%d", i)} {
+				session := e.sessions.GetOrCreateActive(key)
+				if len(session.GetHistory(0)) >= 2 && !session.Busy() {
+					complete++
+				}
 			}
 		}
-		userB := 0
-		for _, h := range histB {
-			if h.Role == "user" {
-				userB++
-			}
-		}
-		if userA >= 5 && userB >= 5 {
+		if complete == 10 && len(pA.getSent()) >= 5 && len(pB.getSent()) >= 5 {
 			break
 		}
 		select {
 		case <-deadline:
-			t.Fatalf("timed out: userA=%d userB=%d (some messages did not land)", userA, userB)
+			t.Fatalf("timed out: completed=%d/10, replies A=%d B=%d", complete, len(pA.getSent()), len(pB.getSent()))
 		default:
 			time.Sleep(20 * time.Millisecond)
 		}
 	}
 
-	// Critical assertion: A's history must NOT contain B's content and
-	// vice versa.
-	histA := e.sessions.GetOrCreateActive("platA:userA").GetHistory(0)
-	for _, h := range histA {
-		if strings.Contains(h.Content, "from B") {
-			t.Fatalf("session A history leaked B's message: %+v", h)
+	// Each session contains its own user message and no message from the
+	// other platform, even though all ten turns ran concurrently.
+	for i := 0; i < 5; i++ {
+		for _, tc := range []struct{ key, own, other string }{
+			{fmt.Sprintf("platA:userA-%d", i), fmt.Sprintf("from A %d", i), "from B"},
+			{fmt.Sprintf("platB:userB-%d", i), fmt.Sprintf("from B %d", i), "from A"},
+		} {
+			foundOwn := false
+			for _, h := range e.sessions.GetOrCreateActive(tc.key).GetHistory(0) {
+				if strings.Contains(h.Content, tc.other) {
+					t.Fatalf("session %s leaked another platform's message: %+v", tc.key, h)
+				}
+				if h.Role == "user" && strings.Contains(h.Content, tc.own) {
+					foundOwn = true
+				}
+			}
+			if !foundOwn {
+				t.Fatalf("session %s has no own user message %q", tc.key, tc.own)
+			}
 		}
-	}
-	histB := e.sessions.GetOrCreateActive("platB:userB").GetHistory(0)
-	for _, h := range histB {
-		if strings.Contains(h.Content, "from A") {
-			t.Fatalf("session B history leaked A's message: %+v", h)
-		}
-	}
-
-	// Platform-side: A only saw replies from A's session and vice versa.
-	// (We can't easily map replies → sessions here, but we assert the bare
-	// minimum: each platform actually received some sends.)
-	if len(pA.getSent()) == 0 {
-		t.Fatal("platA received no replies")
-	}
-	if len(pB.getSent()) == 0 {
-		t.Fatal("platB received no replies")
 	}
 }
 

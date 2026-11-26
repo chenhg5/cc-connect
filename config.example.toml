@@ -284,6 +284,8 @@ level = "info" # debug, info, warn, error
 # interval_ms = 1500        # Min ms between updates (default: 1500) / 更新最小间隔毫秒数（默认 1500）
 # min_delta_chars = 30      # Min new chars before sending update (default: 30) / 发送更新前最少新增字符数（默认 30）
 # max_chars = 2000          # Max preview length (default: 2000) / 预览最大长度（默认 2000）
+# stop_behavior = "discard" # On /stop: "discard" deletes the preview (default); "freeze" keeps its partial text for reference.
+#                           # /stop 时："discard" 删除预览（默认）；"freeze" 保留部分内容供后续参考。
 
 # =============================================================================
 # Instant Reply / 即时确认回复
@@ -382,19 +384,27 @@ level = "info" # debug, info, warn, error
 # enabled = true
 # max_tokens = 12000     # estimated token threshold to trigger compression
 # min_gap_mins = 30      # minimum minutes between auto-compress runs (default 30)
+# overhead_tokens = 0    # default: preserve the previous text-only estimate.
+#                        # To include prompt/tool overhead, set 15000-60000 based on
+#                        # your agent and tools, and raise max_tokens above this value.
 # allow_heuristic = false  # decide from the text-length heuristic when an agent that
 #                          # CAN report exact usage has not reported it yet. Off by
 #                          # default: wait for the exact number instead. The heuristic
-#                          # counts only cc-connect's own history text, ignoring tool
-#                          # results and the fixed system-prompt+tools overhead, so it
+#                          # counts cc-connect's own history text plus overhead_tokens,
+#                          # but ignores tool results and can still be inaccurate, so it
 #                          # is routinely several times off. Agents with no usage
 #                          # reporting at all always use the heuristic — for them it is
 #                          # the only mechanism available, and this flag does not apply.
 #                          # 当「有能力上报精确用量的 agent」暂时还没上报时，是否退回文本
 #                          # 长度启发式估算。默认关闭：宁可等到精确值。该启发式只统计
-#                          # cc-connect 自身的对话文本，忽略 tool_result 与系统提示词/
-#                          # 工具定义的固定开销，误差常达数倍。完全没有用量上报能力的
+#                          # cc-connect 自身的对话文本和配置的固定开销，仍忽略 tool_result，
+#                          # 误差可能很大。完全没有用量上报能力的
 #                          # agent 始终使用启发式——那是它们唯一的机制，本开关对其无效。
+
+# [projects.history_bootstrap]
+# enabled = true       # Send recent chat history on the first turn after switching agent type / 切换 agent 类型后的首轮传入近期聊天历史
+# max_entries = 20     # Maximum prior messages / 最多传入的历史消息数
+# max_tokens = 4000    # Approximate token budget for the history block / 历史片段的估算 token 上限
 
 # [projects.observe]
 # enabled = true                    # Forward native terminal sessions to Slack
@@ -906,7 +916,7 @@ mode = "default" # "default" | "acceptEdits" (edit) | "plan" | "auto" | "bypassP
 
 # Optional: set reasoning effort level (passed to claude --effort)
 # 可选：设置推理强度等级（传递给 claude --effort）
-# reasoning_effort = "high"  # "low" | "medium" | "high" | "max"
+# reasoning_effort = "high"  # "low" | "medium" | "high" | "xhigh" | "max"
 
 # Optional: override the context-window size used by the "ctx N%" indicator
 # in IM replies. By default cc-connect uses the window Claude Code reports
@@ -922,6 +932,13 @@ mode = "default" # "default" | "acceptEdits" (edit) | "plan" | "auto" | "bypassP
 # 当连接到自定义 router / 微调模型（id 与 Claude Code 命名规范不匹配），
 # 或者想硬编码一个特定窗口时设置此选项。<= 0 保持上述默认行为。
 # context_window_tokens = 200000
+
+# Maximum bytes of a Claude Code tool result forwarded to the chat, including
+# its truncation notice. Defaults to 4000; 0 uses the default. The display
+# layer's tool_max_len setting may shorten it further for a given platform.
+# 转发到聊天的 Claude Code 工具结果最大字节数（包含截断提示）；默认 4000，0 使用默认值。
+# 平台显示层的 tool_max_len 仍可能进一步缩短内容。
+# tool_result_max_len = 4000
 
 # In default/acceptEdits mode, you can pre-approve specific tools:
 # 在 default/acceptEdits 模式下，可预授权特定工具：
@@ -943,7 +960,7 @@ mode = "default" # "default" | "acceptEdits" (edit) | "plan" | "auto" | "bypassP
 # 保留 Claude 默认系统提示，并在其后追加本内容（通过 --append-system-prompt）。
 # 想在不丢弃默认提示的前提下补充指令时用它；可与 system_prompt 同时使用。
 # append_system_prompt = "Always respond in Chinese and prefer concise answers."
-
+#
 # Optional: specify a model / 可选：指定模型
 # model = "claude-sonnet-4-20250514"
 
@@ -982,6 +999,14 @@ mode = "default" # "default" | "acceptEdits" (edit) | "plan" | "auto" | "bypassP
 # Active provider (matches a name in [[projects.agent.providers]] or provider_refs)
 # 当前激活的 provider（对应下方 providers 或 provider_refs 中的 name）
 # provider = "anthropic"
+# If exactly one provider applies to this agent, it is selected automatically.
+# With multiple providers, set provider explicitly; otherwise none is selected.
+# 若只有一个适用于此 agent 的 provider，将自动激活；多个时需显式指定 provider。
+# Claude Code environment priority: options.env < active provider env < session env.
+# Claude Code 的环境变量优先级：options.env < 当前 provider env < 会话 env。
+# Claude Code's own settings.json may override process env; remove conflicting
+# env entries there if requests still go to a different endpoint.
+# 若请求仍走向其他端点，请检查 Claude Code 的 settings.json 是否覆盖了进程环境变量。
 
 # Reference global [[providers]] by name — avoids duplicating keys per project
 # 引用全局 [[providers]] — 避免每个项目重复配置
@@ -1282,6 +1307,11 @@ app_secret = "your-feishu-app-secret"
 # proxy = "http://127.0.0.1:7890"  # Optional HTTP/SOCKS5 proxy for Telegram Bot API / 可选 HTTP/SOCKS5 代理
 # proxy_username = ""              # Optional proxy auth username / 代理用户名
 # proxy_password = ""              # Optional proxy auth password / 代理密码
+# http_timeout_secs = 300          # Bot API request timeout: 61–3600s, default 90s. Increase for slow large uploads; also affects polling.
+#                                  # Bot API 请求超时：61–3600 秒，默认 90 秒。慢速大文件上传可调高，也影响轮询。
+# offline_message_max_age_mins = 10 # Default 10 minutes: skip older messages retained during downtime. Set 0 to process all,
+#                                   # including stale commands after long outages. / 默认 10 分钟：跳过停机期间较早的消息。
+#                                   # 设为 0 会处理全部积压消息，长时间停机后旧指令也可能执行。
 # group_reply_all = false  # If true, respond to ALL group messages without @mention / 设为 true 群聊无需 @ 也响应
 # share_session_in_channel = false  # If true, all users in a group share one agent session / 群聊共享会话
 # enable_reactions = false  # If true, add ⚡ reaction to incoming messages / 设为 true 收到消息时添加 ⚡ 表情
@@ -1853,6 +1883,13 @@ app_secret = "your-feishu-app-secret"
 # 追加在 system_prompt 之后，包含在同一段注入的前导内容中。可单独使用，也可与
 # system_prompt 同时使用。
 # append_system_prompt = "Always respond in Chinese and prefer concise answers."
+#
+# Optional: additional prefixes for internal Codex sessions hidden from /list
+# and filtered from /history. Built-in internal prompt prefixes always apply.
+# 可选：额外的内部 Codex 提示前缀；匹配的会话不出现在 /list，提示不出现在 /history。
+# 内置的内部提示前缀始终生效。
+# [projects.agent.options.session_filter]
+# ignore_summary_prefixes = ["Private workflow:"]
 #
 # # Active provider / 当前激活的 provider
 # # provider = "openai"

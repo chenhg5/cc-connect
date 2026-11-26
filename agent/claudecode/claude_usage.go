@@ -464,7 +464,7 @@ func parseClaudeUsageResetTime(raw string, now time.Time) (time.Time, error) {
 		return resetAt, nil
 	}
 
-	return time.Time{}, fmt.Errorf("unsupported reset time %q", raw)
+	return time.Time{}, fmt.Errorf("unsupported reset time (chars=%d)", len([]rune(raw)))
 }
 
 func detectClaudeUsageOutputError(screen, stderr string) error {
