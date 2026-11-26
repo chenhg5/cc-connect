@@ -256,6 +256,19 @@ func TestSummarizeInput_AskUserQuestion(t *testing.T) {
 	}
 }
 
+func TestSummarizeInput_PreservesStructuredToolParameters(t *testing.T) {
+	result := summarizeInput("Grep", map[string]any{
+		"pattern": "foo",
+		"include": "*.go",
+		"path":    "platform/feishu",
+	})
+	for _, want := range []string{"\"pattern\":\"foo\"", "\"include\":\"*.go\"", "\"path\":\"platform/feishu\""} {
+		if !strings.Contains(result, want) {
+			t.Errorf("summary %q does not contain %q", result, want)
+		}
+	}
+}
+
 func TestAgent_Name(t *testing.T) {
 	a := &Agent{}
 	if got := a.Name(); got != "claudecode" {
@@ -438,6 +451,34 @@ func TestEncodeClaudeProjectKey(t *testing.T) {
 				t.Errorf("encodeClaudeProjectKey(%q) = %q, want %q", tt.input, got, tt.expected)
 			}
 		})
+	}
+}
+
+func TestEncodeClaudeProjectKey_NormalizesWorkDirVariants(t *testing.T) {
+	for _, tc := range []struct {
+		name, canonical, variant string
+	}{
+		{"Windows drive and trailing separator", `D:\Foo\bar`, `d:\Foo\bar\`},
+		{"macOS decomposed Unicode", "/Users/me/ünicode", "/Users/me/ünicode"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			want := encodeClaudeProjectKey(tc.canonical)
+			if got := encodeClaudeProjectKey(tc.variant); got != want {
+				t.Fatalf("project key for %q = %q, want %q", tc.variant, got, want)
+			}
+		})
+	}
+}
+
+func TestFindProjectDir_DecomposedMacOSPath(t *testing.T) {
+	home := t.TempDir()
+	canonical := "/Users/me/ünicode"
+	projectDir := filepath.Join(home, "projects", encodeClaudeProjectKey(canonical))
+	if err := os.MkdirAll(projectDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if got := findProjectDir(home, "/Users/me/ünicode"); got != projectDir {
+		t.Fatalf("findProjectDir() = %q, want %q", got, projectDir)
 	}
 }
 
@@ -1248,5 +1289,97 @@ func TestConfigHomeFromEnv_HonorsPerProjectConfigDir(t *testing.T) {
 	t.Setenv("HOME", home)
 	if got, want := configHomeFromEnv(nil), filepath.Join(home, ".claude"); got != want {
 		t.Errorf("configHomeFromEnv(nil) = %q, want %q", got, want)
+	}
+}
+
+// writeLongLineSession writes a transcript with a user record, one line of
+// padLen bytes (a prompt_snapshot attachment), then an assistant record.
+func writeLongLineSession(t *testing.T, padLen int) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "long.jsonl")
+	long := `{"type":"attachment","pad":"` + strings.Repeat("x", padLen) + `"}`
+	lines := []string{
+		`{"type":"user","message":{"role":"user","content":"before"}}`,
+		long,
+		`{"type":"assistant","message":{"role":"assistant","content":"after"}}`,
+	}
+	if err := os.WriteFile(path, []byte(strings.Join(lines, "\n")+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+func TestScanSessionMeta_LineOver256KBStillCountsLaterRecords(t *testing.T) {
+	path := writeLongLineSession(t, 300*1024)
+	summary, count := scanSessionMeta(path)
+	if count != 2 {
+		t.Errorf("count = %d, want 2 (records after the 300KB line must be counted)", count)
+	}
+	if summary != "before" {
+		t.Errorf("summary = %q, want %q", summary, "before")
+	}
+}
+
+func TestGetSessionHistory_LineOver256KBStillReadsLaterRecords(t *testing.T) {
+	a := &Agent{workDir: setupSessionForHistory(t, "s1", writeLongLineSession(t, 300*1024))}
+	entries, err := a.GetSessionHistory(t.Context(), "s1", 0)
+	if err != nil {
+		t.Fatalf("GetSessionHistory: %v", err)
+	}
+	if len(entries) != 2 || entries[1].Content != "after" {
+		t.Errorf("entries = %+v, want before+after", entries)
+	}
+}
+
+func TestGetSessionHistory_LineOverCeilingReturnsError(t *testing.T) {
+	// Use a small ceiling so the test doesn't write a 64MB file. It must stay
+	// above the scanner's 256KB starting buffer to be enforced.
+	old := maxSessionJSONLLineSize
+	maxSessionJSONLLineSize = 512 * 1024
+	t.Cleanup(func() { maxSessionJSONLLineSize = old })
+
+	a := &Agent{workDir: setupSessionForHistory(t, "s2", writeLongLineSession(t, maxSessionJSONLLineSize+1024))}
+	entries, err := a.GetSessionHistory(t.Context(), "s2", 0)
+	if err == nil {
+		t.Fatalf("want error for line over the ceiling, got %d entries", len(entries))
+	}
+}
+
+// setupSessionForHistory copies src into the temp HOME project dir for a new
+// work dir and returns that work dir.
+func setupSessionForHistory(t *testing.T, sessionID, src string) string {
+	t.Helper()
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	workDir := t.TempDir()
+	dir := filepath.Join(home, ".claude", "projects", encodeClaudeProjectKey(workDir))
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(src)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, sessionID+".jsonl"), data, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return workDir
+}
+func TestToolResultMaxLenOption(t *testing.T) {
+	for _, tc := range []struct {
+		value any
+		want  int
+	}{
+		{nil, 4000}, {int64(0), 4000}, {int64(800), 800}, {float64(900), 900},
+	} {
+		// Constructing the agent checks the configured CLI path; the option
+		// parser does not need a real Claude installation.
+		agent, err := New(map[string]any{"work_dir": t.TempDir(), "cmd": os.Args[0], "tool_result_max_len": tc.value})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := agent.(*Agent).toolResultMaxLen; got != tc.want {
+			t.Fatalf("tool_result_max_len %v: got %d, want %d", tc.value, got, tc.want)
+		}
 	}
 }

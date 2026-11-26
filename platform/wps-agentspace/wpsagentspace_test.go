@@ -93,6 +93,8 @@ func TestTruncate(t *testing.T) {
 	}{
 		{"hello", 10, "hello"},
 		{"hello world", 5, "hello..."},
+		{"a界b", 2, "a..."},
+		{"a界b", 4, "a界..."},
 		{"", 5, ""},
 	}
 

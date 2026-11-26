@@ -1,10 +1,12 @@
 package discord
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"reflect"
@@ -18,10 +20,32 @@ import (
 	"github.com/chenhg5/cc-connect/core"
 )
 
+func TestAttachmentDownloadLogsDoNotExposeSignedURL(t *testing.T) {
+	const secret = "SIGNED-URL-SENTINEL"
+	var logs bytes.Buffer
+	previous := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logs, nil)))
+	t.Cleanup(func() { slog.SetDefault(previous) })
+
+	signedURL := "https://cdn.example/private-" + secret + "?sig=" + secret
+	failed := func(string) ([]byte, error) { return nil, fmt.Errorf("download %s failed", signedURL) }
+	for _, contentType := range []string{"audio/ogg", "image/png", "application/pdf"} {
+		classifyAttachments([]*discordgo.MessageAttachment{{URL: signedURL, ContentType: contentType}}, failed)
+	}
+	applyReferencedMessage(&discordgo.Message{Attachments: []*discordgo.MessageAttachment{{URL: signedURL, Width: 1, Height: 1}}}, "", nil, failed)
+	if strings.Contains(logs.String(), secret) {
+		t.Fatal("attachment download log exposed signed URL or transport error")
+	}
+	if !strings.Contains(logs.String(), "cdn.example") {
+		t.Fatal("attachment download log lost safe source host")
+	}
+}
+
 // ── Thread tests (upstream) ──────────────────────────────────
 
 type fakeThreadOps struct {
 	resolveChannel        func(channelID string) (*discordgo.Channel, error)
+	listActiveThreads     func(guildID string) ([]*discordgo.Channel, error)
 	startThread           func(channelID, messageID, name string, archiveDuration int) (*discordgo.Channel, error)
 	startStandaloneThread func(channelID, name string, typ discordgo.ChannelType, archiveDuration int) (*discordgo.Channel, error)
 	joinThread            func(threadID string) error
@@ -58,6 +82,13 @@ func (f fakeThreadOps) ResolveChannel(channelID string) (*discordgo.Channel, err
 		return nil, nil
 	}
 	return f.resolveChannel(channelID)
+}
+
+func (f fakeThreadOps) ListActiveThreads(guildID string) ([]*discordgo.Channel, error) {
+	if f.listActiveThreads == nil {
+		return nil, nil
+	}
+	return f.listActiveThreads(guildID)
 }
 
 func (f fakeThreadOps) StartThread(channelID, messageID, name string, archiveDuration int) (*discordgo.Channel, error) {
@@ -580,6 +611,51 @@ func TestHandleComponentInteraction_DispatchesPermissionResponse(t *testing.T) {
 	}
 	if got.SessionKey != "discord:channel-1:user-1" {
 		t.Fatalf("SessionKey = %q", got.SessionKey)
+	}
+}
+
+func TestHandleComponentInteraction_DispatchesAskQuestionOption(t *testing.T) {
+	var ackBody string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		ackBody += string(body)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = fmt.Fprint(w, `{}`)
+	}))
+	defer server.Close()
+
+	var got *core.Message
+	p := &Platform{
+		session: newTestDiscordSession(t, server),
+		handler: func(_ core.Platform, msg *core.Message) {
+			got = msg
+		},
+	}
+	// Components as discordgo unmarshals them from the gateway: pointers.
+	interaction := &discordgo.InteractionCreate{Interaction: &discordgo.Interaction{
+		ID:        "interaction-1",
+		Token:     "token-1",
+		Type:      discordgo.InteractionMessageComponent,
+		ChannelID: "channel-1",
+		Message: &discordgo.Message{ID: "message-1", Content: "which one?", Components: []discordgo.MessageComponent{
+			&discordgo.ActionsRow{Components: []discordgo.MessageComponent{
+				&discordgo.Button{Label: "Red", CustomID: "askq:req-1:0:1"},
+				&discordgo.Button{Label: "Blue", CustomID: "askq:req-1:0:2"},
+			}},
+		}},
+		Data: discordgo.MessageComponentInteractionData{CustomID: "askq:req-1:0:2"},
+	}}
+
+	p.handleComponentInteraction(p.session, interaction, "user-1", "user")
+
+	if got == nil {
+		t.Fatal("askq button did not dispatch a message")
+	}
+	if got.Content != "askq:req-1:0:2" || got.IsPermissionResponse {
+		t.Fatalf("message = %#v, want raw askq value, not a permission response", got)
+	}
+	if !strings.Contains(ackBody, "✅ Blue") || strings.Contains(ackBody, "askq") {
+		t.Fatalf("ack body = %s, want chosen label instead of raw value", ackBody)
 	}
 }
 
@@ -1777,3 +1853,61 @@ func basePlatformFor(t *testing.T, pAny core.Platform) *Platform {
 	}
 }
 
+func TestResolveThreadReplyContext_UsesThreadCreatedByOtherBot(t *testing.T) {
+	resolved := 0
+	joined := ""
+	ops := fakeThreadOps{
+		resolveChannel: func(id string) (*discordgo.Channel, error) {
+			resolved++
+			if id == "message-1" {
+				return &discordgo.Channel{ID: id, ParentID: "channel-1", Type: discordgo.ChannelTypeGuildPublicThread}, nil
+			}
+			return &discordgo.Channel{ID: id, Type: discordgo.ChannelTypeGuildText}, nil
+		},
+		startThread: func(string, string, string, int) (*discordgo.Channel, error) {
+			return nil, fmt.Errorf("thread already exists")
+		},
+		joinThread: func(id string) error { joined = id; return nil },
+	}
+	m := &discordgo.MessageCreate{Message: &discordgo.Message{ID: "message-1", ChannelID: "channel-1", GuildID: "guild-1", Content: "<@bot> hi"}}
+	key, rc, parent, err := resolveThreadReplyContext(m, "bot", ops)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resolved != 2 || joined != "message-1" || key != "discord:message-1" || rc.channelID != "message-1" || parent != "channel-1" {
+		t.Fatalf("recovered thread: resolved=%d joined=%q key=%q rc=%+v parent=%q", resolved, joined, key, rc, parent)
+	}
+}
+
+func TestResolveThreadReplyContext_FindsActiveThreadAfterCreateRace(t *testing.T) {
+	joined := ""
+	ops := fakeThreadOps{
+		resolveChannel: func(id string) (*discordgo.Channel, error) {
+			if id == "message-1" {
+				return nil, fmt.Errorf("not yet visible")
+			}
+			return &discordgo.Channel{ID: id, Type: discordgo.ChannelTypeGuildText}, nil
+		},
+		startThread: func(string, string, string, int) (*discordgo.Channel, error) {
+			return nil, fmt.Errorf("already exists")
+		},
+		listActiveThreads: func(guildID string) ([]*discordgo.Channel, error) {
+			if guildID != "guild-1" {
+				t.Fatalf("guild ID = %q", guildID)
+			}
+			return []*discordgo.Channel{
+				{ID: "other", ParentID: "channel-2", Name: "hi", Type: discordgo.ChannelTypeGuildPublicThread},
+				{ID: "thread-1", ParentID: "channel-1", Name: "hi", Type: discordgo.ChannelTypeGuildPublicThread},
+			}, nil
+		},
+		joinThread: func(id string) error { joined = id; return nil },
+	}
+	m := &discordgo.MessageCreate{Message: &discordgo.Message{ID: "message-1", ChannelID: "channel-1", GuildID: "guild-1", Content: "<@bot> hi"}}
+	key, rc, parent, err := resolveThreadReplyContext(m, "bot", ops)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if joined != "thread-1" || key != "discord:thread-1" || rc.channelID != "thread-1" || parent != "channel-1" {
+		t.Fatalf("recovered active thread: joined=%q key=%q rc=%+v parent=%q", joined, key, rc, parent)
+	}
+}

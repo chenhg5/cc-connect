@@ -172,6 +172,12 @@ func (*launchdManager) Restart() error {
 	return nil
 }
 
+// RestartInPlace implements daemon.InPlaceRestarter. Restart already performs
+// the restart transaction launchd needs (kickstart -kp on a loaded job, refuse
+// to touch a legacy-only install whose current plist is missing), so a separate
+// Stop would only risk taking a working service down.
+func (m *launchdManager) RestartInPlace() error { return m.Restart() }
+
 // Status reports the daemon's state across both labels.
 //
 // Installed is deliberately based on any cc-connect agent plist rather than the

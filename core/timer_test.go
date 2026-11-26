@@ -3,6 +3,8 @@ package core
 import (
 	"os"
 	"path/filepath"
+	"runtime"
+	"strings"
 	"testing"
 	"time"
 )
@@ -524,5 +526,36 @@ func TestTimerStore_FilePath(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Dir(store.path)); err != nil {
 		t.Errorf("timers directory not created: %v", err)
+	}
+}
+
+// TestExecuteTimerShell_UsesConfiguredShell verifies that timer exec jobs run
+// through the engine's configured shell, flag and shell profile (the same
+// selection cron exec jobs use) instead of a hardcoded sh/powershell.
+func TestExecuteTimerShell_UsesConfiguredShell(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("fake shell script requires a POSIX shell")
+	}
+	dir := t.TempDir()
+	fakeShell := filepath.Join(dir, "fakeshell")
+	script := "#!/bin/sh\necho \"FAKE_SHELL flag=$1\"\nshift\nexec /bin/sh -c \"$1\"\n"
+	if err := os.WriteFile(fakeShell, []byte(script), 0o755); err != nil {
+		t.Fatalf("write fake shell: %v", err)
+	}
+
+	p := &stubPlatformEngine{n: "test"}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	e.SetShell(fakeShell, "-x-custom", "echo PROFILE_LOADED")
+
+	job := &TimerJob{ID: "t1", Exec: "echo timer-ran", WorkDir: dir}
+	if err := e.executeTimerShell(p, "ctx", job); err != nil {
+		t.Fatalf("executeTimerShell: %v", err)
+	}
+
+	out := strings.Join(p.getSent(), "\n")
+	for _, want := range []string{"FAKE_SHELL flag=-x-custom", "PROFILE_LOADED", "timer-ran"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("expected output to contain %q, got %q", want, out)
+		}
 	}
 }
