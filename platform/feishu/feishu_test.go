@@ -1685,6 +1685,7 @@ func TestOnMessageThreadIsolationAdmitsAttachmentWithoutMention(t *testing.T) {
 		}
 		if rootID != "" {
 			ev.Event.Message.RootId = stringPtr(rootID)
+			ev.Event.Message.ThreadId = stringPtr("omt_" + rootID)
 		}
 		return ev
 	}
@@ -3060,5 +3061,132 @@ func TestRichCardTypewriterSurvivesCardSizeCompaction(t *testing.T) {
 	}
 	if !strings.Contains(data, "BODY") {
 		t.Fatal("compaction lost body")
+	}
+}
+
+// A plain reply in the main channel carries the root of the chain it quotes
+// but no thread_id. The bot answers it in a new thread on the reply itself,
+// so the reply, not the quoted root, keys the session: otherwise the first
+// turn and every later message of that thread land in two sessions.
+func TestMakeSessionKeyKeysPlainReplyOnItself(t *testing.T) {
+	p := &Platform{platformName: "feishu", threadIsolation: true}
+	group := "group"
+	cases := []struct {
+		name                        string
+		messageID, rootID, threadID string
+		want                        string
+	}{
+		{"top-level message", "om_top", "", "", "om_top"},
+		{"plain reply quoting a main-channel message", "om_reply", "om_quoted", "", "om_reply"},
+		{"message in the thread opened on that reply", "om_followup", "om_reply", "omt_1", "om_reply"},
+		{"first message of a topic-group topic", "om_topic", "", "omt_2", "om_topic"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			msg := &larkim.EventMessage{MessageId: strPtr(c.messageID), ChatType: &group}
+			if c.rootID != "" {
+				msg.RootId = strPtr(c.rootID)
+			}
+			if c.threadID != "" {
+				msg.ThreadId = strPtr(c.threadID)
+			}
+			if got, want := p.makeSessionKey(msg, "oc_chat", "ou_user"), "feishu:oc_chat:root:"+c.want; got != want {
+				t.Fatalf("makeSessionKey = %q, want %q", got, want)
+			}
+		})
+	}
+}
+
+// The case that lost a task in production: someone posts a request in the
+// main channel without mentioning the bot, and someone else replies to it
+// (a plain reply, no thread yet) with only "@bot". The turn must run in the
+// session of the thread the bot opens on that reply, with the request as
+// its quoted context.
+func TestOnMessagePlainMentionOnlyReplyRootsItsOwnThread(t *testing.T) {
+	const (
+		appID      = "cli_plain_reply"
+		appSecret  = "secret-plain-reply"
+		botOpenID  = "ou_bot"
+		chatID     = "oc_chat"
+		quotedID   = "om_request"
+		replyID    = "om_mention_only"
+		userOpenID = "ou_asker"
+	)
+	got := make(chan *core.Message, 1)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.URL.Path == "/open-apis/auth/v3/tenant_access_token/internal":
+			writeJSON(t, w, map[string]any{"code": 0, "msg": "success", "expire": 7200, "tenant_access_token": "tenant-token"})
+		case r.URL.Path == "/open-apis/im/v1/messages/"+quotedID:
+			writeJSON(t, w, map[string]any{"code": 0, "msg": "success", "data": map[string]any{"items": []map[string]any{{
+				"msg_type":  "text",
+				"parent_id": "",
+				"sender":    map[string]any{"id": "ou_writer", "sender_type": "user"},
+				"body":      map[string]any{"content": `{"text":"读取 C798 的 enable_odometry_net"}`},
+			}}}})
+		case strings.HasPrefix(r.URL.Path, "/open-apis/contact/v3/users/"),
+			strings.HasPrefix(r.URL.Path, "/open-apis/im/v1/chats/"):
+			writeJSON(t, w, map[string]any{"code": 0, "msg": "success"})
+		default:
+			t.Errorf("unexpected path %s", r.URL.Path)
+			writeJSON(t, w, map[string]any{"code": 0, "msg": "success"})
+		}
+	}))
+	defer srv.Close()
+
+	p := &Platform{
+		platformName:    "feishu",
+		domain:          srv.URL,
+		appID:           appID,
+		appSecret:       appSecret,
+		botOpenID:       botOpenID,
+		threadIsolation: true,
+		dedup:           &core.MessageDedup{},
+		client: lark.NewClient(appID, appSecret,
+			lark.WithOpenBaseUrl(srv.URL),
+			lark.WithHttpClient(srv.Client()),
+		),
+		handler: func(_ core.Platform, msg *core.Message) { got <- msg },
+	}
+	chatType, senderType, msgType := "group", "user", "text"
+	content := `{"text":"@_user_1"}`
+	createTime := strconv.FormatInt(time.Now().Add(time.Second).UnixMilli(), 10)
+	err := p.onMessage(context.Background(), &larkim.P2MessageReceiveV1{
+		Event: &larkim.P2MessageReceiveV1Data{
+			Sender: &larkim.EventSender{SenderId: &larkim.UserId{OpenId: strPtr(userOpenID)}, SenderType: &senderType},
+			Message: &larkim.EventMessage{
+				MessageId:   strPtr(replyID),
+				RootId:      strPtr(quotedID),
+				ParentId:    strPtr(quotedID),
+				ChatId:      strPtr(chatID),
+				ChatType:    &chatType,
+				MessageType: &msgType,
+				Content:     &content,
+				CreateTime:  &createTime,
+				Mentions: []*larkim.MentionEvent{{
+					Key:  strPtr("@_user_1"),
+					Id:   &larkim.UserId{OpenId: strPtr(botOpenID)},
+					Name: strPtr("Bot"),
+				}},
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("onMessage() error = %v", err)
+	}
+	select {
+	case msg := <-got:
+		if want := "feishu:" + chatID + ":root:" + replyID; msg.SessionKey != want {
+			t.Fatalf("SessionKey = %q, want %q (the thread the bot opens on the reply)", msg.SessionKey, want)
+		}
+		if msg.Content != "" {
+			t.Fatalf("Content = %q, want empty: the reply only mentions the bot", msg.Content)
+		}
+		if !strings.Contains(msg.ExtraContent, "读取 C798 的 enable_odometry_net") {
+			t.Fatalf("ExtraContent = %q, want the quoted request", msg.ExtraContent)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for the mention-only reply")
 	}
 }

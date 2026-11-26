@@ -3,12 +3,15 @@ package feishu
 import (
 	"context"
 	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"strconv"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/chenhg5/cc-connect/core"
+	lark "github.com/larksuite/oapi-sdk-go/v3"
 	larkim "github.com/larksuite/oapi-sdk-go/v3/service/im/v1"
 )
 
@@ -32,6 +35,22 @@ func newGroupHistoryTestPlatform(handler core.MessageHandler) *Platform {
 	p.chatNameCache.Store("oc_allowed", "Allowed group")
 	p.chatNameCache.Store("oc_forbidden", "Forbidden group")
 	return p
+}
+
+// withEmptyThreads gives p a Feishu API whose threads hold no earlier
+// messages, for the thread-attachment lookup a mention in a thread makes.
+func withEmptyThreads(t *testing.T, p *Platform) {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if r.URL.Path == "/open-apis/auth/v3/tenant_access_token/internal" {
+			writeJSON(t, w, map[string]any{"code": 0, "msg": "success", "expire": 7200, "tenant_access_token": "tenant-token"})
+			return
+		}
+		writeJSON(t, w, map[string]any{"code": 0, "msg": "success", "data": map[string]any{"has_more": false, "items": []any{}}})
+	}))
+	t.Cleanup(srv.Close)
+	p.client = lark.NewClient("cli_history", "secret", lark.WithOpenBaseUrl(srv.URL), lark.WithHttpClient(srv.Client()))
 }
 
 func makeGroupHistoryEvent(t *testing.T, messageID, userID, msgType, rawContent, chatID, rootID string, mentioned bool) *larkim.P2MessageReceiveV1 {
@@ -74,6 +93,7 @@ func makeGroupHistoryEvent(t *testing.T, messageID, userID, msgType, rawContent,
 			Message: &larkim.EventMessage{
 				MessageId:   stringPtr(messageID),
 				RootId:      optionalString(rootID),
+				ThreadId:    threadIDOf(rootID),
 				ChatId:      stringPtr(chatID),
 				ChatType:    &chatType,
 				MessageType: stringPtr(msgType),
@@ -83,6 +103,15 @@ func makeGroupHistoryEvent(t *testing.T, messageID, userID, msgType, rawContent,
 			},
 		},
 	}
+}
+
+// threadIDOf stands in for the thread_id Feishu sets on every message in a
+// thread: a root_id alone marks a plain reply in the main channel.
+func threadIDOf(rootID string) *string {
+	if rootID == "" {
+		return nil
+	}
+	return stringPtr("omt_" + rootID)
 }
 
 func optionalString(value string) *string {
@@ -254,6 +283,7 @@ func TestFeishuGroupHistory_ThreadScopesDoNotLeakAndMainDoesNotFollowFork(t *tes
 	messages := make(chan *core.Message, 8)
 	p := newGroupHistoryTestPlatform(func(_ core.Platform, msg *core.Message) { messages <- msg })
 	p.threadIsolation = true
+	withEmptyThreads(t, p)
 
 	// A main-channel mention forks an agent session, but does not become
 	// pending history for the next main-channel mention.
