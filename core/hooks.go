@@ -11,6 +11,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 )
 
 // HookEventType enumerates the lifecycle events that can trigger hooks.
@@ -244,6 +245,24 @@ func (hm *HookManager) executeHTTP(h *HookConfig, event HookEvent) {
 	)
 }
 
+// maxHookExtraContentEnvBytes caps CC_HOOK_EXTRA_CONTENT. A quoted reply
+// chain can be long, and Linux refuses to exec a command whose single
+// environment string exceeds 128 KiB (E2BIG): the whole hook would fail
+// rather than see a shorter quote. HTTP hooks get the full value.
+const maxHookExtraContentEnvBytes = 32 << 10
+
+// clipEnvValue cuts s to at most max bytes without splitting a UTF-8 rune.
+func clipEnvValue(s string, max int) string {
+	if len(s) <= max {
+		return s
+	}
+	cut := max
+	for cut > 0 && !utf8.RuneStart(s[cut]) {
+		cut--
+	}
+	return s[:cut]
+}
+
 // eventToEnv converts a HookEvent to environment variables for shell hooks.
 func eventToEnv(e HookEvent) []string {
 	env := []string{
@@ -267,7 +286,7 @@ func eventToEnv(e HookEvent) []string {
 		env = append(env, "CC_HOOK_CONTENT="+e.Content)
 	}
 	if e.ExtraContent != "" {
-		env = append(env, "CC_HOOK_EXTRA_CONTENT="+e.ExtraContent)
+		env = append(env, "CC_HOOK_EXTRA_CONTENT="+clipEnvValue(e.ExtraContent, maxHookExtraContentEnvBytes))
 	}
 	if e.Error != "" {
 		env = append(env, "CC_HOOK_ERROR="+e.Error)

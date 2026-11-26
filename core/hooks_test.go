@@ -13,6 +13,7 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+	"unicode/utf8"
 )
 
 func boolPtr(v bool) *bool { return &v }
@@ -573,5 +574,35 @@ func TestHandleMessage_HookGetsQuotedContextOfMentionOnlyReply(t *testing.T) {
 	}
 	if strings.Contains(string(data), "CC_HOOK_CONTENT=") {
 		t.Fatalf("hook content should stay the user's own (empty) text:\n%s", data)
+	}
+}
+
+// A long quoted reply chain must not make the hook unrunnable: exec refuses
+// an environment string over 128 KiB, so the variable is clipped (on a rune
+// boundary) and the hook still runs.
+func TestEmit_CommandHookClipsLongExtraContent(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Unix shell commands (printenv) not available on Windows")
+	}
+	outFile := filepath.Join(t.TempDir(), "extra_out")
+	hm := NewHookManager("p", []HookConfig{{
+		Event:   "message.received",
+		Type:    "command",
+		Command: "printenv CC_HOOK_EXTRA_CONTENT > " + outFile,
+		Async:   boolPtr(false),
+	}}, "sh", "-c", "")
+	quote := strings.Repeat("引用", 100<<10) // 600 KiB of 3-byte runes
+	hm.Emit(HookEvent{Event: HookEventMessageReceived, ExtraContent: quote})
+
+	data, err := os.ReadFile(outFile)
+	if err != nil {
+		t.Fatalf("hook did not run with a long quote: %v", err)
+	}
+	got := strings.TrimSuffix(string(data), "\n")
+	if len(got) > maxHookExtraContentEnvBytes || !strings.HasPrefix(quote, got) || len(got) < maxHookExtraContentEnvBytes-3 {
+		t.Fatalf("CC_HOOK_EXTRA_CONTENT is %d bytes, want a prefix of at most %d", len(got), maxHookExtraContentEnvBytes)
+	}
+	if !utf8.ValidString(got) {
+		t.Fatal("clipped value splits a rune")
 	}
 }
