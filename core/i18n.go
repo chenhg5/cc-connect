@@ -205,6 +205,7 @@ const (
 	MsgSessionCloseFailed        MsgKey = "session_close_failed"
 	MsgSessionResumeUnsafe       MsgKey = "session_resume_unsafe"
 	MsgSessionCancelled          MsgKey = "session_cancelled"
+	MsgThreadWriterConflict      MsgKey = "thread_writer_conflict"
 	MsgNoExecution               MsgKey = "no_execution"
 	MsgPreviousProcessing        MsgKey = "previous_processing"
 	MsgQueueFull                 MsgKey = "queue_full"
@@ -217,6 +218,7 @@ const (
 	MsgToolAllowedNew            MsgKey = "tool_allowed_new"
 	MsgError                     MsgKey = "error"
 	MsgAttachmentUnavailable     MsgKey = "attachment_unavailable"
+	MsgCardRequesterOnly         MsgKey = "card_requester_only"
 	MsgSessionNotFound           MsgKey = "session_not_found"
 	MsgFailedToStartAgentSession MsgKey = "failed_to_start_agent_session"
 	MsgFailedToDeleteSession     MsgKey = "failed_to_delete_session"
@@ -338,6 +340,7 @@ const (
 	MsgModelCurrent          MsgKey = "model_current"
 	MsgModelChanged          MsgKey = "model_changed"
 	MsgModelChangeFailed     MsgKey = "model_change_failed"
+	MsgModelChangeQueued     MsgKey = "model_change_queued"
 	MsgModelCardSwitching    MsgKey = "model_card_switching"
 	MsgModelCardSwitched     MsgKey = "model_card_switched"
 	MsgModelCardSwitchFailed MsgKey = "model_card_switch_failed"
@@ -455,13 +458,14 @@ const (
 	MsgPermCardBody    MsgKey = "perm_card_body"
 	MsgPermCardNote    MsgKey = "perm_card_note"
 
-	MsgAskQuestionTitle     MsgKey = "ask_question_title"
-	MsgAskQuestionNote      MsgKey = "ask_question_note"
-	MsgAskQuestionNoteMulti MsgKey = "ask_question_note_multi"
-	MsgAskQuestionMulti     MsgKey = "ask_question_multi"
-	MsgAskQuestionPrompt    MsgKey = "ask_question_prompt"
-	MsgAskQuestionAnswered  MsgKey = "ask_question_answered"
-	MsgAskQuestionStale     MsgKey = "ask_question_stale"
+	MsgAskQuestionTitle       MsgKey = "ask_question_title"
+	MsgAskQuestionNote        MsgKey = "ask_question_note"
+	MsgAskQuestionNoteMulti   MsgKey = "ask_question_note_multi"
+	MsgAskQuestionMulti       MsgKey = "ask_question_multi"
+	MsgAskQuestionPrompt      MsgKey = "ask_question_prompt"
+	MsgAskQuestionAnswered    MsgKey = "ask_question_answered"
+	MsgAskQuestionStale       MsgKey = "ask_question_stale"
+	MsgAskQuestionCustomInput MsgKey = "ask_question_custom_input"
 
 	MsgCommandsTitle        MsgKey = "commands_title"
 	MsgCommandsEmpty        MsgKey = "commands_empty"
@@ -520,10 +524,13 @@ const (
 	MsgAliasNotFound   MsgKey = "alias_not_found"
 	MsgAliasUsage      MsgKey = "alias_usage"
 
-	MsgNewSessionCreated      MsgKey = "new_session_created"
-	MsgNewSessionCreatedName  MsgKey = "new_session_created_name"
-	MsgSessionAutoResetIdle   MsgKey = "session_auto_reset_idle"
-	MsgSessionClosingGraceful MsgKey = "session_closing_graceful"
+	MsgNewSessionCreated       MsgKey = "new_session_created"
+	MsgNewSessionCreatedName   MsgKey = "new_session_created_name"
+	MsgPreviousTaskStopped     MsgKey = "previous_task_stopped"
+	MsgPreviousTaskUnconfirmed MsgKey = "previous_task_unconfirmed"
+	MsgQueuedMessagesDropped   MsgKey = "queued_messages_dropped"
+	MsgSessionAutoResetIdle    MsgKey = "session_auto_reset_idle"
+	MsgSessionClosingGraceful  MsgKey = "session_closing_graceful"
 
 	MsgDeleteUsage              MsgKey = "delete_usage"
 	MsgDeleteSuccess            MsgKey = "delete_success"
@@ -861,6 +868,13 @@ var messages = map[MsgKey]map[Language]string{
 		LangJapanese:           "✅ ツール `%s` を事前許可しました。次のセッションから有効になります。",
 		LangSpanish:            "✅ Herramienta `%s` pre-autorizada. Se aplicará en la próxima sesión.",
 	},
+	MsgCardRequesterOnly: {
+		LangEnglish:            "Only the requester can operate this card",
+		LangChinese:            "此卡片仅提问者本人可操作",
+		LangTraditionalChinese: "此卡片僅提問者本人可操作",
+		LangJapanese:           "このカードは質問者本人のみ操作できます",
+		LangSpanish:            "Solo quien hizo la solicitud puede usar esta tarjeta",
+	},
 	MsgAttachmentUnavailable: {
 		LangEnglish:            "Attachment unavailable: %s. The attachment was sent but could not be read.",
 		LangChinese:            "附件无法读取：%s。消息确实带有附件，但本次未能取得文件内容。",
@@ -888,6 +902,13 @@ var messages = map[MsgKey]map[Language]string{
 		LangTraditionalChinese: "⚠️ 會話已過期，請發送 /new 開始新會話",
 		LangJapanese:           "⚠️ セッションが期限切れです。/new で新しい会話を開始してください。",
 		LangSpanish:            "⚠️ Sesión expirada. Usa /new para iniciar una nueva conversación.",
+	},
+	MsgThreadWriterConflict: {
+		LangEnglish:            "This conversation is open in another client. Close it there and retry, or start a new session.",
+		LangChinese:            "此会话正在另一个客户端中打开。请先在那里关闭后重试，或新建会话。",
+		LangTraditionalChinese: "此對話正在另一個用戶端開啟。請先在那裡關閉後重試，或建立新對話。",
+		LangJapanese:           "この会話は別のクライアントで開いています。そちらで閉じて再試行するか、新しいセッションを作成してください。",
+		LangSpanish:            "Esta conversación está abierta en otro cliente. Ciérrala allí y vuelve a intentarlo, o inicia una sesión nueva.",
 	},
 	MsgFailedToStartAgentSession: {
 		LangEnglish:            "❌ Error: failed to start agent session",
@@ -2297,6 +2318,13 @@ var messages = map[MsgKey]map[Language]string{
 		LangJapanese:           "モデルを `%s` に切り替えました。このセッションと今後のセッションで使用されます。",
 		LangSpanish:            "Modelo cambiado a `%s`. Esta sesión y las futuras usarán este modelo.",
 	},
+	MsgModelChangeQueued: {
+		LangEnglish:            "Model switched to `%s`. A reply is still in progress; the new model takes effect once it finishes.",
+		LangChinese:            "模型已切换为 `%s`。当前回复仍在进行中，新模型将在其完成后生效。",
+		LangTraditionalChinese: "模型已切換為 `%s`。目前回覆仍在進行中，新模型將在其完成後生效。",
+		LangJapanese:           "モデルを `%s` に切り替えました。現在の応答が進行中のため、完了後に新しいモデルが適用されます。",
+		LangSpanish:            "Modelo cambiado a `%s`. Hay una respuesta en curso; el nuevo modelo se aplicará cuando termine.",
+	},
 	MsgModelChangeFailed: {
 		LangEnglish:            "❌ Failed to change model: %v",
 		LangChinese:            "❌ 切换模型失败: %v",
@@ -2830,6 +2858,13 @@ var messages = map[MsgKey]map[Language]string{
 		LangJapanese:           "カンマ区切りの番号（例: 1,3）で返信するか、直接回答を入力してください",
 		LangSpanish:            "Responda con los números de opción separados por comas (ej. 1,3) o escriba su respuesta",
 	},
+	MsgAskQuestionCustomInput: {
+		LangEnglish:            "Type your custom answer in chat; choosing this option does not submit it.",
+		LangChinese:            "请在聊天中输入自定义回答；选择此项不会直接提交。",
+		LangTraditionalChinese: "請在聊天中輸入自訂回答；選擇此項不會直接提交。",
+		LangJapanese:           "カスタム回答をチャットに入力してください。この選択肢だけでは送信されません。",
+		LangSpanish:            "Escriba su respuesta personalizada en el chat; elegir esta opción no la envía.",
+	},
 	MsgAskQuestionMulti: {
 		LangEnglish:            " (multiple selections allowed, separate with commas)",
 		LangChinese:            "（可多选，用逗号分隔）",
@@ -3258,6 +3293,27 @@ var messages = map[MsgKey]map[Language]string{
 		LangTraditionalChinese: "✅ 新會話已建立：**%s**",
 		LangJapanese:           "✅ 新しいセッションを作成しました：**%s**",
 		LangSpanish:            "✅ Nueva sesión creada: **%s**",
+	},
+	MsgPreviousTaskStopped: {
+		LangEnglish:            "Previous task stopped during session reset.",
+		LangChinese:            "重置会话时已停止上一项任务。",
+		LangTraditionalChinese: "重設對話時已停止上一項任務。",
+		LangJapanese:           "セッションのリセット時に前のタスクを停止しました。",
+		LangSpanish:            "La tarea anterior se detuvo al reiniciar la sesión.",
+	},
+	MsgPreviousTaskUnconfirmed: {
+		LangEnglish:            "The previous task's process could not be confirmed stopped; check the separate close warning.",
+		LangChinese:            "无法确认上一项任务的进程已停止；请查看单独的关闭警告。",
+		LangTraditionalChinese: "無法確認上一項任務的程序已停止；請查看另行顯示的關閉警告。",
+		LangJapanese:           "前のタスクのプロセスが停止したことを確認できません。別途表示された終了警告を確認してください。",
+		LangSpanish:            "No se pudo confirmar que el proceso anterior se detuviera; revisa el aviso de cierre por separado.",
+	},
+	MsgQueuedMessagesDropped: {
+		LangEnglish:            "%d queued message(s) dropped during session reset.",
+		LangChinese:            "重置会话时丢弃了 %d 条排队消息。",
+		LangTraditionalChinese: "重設對話時捨棄了 %d 則佇列訊息。",
+		LangJapanese:           "セッションのリセット時にキュー内のメッセージ %d 件を破棄しました。",
+		LangSpanish:            "Se descartaron %d mensajes en cola al reiniciar la sesión.",
 	},
 	MsgSessionAutoResetIdle: {
 		LangEnglish:            "⏰ Session auto-reset after %d minute(s) of inactivity.",

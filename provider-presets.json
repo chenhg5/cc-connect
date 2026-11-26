@@ -681,6 +681,33 @@
       }
     },
     {
+      "name": "uberllm",
+      "display_name": "UberLLM",
+      "description": "UberLLM: one prepaid, pay-as-you-go key for Claude, GPT, DeepSeek, Qwen and other models over OpenAI- and Anthropic-compatible APIs.",
+      "description_zh": "UberLLM：一个预付费、按量计费的密钥，通过 OpenAI 和 Anthropic 兼容 API 使用 Claude、GPT、DeepSeek、Qwen 等模型。",
+      "features": ["OpenAI Compatible", "Anthropic Compatible", "Pay As You Go"],
+      "tier": 3,
+      "website": "https://uberllm.dev",
+      "agents": {
+        "claudecode": {
+          "base_url": "https://api.uberllm.dev",
+          "model": "anthropic/claude-sonnet-4.6",
+          "models": ["anthropic/claude-sonnet-4.6", "anthropic/claude-opus-4.6", "anthropic/claude-haiku-4.5"]
+        },
+        "codex": {
+          "base_url": "https://api.uberllm.dev/v1",
+          "model": "openai/gpt-5.4",
+          "models": ["openai/gpt-5.4", "openai/gpt-5.4-mini", "openai/gpt-5.3-codex"],
+          "codex_config": { "wire_api": "responses" }
+        },
+        "opencode": {
+          "base_url": "https://api.uberllm.dev/v1",
+          "model": "deepseek/deepseek-v4-flash",
+          "models": ["deepseek/deepseek-v4-flash", "qwen/qwen3-coder"]
+        }
+      }
+    },
+    {
       "name": "cloudgpu",
       "display_name": "CloudGPU",
       "description": "CloudGPU OpenAI-compatible LLM API with text models for coding agents.",
@@ -795,6 +822,135 @@
           "base_url": "https://api.trustedrouter.com/v1",
           "model": "anthropic/claude-sonnet-4.6",
           "models": ["anthropic/claude-sonnet-4.6", "openai/gpt-5.5"]
+        }
+      }
+    },
+    {
+      "name": "worldrouter",
+      "display_name": "WorldRouter",
+      "description": "AI gateway with Claude, GPT, Gemini, DeepSeek, Kimi and GLM models behind one key, through OpenAI and Anthropic compatible APIs.",
+      "description_zh": "AI 网关，一个密钥即可通过 OpenAI 和 Anthropic 兼容 API 使用 Claude、GPT、Gemini、DeepSeek、Kimi、GLM 等模型。",
+      "features": ["OpenAI Compatible", "Anthropic Compatible", "Responses API"],
+      "tier": 3,
+      "website": "https://www.worldrouter.ai",
+      "agents": {
+        "claudecode": {
+          "base_url": "https://inference-api.worldrouter.ai",
+          "model": "claude-sonnet-5-5",
+          "models": ["claude-sonnet-5-5", "claude-opus-5-5", "claude-haiku-5-5"]
+        },
+        "codex": {
+          "base_url": "https://inference-api.worldrouter.ai/v1",
+          "model": "gpt-5.4",
+          "models": ["gpt-5.4", "gpt-6.2-astra", "gpt-5.4-mini"],
+          "codex_config": {"wire_api": "responses"}
+        },
+        "opencode": {
+          "base_url": "https://inference-api.worldrouter.ai/v1",
+          "model": "claude-sonnet-5-5",
+          "models": ["claude-sonnet-5-5", "gpt-5.4", "gemini-4-neon", "deepseek-v4-flash"]
+        }
+      }
+    },
+    {
+      "name": "aigrow",
+      "display_name": "AIGROW",
+      "description": "Prepaid API credit for genuine Claude, GPT, Gemini, Grok, Qwen and Kimi models on one key, through OpenAI and Anthropic compatible APIs.",
+      "description_zh": "预付费 API 额度，一个密钥即可通过 OpenAI 和 Anthropic 兼容 API 使用正版 Claude、GPT、Gemini、Grok、Qwen 和 Kimi 模型。",
+      "features": ["OpenAI + Anthropic API", "18 Models", "Genuine Models"],
+      "tier": 3,
+      "website": "https://aigrow.gg/ai-api",
+      "agents": {
+        "claudecode": {
+          "base_url": "https://aigrow.gg",
+          "model": "claude-opus-5.5",
+          "models": ["claude-opus-5.5", "claude-sonnet-5.5", "claude-haiku-5.5"]
+        },
+        "opencode": {
+          "base_url": "https://aigrow.gg/v1",
+          "model": "claude-opus-5.5",
+          "models": ["claude-opus-5.5", "claude-sonnet-5.5", "gpt-6.2-sol", "gemini-4-neon"]
+        }
+      }
+    },
+    {
+      "name": "lazu",
+      "display_name": "Lazu",
+      "description": "AI gateway built for coding agents, routing Claude, GPT, Gemini, and DeepSeek models through Anthropic Messages, OpenAI Responses, and Chat Completions APIs.",
+      "description_zh": "面向编程智能体的 AI 网关，通过 Anthropic Messages、OpenAI Responses 和 Chat Completions 接口接入 Claude、GPT、Gemini、DeepSeek 等模型。",
+      "features": ["OpenAI Compatible", "Anthropic Compatible", "Responses API", "1M Context"],
+      "tier": 3,
+      "website": "https://lazu.ai",
+      "agents": {
+        "claudecode": {
+          "base_url": "https://api.lazu.ai",
+          "model": "claude-sonnet-5-5",
+          "models": ["claude-sonnet-5-5", "claude-opus-5-5", "claude-haiku-5-5"]
+        },
+        "codex": {
+          "base_url": "https://api.lazu.ai/v1",
+          "model": "gpt-6.2-astra",
+          "models": ["gpt-6.2-astra", "gpt-6.2-sol", "gpt-6.1-terra"],
+          "codex_config": { "wire_api": "responses" }
+        },
+        "opencode": {
+          "base_url": "https://api.lazu.ai/v1",
+          "model": "claude-sonnet-5-5",
+          "models": ["claude-sonnet-5-5", "gpt-6.2-astra", "gemini-4-hydrogen", "deepseek-v4-pro"]
+        }
+      }
+    },
+    {
+      "name": "onomeo",
+      "display_name": "onomeo",
+      "description": "AI gateway with Claude, GPT, Gemini and DeepSeek models behind one key, through Anthropic Messages, OpenAI Responses and Chat Completions APIs, plus free models.",
+      "description_zh": "AI 网关，一个密钥即可通过 Anthropic Messages、OpenAI Responses 和 Chat Completions 接口使用 Claude、GPT、Gemini、DeepSeek 等模型，另有免费模型。",
+      "features": ["OpenAI Compatible", "Anthropic Compatible", "Responses API", "Free Models"],
+      "tier": 3,
+      "website": "https://onomeo.com",
+      "agents": {
+        "claudecode": {
+          "base_url": "https://onomeo.com",
+          "model": "claude-sonnet-5.5",
+          "models": ["claude-sonnet-5.5", "claude-opus-5.5", "claude-haiku-5.5"]
+        },
+        "codex": {
+          "base_url": "https://onomeo.com/v1",
+          "model": "gpt-6.2-sol",
+          "models": ["gpt-6.2-sol", "gpt-6.1-sol", "gpt-6.1-terra"],
+          "codex_config": { "wire_api": "responses" }
+        },
+        "opencode": {
+          "base_url": "https://onomeo.com/v1",
+          "model": "deepseek-v4.1-flash",
+          "models": ["deepseek-v4.1-flash", "claude-sonnet-5.5", "gpt-6.2-sol", "gemini-4-neon"]
+        }
+      }
+    },
+    {
+      "name": "teamorouter",
+      "display_name": "TeamoRouter",
+      "description": "API gateway with Claude, GPT, Gemini, DeepSeek, GLM, Kimi and Qwen models behind one key, through Anthropic Messages, OpenAI Responses and Chat Completions APIs. Prepaid pay-as-you-go, no subscription.",
+      "description_zh": "API 网关，一个密钥即可通过 Anthropic Messages、OpenAI Responses 和 Chat Completions 接口使用 Claude、GPT、Gemini、DeepSeek、GLM、Kimi、Qwen 等模型。按量预付，无订阅。",
+      "features": ["OpenAI Compatible", "Anthropic Compatible", "Responses API"],
+      "tier": 3,
+      "website": "https://teamorouter.com",
+      "agents": {
+        "claudecode": {
+          "base_url": "https://api.teamorouter.com",
+          "model": "claude-sonnet-5-5",
+          "models": ["claude-sonnet-5-5", "claude-opus-5-5", "claude-haiku-5-5"]
+        },
+        "codex": {
+          "base_url": "https://api.teamorouter.com/v1",
+          "model": "gpt-6.2-sol",
+          "models": ["gpt-6.2-sol", "gpt-6.2-astra", "gpt-6.1-sol"],
+          "codex_config": { "wire_api": "responses" }
+        },
+        "opencode": {
+          "base_url": "https://api.teamorouter.com/v1",
+          "model": "deepseek-v4-flash",
+          "models": ["deepseek-v4-flash", "claude-sonnet-5-5", "gpt-6.2-sol", "gemini-4-neon"]
         }
       }
     }

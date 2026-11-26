@@ -489,7 +489,9 @@ func (p *Platform) Reply(ctx context.Context, rctx any, content string) error {
 		return fmt.Errorf("wecom: get access_token: %w", err)
 	}
 
-	if !p.enableMarkdown {
+	if p.enableMarkdown {
+		content = repairBoldFlanking(content)
+	} else {
 		content = core.StripMarkdown(content)
 	}
 

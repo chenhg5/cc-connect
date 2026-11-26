@@ -88,9 +88,12 @@ type acpSessionConfig struct {
 	workDir         string
 	resumeSessionID string
 	authMethod      string
-	initialMode     string           // if non-empty, applied via session/set_mode after session/new
-	initialModel    string           // if non-empty, applied via session/set_config_option after handshake
-	callbacks       sessionCallbacks // may be nil
+	initialMode     string // if non-empty, applied via session/set_mode after session/new
+	initialModel    string // if non-empty, applied via session/set_config_option after handshake
+	// initialThoughtLevel is applied the same way as initialModel, using the
+	// `thought_level` config option that some agents publish (CodeBuddy).
+	initialThoughtLevel string
+	callbacks           sessionCallbacks // may be nil
 }
 
 func newACPSession(ctx context.Context, cfg acpSessionConfig) (*acpSession, error) {
@@ -181,6 +184,15 @@ func newACPSession(ctx context.Context, cfg acpSessionConfig) (*acpSession, erro
 		if ok := s.SetLiveModel(cfg.initialModel); !ok {
 			slog.Warn("acp: initial model could not be applied",
 				"model", cfg.initialModel,
+				"session_id", s.currentACPSessionID(),
+			)
+		}
+	}
+
+	if strings.TrimSpace(cfg.initialThoughtLevel) != "" {
+		if ok := s.SetLiveThoughtLevel(cfg.initialThoughtLevel); !ok {
+			slog.Warn("acp: initial thought level could not be applied",
+				"thought_level", cfg.initialThoughtLevel,
 				"session_id", s.currentACPSessionID(),
 			)
 		}
@@ -371,6 +383,28 @@ type acpConfigOption struct {
 	} `json:"options"`
 }
 
+// UnmarshalJSON accepts non-string currentValue (CodeBuddy sends a boolean
+// "multitask" option) by coercing it to string form.
+func (o *acpConfigOption) UnmarshalJSON(data []byte) error {
+	type plain acpConfigOption
+	var raw struct {
+		plain
+		CurrentValue any `json:"currentValue"`
+	}
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return err
+	}
+	*o = acpConfigOption(raw.plain)
+	switch v := raw.CurrentValue.(type) {
+	case nil:
+	case string:
+		o.CurrentValue = v
+	default:
+		o.CurrentValue = fmt.Sprint(v)
+	}
+	return nil
+}
+
 func (s *acpSession) absorbConfigOptions(options []acpConfigOption) {
 	for _, opt := range options {
 		if opt.ID == "model" {
@@ -388,6 +422,17 @@ func (s *acpSession) absorbConfigOptions(options []acpConfigOption) {
 			}
 			if s.callbacks != nil {
 				s.callbacks.reportModels(opt.CurrentValue, models)
+			}
+		}
+		if opt.ID == "thought_level" {
+			levels := make([]string, 0, len(opt.Options))
+			for _, o := range opt.Options {
+				if o.Value != "" {
+					levels = append(levels, o.Value)
+				}
+			}
+			if s.callbacks != nil {
+				s.callbacks.reportThoughtLevels(opt.CurrentValue, levels)
 			}
 		}
 	}
@@ -418,6 +463,37 @@ func (s *acpSession) SetLiveModel(model string) bool {
 		s.absorbConfigOptions(resp.ConfigOptions)
 	}
 	slog.Info("acp: live model applied", "model", model, "session_id", sid)
+	return true
+}
+
+// SetLiveThoughtLevel changes the reasoning effort of the active session via
+// `session/set_config_option` for agents that publish a `thought_level`
+// config option.
+func (s *acpSession) SetLiveThoughtLevel(level string) bool {
+	if !s.alive.Load() {
+		return false
+	}
+	sid := s.currentACPSessionID()
+	if sid == "" {
+		return false
+	}
+	res, err := s.tr.call(s.ctx, "session/set_config_option", map[string]any{
+		"sessionId": sid,
+		"configId":  "thought_level",
+		"value":     level,
+	})
+	if err != nil {
+		slog.Warn("acp: session/set_config_option thought_level failed",
+			"error", err, "thought_level", level)
+		return false
+	}
+	var resp struct {
+		ConfigOptions []acpConfigOption `json:"configOptions"`
+	}
+	if json.Unmarshal(res, &resp) == nil && len(resp.ConfigOptions) > 0 {
+		s.absorbConfigOptions(resp.ConfigOptions)
+	}
+	slog.Info("acp: live thought level applied", "thought_level", level, "session_id", sid)
 	return true
 }
 
@@ -528,8 +604,7 @@ func (s *acpSession) onNotification(method string, params json.RawMessage) {
 	s.maybeAbsorbUsageUpdate(params)
 	s.maybeAbsorbConfigOptionUpdate(params)
 	sid := s.currentACPSessionID()
-	// Debug log to capture raw session/update JSON for troubleshooting vendor compatibility
-	slog.Debug("acp: session/update", "session_id", sid, "params", string(params))
+	slog.Debug("acp: session/update", "session_id", sid, "params_bytes", len(params))
 	hasVisible := false
 	for _, ev := range mapSessionUpdate(sid, params) {
 		if ev.Type == core.EventToolResult && toolName != "" {
@@ -685,7 +760,7 @@ func (s *acpSession) cacheToolCallInput(params json.RawMessage) {
 		input := summarizeACPToolInput(tc.Kind, tc.RawInput)
 		s.toolInputByID[tc.ToolCallID] = input
 		s.toolInputMu.Unlock()
-		slog.Info("acp: cached tool_call input", "toolCallId", tc.ToolCallID, "kind", tc.Kind, "input", input)
+		slog.Info("acp: cached tool_call input", "toolCallId", tc.ToolCallID, "kind", tc.Kind, "input_bytes", len(input))
 	case "tool_call_update":
 		var tc struct {
 			ToolCallID string          `json:"toolCallId"`
@@ -702,7 +777,7 @@ func (s *acpSession) cacheToolCallInput(params json.RawMessage) {
 		s.evictToolInputCacheIfNeededLocked()
 		s.toolInputByID[tc.ToolCallID] = input
 		s.toolInputMu.Unlock()
-		slog.Info("acp: cached tool_call_update input", "toolCallId", tc.ToolCallID, "input", input)
+		slog.Info("acp: cached tool_call_update input", "toolCallId", tc.ToolCallID, "input_bytes", len(input))
 	}
 }
 
@@ -742,7 +817,7 @@ func (s *acpSession) handlePermissionRequest(id json.RawMessage, params json.Raw
 		_ = s.tr.respondError(id, -32602, "invalid params")
 		return
 	}
-	slog.Debug("acp: permission request raw params", "params", string(params))
+	slog.Debug("acp: permission request", "params_bytes", len(params))
 	reqKey := jsonIDKey(id)
 	toolName := p.ToolCall.Title
 	if toolName == "" {
@@ -792,7 +867,7 @@ func (s *acpSession) handlePermissionRequest(id json.RawMessage, params json.Raw
 			toolInput = p.ToolCall.ToolCallID
 		}
 
-		slog.Info("acp: permission request", "request_id", reqKey, "tool", toolName, "input", toolInput)
+		slog.Info("acp: permission request", "request_id", reqKey, "tool", toolName, "input_bytes", len(toolInput))
 		s.emit(core.Event{
 			Type:         core.EventPermissionRequest,
 			RequestID:    reqKey,

@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"net"
 	"net/http"
 	"strconv"
 	"strings"
@@ -29,7 +30,10 @@ type BridgeServer struct {
 	path        string
 	corsOrigins []string
 	insecure    bool // allow running without token (local dev only)
+	stateMu     sync.RWMutex
 	server      *http.Server
+	listening   bool
+	lastError   string
 
 	mu       sync.RWMutex
 	adapters map[string]*bridgeAdapter // platform name → adapter
@@ -210,8 +214,8 @@ func (bs *BridgeServer) RegisterEngine(projectName string, engine *Engine, bp *B
 	bs.engines[projectName] = &bridgeEngineRef{engine: engine, platform: bp}
 }
 
-// Start launches the HTTP/WebSocket server.
-func (bs *BridgeServer) Start() {
+// Start binds the HTTP/WebSocket endpoint before reporting success.
+func (bs *BridgeServer) Start() error {
 	mux := http.NewServeMux()
 	mux.HandleFunc(bs.path, bs.handleWS)
 
@@ -220,14 +224,49 @@ func (bs *BridgeServer) Start() {
 	mux.HandleFunc("/bridge/sessions/", bs.corsHTTP(bs.authHTTP(bs.handleSessionRoutes)))
 
 	addr := fmt.Sprintf(":%d", bs.port)
-	bs.server = &http.Server{Addr: addr, Handler: mux}
+	ln, err := net.Listen("tcp", addr)
+	if err != nil {
+		bs.stateMu.Lock()
+		bs.listening = false
+		bs.lastError = err.Error()
+		bs.stateMu.Unlock()
+		return fmt.Errorf("bridge: listen on %s: %w", addr, err)
+	}
+	server := &http.Server{Addr: addr, Handler: mux}
+	bs.stateMu.Lock()
+	bs.server = server
+	bs.listening = true
+	bs.lastError = ""
+	bs.stateMu.Unlock()
 
 	go func() {
 		slog.Info("bridge: server started", "addr", addr, "path", bs.path)
-		if err := bs.server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			slog.Error("bridge: server error", "error", err)
+		serveErr := server.Serve(ln)
+		bs.stateMu.Lock()
+		bs.listening = false
+		if serveErr != nil && serveErr != http.ErrServerClosed {
+			bs.lastError = serveErr.Error()
+		}
+		bs.stateMu.Unlock()
+		if serveErr != nil && serveErr != http.ErrServerClosed {
+			slog.Error("bridge: server error", "error", serveErr)
 		}
 	}()
+	return nil
+}
+
+// Listening reports whether the bridge endpoint is accepting connections.
+func (bs *BridgeServer) Listening() bool {
+	bs.stateMu.RLock()
+	defer bs.stateMu.RUnlock()
+	return bs.listening
+}
+
+// LastError reports the latest bind or serve failure, if any.
+func (bs *BridgeServer) LastError() string {
+	bs.stateMu.RLock()
+	defer bs.stateMu.RUnlock()
+	return bs.lastError
 }
 
 // corsHTTP wraps a handler with CORS headers. OPTIONS preflight is handled directly.
@@ -268,12 +307,18 @@ func (bs *BridgeServer) Stop() {
 	bs.adapters = make(map[string]*bridgeAdapter)
 	bs.mu.Unlock()
 
-	if bs.server != nil {
+	bs.stateMu.RLock()
+	server := bs.server
+	bs.stateMu.RUnlock()
+	if server != nil {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
-		if err := bs.server.Shutdown(ctx); err != nil && err != http.ErrServerClosed {
+		if err := server.Shutdown(ctx); err != nil && err != http.ErrServerClosed {
 			slog.Debug("bridge: server shutdown failed", "error", err)
 		}
+		bs.stateMu.Lock()
+		bs.listening = false
+		bs.stateMu.Unlock()
 	}
 }
 

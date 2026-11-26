@@ -174,7 +174,7 @@ func (p *Platform) refreshToken() (string, error) {
 	}
 
 	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("weibo: token HTTP %d: %s", resp.StatusCode, string(raw))
+		return "", core.HTTPError("weibo: token", resp.StatusCode, raw, p.appSecret, p.appID)
 	}
 
 	var tr tokenResponse
@@ -182,7 +182,7 @@ func (p *Platform) refreshToken() (string, error) {
 		return "", fmt.Errorf("weibo: parse token response: %w", err)
 	}
 	if tr.Data.Token == "" {
-		return "", fmt.Errorf("weibo: empty token in response: %s", string(raw))
+		return "", fmt.Errorf("weibo: empty token in response (body_bytes=%d)", len(raw))
 	}
 
 	p.token = tr.Data.Token
@@ -305,11 +305,11 @@ type wsMessage struct {
 }
 
 type messagePayload struct {
-	MessageID  string              `json:"messageId"`
-	FromUserID string              `json:"fromUserId"`
-	Text       string              `json:"text"`
-	Timestamp  int64               `json:"timestamp"`
-	Input      []messageInputItem  `json:"input,omitempty"`
+	MessageID  string             `json:"messageId"`
+	FromUserID string             `json:"fromUserId"`
+	Text       string             `json:"text"`
+	Timestamp  int64              `json:"timestamp"`
+	Input      []messageInputItem `json:"input,omitempty"`
 }
 
 type messageInputItem struct {
