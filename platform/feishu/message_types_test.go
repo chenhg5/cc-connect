@@ -318,6 +318,53 @@ func TestOnMessage_VideoChatReachesAgent(t *testing.T) {
 	}
 }
 
+func TestOnMessage_InteractiveGroupCardReachesAgentOnlyWithBotMention(t *testing.T) {
+	const card = `{"header":{"title":{"tag":"plain_text","content":"系统告警"}},"body":{"elements":[{"tag":"div","text":{"tag":"lark_md","content":"CPU 使用率 95%"}}]}}`
+	const rawCard = `{"schema":"2.0","header":{"title":{"content":"系统告警"}},"body":{"property":{"elements":[{"tag":"markdown","property":{"content":"CPU 使用率 95%"}}]}}}`
+	const expected = "[interactive card]\n系统告警\nCPU 使用率 95%"
+	for _, tc := range []struct {
+		name, content, rawContent, mention, want string
+	}{
+		{"readable", card, "", "ou_bot", expected},
+		{"degraded event", `{"elements":[[{"tag":"text","text":"请升级至最新版本客户端，以查看内容"}]]}`, `{"json_card":` + strconv.Quote(rawCard) + `}`, "ou_bot", expected},
+		{"visual mention only", `{"title":"<at id=ou_bot></at> 系统告警"}`, "", "", ""},
+		{"different bot", card, "", "ou_other", ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := make(chan *core.Message, 1)
+			p := newMessageTypesPlatform(t, "om_card", "interactive", tc.rawContent, func(_ core.Platform, msg *core.Message) { got <- msg })
+			p.groupReplyAll = true
+			msg := &larkim.EventMessage{
+				MessageId: strPtr("om_card"), ChatId: strPtr("oc_group"), ChatType: strPtr("group"),
+				MessageType: strPtr("interactive"), Content: strPtr(tc.content),
+			}
+			if tc.mention != "" {
+				msg.Mentions = []*larkim.MentionEvent{{Id: &larkim.UserId{OpenId: strPtr(tc.mention)}}}
+			}
+			if err := p.onMessage(context.Background(), &larkim.P2MessageReceiveV1{Event: &larkim.P2MessageReceiveV1Data{
+				Sender:  &larkim.EventSender{SenderId: &larkim.UserId{OpenId: strPtr("ou_alice")}, SenderType: strPtr("user")},
+				Message: msg,
+			}}); err != nil {
+				t.Fatalf("onMessage: %v", err)
+			}
+			deadline := 3 * time.Second
+			if tc.want == "" {
+				deadline = 100 * time.Millisecond
+			}
+			select {
+			case received := <-got:
+				if received.Content != tc.want || tc.want == "" {
+					t.Fatalf("unexpected agent input %q, expected content %q", received.Content, tc.want)
+				}
+			case <-time.After(deadline):
+				if tc.want != "" {
+					t.Fatal("addressed interactive card never reached the agent handler")
+				}
+			}
+		})
+	}
+}
+
 func TestDispatchMessage_UnhandledMessageTypes(t *testing.T) {
 	pinFeishuDisplayLocation(t)
 	cases := []struct {
@@ -330,7 +377,6 @@ func TestDispatchMessage_UnhandledMessageTypes(t *testing.T) {
 		{"vote", `{"topic":"Lunch","options":["noodles","rice"]}`, "[vote: Lunch, options: noodles / rice]"},
 		{"folder", `{"file_key":"fk","file_name":"docs"}`, "[unsupported Feishu message: folder]"},
 		{"system", `{"template":"{from_user} invited {to_chatters} to this chat.","from_user":["bot"],"to_chatters":["Alice"]}`, ""},
-		{"interactive", `{"title":"Alert","elements":[]}`, ""},
 	}
 	for _, tc := range cases {
 		t.Run(tc.msgType, func(t *testing.T) {

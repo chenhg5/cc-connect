@@ -521,10 +521,10 @@ func randomServerPassword() (string, error) {
 func ensureLoopbackURL(raw string) (string, error) {
 	u, err := url.Parse(raw)
 	if err != nil {
-		return "", fmt.Errorf("opencode server: parse listen address %q: %w", raw, err)
+		return "", fmt.Errorf("opencode server: parse listen address (length %d): %w", len(raw), err)
 	}
 	if u.Scheme != "http" && u.Scheme != "https" {
-		return "", fmt.Errorf("opencode server: listen address %q is not http(s)", raw)
+		return "", fmt.Errorf("opencode server: listen address scheme %q is not http(s)", u.Scheme)
 	}
 	host := u.Hostname()
 	if host == "localhost" {
@@ -533,7 +533,7 @@ func ensureLoopbackURL(raw string) (string, error) {
 	if ip := net.ParseIP(host); ip != nil && ip.IsLoopback() {
 		return u.String(), nil
 	}
-	return "", fmt.Errorf("opencode server: refusing to talk to non-loopback address %q", raw)
+	return "", fmt.Errorf("opencode server: refusing to talk to non-loopback host %q", core.SafeURLHost(raw))
 }
 
 // opencodeHTTPClient is used for every call to the local server. Redirects are
@@ -1058,6 +1058,7 @@ func newServerSessionOn(ctx context.Context, srv *opencodeServer, serveCfg openc
 		agentName:     agentName,
 		mode:          mode,
 		sessionID:     resumeID,
+		turnFinished:  -1, // no turn has finished yet; gen 0 is a real first turn
 		assistantMsgs: map[string]struct{}{},
 		userMsgs:      map[string]struct{}{},
 		emittedTools:  map[string]struct{}{},

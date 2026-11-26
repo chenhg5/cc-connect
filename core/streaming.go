@@ -8,6 +8,15 @@ import (
 	"time"
 )
 
+const (
+	StopBehaviorDiscard = "discard"
+	StopBehaviorFreeze  = "freeze"
+)
+
+func StopBehaviorIsValid(value string) bool {
+	return value == "" || value == StopBehaviorDiscard || value == StopBehaviorFreeze
+}
+
 // StreamPreviewCfg controls the streaming preview behavior.
 type StreamPreviewCfg struct {
 	Enabled           bool     // global toggle
@@ -15,6 +24,7 @@ type StreamPreviewCfg struct {
 	IntervalMs        int      // minimum ms between updates (default 1500)
 	MinDeltaChars     int      // minimum new chars before sending an update (default 30)
 	MaxChars          int      // max preview length (default 2000)
+	StopBehavior      string   // "discard" (default) or "freeze" on /stop
 }
 
 // DefaultStreamPreviewCfg returns sensible defaults.
@@ -25,6 +35,7 @@ func DefaultStreamPreviewCfg() StreamPreviewCfg {
 		IntervalMs:        1500,
 		MinDeltaChars:     30,
 		MaxChars:          2000,
+		StopBehavior:      StopBehaviorDiscard,
 	}
 }
 
@@ -103,7 +114,7 @@ type RichCardMarkdownResolver interface {
 // MarkdownTableSplitter is an optional interface for platforms that need
 // platform-specific markdown table chunking before final send.
 type MarkdownTableSplitter interface {
-	SplitMarkdownByTables(md string, maxTables int) []string
+	SplitMarkdownByTables(md string) []string
 }
 
 // RichCardTextStreamer is an optional interface for platforms that support
@@ -552,7 +563,7 @@ func (sp *streamPreview) detachPreview() {
 func (sp *streamPreview) appendSeparator(sep string) bool {
 	sp.mu.Lock()
 	defer sp.mu.Unlock()
-	if sp.degraded || !sp.cfg.Enabled || sp.fullText == "" {
+	if sp.degraded || !sp.cfg.Enabled || sp.fullText == "" || strings.HasSuffix(sp.fullText, sep) {
 		return false
 	}
 	sp.fullText += sep

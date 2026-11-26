@@ -18,6 +18,11 @@ func TestEscapeSystemdEnvValue(t *testing.T) {
 		{"new\nline", `new\nline`},
 		{"tab\there", `tab\there`},
 		{"return\rback", `return\rback`},
+		// systemd expands specifiers in Environment= values, so a literal %
+		// has to be doubled or the unit breaks / silently rewrites.
+		{`100%`, `100%%`},
+		{`/home/a%Q`, `/home/a%%Q`},
+		{`/home/a%n`, `/home/a%%n`},
 	}
 	for _, c := range cases {
 		if got := escapeSystemdEnvValue(c.in); got != c.want {
@@ -39,6 +44,40 @@ func TestBuildUnit_EscapesEnvValue(t *testing.T) {
 	out := mgr.buildUnit(cfg)
 	if !strings.Contains(out, `Environment="TRICKY=a\"b\\c"`) {
 		t.Errorf("expected escaped Environment line; got:\n%s", out)
+	}
+}
+
+// systemd expands specifiers in Environment= values, so a HOME containing a
+// literal % has to be doubled: %Q makes the unit invalid, and %n silently
+// expands to the unit name — pointing HOME at a directory that does not exist.
+func TestBuildUnit_EscapesPercentSpecifiersInHOME(t *testing.T) {
+	cases := []struct {
+		name string
+		home string
+		want string
+	}{
+		{"unknown specifier", `/home/a%Q`, `Environment="HOME=/home/a%%Q"`},
+		{"unit-name specifier", `/home/a%n`, `Environment="HOME=/home/a%%n"`},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			mgr := &systemdManager{system: true}
+			cfg := Config{
+				BinaryPath: "/bin/true",
+				WorkDir:    "/tmp",
+				LogFile:    "/tmp/log",
+				LogMaxSize: 1024,
+				EnvPATH:    "/usr/bin",
+				HomeDir:    c.home,
+			}
+			out := mgr.buildUnit(cfg)
+			if !strings.Contains(out, c.want) {
+				t.Fatalf("unit should render %s; got:\n%s", c.want, out)
+			}
+			if strings.Contains(out, c.home) {
+				t.Fatalf("unescaped %q leaked into the unit:\n%s", c.home, out)
+			}
+		})
 	}
 }
 
