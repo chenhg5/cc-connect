@@ -225,6 +225,15 @@ level = "info" # debug, info, warn, error
 # [[projects]]
 # agent_session_idle_timeout_mins = 30
 
+# queue_notice: whether a message that waits for the running turn gets the
+# "will process after the current task finishes" reply (default true). false
+# queues it silently; it is still answered in order, and a full queue is still
+# reported.
+# queue_notice：消息需要等当前任务结束时，是否回复「将在当前任务完成后处理」（默认 true）。
+# false 时静默排队，仍按顺序处理；队列已满照常提示。
+# [[projects]]
+# queue_notice = false
+
 # =============================================================================
 # OS-user isolation via run_as_user (Linux/macOS only)
 # 通过 run_as_user 实现 OS 用户隔离（仅限 Linux/macOS）
