@@ -1043,9 +1043,13 @@ func TestBuildPreviewCardJSON_ProgressPayloadUsesStructuredCard(t *testing.T) {
 	if err := json.Unmarshal([]byte(cardJSON), &card); err != nil {
 		t.Fatalf("card JSON is invalid: %v", err)
 	}
-	header, ok := card["header"].(map[string]any)
-	if !ok || header == nil {
-		t.Fatalf("expected header in card json, got %#v", card["header"])
+	// The status is the first body element: a card header cannot be updated
+	// in place, and progress cards are refreshed in place.
+	elements := card["body"].(map[string]any)["elements"].([]any)
+	status, _ := elements[0].(map[string]any)
+	content, _ := status["content"].(string)
+	if status["element_id"] != progressStatusElementID || !strings.Contains(content, "Codex · Running") {
+		t.Fatalf("first body element should be the status line, got %#v", status)
 	}
 }
 
