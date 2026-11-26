@@ -4883,6 +4883,20 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				}
 			}
 			turnDuration := time.Since(turnStart)
+			receipt := ""
+			if !isSilent {
+				// A stale card may keep showing an old elapsed time on the
+				// client, so the reply restates the terminal state. Fresh cards
+				// return "" here and healthy turns stay free of duplicates.
+				receipt = e.terminalReceipt(stateTaskCard(state), turnDuration)
+				if receipt != "" {
+					if strings.TrimSpace(cleanResponse) == "" {
+						cleanResponse = receipt
+					} else {
+						cleanResponse = strings.TrimRight(cleanResponse, "\n") + "\n\n" + receipt
+					}
+				}
+			}
 			if !isSilent {
 				footerContext := replyFooterContextText(replyFooterSessionContextUsage(state.agentSession), e.i18n)
 				if contextText != "" && e.replyFooterEnabled {
@@ -4903,6 +4917,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				"tools", toolCount,
 				"response_len", len(fullResponse),
 				"turn_duration", turnDuration,
+				"card_receipt", receipt != "",
 				"input_tokens", event.InputTokens,
 				"output_tokens", event.OutputTokens,
 				"silent", isSilent,
@@ -8752,6 +8767,12 @@ func (e *Engine) cmdTTS(p Platform, msg *Message, args []string) {
 
 func (e *Engine) cmdStop(p Platform, msg *Message) {
 	iKey := e.interactiveKeyForSessionKey(msg.SessionKey)
+
+	// Card actions carry the message id they came from (routed through the
+	// platform log); this line names the card that is live right now, so a
+	// stale card's stop button can be recognised after the fact.
+	slog.Info("user stop requested", "session", msg.SessionKey,
+		"card_message_id", e.liveTaskCardID(iKey))
 
 	// Preferred path: interrupt the in-flight turn (milliseconds, keeps the
 	// process and context alive). Falls back to a hard stop for agents that

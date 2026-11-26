@@ -349,6 +349,14 @@ type TaskCardSender interface {
 	UpdateTaskCard(ctx context.Context, handle any, card *Card) error
 }
 
+// TaskCardHandleIDer is an optional interface for task-card handles that can
+// expose the platform message id. It exists purely for log correlation: the
+// terminal and refresh logs carry it so an incident can be traced back to the
+// exact message the user saw.
+type TaskCardHandleIDer interface {
+	TaskCardMessageID() string
+}
+
 // TaskCardTickerSender is an optional interface for platforms that can make a
 // single, non-retrying task-card update. The independent ticker uses it so a
 // rate-limited tick returns immediately and the card's own backoff controls the

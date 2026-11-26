@@ -757,7 +757,8 @@ func (p *Platform) onCardAction(event *callback.CardActionTriggerEvent) (*callba
 		cmdText := strings.TrimPrefix(actionVal, "cmd:")
 		rctx := replyContext{messageID: messageID, chatID: chatID, sessionKey: sessionKey}
 
-		slog.Info(p.tag()+": card action dispatched as command", "cmd", cmdText, "user", userID)
+		slog.Info(p.tag()+": card action dispatched as command",
+			"cmd", cmdText, "user", userID, "message_id", messageID)
 
 		go p.handler(p.dispatchPlatform(), &core.Message{
 			SessionKey: sessionKey,

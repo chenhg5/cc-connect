@@ -33,6 +33,10 @@ const (
 	taskCardRetryGap = 15 * time.Second
 	// taskCardDegradedGap is the slower cadence after sustained rejections.
 	taskCardDegradedGap = 30 * time.Second
+	// taskCardStaleReceiptGap is how old the card's last accepted frame may be
+	// before the reply restates the terminal state itself. Below this the card
+	// is fresh enough that a receipt would only duplicate it.
+	taskCardStaleReceiptGap = 10 * time.Second
 )
 
 // taskCardTerminalRetryDelays is a variable so tests can shorten the wait.
@@ -85,6 +89,15 @@ type turnCard struct {
 	rendering        bool // a card request is in flight
 	pendingRender    bool // a refresh was requested while rendering
 	failCount        int
+	// Refresh telemetry: fields only, never a log line of its own. Attached to
+	// the terminal line so a frozen clock can be explained from one log entry.
+	renderCalls      int           // refreshes that reached the network
+	skipsThrottled   int           // refreshes suppressed by the render gap
+	skipsInFlight    int           // refreshes coalesced behind an in-flight request
+	skipsNotStarted  int           // event refreshes dropped before the start threshold
+	failMax          int           // highest consecutive-failure count seen
+	maxRenderLatency time.Duration // slowest card request of the turn
+	lastRenderOK     time.Time     // last frame the platform accepted
 	visible          bool          // true once the card message exists
 	tickInterval     time.Duration // 0 = no independent ticker
 	startDelay       time.Duration // how long a turn may run before the first post
@@ -252,7 +265,10 @@ func (tc *turnCard) heartbeat(interval time.Duration) {
 	ticker := time.NewTicker(interval)
 	defer func() {
 		ticker.Stop()
-		slog.Info("task card ticker stopped", "platform", tc.senderName(), "session", tc.key)
+		d := tc.diag()
+		slog.Info("task card ticker stopped", "platform", tc.senderName(), "session", tc.key,
+			"message_id", tc.taskCardMessageID(), "refreshes", d.refreshes,
+			"max_refresh_ms", d.maxLatency.Milliseconds())
 	}()
 	for {
 		select {
@@ -337,6 +353,11 @@ func (tc *turnCard) Finish(status taskCardStatus, note string) {
 	// below will run after it (FIFO outbox), so the card must not be treated as
 	// non-existent just because the create has not completed yet.
 	hasCard := tc.visible || tc.handle != nil || tc.creating
+	visible := tc.visible
+	creating := tc.creating
+	fails := tc.failCount
+	renders := tc.renderCalls
+	started := tc.started
 	tc.mu.Unlock()
 
 	tc.once.Do(func() { close(tc.done) })
@@ -344,6 +365,14 @@ func (tc *turnCard) Finish(status taskCardStatus, note string) {
 	if !hasCard {
 		// The card was never posted (the turn finished before the start delay
 		// or no card was ever rendered); nothing to finish, no text fallback.
+		// Logged at warn: if refreshes were attempted but no handle was ever
+		// recorded, the card may exist server-side while this process believes
+		// it does not, and the card stays "running" forever.
+		slog.Warn("task card terminal skipped: no card handle",
+			"platform", tc.senderName(), "session", tc.key, "status", status,
+			"refreshes", renders, "consecutive_failures", fails,
+			"creating", creating, "visible", visible,
+			"elapsed", formatCardElapsed(time.Since(started)))
 		return
 	}
 
@@ -356,13 +385,23 @@ func (tc *turnCard) Finish(status taskCardStatus, note string) {
 	// the next turn's answer behind ~47s of sleeps.
 	tc.e.outboxFor(tc.key).push(func() {
 		err := tc.applyCard(card)
+		d := tc.diag()
 		if err == nil {
 			slog.Info("task card terminal state delivered",
-				"platform", tc.senderName(), "attempt", 1, "status", status)
+				"platform", tc.senderName(), "attempt", 1, "status", status,
+				"message_id", tc.taskCardMessageID(), "title", cardTitle(card),
+				"elapsed", formatCardElapsed(time.Since(started)),
+				"refreshes", d.refreshes, "skips_throttled", d.throttled,
+				"skips_in_flight", d.inFlight, "skips_not_started", d.notStarted,
+				"fail_max", d.failMax, "max_refresh_ms", d.maxLatency.Milliseconds())
 			return
 		}
 		slog.Warn("task card terminal update failed",
 			"platform", tc.senderName(), "attempt", 1,
+			"message_id", tc.taskCardMessageID(), "title", cardTitle(card),
+			"refreshes", d.refreshes, "skips_throttled", d.throttled,
+			"skips_in_flight", d.inFlight, "skips_not_started", d.notStarted,
+			"fail_max", d.failMax, "max_refresh_ms", d.maxLatency.Milliseconds(),
 			"will_retry", len(taskCardTerminalRetryDelays) > 1, "error", err)
 		go tc.retryTerminal(card, status, 1)
 	})
@@ -384,12 +423,15 @@ func (tc *turnCard) retryTerminal(card *Card, status taskCardStatus, startAttemp
 		}
 		if err := tc.applyCard(card); err == nil {
 			slog.Info("task card terminal state delivered",
-				"platform", tc.senderName(), "attempt", i+1, "status", status)
+				"platform", tc.senderName(), "attempt", i+1, "status", status,
+				"message_id", tc.taskCardMessageID(), "title", cardTitle(card),
+				"elapsed", formatCardElapsed(time.Since(tc.started)))
 			return
 		} else {
 			lastErr = err
 			slog.Warn("task card terminal update failed",
 				"platform", tc.senderName(), "attempt", i+1,
+				"message_id", tc.taskCardMessageID(), "title", cardTitle(card),
 				"will_retry", i+1 < len(delays), "error", err)
 		}
 	}
@@ -415,6 +457,10 @@ func (tc *turnCard) applyCard(card *Card) error {
 
 	var err error
 	if handle == nil {
+		// No handle: this terminal attempt posts a brand-new card. If an earlier
+		// create failed after the platform had already created the message, the
+		// user keeps a frozen "running" card and a second terminal card appears;
+		// the message ids in these two lines are what proves it.
 		var h any
 		h, err = tc.sender.SendTaskCard(ctx, tc.replyCtx, card)
 		tc.mu.Lock()
@@ -423,13 +469,24 @@ func (tc *turnCard) applyCard(card *Card) error {
 			tc.handle = h
 			tc.visible = true
 			tc.failCount = 0
+			tc.lastRenderOK = time.Now()
 		}
 		tc.mu.Unlock()
+		if err == nil {
+			slog.Info("task card terminal created new message",
+				"platform", tc.senderName(), "session", tc.key,
+				"message_id", taskCardHandleID(h), "title", cardTitle(card))
+		} else {
+			slog.Warn("task card terminal create failed",
+				"platform", tc.senderName(), "session", tc.key,
+				"title", cardTitle(card), "error", err)
+		}
 	} else {
 		err = tc.sender.UpdateTaskCard(ctx, handle, card)
 		if err == nil {
 			tc.mu.Lock()
 			tc.failCount = 0
+			tc.lastRenderOK = time.Now()
 			tc.mu.Unlock()
 		}
 	}
@@ -548,6 +605,7 @@ func (tc *turnCard) renderWith(policy renderPolicy) {
 	// Before the start threshold the card must not exist yet: step/queue
 	// updates only refresh memory. EnsureStarted renders with renderForced.
 	if !tc.cardStarted && policy != renderForced {
+		tc.skipsNotStarted++
 		tc.mu.Unlock()
 		slog.Debug("task card refresh skipped", "platform", tc.senderName(), "reason", "not_started")
 		return
@@ -555,6 +613,7 @@ func (tc *turnCard) renderWith(policy renderPolicy) {
 	// A create is already in flight; don't enqueue a second one.
 	if tc.handle == nil && tc.creating {
 		tc.pendingRender = true
+		tc.skipsInFlight++
 		tc.mu.Unlock()
 		slog.Debug("task card refresh skipped", "platform", tc.senderName(), "reason", "create_in_flight")
 		return
@@ -564,6 +623,7 @@ func (tc *turnCard) renderWith(policy renderPolicy) {
 	// refresh instead of queueing unboundedly behind it.
 	if tc.rendering {
 		tc.pendingRender = true
+		tc.skipsInFlight++
 		tc.mu.Unlock()
 		slog.Debug("task card refresh skipped", "platform", tc.senderName(), "reason", "render_in_flight")
 		return
@@ -586,6 +646,7 @@ func (tc *turnCard) renderWith(policy renderPolicy) {
 	}
 	if policy != renderForced && now.Sub(tc.lastRender) < minGap {
 		gap := now.Sub(tc.lastRender)
+		tc.skipsThrottled++
 		tc.mu.Unlock()
 		slog.Debug("task card refresh skipped",
 			"platform", tc.senderName(), "reason", "throttled",
@@ -599,6 +660,7 @@ func (tc *turnCard) renderWith(policy renderPolicy) {
 		tc.creating = true
 	}
 	tc.rendering = true
+	tc.renderCalls++
 	tc.mu.Unlock()
 
 	// The network call runs on the session's outbox goroutine so the turn loop
@@ -629,7 +691,9 @@ func (tc *turnCard) renderWith(policy renderPolicy) {
 		ctx, cancel := context.WithTimeout(tc.e.ctx, 10*time.Second)
 		defer cancel()
 
+		start := time.Now()
 		var err error
+		msgID := taskCardHandleID(handle)
 		op := "update"
 		if handle == nil {
 			op = "create"
@@ -642,6 +706,7 @@ func (tc *turnCard) renderWith(policy renderPolicy) {
 				tc.visible = true
 			}
 			tc.mu.Unlock()
+			msgID = taskCardHandleID(h)
 		} else {
 			// Ticker refreshes use a single attempt so the card's own backoff
 			// (15s/30s) controls the cadence; terminal delivery still uses the
@@ -652,15 +717,23 @@ func (tc *turnCard) renderWith(policy renderPolicy) {
 				err = tc.sender.UpdateTaskCard(ctx, handle, card)
 			}
 		}
+		took := time.Since(start)
 		tc.mu.Lock()
 		prevFails := tc.failCount
 		if err == nil {
 			tc.failCount = 0
 			tc.degradedNotified = false
+			tc.lastRenderOK = time.Now()
 		} else {
 			tc.failCount++
 		}
 		fails := tc.failCount
+		if fails > tc.failMax {
+			tc.failMax = fails
+		}
+		if took > tc.maxRenderLatency {
+			tc.maxRenderLatency = took
+		}
 		degraded := fails >= taskCardDegradedThreshold
 		notify := degraded && !tc.degradedNotified
 		if notify {
@@ -678,6 +751,7 @@ func (tc *turnCard) renderWith(policy renderPolicy) {
 			}
 			slog.Debug("task card refresh delivered",
 				"platform", tc.senderName(), "op", op,
+				"message_id", msgID, "took", took.Round(time.Millisecond),
 				"policy", renderPolicyName(policy), "elapsed", formatCardElapsed(elapsed),
 				"finished", finished)
 			return
@@ -686,7 +760,8 @@ func (tc *turnCard) renderWith(policy renderPolicy) {
 		// Log every failed refresh with enough context to reconstruct the
 		// incident from cc-connect.log alone.
 		slog.Warn("task card refresh failed",
-			"platform", tc.senderName(), "op", op, "consecutive", fails,
+			"platform", tc.senderName(), "op", op, "message_id", msgID,
+			"took", took.Round(time.Millisecond), "consecutive", fails,
 			"degraded", degraded, "finished", finished,
 			"visible", visible, "error", err)
 		if notify {
@@ -705,6 +780,104 @@ func (tc *turnCard) senderName() string {
 		return p.Name()
 	}
 	return "unknown"
+}
+
+// taskCardHandleID extracts the platform message id from a card handle so log
+// lines can be matched to the message the user is actually looking at. Handles
+// that do not expose an id log an empty value; nothing else changes.
+func taskCardHandleID(handle any) string {
+	if handle == nil {
+		return ""
+	}
+	if h, ok := handle.(TaskCardHandleIDer); ok {
+		return h.TaskCardMessageID()
+	}
+	return ""
+}
+
+// cardDiag is the per-turn refresh telemetry attached to the terminal log
+// line. It answers "why did the elapsed clock freeze" from a single entry,
+// without adding lines on healthy turns.
+type cardDiag struct {
+	refreshes  int
+	throttled  int
+	inFlight   int
+	notStarted int
+	failMax    int
+	maxLatency time.Duration
+}
+
+func (tc *turnCard) diag() cardDiag {
+	tc.mu.Lock()
+	defer tc.mu.Unlock()
+	return cardDiag{
+		refreshes:  tc.renderCalls,
+		throttled:  tc.skipsThrottled,
+		inFlight:   tc.skipsInFlight,
+		notStarted: tc.skipsNotStarted,
+		failMax:    tc.failMax,
+		maxLatency: tc.maxRenderLatency,
+	}
+}
+
+// shouldAppendTerminalReceipt reports whether the reply should restate the
+// terminal state. The trigger is the card's own frame age: when the last frame
+// the platform accepted is already well past one ticker interval, the client is
+// probably showing an older elapsed time (Feishu does not always repaint a
+// patched card), so the reply carries the final number instead. Fresh cards
+// stay quiet, which keeps healthy turns free of duplicate "done" lines.
+func shouldAppendTerminalReceipt(tc *turnCard) bool {
+	if tc == nil {
+		return false
+	}
+	tc.mu.Lock()
+	finished, visible := tc.finished, tc.visible
+	ticking, last := tc.tickInterval > 0, tc.lastRenderOK
+	tc.mu.Unlock()
+	// A finished card belongs to an earlier turn (proactive/cron turns keep the
+	// previous card in state and never post their own), so it must not trigger
+	// a receipt on an unrelated reply.
+	if finished || !visible || !ticking || last.IsZero() {
+		return false
+	}
+	return time.Since(last) >= taskCardStaleReceiptGap
+}
+
+// terminalReceipt returns the reply line that restates the terminal state, or
+// "" when the card is fresh enough that repeating it would only duplicate.
+func (e *Engine) terminalReceipt(tc *turnCard, d time.Duration) string {
+	if !shouldAppendTerminalReceipt(tc) {
+		return ""
+	}
+	return e.i18n.Tf(MsgTaskCardDone, formatCardElapsed(d))
+}
+
+// liveTaskCardID returns the message id of the session's current card. Card
+// actions log it so a stop click can be matched to the card it came from.
+func (e *Engine) liveTaskCardID(sessionKey string) string {
+	e.interactiveMu.Lock()
+	state := e.interactiveStates[sessionKey]
+	e.interactiveMu.Unlock()
+	if tc := stateTaskCard(state); tc != nil {
+		return tc.taskCardMessageID()
+	}
+	return ""
+}
+
+// cardTitle returns the rendered title for log correlation.
+func cardTitle(card *Card) string {
+	if card == nil || card.Header == nil {
+		return ""
+	}
+	return card.Header.Title
+}
+
+// taskCardMessageID returns the id of the message currently backing the card.
+func (tc *turnCard) taskCardMessageID() string {
+	tc.mu.Lock()
+	handle := tc.handle
+	tc.mu.Unlock()
+	return taskCardHandleID(handle)
 }
 
 // buildCardLocked renders the card. Callers must hold tc.mu.

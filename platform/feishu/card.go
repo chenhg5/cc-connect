@@ -517,6 +517,14 @@ type feishuTaskCardHandle struct {
 	sessionKey string
 }
 
+// TaskCardMessageID exposes the message id for log correlation.
+func (h *feishuTaskCardHandle) TaskCardMessageID() string {
+	if h == nil {
+		return ""
+	}
+	return h.messageID
+}
+
 // SendTaskCard posts a progress card and returns a handle for in-place updates.
 func (p *interactivePlatform) SendTaskCard(ctx context.Context, rctx any, card *core.Card) (any, error) {
 	rc, ok := rctx.(replyContext)

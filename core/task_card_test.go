@@ -915,3 +915,79 @@ func TestSyncTaskCardQueueEmptyKeepsCardLazy(t *testing.T) {
 	}
 	tc.Finish(taskCardDone, "")
 }
+
+// logHandle is a stub card handle that exposes a message id, mirroring the
+// feishu handle used for log correlation.
+type logHandle string
+
+func (h logHandle) TaskCardMessageID() string { return string(h) }
+
+// TestTaskCardHandleID locks the log-correlation helper: handles that expose a
+// message id are reported, everything else degrades to an empty string.
+func TestTaskCardHandleID(t *testing.T) {
+	if got := taskCardHandleID(nil); got != "" {
+		t.Fatalf("nil handle id = %q, want empty", got)
+	}
+	if got := taskCardHandleID("handle-1"); got != "" {
+		t.Fatalf("plain handle id = %q, want empty", got)
+	}
+	if got := taskCardHandleID(logHandle("om_123")); got != "om_123" {
+		t.Fatalf("handle id = %q, want om_123", got)
+	}
+}
+
+// TestShouldAppendTerminalReceipt locks the staleness rule: the reply restates
+// the terminal state only when the card's last accepted frame is old enough
+// that the client is likely showing an outdated elapsed time. Fresh cards stay
+// silent so healthy turns do not repeat "done" twice.
+func TestShouldAppendTerminalReceipt(t *testing.T) {
+	fresh := func() *turnCard {
+		return &turnCard{visible: true, tickInterval: 5 * time.Second, lastRenderOK: time.Now()}
+	}
+	cases := []struct {
+		name string
+		card *turnCard
+		want bool
+	}{
+		{"nil card", nil, false},
+		{"card never visible", &turnCard{tickInterval: 5 * time.Second, lastRenderOK: time.Now().Add(-time.Minute)}, false},
+		{"ticker disabled", &turnCard{visible: true, lastRenderOK: time.Now().Add(-time.Minute)}, false},
+		{"no accepted frame", &turnCard{visible: true, tickInterval: 5 * time.Second}, false},
+		{"fresh frame", fresh(), false},
+		{"one tick behind", &turnCard{visible: true, tickInterval: 5 * time.Second, lastRenderOK: time.Now().Add(-6 * time.Second)}, false},
+		{"two ticks behind", &turnCard{visible: true, tickInterval: 5 * time.Second, lastRenderOK: time.Now().Add(-12 * time.Second)}, true},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := shouldAppendTerminalReceipt(c.card); got != c.want {
+				t.Fatalf("shouldAppendTerminalReceipt() = %v, want %v", got, c.want)
+			}
+		})
+	}
+}
+
+// TestEngineTerminalReceipt covers the reply restatement end to end at the
+// helper level: only a live, visible card whose last accepted frame is stale
+// produces a line, and the line carries the real duration.
+func TestEngineTerminalReceipt(t *testing.T) {
+	e := NewEngine("test", &resultAgent{session: newResultAgentSession("ok")}, []Platform{&stubPlatformEngine{n: "test"}}, "", LangChinese)
+	t.Cleanup(e.cancel)
+
+	cases := []struct {
+		name string
+		card *turnCard
+		want string
+	}{
+		{"no card", nil, ""},
+		{"fresh card", &turnCard{visible: true, tickInterval: 5 * time.Second, lastRenderOK: time.Now()}, ""},
+		{"finished card", &turnCard{visible: true, finished: true, tickInterval: 5 * time.Second, lastRenderOK: time.Now().Add(-time.Minute)}, ""},
+		{"stale card", &turnCard{visible: true, tickInterval: 5 * time.Second, lastRenderOK: time.Now().Add(-20 * time.Second)}, "✅ 已完成 · 用时 2:43"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := e.terminalReceipt(c.card, 2*time.Minute+43*time.Second); got != c.want {
+				t.Fatalf("terminalReceipt() = %q, want %q", got, c.want)
+			}
+		})
+	}
+}
