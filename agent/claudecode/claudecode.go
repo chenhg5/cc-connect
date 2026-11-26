@@ -19,6 +19,7 @@ import (
 
 	"github.com/chenhg5/cc-connect/agent/internal/skillroots"
 	"github.com/chenhg5/cc-connect/core"
+	"golang.org/x/text/unicode/norm"
 )
 
 func init() {
@@ -35,25 +36,26 @@ func init() {
 //   - "auto":              Claude's automatic permission classifier
 //   - "bypassPermissions": auto-approve everything (alias: yolo)
 type Agent struct {
-	workDir          string
-	cmd              string   // CLI binary name (default: "claude")
-	cliExtraArgs     []string // extra args parsed from cmd (e.g. ["code", "-t", "foo"])
-	configEnv        []string // env vars from [projects.agent.options.env] — persists across SetSessionEnv calls
-	cmdArgsFlag      string   // if set, claude args are passed as a single string via this flag (e.g. "-a")
-	model            string
-	reasoningEffort  string // "low" | "medium" | "high" | "max"
-	mode             string // "default" | "acceptEdits" | "plan" | "auto" | "bypassPermissions" | "dontAsk"
-	allowedTools     []string
-	disallowedTools  []string
+	workDir             string
+	cmd                 string   // CLI binary name (default: "claude")
+	cliExtraArgs        []string // extra args parsed from cmd (e.g. ["code", "-t", "foo"])
+	configEnv           []string // env vars from [projects.agent.options.env] — persists across SetSessionEnv calls
+	cmdArgsFlag         string   // if set, claude args are passed as a single string via this flag (e.g. "-a")
+	model               string
+	reasoningEffort     string // "low" | "medium" | "high" | "max"
+	mode                string // "default" | "acceptEdits" | "plan" | "auto" | "bypassPermissions" | "dontAsk"
+	allowedTools        []string
+	disallowedTools     []string
 	maxContextTokens    int // optional: passed as --max-context-tokens when > 0
 	contextWindowTokens int // optional: override the context-window-size heuristic used by the ctx% indicator. When <= 0, fall back to model-name heuristics.
+	toolResultMaxLen    int // maximum bytes sent for a tool result, including the truncation notice
 	providers           []core.ProviderConfig
-	activeIdx        int // -1 = no provider set
-	sessionEnv       []string
-	routerURL        string   // Claude Code Router URL (e.g., "http://127.0.0.1:3456")
-	routerAPIKey     string   // Claude Code Router API key (optional)
-	systemPrompt     string   // Custom system prompt to pass to Claude CLI
-	pluginDirs       []string // Plugin directories to load via --plugin-dir (repeatable)
+	activeIdx           int // -1 = no provider set
+	sessionEnv          []string
+	routerURL           string   // Claude Code Router URL (e.g., "http://127.0.0.1:3456")
+	routerAPIKey        string   // Claude Code Router API key (optional)
+	systemPrompt        string   // Custom system prompt to pass to Claude CLI
+	pluginDirs          []string // Plugin directories to load via --plugin-dir (repeatable)
 
 	appendSystemPrompt string // Custom text appended to the system prompt (keeps Claude's default)
 
@@ -232,6 +234,21 @@ func New(opts map[string]any) (core.Agent, error) {
 			contextWindowTokens = int(v)
 		}
 	}
+	toolResultMaxLen := defaultToolResultMaxLen
+	switch v := opts["tool_result_max_len"].(type) {
+	case int:
+		if v > 0 {
+			toolResultMaxLen = v
+		}
+	case int64:
+		if v > 0 {
+			toolResultMaxLen = int(v)
+		}
+	case float64:
+		if v > 0 {
+			toolResultMaxLen = int(v)
+		}
+	}
 
 	// Claude Code Router support
 	routerURL, _ := opts["router_url"].(string)
@@ -304,6 +321,7 @@ func New(opts map[string]any) (core.Agent, error) {
 		disallowedTools:     disallowedTools,
 		maxContextTokens:    maxContextTokens,
 		contextWindowTokens: contextWindowTokens,
+		toolResultMaxLen:    toolResultMaxLen,
 		configEnv:           configEnv,
 		activeIdx:           -1,
 		routerURL:           routerURL,
@@ -327,6 +345,8 @@ func normalizeEffort(raw string) string {
 		return "medium"
 	case "high":
 		return "high"
+	case "xhigh", "x-high", "extra-high", "extra_high":
+		return "xhigh"
 	case "max":
 		return "max"
 	default:
@@ -397,7 +417,7 @@ func (a *Agent) GetReasoningEffort() string {
 }
 
 func (a *Agent) AvailableReasoningEfforts() []string {
-	return []string{"low", "medium", "high", "max"}
+	return []string{"low", "medium", "high", "xhigh", "max"}
 }
 
 func (a *Agent) configuredModels() []core.ModelOption {
@@ -407,6 +427,12 @@ func (a *Agent) configuredModels() []core.ModelOption {
 }
 
 func (a *Agent) AvailableModels(ctx context.Context) []core.ModelOption {
+	a.mu.RLock()
+	minimaxModels := core.GetMiniMaxProviderModels(a.providers, a.activeIdx)
+	a.mu.RUnlock()
+	if len(minimaxModels) > 0 {
+		return minimaxModels
+	}
 	if models := a.configuredModels(); len(models) > 0 {
 		return models
 	}
@@ -547,6 +573,7 @@ func (a *Agent) StartSession(ctx context.Context, sessionID string) (core.AgentS
 	copy(disTools, a.disallowedTools)
 	maxTok := a.maxContextTokens
 	ctxWin := a.contextWindowTokens
+	toolResultMaxLen := a.toolResultMaxLen
 	model := a.model
 	effort := a.reasoningEffort
 	workDir := a.workDir
@@ -576,12 +603,9 @@ func (a *Agent) StartSession(ctx context.Context, sessionID string) (core.AgentS
 	// prompt. Read under the mutex and pass through to newClaudeSession so the
 	// session picks up the right tool-prompt bundle at spawn time.
 	lang := a.lang
-	// When router_url is set, --verbose conflicts with --output-format stream-json
-	// (verbose emits non-JSON text to stdout that corrupts the JSON stream).
-	disableVerbose := a.routerURL != ""
 	a.mu.Unlock()
 
-	return newClaudeSession(ctx, workDir, a.cmd, a.cliExtraArgs, a.cmdArgsFlag, model, effort, sessionID, mode, systemPrompt, appendSystemPrompt, tools, disTools, pluginDirs, extraEnv, platformPrompt, disableVerbose, a.spawnOpts, maxTok, ctxWin, a.ccDataDir, lang)
+	return newClaudeSession(ctx, workDir, a.cmd, a.cliExtraArgs, a.cmdArgsFlag, model, effort, sessionID, mode, systemPrompt, appendSystemPrompt, tools, disTools, pluginDirs, extraEnv, platformPrompt, a.spawnOpts, maxTok, ctxWin, a.ccDataDir, lang, toolResultMaxLen)
 }
 
 func (a *Agent) ListSessions(ctx context.Context) ([]core.AgentSessionInfo, error) {
@@ -969,6 +993,9 @@ func (a *Agent) WorkspaceAgentOptions() map[string]any {
 	}
 	if a.contextWindowTokens > 0 {
 		opts["context_window_tokens"] = a.contextWindowTokens
+	}
+	if a.toolResultMaxLen > 0 && a.toolResultMaxLen != defaultToolResultMaxLen {
+		opts["tool_result_max_len"] = a.toolResultMaxLen
 	}
 	if a.routerURL != "" {
 		opts["router_url"] = a.routerURL
@@ -1479,33 +1506,14 @@ func getBaseURLEnvVarForProviderType(providerType string) string {
 	}
 }
 
-// summarizeInput produces a short human-readable description of tool input.
+// summarizeInput preserves structured tool input for downstream renderers.
+// Card renderers apply their own allowlist and redaction; reducing common tools
+// to one field here would discard parameters such as grep include/path and bash
+// descriptions before the renderer can inspect them.
 func summarizeInput(tool string, input any) string {
 	m, ok := input.(map[string]any)
 	if !ok {
 		return ""
-	}
-
-	switch tool {
-	case "Read", "Edit", "Write":
-		if fp, ok := m["file_path"].(string); ok {
-			return fp
-		}
-	case "Bash":
-		if cmd, ok := m["command"].(string); ok {
-			return cmd
-		}
-	case "Grep":
-		if p, ok := m["pattern"].(string); ok {
-			return p
-		}
-	case "Glob":
-		if p, ok := m["pattern"].(string); ok {
-			return p
-		}
-		if p, ok := m["glob_pattern"].(string); ok {
-			return p
-		}
 	}
 
 	b, err := json.Marshal(m)
@@ -1570,8 +1578,15 @@ func boolVal(m map[string]any, key string) bool {
 //     "/Users/x/Library/Mobile Documents/com~apple~CloudDocs/...")
 //  5. Replacing all non-ASCII characters with "-"
 func encodeClaudeProjectKey(absPath string) string {
-	// First, normalize to forward slashes for consistent processing
-	normalized := strings.ReplaceAll(absPath, "\\", "/")
+	// Normalize only the key input; keep the original path when launching Claude.
+	if absPath == "" {
+		return ""
+	}
+	normalized := filepath.Clean(strings.ReplaceAll(absPath, "\\", "/"))
+	if len(normalized) >= 2 && normalized[1] == ':' && normalized[0] >= 'a' && normalized[0] <= 'z' {
+		normalized = strings.ToUpper(normalized[:1]) + normalized[1:]
+	}
+	normalized = norm.NFC.String(normalized)
 
 	// Build the encoded key character by character.
 	// Claude Code replaces path separators, special punctuation, and non-ASCII

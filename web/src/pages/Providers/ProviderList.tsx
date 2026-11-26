@@ -866,8 +866,8 @@ function CCSwitchImportModal({
           setError(data.error || t('globalProviders.ccSwitch.notFound'));
         } else {
           setProviders(data.providers || []);
-          const selectable = (data.providers || []).filter(p => !existingNames.has(p.name));
-          setSelected(new Set(selectable.map(p => p.name)));
+          const selectable = (data.providers || []).filter(p => !existingNames.has(p.import_name));
+          setSelected(new Set(selectable.map(p => p.id)));
         }
       } catch {
         setError(t('globalProviders.ccSwitch.notFound'));
@@ -876,11 +876,11 @@ function CCSwitchImportModal({
     })();
   }, []);
 
-  const toggle = (name: string) => {
+  const toggle = (id: string) => {
     setSelected(prev => {
       const next = new Set(prev);
-      if (next.has(name)) next.delete(name);
-      else next.add(name);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
       return next;
     });
   };
@@ -927,24 +927,24 @@ function CCSwitchImportModal({
             </p>
             <div className="max-h-72 overflow-y-auto space-y-1">
               {providers.map(p => {
-                const exists = existingNames.has(p.name);
+                const exists = existingNames.has(p.import_name);
                 return (
                   <label
-                    key={p.name}
+                    key={p.id}
                     className={cn(
                       'flex items-center gap-3 rounded-xl px-3 py-2.5 transition-colors cursor-pointer',
                       exists
                         ? 'opacity-50 cursor-not-allowed'
-                        : selected.has(p.name)
+                        : selected.has(p.id)
                           ? 'bg-accent/10 dark:bg-accent/5'
                           : 'hover:bg-gray-50 dark:hover:bg-white/[0.04]',
                     )}
                   >
                     <input
                       type="checkbox"
-                      checked={selected.has(p.name)}
+                      checked={selected.has(p.id)}
                       disabled={exists}
-                      onChange={() => !exists && toggle(p.name)}
+                      onChange={() => !exists && toggle(p.id)}
                       className="rounded border-gray-300 dark:border-white/20 text-accent focus:ring-accent/30"
                     />
                     <div className="flex-1 min-w-0">

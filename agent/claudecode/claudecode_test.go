@@ -256,6 +256,19 @@ func TestSummarizeInput_AskUserQuestion(t *testing.T) {
 	}
 }
 
+func TestSummarizeInput_PreservesStructuredToolParameters(t *testing.T) {
+	result := summarizeInput("Grep", map[string]any{
+		"pattern": "foo",
+		"include": "*.go",
+		"path":    "platform/feishu",
+	})
+	for _, want := range []string{"\"pattern\":\"foo\"", "\"include\":\"*.go\"", "\"path\":\"platform/feishu\""} {
+		if !strings.Contains(result, want) {
+			t.Errorf("summary %q does not contain %q", result, want)
+		}
+	}
+}
+
 func TestAgent_Name(t *testing.T) {
 	a := &Agent{}
 	if got := a.Name(); got != "claudecode" {
@@ -438,6 +451,34 @@ func TestEncodeClaudeProjectKey(t *testing.T) {
 				t.Errorf("encodeClaudeProjectKey(%q) = %q, want %q", tt.input, got, tt.expected)
 			}
 		})
+	}
+}
+
+func TestEncodeClaudeProjectKey_NormalizesWorkDirVariants(t *testing.T) {
+	for _, tc := range []struct {
+		name, canonical, variant string
+	}{
+		{"Windows drive and trailing separator", `D:\Foo\bar`, `d:\Foo\bar\`},
+		{"macOS decomposed Unicode", "/Users/me/ünicode", "/Users/me/ünicode"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			want := encodeClaudeProjectKey(tc.canonical)
+			if got := encodeClaudeProjectKey(tc.variant); got != want {
+				t.Fatalf("project key for %q = %q, want %q", tc.variant, got, want)
+			}
+		})
+	}
+}
+
+func TestFindProjectDir_DecomposedMacOSPath(t *testing.T) {
+	home := t.TempDir()
+	canonical := "/Users/me/ünicode"
+	projectDir := filepath.Join(home, "projects", encodeClaudeProjectKey(canonical))
+	if err := os.MkdirAll(projectDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if got := findProjectDir(home, "/Users/me/ünicode"); got != projectDir {
+		t.Fatalf("findProjectDir() = %q, want %q", got, projectDir)
 	}
 }
 
@@ -1323,4 +1364,22 @@ func setupSessionForHistory(t *testing.T, sessionID, src string) string {
 		t.Fatal(err)
 	}
 	return workDir
+}
+func TestToolResultMaxLenOption(t *testing.T) {
+	for _, tc := range []struct {
+		value any
+		want  int
+	}{
+		{nil, 4000}, {int64(0), 4000}, {int64(800), 800}, {float64(900), 900},
+	} {
+		// Constructing the agent checks the configured CLI path; the option
+		// parser does not need a real Claude installation.
+		agent, err := New(map[string]any{"work_dir": t.TempDir(), "cmd": os.Args[0], "tool_result_max_len": tc.value})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := agent.(*Agent).toolResultMaxLen; got != tc.want {
+			t.Fatalf("tool_result_max_len %v: got %d, want %d", tc.value, got, tc.want)
+		}
+	}
 }

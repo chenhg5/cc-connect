@@ -1043,9 +1043,13 @@ func TestBuildPreviewCardJSON_ProgressPayloadUsesStructuredCard(t *testing.T) {
 	if err := json.Unmarshal([]byte(cardJSON), &card); err != nil {
 		t.Fatalf("card JSON is invalid: %v", err)
 	}
-	header, ok := card["header"].(map[string]any)
-	if !ok || header == nil {
-		t.Fatalf("expected header in card json, got %#v", card["header"])
+	// The status is the first body element: a card header cannot be updated
+	// in place, and progress cards are refreshed in place.
+	elements := card["body"].(map[string]any)["elements"].([]any)
+	status, _ := elements[0].(map[string]any)
+	content, _ := status["content"].(string)
+	if status["element_id"] != progressStatusElementID || !strings.Contains(content, "Codex · Running") {
+		t.Fatalf("first body element should be the status line, got %#v", status)
 	}
 }
 
@@ -1495,7 +1499,7 @@ func containsMarkdownLine(content string, want string) bool {
 	return false
 }
 
-func TestBuildCardJSONWithStatusFooter_SharesCardTableBudget(t *testing.T) {
+func TestBuildCardJSONWithStatusFooter_BodyRowsLeaveFooterTableBudget(t *testing.T) {
 	body := strings.Join([]string{
 		"| A |",
 		"|---|",
@@ -1516,11 +1520,11 @@ func TestBuildCardJSONWithStatusFooter_SharesCardTableBudget(t *testing.T) {
 	}, "\n")
 
 	content := strings.Join(collectCardMarkdownContents(t, buildCardJSONWithStatusFooter(body, footer)), "\n")
-	if !strings.Contains(content, "| C |\n|---|\n| 3 |") {
-		t.Fatalf("third table should remain renderable, got %q", content)
+	if !strings.Contains(content, "| C |\n|---|\n| 3 |") || !strings.Contains(content, "| D |\n|---|\n| 4 |") {
+		t.Fatalf("footer tables should remain renderable after body uses row components, got %q", content)
 	}
-	if !strings.Contains(content, "```\n| D |\n|---|\n| 4 |\n```") {
-		t.Fatalf("fourth table across card elements should be downgraded, got %q", content)
+	if strings.Contains(content, "```\n| D |") {
+		t.Fatalf("footer table was unnecessarily downgraded, got %q", content)
 	}
 }
 
@@ -1686,6 +1690,76 @@ func TestFormatProgressToolInput_OtherTools(t *testing.T) {
 	result = formatProgressToolInput("TodoWrite", "not json")
 	if !strings.Contains(result, "```text") {
 		t.Errorf("TodoWrite with invalid JSON should fall back to text block, got %q", result)
+	}
+}
+
+func TestBuildToolDisplay_ShowsKeyParameters(t *testing.T) {
+	tests := []struct {
+		name     string
+		tool     string
+		input    string
+		contains []string
+	}{
+		{
+			name:  "read includes path range",
+			tool:  "read",
+			input: `{"filePath":"/tmp/a.go","offset":1,"limit":200}`,
+			contains: []string{
+				"filePath: /tmp/a.go",
+				"offset: 1",
+				"limit: 200",
+			},
+		},
+		{
+			name:  "grep includes scope",
+			tool:  "grep",
+			input: `{"pattern":"foo","include":"*.go","path":"platform/feishu"}`,
+			contains: []string{
+				"pattern: foo",
+				"include: *.go",
+				"path: platform/feishu",
+			},
+		},
+		{
+			name:  "command includes execution context",
+			tool:  "exec",
+			input: `{"cmd":"go test ./...","cwd":"/tmp/project","timeout":120000}`,
+			contains: []string{
+				"cmd: go test ./...",
+				"cwd: /tmp/project",
+				"timeout: 120000",
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := buildToolDisplay(tt.tool, tt.input)
+			for _, want := range tt.contains {
+				if !strings.Contains(got.Detail, want) {
+					t.Errorf("detail %q does not contain %q", got.Detail, want)
+				}
+			}
+		})
+	}
+}
+
+func TestBuildToolDisplay_RedactsKeyParameters(t *testing.T) {
+	got := buildToolDisplay("read", `{"filePath":"/tmp/a?token=secret","offset":1}`)
+	if strings.Contains(got.Detail, "token=secret") {
+		t.Fatalf("sensitive query value leaked: %q", got.Detail)
+	}
+	if !strings.Contains(got.Detail, "filePath:") || !strings.Contains(got.Detail, "offset: 1") {
+		t.Fatalf("key parameters were not retained: %q", got.Detail)
+	}
+}
+
+func TestBuildToolDisplay_ShowsPatchText(t *testing.T) {
+	got := buildToolDisplay("apply_patch", `{"filePath":"/tmp/a.go","patchText":"@@\n-old\n+new"}`)
+	for _, want := range []string{"filePath: /tmp/a.go", "patchText: @@\n-old\n+new"} {
+		if !strings.Contains(got.Detail, want) {
+			t.Errorf("detail %q does not contain %q", got.Detail, want)
+		}
 	}
 }
 

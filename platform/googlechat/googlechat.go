@@ -352,10 +352,11 @@ func (p *Platform) ReconstructReplyCtx(sessionKey string) (any, error) {
 // an error combining prefix, status code, and the response snippet.
 func httpErrorBody(resp *http.Response, prefix string) error {
 	b, _ := io.ReadAll(io.LimitReader(resp.Body, 2048))
+	failure := core.HTTPError(prefix, resp.StatusCode, b)
 	if err := resp.Body.Close(); err != nil {
-		return fmt.Errorf("%s: status %d: %s (close body: %v)", prefix, resp.StatusCode, strings.TrimSpace(string(b)), err)
+		return fmt.Errorf("%w (close body: %v)", failure, err)
 	}
-	return fmt.Errorf("%s: status %d: %s", prefix, resp.StatusCode, strings.TrimSpace(string(b)))
+	return failure
 }
 
 // coalesce returns s if non-empty, otherwise def.
