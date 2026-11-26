@@ -15,6 +15,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"github.com/chenhg5/cc-connect/core"
 )
@@ -875,7 +876,7 @@ func parseStallTimeout(raw any) (time.Duration, error) {
 	}
 	d, err := time.ParseDuration(text)
 	if err != nil || d < 0 {
-		return 0, fmt.Errorf("opencode: invalid opencode_stall_timeout %q (use a duration such as \"10m\", or \"off\")", text)
+		return 0, fmt.Errorf("opencode: invalid opencode_stall_timeout (length %d, use a duration such as \"10m\", or \"off\")", utf8.RuneCountInString(text))
 	}
 	return d, nil
 }
@@ -896,7 +897,7 @@ func parseServerIdleTTL(raw any) (time.Duration, error) {
 	}
 	d, err := time.ParseDuration(text)
 	if err != nil || d <= 0 {
-		return 0, fmt.Errorf("opencode: invalid opencode_server_idle_ttl %q (use a duration such as \"10m\", or \"off\")", text)
+		return 0, fmt.Errorf("opencode: invalid opencode_server_idle_ttl (length %d, use a duration such as \"10m\", or \"off\")", utf8.RuneCountInString(text))
 	}
 	return d, nil
 }

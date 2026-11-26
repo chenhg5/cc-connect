@@ -521,10 +521,10 @@ func randomServerPassword() (string, error) {
 func ensureLoopbackURL(raw string) (string, error) {
 	u, err := url.Parse(raw)
 	if err != nil {
-		return "", fmt.Errorf("opencode server: parse listen address %q: %w", raw, err)
+		return "", fmt.Errorf("opencode server: parse listen address host %q: %w", core.SafeURLHost(raw), err)
 	}
 	if u.Scheme != "http" && u.Scheme != "https" {
-		return "", fmt.Errorf("opencode server: listen address %q is not http(s)", raw)
+		return "", fmt.Errorf("opencode server: listen address host %q is not http(s)", core.SafeURLHost(raw))
 	}
 	host := u.Hostname()
 	if host == "localhost" {
@@ -533,7 +533,7 @@ func ensureLoopbackURL(raw string) (string, error) {
 	if ip := net.ParseIP(host); ip != nil && ip.IsLoopback() {
 		return u.String(), nil
 	}
-	return "", fmt.Errorf("opencode server: refusing to talk to non-loopback address %q", raw)
+	return "", fmt.Errorf("opencode server: refusing to talk to non-loopback address %q", core.SafeURLHost(raw))
 }
 
 // opencodeHTTPClient is used for every call to the local server. Redirects are
@@ -1073,6 +1073,10 @@ func newServerSessionOn(ctx context.Context, srv *opencodeServer, serveCfg openc
 		sseCancel:     cancel,
 		stallTimeout:  stallTimeoutOrDefault(serveCfg.stallTimeout),
 		turnWake:      make(chan struct{}, 1),
+		// No turn has finished yet; -1 can never equal a real generation
+		// (turnGen starts at 0 and is pre-incremented by beginTurn), so the
+		// first session.idle before any Send still closes the turn.
+		turnFinished: -1,
 	}
 
 	s.wg.Add(1)

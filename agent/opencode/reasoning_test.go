@@ -208,6 +208,7 @@ func TestWorkspaceAgentOptionsCarriesReasoningEffort(t *testing.T) {
 		"work_dir":         t.TempDir(),
 		"model":            "p/m",
 		"reasoning_effort": "x-high",
+		"cmd":              writeFakeModelsBin(t, nil, 0),
 	})
 	if err != nil {
 		t.Fatalf("rebuild from workspace options: %v", err)

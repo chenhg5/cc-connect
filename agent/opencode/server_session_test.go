@@ -1425,6 +1425,26 @@ func TestEnsureLoopbackURL(t *testing.T) {
 	}
 }
 
+// The listen address is scraped from the child process and may carry the
+// basic-auth password in its userinfo. A refusal must report only the host so
+// the password never reaches an error string (cmd/logcheck flags the raw form).
+func TestEnsureLoopbackURL_DoesNotLeakCredentials(t *testing.T) {
+	raw := "http://user:s3cr3t@10.0.0.7:4096/path?token=abc"
+	_, err := ensureLoopbackURL(raw)
+	if err == nil {
+		t.Fatalf("expected refusal for non-loopback address")
+	}
+	msg := err.Error()
+	for _, leak := range []string{"s3cr3t", "user:", "token", "/path", "?token=abc"} {
+		if strings.Contains(msg, leak) {
+			t.Errorf("refusal error leaked %q: %s", leak, msg)
+		}
+	}
+	if !strings.Contains(msg, "10.0.0.7") {
+		t.Errorf("refusal error should still name the host, got: %s", msg)
+	}
+}
+
 // Every request carries the server password, so a redirect must not be followed:
 // whatever host the server points at would receive the credentials.
 func TestServerRequestsAreNotRedirected(t *testing.T) {
