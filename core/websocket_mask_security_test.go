@@ -26,7 +26,7 @@ func TestWebSocketMasksDoNotFollowMathRandSeed(t *testing.T) {
 			errors <- err
 			return
 		}
-		defer conn.Close()
+		defer func() { _ = conn.Close() }()
 		raw := conn.UnderlyingConn()
 		_ = raw.SetReadDeadline(time.Now().Add(5 * time.Second))
 		var got [4][4]byte
@@ -49,9 +49,10 @@ func TestWebSocketMasksDoNotFollowMathRandSeed(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 	_ = conn.SetWriteDeadline(time.Now().Add(5 * time.Second))
-	rand.Seed(1)
+	// SA1019: the prediction only holds if the global source is deterministic.
+	rand.Seed(1) //nolint:staticcheck
 	prediction := rand.New(rand.NewSource(1))
 	var predicted [4][4]byte
 	for i := range predicted {
