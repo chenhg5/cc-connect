@@ -2457,6 +2457,12 @@ app_secret = "your-feishu-app-secret"
 #
 # Optional: specify a model / 可选：指定模型
 # model = "gemini-3.1-pro-preview"
+# Optional: reasoning level; Orchestrator models ignore it / 可选：推理强度，Orchestrator 模型不使用
+# reasoning_effort = "high"  # "low" | "medium" | "high" | "xhigh" | "max"
+# Optional: Orchestrator planner / executor models / 可选：Orchestrator 规划与执行模型
+# orchestrator_planner = "planner-model-id"
+# orchestrator_executor = "executor-model-id"
+# See docs/antigravity.md for details / 详见 docs/antigravity.md
 #
 # # Provider with API key / 使用 API Key 的 Provider
 # [[projects.agent.providers]]
