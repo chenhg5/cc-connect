@@ -28,4 +28,8 @@ curl --unix-socket ~/.cc-connect/run/api.sock -X POST http://unix/cards/update \
   platforms; the platform is resolved from it the same way `/send` does,
   workspace-prefixed keys included). It shares `/send`'s body size limit and
   outgoing rate limit.
+- `/cards/update` does not check that `message_id` belongs to the session or
+  project it names: `session_key` only selects the platform, and the id is
+  patched on that platform. The trust boundary is the same as for `/send`,
+  the local API socket that only its owner can access (mode 0600).
 - Platforms that cannot send or update raw cards answer `501 Not Implemented`.
