@@ -133,21 +133,21 @@ func (p *Platform) createAICard(ctx context.Context, rc replyContext) (*aiCard, 
 	}
 	defer resp.Body.Close()
 
-	respBody, _ := io.ReadAll(resp.Body)
+	respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 8<<10))
 
 	slog.Debug("dingtalk: createAndDeliver response",
 		"status", resp.StatusCode,
-		"body", string(respBody))
+		"body_bytes", len(respBody))
 
 	if resp.StatusCode != http.StatusOK {
+		failure := core.HTTPError("create AI card", resp.StatusCode, respBody, token, p.clientSecret)
 		slog.Error("dingtalk: create AI card failed",
-			"status", resp.StatusCode,
-			"body", string(respBody))
+			"error", failure)
 		// Check if we should trigger degrade
 		if resp.StatusCode == 403 || resp.StatusCode == 429 || resp.StatusCode >= 500 {
 			p.activateCardDegrade(fmt.Sprintf("card.create:%d", resp.StatusCode))
 		}
-		return nil, fmt.Errorf("create AI card: status=%d, body=%s", resp.StatusCode, string(respBody))
+		return nil, failure
 	}
 
 	// Parse response to get cardInstanceId
@@ -161,7 +161,7 @@ func (p *Platform) createAICard(ctx context.Context, rc replyContext) (*aiCard, 
 		OutTrackId     string `json:"outTrackId"`
 	}
 	if err := json.Unmarshal(respBody, &result); err != nil {
-		slog.Warn("dingtalk: failed to parse createAndDeliver response", "error", err, "body", string(respBody))
+		slog.Warn("dingtalk: failed to parse createAndDeliver response", "error", err, "body_bytes", len(respBody))
 	}
 
 	cardInstanceId := result.Result.CardInstanceId
@@ -192,11 +192,15 @@ func (p *Platform) createAICard(ctx context.Context, rc replyContext) (*aiCard, 
 	if err := json.Unmarshal(respBody, &deliverCheck); err == nil {
 		for _, dr := range deliverCheck.Result.DeliverResults {
 			if !dr.Success {
+				message := core.HTTPErrorMessage(dr.ErrorMsg, token, p.clientSecret)
 				slog.Warn("dingtalk: AI card delivery failed",
-					"errorMsg", dr.ErrorMsg,
 					"outTrackId", outTrackId,
-					"isGroup", isGroup)
-				return nil, fmt.Errorf("AI card delivery failed: %s", dr.ErrorMsg)
+					"isGroup", isGroup,
+					"errmsg", message)
+				if message != "" {
+					return nil, fmt.Errorf("AI card delivery failed: %s", message)
+				}
+				return nil, fmt.Errorf("AI card delivery failed")
 			}
 		}
 	}
@@ -357,17 +361,17 @@ func (c *aiCard) doStream(ctx context.Context, content string, isFinalize bool) 
 	}
 	defer resp.Body.Close()
 
-	respBody, _ := io.ReadAll(resp.Body)
+	respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 8<<10))
 
 	slog.Debug("dingtalk: streaming response",
 		"status", resp.StatusCode,
-		"body", string(respBody),
+		"body_bytes", len(respBody),
 		"isFinalize", isFinalize)
 
 	if resp.StatusCode != http.StatusOK {
+		failure := core.HTTPError("stream AI card", resp.StatusCode, respBody, token, c.platform.clientSecret, content)
 		slog.Error("dingtalk: stream AI card failed",
-			"status", resp.StatusCode,
-			"body", string(respBody))
+			"error", failure)
 		// Check if we should trigger degrade
 		if resp.StatusCode == 403 || resp.StatusCode == 429 || resp.StatusCode >= 500 {
 			c.platform.activateCardDegrade(fmt.Sprintf("card.stream:%d", resp.StatusCode))
@@ -376,7 +380,7 @@ func (c *aiCard) doStream(ctx context.Context, content string, isFinalize bool) 
 			close(c.done)
 			c.mu.Unlock()
 		}
-		return fmt.Errorf("stream AI card: status=%d, body=%s", resp.StatusCode, string(respBody))
+		return failure
 	}
 
 	slog.Debug("dingtalk: AI card streamed successfully", "isFinalize", isFinalize)

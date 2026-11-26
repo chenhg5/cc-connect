@@ -11,6 +11,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/chenhg5/cc-connect/core"
 )
 
 // This file implements Feishu message-resource downloads that support large
@@ -266,7 +268,7 @@ func (p *Platform) resourceSingleGet(ctx context.Context, token, messageID, file
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4*1024))
-		return nil, fmt.Errorf("resource API status=%d body=%q", resp.StatusCode, strings.TrimSpace(string(body)))
+		return nil, core.HTTPError("feishu: resource API", resp.StatusCode, body, token)
 	}
 
 	if cl := resp.ContentLength; cl > p.resourceMaxBytes {
@@ -361,7 +363,7 @@ func (p *Platform) resourceRangeChunk(
 		_ = resp.Body.Close()
 
 		if resp.StatusCode >= 500 && resp.StatusCode < 600 && attempt < maxTransientRetries {
-			lastErr = fmt.Errorf("range status %d body=%q", resp.StatusCode, strings.TrimSpace(string(body)))
+			lastErr = core.HTTPError("feishu: resource range", resp.StatusCode, body, token)
 			continue
 		}
 
@@ -372,7 +374,7 @@ func (p *Platform) resourceRangeChunk(
 			return body, nil
 		}
 
-		return nil, fmt.Errorf("range request status=%d body=%q", resp.StatusCode, strings.TrimSpace(string(body)))
+		return nil, core.HTTPError("feishu: resource range", resp.StatusCode, body, token)
 	}
 
 	if lastErr == nil {

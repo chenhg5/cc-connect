@@ -189,6 +189,75 @@ type resultAgentSession struct {
 	sentPrompts []string
 }
 
+type issue1959ConflictSession struct{ *resultAgentSession }
+
+type issue1959CloseErrorSession struct{ *resultAgentSession }
+
+func (s *issue1959CloseErrorSession) Close() error { return errors.New("close could not be confirmed") }
+
+func (s *issue1959ConflictSession) Send(_ string, _ string, _ []ImageAttachment, _ []FileAttachment) error {
+	s.events <- Event{Type: EventError, Error: errors.New("thread-store conflict: thread already has an active writer at /tmp/PRIVATE_PATH_SENTINEL")}
+	return nil
+}
+
+func TestIssue1959_ThreadWriterConflictDoesNotExposeRawError(t *testing.T) {
+	p := &stubPlatformEngine{n: "plain"}
+	sess := &issue1959ConflictSession{newResultAgentSession("")}
+	e := NewEngine("test", &resultAgent{session: sess}, []Platform{p}, "", LangEnglish)
+	defer e.cancel()
+	e.ReceiveMessage(p, &Message{SessionKey: "plain:chat:user", Content: "hello", ReplyCtx: "ctx"})
+	sent := waitForPlatformSend(p, 1, 2*time.Second)
+	if len(sent) != 1 || strings.Contains(sent[0], "PRIVATE_PATH_SENTINEL") || !strings.Contains(strings.ToLower(sent[0]), "conversation") {
+		t.Fatalf("conflict reply should be actionable without internal path: %q", sent)
+	}
+}
+
+func TestIssue1959_NewReportsStoppedTurnAndDroppedQueue(t *testing.T) {
+	p := &stubPlatformEngine{n: "plain"}
+	e := NewEngine("test", &resultAgent{session: newResultAgentSession("")}, []Platform{p}, "", LangEnglish)
+	defer e.cancel()
+	key := "plain:chat:user"
+	session := e.sessions.GetOrCreateActive(key)
+	if _, ok := session.TryLock(); !ok {
+		t.Fatal("failed to mark the old turn busy")
+	}
+	e.interactiveMu.Lock()
+	e.interactiveStates[key] = &interactiveState{
+		agentSession: newResultAgentSession(""), busySession: session,
+		platform: p, replyCtx: "ctx",
+		pendingMessages: []queuedMessage{{platform: p, replyCtx: "queued-ctx", content: "queued"}},
+	}
+	e.interactiveMu.Unlock()
+	e.cmdNew(p, &Message{SessionKey: key, ReplyCtx: "ctx"}, nil)
+	sent := strings.Join(p.getSent(), "\n")
+	if !strings.Contains(sent, "Previous task") || !strings.Contains(sent, "queued message") {
+		t.Fatalf("/new did not report old turn and queue outcome: %q", sent)
+	}
+}
+
+func TestIssue1959_NewDoesNotClaimFailedCloseStopped(t *testing.T) {
+	p := &stubPlatformEngine{n: "plain"}
+	e := NewEngine("test", &resultAgent{session: newResultAgentSession("")}, []Platform{p}, "", LangEnglish)
+	defer e.cancel()
+	key := "plain:chat:close-failure"
+	session := e.sessions.GetOrCreateActive(key)
+	if _, ok := session.TryLock(); !ok {
+		t.Fatal("failed to mark the old turn busy")
+	}
+	e.interactiveMu.Lock()
+	e.interactiveStates[key] = &interactiveState{
+		agentSession: &issue1959CloseErrorSession{newResultAgentSession("")},
+		busySession:  session, platform: p, replyCtx: "ctx",
+	}
+	e.interactiveMu.Unlock()
+	e.cmdNew(p, &Message{SessionKey: key, ReplyCtx: "ctx"}, nil)
+	sent := p.getSent()
+	final := sent[len(sent)-1]
+	if !strings.Contains(final, "could not be confirmed") || strings.Contains(final, "Previous task stopped during") {
+		t.Fatalf("/new claimed an unconfirmed close stopped: %q", final)
+	}
+}
+
 func newResultAgentSession(result string) *resultAgentSession {
 	return &resultAgentSession{
 		events: make(chan Event, 1),
@@ -1351,6 +1420,40 @@ func TestProcessInteractiveEvents_AppendsContextIndicatorInsideReplyFooter(t *te
 	}
 }
 
+func TestProcessInteractiveEvents_ContextIndicatorUsesSessionWindow(t *testing.T) {
+	homeDir := t.TempDir()
+	t.Setenv("HOME", homeDir)
+	t.Setenv("USERPROFILE", homeDir)
+
+	agent := &stubReplyFooterAgent{
+		stubModelModeAgent: stubModelModeAgent{model: "large-window"},
+		workDir:            homeDir,
+	}
+	p := &stubPlatformEngine{n: "telegram"}
+	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+	e.SetReplyFooterEnabled(true)
+
+	sessionKey := "telegram:user-large-window"
+	session := e.sessions.GetOrCreateActive(sessionKey)
+	agentSession := newControllableSession("s-large-window")
+	agentSession.contextUsage = &ContextUsage{UsedTokens: 190_000, ContextWindow: 1_000_000}
+	state := &interactiveState{
+		agentSession: agentSession,
+		platform:     p,
+		replyCtx:     "ctx-large-window",
+		agent:        agent,
+	}
+	e.interactiveStates[sessionKey] = state
+
+	agentSession.events <- Event{Type: EventResult, Content: "answer", InputTokens: 360_527, Done: true}
+	e.processInteractiveEvents(state, session, e.sessions, sessionKey, "m-large-window", time.Now(), nil, nil, state.replyCtx, 0)
+
+	sent := p.getSent()
+	if len(sent) != 1 || !strings.Contains(sent[0], "[ctx: ~19%]") {
+		t.Fatalf("large-window context footer = %q, want 19%% usage", sent)
+	}
+}
+
 func TestProcessInteractiveEvents_ToolSegmentsKeepFinalFooter(t *testing.T) {
 	homeDir := t.TempDir()
 	t.Setenv("HOME", homeDir)
@@ -2055,6 +2158,31 @@ func TestProcessInteractiveEvents_CardProgressTruncatesToolInputByToolMaxLen(t *
 	}
 }
 
+func TestProcessInteractiveEvents_QuietModeUsesOneGapAcrossToolCalls(t *testing.T) {
+	p := &stubCompactProgressPlatform{stubPlatformEngine: stubPlatformEngine{n: "telegram"}}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	e.SetDisplayConfig(DisplayCfg{Mode: "quiet", CardMode: "legacy", ThinkingMessages: false, ToolMessages: false})
+	sessionKey := "telegram:user-quiet-tools"
+	session := e.sessions.GetOrCreateActive(sessionKey)
+	agentSession := newControllableSession("s-quiet-tools")
+	state := &interactiveState{agentSession: agentSession, platform: p, replyCtx: "ctx-quiet-tools"}
+	e.interactiveStates[sessionKey] = state
+
+	agentSession.events <- Event{Type: EventText, Content: "Checking. "}
+	for i := 0; i < 3; i++ {
+		agentSession.events <- Event{Type: EventToolUse, ToolName: "Bash", ToolInput: "echo ok"}
+	}
+	agentSession.events <- Event{Type: EventText, Content: "Done."}
+	agentSession.events <- Event{Type: EventResult, Content: "Done.", Done: true}
+
+	e.processInteractiveEvents(state, session, e.sessions, sessionKey, "m-quiet-tools", time.Now(), nil, nil, state.replyCtx, 0)
+	edits := p.getPreviewEdits()
+	if len(edits) == 0 || !strings.Contains(edits[len(edits)-1], "Checking. \n\nDone.") ||
+		strings.Contains(edits[len(edits)-1], "\n\n\n") {
+		t.Fatalf("quiet preview has repeated tool gaps: edits=%q", edits)
+	}
+}
+
 func TestProcessInteractiveEvents_RichCardShowsThinkingContent(t *testing.T) {
 	p := &stubCompactProgressPlatform{
 		stubPlatformEngine: stubPlatformEngine{n: "feishu"},
@@ -2138,6 +2266,36 @@ func TestProcessInteractiveEvents_RichCardCoalescesToolResult(t *testing.T) {
 		if !strings.Contains(rendered, want) {
 			t.Fatalf("rich card should contain %q, got %q", want, rendered)
 		}
+	}
+}
+
+func TestProcessInteractiveEvents_RichCardKeepsPreToolTextAtDone(t *testing.T) {
+	p := &stubRichCardSilentPlatform{stubPlatformEngine: stubPlatformEngine{n: "feishu"}}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	e.SetDisplayConfig(DisplayCfg{
+		Mode: "full", CardMode: "rich", ToolMessages: true,
+		ThinkingMessages: true, ThinkingMaxLen: 300, ToolMaxLen: 500,
+	})
+	sessionKey := "feishu:user-rich-multiple-text"
+	session := e.sessions.GetOrCreateActive(sessionKey)
+	agentSession := newControllableSession("s-rich-multiple-text")
+	state := &interactiveState{agentSession: agentSession, platform: p, replyCtx: "ctx-rich-multiple-text"}
+	e.interactiveStates[sessionKey] = state
+
+	agentSession.events <- Event{Type: EventText, Content: "Before tool. "}
+	agentSession.events <- Event{Type: EventToolUse, ToolName: "Bash", ToolInput: "echo ok"}
+	agentSession.events <- Event{Type: EventToolResult, ToolName: "Bash", ToolResult: "ok"}
+	agentSession.events <- Event{Type: EventText, Content: "After tool."}
+	agentSession.events <- Event{Type: EventResult, Content: "After tool.", Done: true}
+
+	e.processInteractiveEvents(state, session, e.sessions, sessionKey, "m-rich-multiple-text", time.Now(), nil, nil, state.replyCtx, 0)
+	_, _, updates, _ := p.snapshot()
+	if len(updates) == 0 || !strings.Contains(updates[len(updates)-1], `body="Before tool. After tool."`) {
+		t.Fatalf("final rich card lost pre-tool text: updates=%q", updates)
+	}
+	history := session.GetHistory(0)
+	if len(history) == 0 || history[len(history)-1].Content != "Before tool. After tool." {
+		t.Fatalf("assistant history lost pre-tool text: %#v", history)
 	}
 }
 
@@ -2350,6 +2508,68 @@ func TestProcessInteractiveEvents_RichCard_NoReplyChunked(t *testing.T) {
 	}
 	if deletes != 0 {
 		t.Fatalf("expected no DeletePreviewMessage, got %d", deletes)
+	}
+}
+
+func TestProcessInteractiveEvents_RichCard_NoReplyAfterRejectedDraftKeepsCard(t *testing.T) {
+	p := &stubRichCardSilentPlatform{stubPlatformEngine: stubPlatformEngine{n: "feishu"}}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	e.SetDisplayConfig(DisplayCfg{Mode: "full", CardMode: "rich", ThinkingMessages: true, ToolMessages: true})
+	key := "feishu:thinking-then-silent"
+	session := e.sessions.GetOrCreateActive(key)
+	as := newControllableSession("s-thinking-then-silent")
+	state := &interactiveState{agentSession: as, platform: p, replyCtx: "ctx-thinking-then-silent"}
+	e.interactiveStates[key] = state
+	as.events <- Event{Type: EventText, Content: "rejected draft"}
+	as.events <- Event{Type: EventHookRejected}
+	as.events <- Event{Type: EventText, Content: "NO_REPLY"}
+	as.events <- Event{Type: EventResult, Content: "NO_REPLY", Done: true}
+	e.processInteractiveEvents(state, session, e.sessions, key, "m-thinking-then-silent", time.Now(), nil, nil, state.replyCtx, 0)
+	starts, _, updates, deletes := p.snapshot()
+	if len(starts) == 0 {
+		t.Fatal("expected a rich card before the silent result")
+	}
+	if deletes != 0 {
+		t.Fatalf("expected no recall gray bar, got %d deletes", deletes)
+	}
+	if len(updates) == 0 || !strings.Contains(updates[len(updates)-1], "status=done") {
+		t.Fatalf("expected final Done card, got %v", updates)
+	}
+}
+
+type richSilentNoUpdaterPlatform struct {
+	stubPlatformEngine
+	starts, deletes int
+}
+
+func (p *richSilentNoUpdaterPlatform) BuildRichCard(_ CardStatus, _ string, _ []ToolStep, _ string, _ bool, _ string) string {
+	return "card"
+}
+func (p *richSilentNoUpdaterPlatform) SendPreviewStart(_ context.Context, _ any, _ string) (any, error) {
+	p.starts++
+	return "handle", nil
+}
+func (p *richSilentNoUpdaterPlatform) DeletePreviewMessage(_ context.Context, _ any) error {
+	p.deletes++
+	return nil
+}
+
+func TestProcessInteractiveEvents_RichCard_NoUpdaterStillDeletesSilentCard(t *testing.T) {
+	p := &richSilentNoUpdaterPlatform{stubPlatformEngine: stubPlatformEngine{n: "feishu"}}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	e.SetDisplayConfig(DisplayCfg{Mode: "full", CardMode: "rich", ToolMessages: true})
+	key := "feishu:no-updater-silent"
+	session := e.sessions.GetOrCreateActive(key)
+	as := newControllableSession("s-no-updater-silent")
+	state := &interactiveState{agentSession: as, platform: p, replyCtx: "ctx-no-updater-silent"}
+	e.interactiveStates[key] = state
+	as.events <- Event{Type: EventText, Content: "rejected draft"}
+	as.events <- Event{Type: EventHookRejected}
+	as.events <- Event{Type: EventText, Content: "NO_REPLY"}
+	as.events <- Event{Type: EventResult, Content: "NO_REPLY", Done: true}
+	e.processInteractiveEvents(state, session, e.sessions, key, "m-no-updater-silent", time.Now(), nil, nil, state.replyCtx, 0)
+	if p.starts != 1 || p.deletes != 1 {
+		t.Fatalf("starts=%d deletes=%d, want one of each", p.starts, p.deletes)
 	}
 }
 
@@ -6936,6 +7156,22 @@ func TestSendAskQuestionPrompt_InlineButtonPlatform(t *testing.T) {
 	}
 }
 
+func TestSendAskQuestionPrompt_InlineButtonPlatform_MultiSelectUsesText(t *testing.T) {
+	e := newTestEngine()
+	p := &stubInlineButtonPlatform{stubPlatformEngine: stubPlatformEngine{n: "telegram"}}
+	questions := testQuestions()
+	questions[0].MultiSelect = true
+	e.sendAskQuestionPrompt(p, "ctx", questions, 0)
+
+	if len(p.buttonRows) != 0 {
+		t.Fatalf("multi-select prompt offered single-answer buttons: %v", p.buttonRows)
+	}
+	if len(p.sent) != 1 || !strings.Contains(p.sent[0], "1. **PostgreSQL**") ||
+		!strings.Contains(p.sent[0], e.i18n.T(MsgAskQuestionNoteMulti)) {
+		t.Fatalf("multi-select prompt lacks numbered choices or comma-separated reply hint: %q", p.sent)
+	}
+}
+
 func TestSendAskQuestionPrompt_PlainPlatform(t *testing.T) {
 	e := newTestEngine()
 	p := &stubPlatformEngine{n: "plain"}
@@ -10124,7 +10360,7 @@ func TestQueueMessage_NoState_ReturnsFalse(t *testing.T) {
 	}
 }
 
-func TestQueueMessage_DeadSession_ReturnsFalse(t *testing.T) {
+func TestQueueMessage_DeadSession_AcceptsForRestart(t *testing.T) {
 	p := &stubPlatformEngine{n: "test"}
 	sess := newQueuingSession("dead")
 	sess.alive = false
@@ -10142,8 +10378,16 @@ func TestQueueMessage_DeadSession_ReturnsFalse(t *testing.T) {
 
 	msg := &Message{SessionKey: key, Content: "hello"}
 	ok := e.queueMessageForBusySession(p, msg, key)
-	if ok {
-		t.Fatal("expected false for dead session")
+	if !ok {
+		t.Fatal("dead session must accept the message for restart")
+	}
+	state.mu.Lock()
+	defer state.mu.Unlock()
+	if len(state.pendingMessages) != 1 {
+		t.Fatalf("dead session queue: pending=%d, want 1", len(state.pendingMessages))
+	}
+	if sent := p.getSent(); len(sent) != 1 || !strings.Contains(sent[0], e.i18n.T(MsgMessageQueued)) {
+		t.Fatalf("queue notice = %v, want exactly one", sent)
 	}
 }
 
@@ -10582,6 +10826,102 @@ func TestAutoCompress_AgentWithoutReporter_StillUsesHeuristic(t *testing.T) {
 	inner.sendMu.Unlock()
 	if last != "/compact" {
 		t.Fatalf("expected /compact via heuristic for a reporter-less agent, got %q", last)
+	}
+}
+
+func TestAutoCompress_NoReporterIncludesConfiguredOverhead(t *testing.T) {
+	p := &stubPlatformEngine{n: "test"}
+	inner := newQueuingSession("overhead")
+	sess := &noReporterSession{AgentSession: inner, inner: inner}
+	agent := &stubCompressorAgent{cmd: "/compact"}
+	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+	e.SetAutoCompressConfig(true, 15_000, 0)
+	e.SetAutoCompressOverheadTokens(20_000)
+	key := "test:overhead"
+	state := &interactiveState{agentSession: sess, platform: p, replyCtx: "ctx"}
+	e.interactiveStates[key] = state
+	session := e.sessions.GetOrCreateActive(key)
+	session.AddHistory("user", "short history")
+	go e.processInteractiveEvents(state, session, e.sessions, key, "msg1", time.Now(), func() {}, nil, nil, 0)
+	inner.events <- Event{Type: EventResult, Content: "response", Done: true}
+	deadline := time.After(2 * time.Second)
+	for {
+		inner.sendMu.Lock()
+		n := len(inner.sendCalls)
+		inner.sendMu.Unlock()
+		if n > 0 {
+			return
+		}
+		select {
+		case <-deadline:
+			t.Fatal("expected configured fixed overhead to cross the auto-compress threshold")
+		default:
+			time.Sleep(10 * time.Millisecond)
+		}
+	}
+}
+
+func TestAutoCompress_UnconfiguredOverheadPreservesHeuristic(t *testing.T) {
+	p := &stubPlatformEngine{n: "test"}
+	inner := newQueuingSession("unconfigured-overhead")
+	sess := &noReporterSession{AgentSession: inner, inner: inner}
+	e := NewEngine("test", &stubCompressorAgent{cmd: "/compact"}, []Platform{p}, "", LangEnglish)
+	e.SetAutoCompressConfig(true, 15_000, 0)
+	key := "test:unconfigured-overhead"
+	state := &interactiveState{agentSession: sess, platform: p, replyCtx: "ctx"}
+	e.interactiveStates[key] = state
+	session := e.sessions.GetOrCreateActive(key)
+	session.AddHistory("user", "short history")
+	go e.processInteractiveEvents(state, session, e.sessions, key, "msg1", time.Now(), func() {}, nil, nil, 0)
+	inner.events <- Event{Type: EventResult, Content: "response", Done: true}
+	time.Sleep(300 * time.Millisecond)
+	inner.sendMu.Lock()
+	defer inner.sendMu.Unlock()
+	if len(inner.sendCalls) != 0 {
+		t.Fatalf("unconfigured overhead must preserve the old estimate, got sends %v", inner.sendCalls)
+	}
+}
+
+func TestAutoCompress_ExplicitZeroOverheadPreservesHeuristic(t *testing.T) {
+	p := &stubPlatformEngine{n: "test"}
+	inner := newQueuingSession("zero-overhead")
+	sess := &noReporterSession{AgentSession: inner, inner: inner}
+	e := NewEngine("test", &stubCompressorAgent{cmd: "/compact"}, []Platform{p}, "", LangEnglish)
+	e.SetAutoCompressConfig(true, 15_000, 0)
+	e.SetAutoCompressOverheadTokens(0)
+	key := "test:zero-overhead"
+	state := &interactiveState{agentSession: sess, platform: p, replyCtx: "ctx"}
+	e.interactiveStates[key] = state
+	session := e.sessions.GetOrCreateActive(key)
+	session.AddHistory("user", "short history")
+	go e.processInteractiveEvents(state, session, e.sessions, key, "msg1", time.Now(), func() {}, nil, nil, 0)
+	inner.events <- Event{Type: EventResult, Content: "response", Done: true}
+	time.Sleep(100 * time.Millisecond)
+	inner.sendMu.Lock()
+	defer inner.sendMu.Unlock()
+	if len(inner.sendCalls) != 0 {
+		t.Fatalf("zero overhead must preserve the old estimate, got sends %v", inner.sendCalls)
+	}
+}
+
+func TestAutoCompress_ExactUsageIgnoresOverhead(t *testing.T) {
+	p := &stubPlatformEngine{n: "test"}
+	sess := newQueuingSession("exact-overhead")
+	sess.contextUsage = &ContextUsage{UsedTokens: 100, ContextWindow: 200_000}
+	e := NewEngine("test", &stubCompressorAgent{cmd: "/compact"}, []Platform{p}, "", LangEnglish)
+	e.SetAutoCompressConfig(true, 15_000, 0)
+	key := "test:exact-overhead"
+	state := &interactiveState{agentSession: sess, platform: p, replyCtx: "ctx"}
+	e.interactiveStates[key] = state
+	session := e.sessions.GetOrCreateActive(key)
+	session.AddHistory("user", "short history")
+	go e.processInteractiveEvents(state, session, e.sessions, key, "msg1", time.Now(), func() {}, nil, nil, 0)
+	sess.events <- Event{Type: EventResult, Content: "response", Done: true}
+	time.Sleep(100 * time.Millisecond)
+	sess.sendMu.Lock()
+	defer sess.sendMu.Unlock()
+	if len(sess.sendCalls) != 0 {
+		t.Fatalf("exact usage must ignore overhead, got sends %v", sess.sendCalls)
 	}
 }
 
@@ -13056,6 +13396,31 @@ func TestWorkspace_Bind_Unbind_List(t *testing.T) {
 	}
 }
 
+func TestWorkspace_ListShowsPreviouslyBoundProjects(t *testing.T) {
+	p := &stubPlatformEngine{n: "test"}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	baseDir := t.TempDir()
+	for _, name := range []string{"project-a", "project-b"} {
+		if err := os.MkdirAll(filepath.Join(baseDir, name), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	e.SetMultiWorkspace(baseDir, filepath.Join(t.TempDir(), "bindings.json"))
+	for _, name := range []string{"project-a", "project-b"} {
+		msg := &Message{SessionKey: "test:ch1:user1", Content: "/workspace bind " + name, ReplyCtx: "ctx"}
+		e.handleCommand(p, msg, msg.Content)
+	}
+	p.clearSent()
+	msg := &Message{SessionKey: "test:ch1:user1", Content: "/workspace list", ReplyCtx: "ctx"}
+	e.handleCommand(p, msg, msg.Content)
+	got := strings.Join(p.getSent(), "\n")
+	for _, name := range []string{"project-a", "project-b"} {
+		if !strings.Contains(got, name) {
+			t.Fatalf("/workspace list omitted %s: %q", name, got)
+		}
+	}
+}
+
 func TestWorkspace_Bind_NonexistentDir(t *testing.T) {
 	p := &stubPlatformEngine{n: "test"}
 	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
@@ -14478,7 +14843,7 @@ func TestEngine_AddPlatform_Multiple(t *testing.T) {
 	}
 }
 
-func TestExecuteCronJob_ResolvesCronReplyTarget(t *testing.T) {
+func TestIssue1959_CronResultIdentifiesJob(t *testing.T) {
 	dir := t.TempDir()
 	store, err := NewCronStore(dir)
 	if err != nil {
@@ -14523,8 +14888,8 @@ func TestExecuteCronJob_ResolvesCronReplyTarget(t *testing.T) {
 	if sent[0] != "⏰ Daily summary" {
 		t.Fatalf("sent[0] = %q, want cron start notice", sent[0])
 	}
-	if sent[1] != "cron complete" {
-		t.Fatalf("sent[1] = %q, want final result", sent[1])
+	if !strings.Contains(sent[1], "cron complete") || !strings.Contains(sent[1], "Daily summary") || !strings.Contains(sent[1], "job-1") {
+		t.Fatalf("sent[1] = %q, want job identity and final result", sent[1])
 	}
 
 	if got := len(e.sessions.ListSessions("discord:thread-fresh")); got != 0 {
@@ -14543,6 +14908,35 @@ func TestExecuteCronJob_ResolvesCronReplyTarget(t *testing.T) {
 
 	if len(agentSession.sentPrompts) != 1 || !strings.Contains(agentSession.sentPrompts[0], "summarize activity") {
 		t.Fatalf("agent prompts = %#v, want prompt containing summarize activity", agentSession.sentPrompts)
+	}
+}
+
+func TestIssue1959_CronLabelDoesNotExposePrompt(t *testing.T) {
+	platform := &stubCronReplyTargetPlatform{stubPlatformEngine: stubPlatformEngine{n: "discord"}}
+	e := NewEngine("test", &resultAgent{session: newResultAgentSession("done")}, []Platform{platform}, "", LangEnglish)
+	defer e.cancel()
+	silent := true
+	job := &CronJob{ID: "job-private", SessionKey: "discord:channel:user", Prompt: "SECRET_PROMPT_SENTINEL", Silent: &silent}
+	if err := e.ExecuteCronJob(job); err != nil {
+		t.Fatal(err)
+	}
+	sent := platform.getSent()
+	if len(sent) != 1 || !strings.Contains(sent[0], job.ID) || strings.Contains(sent[0], job.Prompt) {
+		t.Fatalf("cron result label should include ID without exposing prompt: %q", sent)
+	}
+}
+
+func TestIssue1959_CronShellResultIdentifiesJob(t *testing.T) {
+	platform := &stubCronReplyTargetPlatform{stubPlatformEngine: stubPlatformEngine{n: "discord"}}
+	e := NewEngine("test", &stubAgent{}, []Platform{platform}, "", LangEnglish)
+	defer e.cancel()
+	job := &CronJob{ID: "shell-job-1", SessionKey: "discord:channel:user", Exec: "printf done", WorkDir: t.TempDir()}
+	if err := e.ExecuteCronJob(job); err != nil {
+		t.Fatal(err)
+	}
+	sent := platform.getSent()
+	if len(sent) < 2 || !strings.Contains(sent[len(sent)-1], job.ID) || !strings.Contains(sent[len(sent)-1], "done") {
+		t.Fatalf("shell result lacks job identity: %q", sent)
 	}
 }
 

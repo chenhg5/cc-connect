@@ -14,6 +14,8 @@ import (
 	"net/url"
 	"regexp"
 	"strings"
+
+	"github.com/chenhg5/cc-connect/core"
 )
 
 const maxWeixinMediaBytes = 100 << 20
@@ -143,7 +145,7 @@ func fetchCdnBytes(ctx context.Context, client *http.Client, fullURL, label stri
 		return nil, fmt.Errorf("%s: CDN body exceeds %d bytes", label, maxWeixinMediaBytes)
 	}
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("%s: CDN http %d: %s", label, resp.StatusCode, truncateForLog(body, 256))
+		return nil, core.HTTPError(label+": CDN", resp.StatusCode, body)
 	}
 	return body, nil
 }

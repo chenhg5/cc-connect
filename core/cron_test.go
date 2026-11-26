@@ -1,10 +1,12 @@
 package core
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -14,6 +16,31 @@ import (
 
 	"github.com/robfig/cron/v3"
 )
+
+func TestIssue1959_MutedCronDeliveryIsAuditedWithoutContent(t *testing.T) {
+	var logs bytes.Buffer
+	previous := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logs, nil)))
+	defer slog.SetDefault(previous)
+
+	inner := &stubPlatformEngine{n: "test"}
+	muted := &mutePlatform{Platform: inner, kind: "cron", jobID: "job-1", sessionKey: "test:ch1"}
+	const content = "SECRET_CRON_CONTENT"
+	if err := muted.Reply(context.Background(), "ctx", content); err != nil {
+		t.Fatal(err)
+	}
+	if err := muted.Send(context.Background(), "ctx", content); err != nil {
+		t.Fatal(err)
+	}
+	got := logs.String()
+	if strings.Count(got, "delivery suppressed by mute") != 2 || !strings.Contains(got, "bytes=19") ||
+		!strings.Contains(got, "job=job-1") || !strings.Contains(got, "session_key=test:ch1") {
+		t.Fatalf("mute audit missing delivery count or size: %q", got)
+	}
+	if strings.Contains(got, content) {
+		t.Fatalf("mute audit exposed message content: %q", got)
+	}
+}
 
 func TestCronStore_MuteToggle(t *testing.T) {
 	dir := t.TempDir()
@@ -101,7 +128,7 @@ func TestCronStore_MutePersistence(t *testing.T) {
 
 func TestMutePlatform_DiscardMessages(t *testing.T) {
 	inner := &stubPlatformEngine{n: "test"}
-	mp := &mutePlatform{inner}
+	mp := &mutePlatform{Platform: inner}
 
 	if err := mp.Reply(context.Background(), "ctx", "hello"); err != nil {
 		t.Errorf("Reply should return nil, got %v", err)
@@ -416,8 +443,8 @@ func TestCronScheduler_RunJobNow_DisabledJobStillRuns(t *testing.T) {
 			if sent[0] != "⏰ Disabled daily summary" {
 				t.Fatalf("sent[0] = %q, want cron start notice", sent[0])
 			}
-			if sent[1] != "manual run complete" {
-				t.Fatalf("sent[1] = %q, want final result", sent[1])
+			if !strings.Contains(sent[1], "manual run complete") || !strings.Contains(sent[1], "manual1") {
+				t.Fatalf("sent[1] = %q, want identified final result", sent[1])
 			}
 			found, lastRunSet, lastErr := cronJobRunStatus(store, "manual1")
 			if !found {
@@ -1021,12 +1048,14 @@ func TestCronScheduler_SleepRecovery_PastDueFiresImmediately(t *testing.T) {
 	}
 	entry.nextRun = time.Now().Add(-8 * time.Hour)
 	cs.mu.Unlock()
+	// Capture the baseline before waking the scheduler. The job may fire
+	// immediately, so reading it afterward can miss the result entirely.
+	startSent := len(platform.getSent())
 	cs.signalWakeUp()
 
 	// Should fire within maxCronTimerSpan (30s) of the wake-up signal,
 	// not 8 hours from now (the naive pre-fix behavior).
 	deadline := time.Now().Add(maxCronTimerSpan + 5*time.Second)
-	startSent := len(platform.getSent())
 	for time.Now().Before(deadline) {
 		if len(platform.getSent()) > startSent+1 {
 			return
@@ -1439,7 +1468,7 @@ func TestExecuteCronRun_TimeoutCancelsRunAndUnwinds(t *testing.T) {
 	job := &CronJob{ID: "job-timeout", SessionKey: "discord:channel-1:user-1", Prompt: "long task"}
 
 	start := time.Now()
-	err := executeCronRun(e, job, nil, 100*time.Millisecond)
+	err := executeCronRun(&CronScheduler{}, e, job, true, nil, 100*time.Millisecond)
 	elapsed := time.Since(start)
 
 	if err == nil || !strings.Contains(err.Error(), "timed out") {

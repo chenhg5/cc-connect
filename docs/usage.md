@@ -274,6 +274,13 @@ name = "bedrock"
 env = { CLAUDE_CODE_USE_BEDROCK = "1", AWS_PROFILE = "bedrock" }
 ```
 
+When exactly one provider applies to the agent, cc-connect selects it automatically.
+If several apply, set `provider = "name"` under `[projects.agent.options]` to choose one;
+otherwise none is selected. Claude Code environment values are applied in this order:
+`options.env`, active provider `env`, then session env (later values win).
+If requests still reach a different endpoint, check Claude Code's `settings.json`
+for conflicting environment values and remove them there.
+
 ### CLI Commands
 
 ```bash

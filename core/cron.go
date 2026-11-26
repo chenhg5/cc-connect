@@ -50,6 +50,9 @@ const defaultCronJobTimeout = 30 * time.Minute
 var (
 	ErrCronJobNotFound     = errors.New("cron job not found")
 	ErrCronProjectNotFound = errors.New("cron project not found")
+	// ErrCronEmptyResponse identifies an agent turn without an assistant
+	// history entry; only this outcome is eligible for one retry.
+	ErrCronEmptyResponse = errors.New("produced an empty response")
 )
 
 // ExecutionTimeout returns how long the scheduler waits for the job goroutine to finish.
@@ -446,8 +449,9 @@ type CronScheduler struct {
 	engines            map[string]*Engine // project name → engine
 	entries            map[string]*cronEntry
 	mu                 sync.RWMutex
-	defaultSilent      bool   // global default for suppressing cron start notifications
-	defaultSessionMode string // global default session mode; "" = reuse, "new_per_run" = fresh session each run
+	defaultSilent      bool          // global default for suppressing cron start notifications
+	defaultSessionMode string        // global default session mode; "" = reuse, "new_per_run" = fresh session each run
+	emptyRetryDelay    time.Duration // wait before retrying an empty agent response once
 
 	// runLoop plumbing. wakeUp carries a "schedule changed, re-evaluate"
 	// signal (buffered 1). stop ends the loop. done closes when the loop
@@ -463,9 +467,10 @@ type CronScheduler struct {
 
 func NewCronScheduler(store *CronStore) *CronScheduler {
 	return &CronScheduler{
-		store:   store,
-		engines: make(map[string]*Engine),
-		entries: make(map[string]*cronEntry),
+		store:           store,
+		engines:         make(map[string]*Engine),
+		entries:         make(map[string]*cronEntry),
+		emptyRetryDelay: 30 * time.Second,
 	}
 }
 
@@ -885,13 +890,13 @@ func (cs *CronScheduler) runJob(job *CronJob, manual bool) {
 		return
 	}
 
-	slog.Info("cron: executing job", "id", job.ID, "project", job.Project, "manual", manual, "prompt", truncateStr(job.Prompt, 60))
+	slog.Info("cron: executing job", "id", job.ID, "project", job.Project, "manual", manual, "prompt_len", len(job.Prompt))
 
 	cs.mu.RLock()
 	quit := cs.quit
 	cs.mu.RUnlock()
 
-	err := executeCronRun(engine, job, quit, job.ExecutionTimeout())
+	err := executeCronRun(cs, engine, job, manual, quit, job.ExecutionTimeout())
 
 	cs.store.MarkRun(job.ID, err)
 
@@ -924,16 +929,40 @@ const (
 // out of run creation via CronRunHandle) and waits a bounded time for the run
 // goroutine to unwind. A timeout <= 0 waits for completion or shutdown. A nil
 // quit channel disables shutdown interruption.
-func executeCronRun(engine *Engine, job *CronJob, quit chan struct{}, timeout time.Duration) error {
+func executeCronRun(cs *CronScheduler, engine *Engine, job *CronJob, manual bool, quit chan struct{}, timeout time.Duration) error {
 	done := make(chan error, 1)
 	handles := make(chan CronRunHandle, 1)
 	go func() {
-		done <- engine.ExecuteCronJobWithHandle(job, func(h CronRunHandle) {
+		err := engine.ExecuteCronJobWithHandle(job, func(h CronRunHandle) {
 			select {
 			case handles <- h:
 			default:
 			}
 		})
+		if errors.Is(err, ErrCronEmptyResponse) {
+			slog.Warn("cron: empty response, retrying job once", "id", job.ID, "manual", manual, "delay", cs.emptyRetryDelay)
+			timer := time.NewTimer(cs.emptyRetryDelay)
+			select {
+			case <-timer.C:
+			case <-quit:
+				timer.Stop()
+				done <- errors.New("job interrupted by shutdown")
+				return
+			}
+			if !manual {
+				current := cs.store.Get(job.ID)
+				if current == nil || !current.Enabled {
+					done <- err
+					return
+				}
+			}
+			// The first attempt already sent the start notice.
+			retryJob := *job
+			silent := true
+			retryJob.Silent = &silent
+			err = engine.ExecuteCronJob(&retryJob)
+		}
+		done <- err
 	}()
 
 	var timeoutCh <-chan time.Time
@@ -1026,10 +1055,25 @@ func stopCronRun(engine *Engine, handle CronRunHandle) bool {
 // Used for muted cron jobs that should execute without sending chat messages.
 type mutePlatform struct {
 	Platform
+	kind       string
+	jobID      string
+	sessionKey string
 }
 
-func (m *mutePlatform) Reply(_ context.Context, _ any, _ string) error { return nil }
-func (m *mutePlatform) Send(_ context.Context, _ any, _ string) error  { return nil }
+func (m *mutePlatform) auditDiscard(content string) {
+	slog.Info("scheduled delivery suppressed by mute", "kind", m.kind, "job", m.jobID,
+		"session_key", m.sessionKey, "bytes", len(content))
+}
+
+func (m *mutePlatform) Reply(_ context.Context, _ any, content string) error {
+	m.auditDiscard(content)
+	return nil
+}
+
+func (m *mutePlatform) Send(_ context.Context, _ any, content string) error {
+	m.auditDiscard(content)
+	return nil
+}
 
 func GenerateCronID() string {
 	b := make([]byte, 4)
