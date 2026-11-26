@@ -16630,12 +16630,15 @@ func truncateToolInput(s string, maxLen int) string {
 	if maxLen <= 0 || utf8.RuneCountInString(s) <= maxLen {
 		return s
 	}
+	dec := json.NewDecoder(strings.NewReader(s))
+	dec.UseNumber()
 	var payload map[string]any
-	if err := json.Unmarshal([]byte(s), &payload); err != nil {
+	if err := dec.Decode(&payload); err != nil {
 		return truncateIf(s, maxLen)
 	}
+	markerLen := utf8.RuneCountInString(truncatedJSONMarker)
 	for {
-		b, err := json.Marshal(payload)
+		b, err := marshalNoEscapeHTML(payload)
 		if err != nil {
 			return truncateIf(s, maxLen)
 		}
@@ -16645,23 +16648,36 @@ func truncateToolInput(s string, maxLen int) string {
 		}
 		key := longestJSONStringValue(payload)
 		if key == "" {
-			return truncateIf(s, maxLen)
+			return string(b)
 		}
 		runes := []rune(payload[key].(string))
-		budget := len(runes) - over
-		if budget < 0 {
-			budget = 0
+		target := len(runes) - over
+		if target < markerLen {
+			target = markerLen
 		}
-		keep := budget - utf8.RuneCountInString(truncatedJSONMarker)
-		switch {
-		case keep > 0:
-			payload[key] = string(runes[:keep]) + truncatedJSONMarker
-		case budget > 0:
-			payload[key] = string(runes[:budget])
-		default:
-			payload[key] = ""
+		if target > len(runes) {
+			target = len(runes)
 		}
+		keep := target - markerLen
+		if keep < 0 {
+			keep = 0
+		}
+		payload[key] = string(runes[:keep]) + truncatedJSONMarker
 	}
+}
+
+// marshalNoEscapeHTML encodes payload without HTML escaping so the measured
+// rune length matches the emitted JSON. json.Marshal escapes <, > and & into
+// six-rune sequences, which would otherwise be charged against the value
+// budget and blank angle-bracket-heavy payloads such as patches.
+func marshalNoEscapeHTML(payload map[string]any) ([]byte, error) {
+	var buf bytes.Buffer
+	enc := json.NewEncoder(&buf)
+	enc.SetEscapeHTML(false)
+	if err := enc.Encode(payload); err != nil {
+		return nil, err
+	}
+	return bytes.TrimRight(buf.Bytes(), "\n"), nil
 }
 
 // longestJSONStringValue returns the longest top-level string value that has

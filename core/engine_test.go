@@ -12276,7 +12276,7 @@ func TestTruncateToolInput_KeepsShortFieldsVisible(t *testing.T) {
 	if payload["filePath"] != "/tmp/a.go" {
 		t.Errorf("short field lost: %v", payload["filePath"])
 	}
-	if payload["offset"] != float64(10) {
+	if fmt.Sprint(payload["offset"]) != "10" {
 		t.Errorf("numeric field lost: %v", payload["offset"])
 	}
 	text, _ := payload["patchText"].(string)
@@ -12293,6 +12293,54 @@ func TestTruncateToolInput_SmallBudgetTerminates(t *testing.T) {
 	got := truncateToolInput(string(raw), 10)
 	if runes := utf8.RuneCountInString(got); runes > len([]rune(string(raw))) {
 		t.Fatalf("result grew: %d runes", runes)
+	}
+}
+
+func TestTruncateToolInput_AngleBracketPatchNotBlanked(t *testing.T) {
+	patch := "*** Begin Patch\n*** Update File: /tmp/a.tsx\n" + strings.Repeat("+const x = <div>{a < b && c > d}</div>;\n", 40)
+	raw, err := json.Marshal(map[string]any{"patchText": patch})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+
+	got := truncateToolInput(string(raw), 500)
+	var payload map[string]any
+	if err := json.Unmarshal([]byte(got), &payload); err != nil {
+		t.Fatalf("not valid JSON: %v (got %q)", err, got)
+	}
+	text, _ := payload["patchText"].(string)
+	if text == "" {
+		t.Fatalf("angle-bracket patch was blanked")
+	}
+	if !strings.Contains(text, truncatedJSONMarker) {
+		t.Errorf("shortened patch missing truncation marker: %q", text)
+	}
+	if !strings.HasPrefix(text, "*** Begin Patch") {
+		t.Errorf("patch body lost, got %q", text)
+	}
+}
+
+func TestTruncateToolInput_PreservesLargeIntegers(t *testing.T) {
+	raw := []byte(`{"id":9007199254740993,"patchText":"` + strings.Repeat("z", 2000) + `"}`)
+	got := truncateToolInput(string(raw), 500)
+	if !strings.Contains(got, "9007199254740993") {
+		t.Errorf("large integer rewritten: %q", got)
+	}
+	var payload map[string]any
+	if err := json.Unmarshal([]byte(got), &payload); err != nil {
+		t.Fatalf("not valid JSON: %v", err)
+	}
+}
+
+func TestTruncateToolInput_NestedNumericStaysValid(t *testing.T) {
+	raw := []byte(`{"opts":{"depth":3,"items":[1,2,3]},"payload":"` + strings.Repeat("q", 2000) + `"}`)
+	got := truncateToolInput(string(raw), 500)
+	var payload map[string]any
+	if err := json.Unmarshal([]byte(got), &payload); err != nil {
+		t.Fatalf("nested/numeric payload not valid JSON after truncation: %v (got %q)", err, got)
+	}
+	if _, ok := payload["opts"]; !ok {
+		t.Errorf("nested object lost")
 	}
 }
 
