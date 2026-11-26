@@ -2,6 +2,7 @@ package acp
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -60,15 +61,38 @@ func TestAgent_GetSessionHistory_ReadsKimiTranscript(t *testing.T) {
 	}
 }
 
-func TestAgent_GetSessionHistory_MissingSessionReturnsError(t *testing.T) {
+func TestAgent_GetSessionHistory_MissingSessionReturnsUnsupported(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	t.Setenv("KIMI_CODE_HOME", "")
 	t.Setenv("KIMI_SHARE_DIR", "")
 
 	a := &Agent{}
-	if _, err := a.GetSessionHistory(context.Background(), "nonexistent-session", 0); err == nil {
-		t.Fatal("expected error for missing session, got nil")
+	if _, err := a.GetSessionHistory(context.Background(), "nonexistent-session", 0); !errors.Is(err, core.ErrHistoryUnsupported) {
+		t.Fatalf("error = %v, want core.ErrHistoryUnsupported", err)
+	}
+}
+
+func TestAgent_GetSessionHistory_PreservesTranscriptReadErrors(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("KIMI_CODE_HOME", "")
+	t.Setenv("KIMI_SHARE_DIR", "")
+
+	sessionID := "session_with_unreadable_transcript"
+	sessionDir := filepath.Join(home, ".kimi-code", "sessions", "wd_project", sessionID)
+	wirePath := filepath.Join(sessionDir, "agents", "main", "wire.jsonl")
+	if err := os.MkdirAll(wirePath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	a := &Agent{}
+	_, err := a.GetSessionHistory(context.Background(), sessionID, 0)
+	if err == nil {
+		t.Fatal("expected transcript read error, got nil")
+	}
+	if errors.Is(err, core.ErrHistoryUnsupported) {
+		t.Fatalf("transcript read error = %v, must not be classified as unsupported", err)
 	}
 }
 
@@ -99,4 +123,3 @@ func TestAgent_GetSessionHistory_ForwardsAgentStorageEnv(t *testing.T) {
 		t.Fatalf("entries = %+v, want [from custom env]", entries)
 	}
 }
-

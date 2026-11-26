@@ -10596,18 +10596,10 @@ func (e *Engine) cmdHistory(p Platform, msg *Message, args []string) {
 		n = v
 	}
 
-	entries := s.GetHistory(n)
-	agentSID := s.GetAgentSessionID()
-	if len(entries) == 0 && agentSID != "" {
-		if hp, ok := agent.(HistoryProvider); ok {
-			agentEntries, err := hp.GetSessionHistory(e.ctx, agentSID, n)
-			if err != nil {
-				slog.Warn("history: agent transcript read failed", "session_id", agentSID, "error", err)
-				e.reply(p, msg.ReplyCtx, e.i18n.T(MsgHistoryReadFailed))
-				return
-			}
-			entries = agentEntries
-		}
+	entries, err := e.loadSessionHistory(agent, s, n)
+	if err != nil {
+		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgHistoryReadFailed))
+		return
 	}
 
 	if len(entries) == 0 {
@@ -10627,6 +10619,31 @@ func (e *Engine) cmdHistory(p Platform, msg *Message, args []string) {
 		sb.WriteString(fmt.Sprintf("%s [%s]\n%s\n\n", icon, h.Timestamp.Format("15:04:05"), content))
 	}
 	e.reply(p, msg.ReplyCtx, sb.String())
+}
+
+// loadSessionHistory prefers the agent transcript, which includes turns from
+// other clients. If the transcript is unavailable, it falls back to the local
+// cache. It returns an error only when the transcript read fails and the cache
+// is empty.
+func (e *Engine) loadSessionHistory(agent Agent, session *Session, limit int) ([]HistoryEntry, error) {
+	var transcriptErr error
+	if agentSID := session.GetAgentSessionID(); agentSID != "" {
+		if hp, ok := agent.(HistoryProvider); ok {
+			entries, err := hp.GetSessionHistory(e.ctx, agentSID, limit)
+			switch {
+			case err == nil && len(entries) > 0:
+				return entries, nil
+			case err != nil && !errors.Is(err, ErrHistoryUnsupported):
+				slog.Warn("history: agent transcript read failed, falling back to local cache", "session_id", agentSID, "error", err)
+				transcriptErr = err
+			}
+		}
+	}
+	cached := session.GetHistory(limit)
+	if len(cached) == 0 && transcriptErr != nil {
+		return nil, transcriptErr
+	}
+	return cached, nil
 }
 
 func (e *Engine) historyEntryMaxLen() int {
@@ -14920,18 +14937,9 @@ func (e *Engine) renderCurrentCard(sessionKey string) *Card {
 func (e *Engine) renderHistoryCard(sessionKey string) *Card {
 	agent, sessions := e.sessionContextForKey(sessionKey)
 	s := sessions.GetOrCreateActive(sessionKey)
-	entries := s.GetHistory(10)
-
-	agentSID := s.GetAgentSessionID()
-	if len(entries) == 0 && agentSID != "" {
-		if hp, ok := agent.(HistoryProvider); ok {
-			agentEntries, err := hp.GetSessionHistory(e.ctx, agentSID, 10)
-			if err != nil {
-				slog.Warn("history: agent transcript read failed", "session_id", agentSID, "error", err)
-				return e.simpleCard(e.i18n.T(MsgCardTitleHistory), "turquoise", e.i18n.T(MsgHistoryReadFailed))
-			}
-			entries = agentEntries
-		}
+	entries, err := e.loadSessionHistory(agent, s, 10)
+	if err != nil {
+		return e.simpleCard(e.i18n.T(MsgCardTitleHistory), "turquoise", e.i18n.T(MsgHistoryReadFailed))
 	}
 
 	if len(entries) == 0 {

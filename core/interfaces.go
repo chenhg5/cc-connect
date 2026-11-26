@@ -47,6 +47,10 @@ type Platform interface {
 // ErrNotSupported indicates a platform doesn't support a particular operation.
 var ErrNotSupported = errors.New("operation not supported by this platform")
 
+// ErrHistoryUnsupported indicates an agent cannot retrieve history from its
+// backend. Callers may fall back to their local history cache.
+var ErrHistoryUnsupported = errors.New("agent history retrieval not supported")
+
 // ReplyContextReconstructor is an optional interface for platforms that can
 // recreate a reply context from a session key. This is needed for cron jobs
 // to send messages to users without an incoming message.

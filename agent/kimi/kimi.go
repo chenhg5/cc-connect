@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -54,6 +55,10 @@ type Agent struct {
 }
 
 var _ core.HistoryProvider = (*Agent)(nil)
+
+// ErrSessionNotFound indicates that no local Kimi session transcript exists
+// for the requested session ID.
+var ErrSessionNotFound = errors.New("session not found")
 
 func New(opts map[string]any) (core.Agent, error) {
 	workDir, _ := opts["work_dir"].(string)
@@ -302,7 +307,7 @@ func (a *Agent) GetSessionHistory(_ context.Context, sessionID string, limit int
 func ReadSessionHistory(sessionID string, limit int, extraEnv ...string) ([]core.HistoryEntry, error) {
 	sessionDir := findKimiSessionDir(sessionID, extraEnv...)
 	if sessionDir == "" {
-		return nil, fmt.Errorf("kimi: session not found: %s", sessionID)
+		return nil, fmt.Errorf("kimi: %w: %s", ErrSessionNotFound, sessionID)
 	}
 
 	contextPath := filepath.Join(sessionDir, "context.jsonl")
