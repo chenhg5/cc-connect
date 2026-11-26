@@ -953,6 +953,33 @@
           "models": ["deepseek-v4-flash", "claude-sonnet-5-5", "gpt-6.2-sol", "gemini-4-neon"]
         }
       }
+    },
+    {
+      "name": "straitly",
+      "display_name": "Straitly",
+      "description": "AI gateway with one key for 150+ models including Claude, GPT, Gemini, Grok and DeepSeek, through Anthropic Messages, OpenAI Responses and Chat Completions APIs. Pay per token from prepaid credits, no subscription.",
+      "description_zh": "AI 网关，一个密钥即可通过 Anthropic Messages、OpenAI Responses 和 Chat Completions 接口使用 Claude、GPT、Gemini、Grok、DeepSeek 等 150 多个模型。按 Token 从预付额度扣费，无订阅。",
+      "features": ["OpenAI Compatible", "Anthropic Compatible", "Responses API", "150+ Models"],
+      "tier": 3,
+      "website": "https://straitly.ai",
+      "agents": {
+        "claudecode": {
+          "base_url": "https://api.straitly.ai",
+          "model": "claude-sonnet-5-5",
+          "models": ["claude-sonnet-5-5", "claude-opus-5-5", "claude-haiku-5-5"]
+        },
+        "codex": {
+          "base_url": "https://api.straitly.ai/v1",
+          "model": "gpt-6.1-sol",
+          "models": ["gpt-6.1-sol", "gpt-6-sol", "gpt-6-astra"],
+          "codex_config": { "wire_api": "responses" }
+        },
+        "opencode": {
+          "base_url": "https://api.straitly.ai/v1",
+          "model": "deepseek/deepseek-v4-1-flash-1017",
+          "models": ["deepseek/deepseek-v4-1-flash-1017", "claude-sonnet-5-5", "gpt-6.1-sol", "gemini-4-argon"]
+        }
+      }
     }
   ]
 }
