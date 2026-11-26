@@ -4599,7 +4599,7 @@ func (e *Engine) getOrCreateInteractiveStateWith(sessionKey string, p Platform, 
 		session.SetAgentSessionID("", agent.Name())
 		sessions.Save()
 		startSessionID = ""
-		e.warnNotice(p, replyCtx, sessionKey, e.i18n.T(MsgSessionResumeUnsafe))
+		e.warnNotice(p, replyCtx, sessionKey, MsgSessionResumeUnsafe, e.i18n.T(MsgSessionResumeUnsafe))
 	}
 
 	isResume := startSessionID != ""
@@ -5477,7 +5477,8 @@ func (e *Engine) runUnsolicitedReader(ctx context.Context, cancel context.Cancel
 					if toolName == "" {
 						toolName = "(unknown)"
 					}
-					e.warnNotice(p, replyCtx, sessionKey, fmt.Sprintf(e.i18n.T(MsgBackgroundAutoDenied), toolName))
+					e.warnNotice(p, replyCtx, sessionKey, MsgBackgroundAutoDenied,
+						fmt.Sprintf(e.i18n.T(MsgBackgroundAutoDenied), toolName), "tool", toolName)
 				}
 
 			case EventError:

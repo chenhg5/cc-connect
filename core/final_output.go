@@ -37,10 +37,12 @@ func (e *Engine) notice(p Platform, replyCtx any, content string) {
 // warnNotice is notice for a notice whose loss costs the user something --
 // a fresh session started instead of the resumed one, a background tool
 // call that was refused. Final output mode does not send it either, but
-// logs it at Warn with the session key so it stays visible in the logs.
-func (e *Engine) warnNotice(p Platform, replyCtx any, sessionKey, content string) {
+// logs it at Warn with the session key, the notice's message key and the
+// caller's attrs (never the notice text) so it stays visible in the logs.
+func (e *Engine) warnNotice(p Platform, replyCtx any, sessionKey string, kind MsgKey, content string, attrs ...any) {
 	if e.finalOutput() {
-		slog.Warn("final output: notice not sent to the chat", "session_key", sessionKey, "notice", content)
+		slog.Warn("final output: notice not sent to the chat",
+			append([]any{"session_key", sessionKey, "notice", string(kind)}, attrs...)...)
 		return
 	}
 	e.send(p, replyCtx, content)

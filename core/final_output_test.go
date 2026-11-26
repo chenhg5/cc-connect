@@ -2,7 +2,6 @@ package core
 
 import (
 	"context"
-	"encoding/json"
 	"strings"
 	"sync"
 	"testing"
@@ -290,15 +289,20 @@ func TestFinalMode_WarnNoticeIsLoggedNotSent(t *testing.T) {
 	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
 	t.Cleanup(func() { _ = e.Stop() })
 	e.SetDisplayConfig(DisplayCfg{Mode: "final"})
-	e.warnNotice(p, "ctx", "test:warn", "started a new session")
+	e.warnNotice(p, "ctx", "test:warn", MsgSessionResumeUnsafe, "started a new session", "tool", "Bash")
 	if sent := p.getSent(); len(sent) != 0 {
 		t.Fatalf("final mode sent %q", sent)
 	}
-	if log := buf.String(); !strings.Contains(log, `"level":"WARN"`) || !strings.Contains(log, "started a new session") || !strings.Contains(log, "test:warn") {
+	log := buf.String()
+	if !strings.Contains(log, `"level":"WARN"`) || !strings.Contains(log, string(MsgSessionResumeUnsafe)) ||
+		!strings.Contains(log, "test:warn") || !strings.Contains(log, `"tool":"Bash"`) {
 		t.Fatalf("warn log = %s", log)
 	}
+	if strings.Contains(log, "started a new session") {
+		t.Fatalf("warn log must not carry the notice text: %s", log)
+	}
 	e.SetDisplayConfig(DisplayCfg{Mode: "full"})
-	e.warnNotice(p, "ctx", "test:warn", "started a new session")
+	e.warnNotice(p, "ctx", "test:warn", MsgSessionResumeUnsafe, "started a new session")
 	if sent := p.getSent(); len(sent) != 1 || sent[0] != "started a new session" {
 		t.Fatalf("other modes must send the notice, got %q", sent)
 	}
@@ -320,16 +324,9 @@ func TestFinalMode_UnsafeResumeNoticeIsLogged(t *testing.T) {
 	if sent := p.getSent(); len(sent) != 0 {
 		t.Fatalf("final mode sent %q", sent)
 	}
-	want := e.i18n.T(MsgSessionResumeUnsafe)
-	if log := buf.String(); !strings.Contains(log, "notice not sent") || !strings.Contains(log, key) || !strings.Contains(log, jsonEscape(want)) {
+	if log := buf.String(); !strings.Contains(log, "notice not sent") || !strings.Contains(log, key) || !strings.Contains(log, string(MsgSessionResumeUnsafe)) {
 		t.Fatalf("warn log lacks the dropped resume notice:\n%s", log)
 	}
-}
-
-// jsonEscape renders s the way slog's JSON handler writes a string value.
-func jsonEscape(s string) string {
-	b, _ := json.Marshal(s)
-	return strings.Trim(string(b), `"`)
 }
 
 // agentStatusFooter is the model/token footer agents append to their text;
