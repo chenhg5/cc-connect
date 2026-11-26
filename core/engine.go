@@ -5478,16 +5478,20 @@ func (e *Engine) scheduleUnsolicitedReaderRecovery(state *interactiveState, sess
 				valid := current == state && state.unsolicitedTimedOutDone == done &&
 					as != nil && as.Alive() && !state.stopped && state.eventsNeedResync &&
 					state.unsolicitedCancel == nil && len(state.pendingMessages) == 0
+				var subagentEvents []Event
 				if valid {
 					// The old reader has exited and this goroutine owns the
 					// session lock, so no foreground consumer can race with resync.
-					drainEvents(as.Events())
+					// Subagent events are no leftovers; they go to their cards
+					// once state.mu is released.
+					subagentEvents = drainEventsExceptSubagents(as.Events())
 					state.eventsNeedResync = false
 					state.unsolicitedTimedOutDone = nil
 				}
 				state.unsolicitedRecoveryScheduled = false
 				state.mu.Unlock()
 				if valid {
+					e.handleSubagentEvents(state, subagentEvents)
 					e.startUnsolicitedReader(state, session, sessions, sessionKey, workspaceDir)
 					e.scheduleAgentSessionIdleClose(sessionKey, state)
 				}

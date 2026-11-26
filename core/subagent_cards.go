@@ -104,15 +104,24 @@ func (e *Engine) handleSubagentEvent(state *interactiveState, event Event) {
 // subagent keeps writing them across turns, so they are no leftovers, and a
 // dropped one would leave its card without a title or stuck running.
 func (e *Engine) drainEventsKeepSubagents(state *interactiveState, ch <-chan Event) {
+	e.handleSubagentEvents(state, drainEventsExceptSubagents(ch))
+}
+
+// drainEventsExceptSubagents empties ch like drainEvents and returns the
+// subagent events it held, in order, for handleSubagentEvents. It takes no
+// lock, so a caller holding state.mu drains with it and hands the events
+// over once it has released the lock.
+func drainEventsExceptSubagents(ch <-chan Event) []Event {
+	var subagent []Event
 	drained := 0
 	for {
 		select {
 		case event, ok := <-ch:
 			if !ok {
-				return
+				return subagent
 			}
 			if event.Type == EventSubagent {
-				e.handleSubagentEvent(state, event)
+				subagent = append(subagent, event)
 				continue
 			}
 			drained++
@@ -120,8 +129,16 @@ func (e *Engine) drainEventsKeepSubagents(state *interactiveState, ch <-chan Eve
 			if drained > 0 {
 				slog.Warn("drained stale events from previous turn", "count", drained)
 			}
-			return
+			return subagent
 		}
+	}
+}
+
+// handleSubagentEvents routes subagent events kept by a drain to their cards.
+// It locks state.mu.
+func (e *Engine) handleSubagentEvents(state *interactiveState, events []Event) {
+	for _, event := range events {
+		e.handleSubagentEvent(state, event)
 	}
 }
 

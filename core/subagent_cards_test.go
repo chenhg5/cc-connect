@@ -249,6 +249,54 @@ func TestSubagentCards_DrainKeepsSubagentEvents(t *testing.T) {
 	}
 }
 
+// TestSubagentCards_StopTimeoutResyncKeepsSubagentEvents covers the resync
+// that restarts the background reader after a reader missed its stop
+// deadline. That drain runs under state.mu, so the subagent events it keeps
+// must reach their card after the lock is released, not be dropped (a lost
+// finish leaves the card running) or deadlock on the lock.
+func TestSubagentCards_StopTimeoutResyncKeepsSubagentEvents(t *testing.T) {
+	p := &cardRecorderPlatform{stubPlatformEngine: stubPlatformEngine{n: "test"}}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	defer func() { _ = e.Stop() }()
+	as := newControllableSession("subagent-resync")
+	key := "test:subagent-resync"
+	session := e.sessions.GetOrCreateActive(key)
+	timedOutDone := make(chan struct{})
+	close(timedOutDone) // the timed-out reader has already exited
+	state := &interactiveState{
+		agentSession:            as,
+		platform:                p,
+		replyCtx:                "ctx",
+		eventsNeedResync:        true,
+		unsolicitedTimedOutDone: timedOutDone,
+	}
+	e.interactiveMu.Lock()
+	e.interactiveStates[key] = state
+	e.interactiveMu.Unlock()
+	defer func() { e.cleanupInteractiveState(key, state) }()
+
+	as.events <- subagentEvent(SubagentEvent{ID: "a", Phase: SubagentStarted, Title: "Count to three", Kind: "general-purpose", Background: true, Prompt: "count 1 2 3"})
+	as.events <- Event{Type: EventError, Error: fmt.Errorf("stale")}
+	as.events <- subagentEvent(SubagentEvent{ID: "a", Phase: SubagentFinished, Status: "completed", Summary: "counted"})
+	e.scheduleUnsolicitedReaderRecovery(state, session, e.sessions, key, "")
+
+	cards := waitForCards(t, p, func(c map[string]*ProgressCardPayload) bool {
+		return c[cardA] != nil && c[cardA].State == ProgressCardStateCompleted
+	})
+	if cards[cardA] == nil {
+		t.Fatalf("subagent events kept by the resync drain never reached a card; cards = %v", cards)
+	}
+	if got, want := strings.Join(cardTexts(cards[cardA]), "\n"), "info|count 1 2 3\ninfo|✅ counted"; got != want || cards[cardA].State != ProgressCardStateCompleted {
+		t.Fatalf("card = %q (state %s), want %q completed", got, cards[cardA].State, want)
+	}
+	state.mu.Lock()
+	resynced := !state.eventsNeedResync && state.unsolicitedCancel != nil
+	state.mu.Unlock()
+	if !resynced {
+		t.Fatal("background reader did not restart after the resync")
+	}
+}
+
 // TestSubagentCards_BacklogKeepsStartsAndFinishes stalls the worker on a slow
 // platform call while a chatty subagent floods it. Steps beyond the backlog
 // may be dropped, but its start and finish must get through: a lost finish
