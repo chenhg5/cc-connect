@@ -50,6 +50,9 @@ const defaultCronJobTimeout = 30 * time.Minute
 var (
 	ErrCronJobNotFound     = errors.New("cron job not found")
 	ErrCronProjectNotFound = errors.New("cron project not found")
+	// ErrCronEmptyResponse identifies an agent turn without an assistant
+	// history entry; only this outcome is eligible for one retry.
+	ErrCronEmptyResponse = errors.New("produced an empty response")
 )
 
 // ExecutionTimeout returns how long the scheduler waits for the job goroutine to finish.
@@ -446,8 +449,9 @@ type CronScheduler struct {
 	engines            map[string]*Engine // project name → engine
 	entries            map[string]*cronEntry
 	mu                 sync.RWMutex
-	defaultSilent      bool   // global default for suppressing cron start notifications
-	defaultSessionMode string // global default session mode; "" = reuse, "new_per_run" = fresh session each run
+	defaultSilent      bool          // global default for suppressing cron start notifications
+	defaultSessionMode string        // global default session mode; "" = reuse, "new_per_run" = fresh session each run
+	emptyRetryDelay    time.Duration // wait before retrying an empty agent response once
 
 	// runLoop plumbing. wakeUp carries a "schedule changed, re-evaluate"
 	// signal (buffered 1). stop ends the loop. done closes when the loop
@@ -456,13 +460,17 @@ type CronScheduler struct {
 	stop    chan struct{}
 	done    chan struct{}
 	running bool
+	// quit is closed by Stop so a job that is still running stops being
+	// waited on; shutdown must not block until the job finishes (#2313).
+	quit chan struct{}
 }
 
 func NewCronScheduler(store *CronStore) *CronScheduler {
 	return &CronScheduler{
-		store:   store,
-		engines: make(map[string]*Engine),
-		entries: make(map[string]*cronEntry),
+		store:           store,
+		engines:         make(map[string]*Engine),
+		entries:         make(map[string]*cronEntry),
+		emptyRetryDelay: 30 * time.Second,
 	}
 }
 
@@ -511,6 +519,7 @@ func (cs *CronScheduler) Start() error {
 	cs.wakeUp = make(chan struct{}, 1)
 	cs.stop = make(chan struct{}, 1)
 	cs.done = make(chan struct{})
+	cs.quit = make(chan struct{})
 	cs.mu.Unlock()
 
 	jobs := cs.store.List()
@@ -537,6 +546,7 @@ func (cs *CronScheduler) Stop() {
 	cs.running = false
 	stopCh := cs.stop
 	doneCh := cs.done
+	close(cs.quit)
 	cs.mu.Unlock()
 
 	select {
@@ -544,6 +554,22 @@ func (cs *CronScheduler) Stop() {
 	default:
 	}
 	<-doneCh
+}
+
+// stopping reports whether Stop has been called since the last Start.
+func (cs *CronScheduler) stopping() bool {
+	cs.mu.RLock()
+	quit := cs.quit
+	cs.mu.RUnlock()
+	if quit == nil {
+		return false
+	}
+	select {
+	case <-quit:
+		return true
+	default:
+		return false
+	}
 }
 
 // signalWakeUp nudges the runLoop to re-evaluate the next firing time.
@@ -639,6 +665,9 @@ func (cs *CronScheduler) fireDueJobs() {
 	cs.mu.RUnlock()
 
 	for _, e := range due {
+		if cs.stopping() {
+			return
+		}
 		job := cs.store.Get(e.jobID)
 		if job != nil {
 			cs.runJob(job, false)
@@ -861,23 +890,58 @@ func (cs *CronScheduler) runJob(job *CronJob, manual bool) {
 		return
 	}
 
-	slog.Info("cron: executing job", "id", job.ID, "project", job.Project, "manual", manual, "prompt", truncateStr(job.Prompt, 60))
+	slog.Info("cron: executing job", "id", job.ID, "project", job.Project, "manual", manual, "prompt_len", len(job.Prompt))
+
+	cs.mu.RLock()
+	quit := cs.quit
+	cs.mu.RUnlock()
 
 	done := make(chan error, 1)
 	go func() {
-		done <- engine.ExecuteCronJob(job)
+		err := engine.ExecuteCronJob(job)
+		if errors.Is(err, ErrCronEmptyResponse) {
+			slog.Warn("cron: empty response, retrying job once", "id", job.ID, "manual", manual, "delay", cs.emptyRetryDelay)
+			timer := time.NewTimer(cs.emptyRetryDelay)
+			select {
+			case <-timer.C:
+			case <-quit:
+				timer.Stop()
+				done <- errors.New("job interrupted by shutdown")
+				return
+			}
+			if !manual {
+				current := cs.store.Get(job.ID)
+				if current == nil || !current.Enabled {
+					done <- err
+					return
+				}
+			}
+			// The first attempt already sent the start notice.
+			retryJob := *job
+			silent := true
+			retryJob.Silent = &silent
+			err = engine.ExecuteCronJob(&retryJob)
+		}
+		done <- err
 	}()
 
-	var err error
+	// A nil timeout channel blocks forever, so a job without a timeout
+	// waits only for completion or shutdown.
+	var timeoutCh <-chan time.Time
 	timeout := job.ExecutionTimeout()
 	if timeout > 0 {
-		select {
-		case err = <-done:
-		case <-time.After(timeout):
-			err = fmt.Errorf("job timed out after %v", timeout)
-		}
-	} else {
-		err = <-done
+		timer := time.NewTimer(timeout)
+		defer timer.Stop()
+		timeoutCh = timer.C
+	}
+
+	var err error
+	select {
+	case err = <-done:
+	case <-timeoutCh:
+		err = fmt.Errorf("job timed out after %v", timeout)
+	case <-quit:
+		err = errors.New("job interrupted by shutdown")
 	}
 
 	cs.store.MarkRun(job.ID, err)
@@ -893,10 +957,25 @@ func (cs *CronScheduler) runJob(job *CronJob, manual bool) {
 // Used for muted cron jobs that should execute without sending chat messages.
 type mutePlatform struct {
 	Platform
+	kind       string
+	jobID      string
+	sessionKey string
 }
 
-func (m *mutePlatform) Reply(_ context.Context, _ any, _ string) error { return nil }
-func (m *mutePlatform) Send(_ context.Context, _ any, _ string) error  { return nil }
+func (m *mutePlatform) auditDiscard(content string) {
+	slog.Info("scheduled delivery suppressed by mute", "kind", m.kind, "job", m.jobID,
+		"session_key", m.sessionKey, "bytes", len(content))
+}
+
+func (m *mutePlatform) Reply(_ context.Context, _ any, content string) error {
+	m.auditDiscard(content)
+	return nil
+}
+
+func (m *mutePlatform) Send(_ context.Context, _ any, content string) error {
+	m.auditDiscard(content)
+	return nil
+}
 
 func GenerateCronID() string {
 	b := make([]byte, 4)
