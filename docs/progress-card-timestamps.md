@@ -10,6 +10,8 @@ Each timestamp records when the cc-connect process first observes that row:
 
 - A rich-card tool row is updated in place when its result arrives, retaining the
   tool's start time.
+- A rich-card `TodoWrite` row is replaced by the turn's next `TodoWrite` call, so
+  it shows the current checklist and the time of that latest call.
 - A structured card appends separate tool-use and tool-result rows. The use row
   shows its start time; the result row shows when the result arrived. For example,
   a tool starting at `14:03:07` and completing thirty seconds later shows

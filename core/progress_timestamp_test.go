@@ -119,6 +119,28 @@ func TestProcessInteractiveEvents_RecordsStableRichStepTimestamps(t *testing.T) 
 	}
 }
 
+// TestAppendToolStep_TodoWriteReplacementShowsLatestCallTime pins the time of
+// the rich-card TodoWrite row, which each TodoWrite call replaces with the
+// current checklist: the row shows when that latest call was observed, and the
+// rows around it keep their own times.
+func TestAppendToolStep_TodoWriteReplacementShowsLatestCallTime(t *testing.T) {
+	steps := appendToolStep(nil, "TodoWrite", "⬜ first")
+	steps = appendToolStep(steps, "Bash", "pwd")
+	bashTime := steps[1].Timestamp
+	time.Sleep(2 * time.Millisecond)
+	mid := time.Now()
+	steps = appendToolStep(steps, "TodoWrite", "✅ first")
+	if len(steps) != 2 || steps[0].Summary != "✅ first" {
+		t.Fatalf("TodoWrite should replace its earlier row: %+v", steps)
+	}
+	if steps[0].Timestamp.Before(mid) || steps[0].Timestamp.After(time.Now()) {
+		t.Fatalf("replaced TodoWrite row should show the latest call's time, got %v (latest call after %v)", steps[0].Timestamp, mid)
+	}
+	if !steps[1].Timestamp.Equal(bashTime) {
+		t.Fatalf("other rows must keep their occurrence time: %v != %v", steps[1].Timestamp, bashTime)
+	}
+}
+
 func TestCompactProgressWriter_PreservesSeparateToolOccurrenceTimes(t *testing.T) {
 	start := time.Date(2026, 10, 23, 14, 3, 7, 0, time.FixedZone("UTC+8", 8*60*60))
 	for _, payload := range []bool{true, false} {
