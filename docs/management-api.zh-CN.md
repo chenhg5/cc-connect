@@ -191,6 +191,7 @@ GET /api/v1/status?token=mgmt-secret
 | `connected_platforms`  | string[] | 当前已连接的平台类型                      |
 | `projects_count`       | number   | 已配置项目数量                            |
 | `bridge_adapters`      | array    | 通过 Bridge WebSocket 连接的外部适配器    |
+| `api_server`           | object   | `cc-connect send`、cron、relay 使用的本地 API socket：`listening`（bool）与 `last_error`（string，监听正常时为空）。无法接管 socket 时（另一实例持有、或路径不是 socket）守护进程继续运行，`listening` 为 `false`。 |
 
 ---
 

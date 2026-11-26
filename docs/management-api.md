@@ -191,6 +191,7 @@ Returns system status and summary.
 | `connected_platforms` | string[] | Platform types currently connected               |
 | `projects_count`      | number   | Number of configured projects                    |
 | `bridge_adapters`     | array   | External adapters connected via Bridge WebSocket |
+| `api_server`          | object   | Local API socket used by `cc-connect send`, cron and relay: `listening` (bool) and `last_error` (string, empty when listening). A daemon that could not take the socket (another instance owns it, or the path is not a socket) keeps running with `listening: false`. |
 
 ---
 

@@ -76,7 +76,7 @@ func NewAPIServer(dataDir string) (*APIServer, error) {
 	// this lock for the listener's lifetime, including stale-socket recovery.
 	lock, err := lockAPISocket(sockPath + ".lock")
 	if err != nil {
-		return nil, fmt.Errorf("lock API socket: %w", err)
+		return nil, fmt.Errorf("lock API socket %s (is another cc-connect instance using this data directory?): %w", sockPath, err)
 	}
 	owned := false
 	defer func() {

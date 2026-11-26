@@ -191,6 +191,7 @@ GET /api/v1/status?token=mgmt-secret
 | `connected_platforms` | string[] | Типы платформ, подключённых в данный момент |
 | `projects_count` | number | Количество настроенных проектов |
 | `bridge_adapters` | array | Внешние адаптеры, подключённые через WebSocket Bridge |
+| `api_server` | object | Локальный API-сокет для `cc-connect send`, cron и relay: `listening` (bool) и `last_error` (string, пустая строка при успешном прослушивании). Если сокет занят другим экземпляром или путь не является сокетом, демон продолжает работу с `listening: false`. |
 
 ---
 

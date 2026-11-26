@@ -52,6 +52,10 @@ type ManagementServer struct {
 	heartbeatScheduler *HeartbeatScheduler
 	bridgeServer       *BridgeServer
 
+	// apiServerStatus records whether the local API socket used by
+	// `cc-connect send` / cron / relay started; nil until reported.
+	apiServerStatus map[string]any
+
 	setupFeishuSave      func(req FeishuSetupSaveRequest) error
 	setupWeixinSave      func(req WeixinSetupSaveRequest) error
 	addPlatformToProject func(projectName, platType string, opts map[string]any, workDir, agentType string) error
@@ -96,6 +100,19 @@ func (m *ManagementServer) SetCronScheduler(cs *CronScheduler)           { m.cro
 func (m *ManagementServer) SetTimerScheduler(ts *TimerScheduler)         { m.timerScheduler = ts }
 func (m *ManagementServer) SetHeartbeatScheduler(hs *HeartbeatScheduler) { m.heartbeatScheduler = hs }
 func (m *ManagementServer) SetBridgeServer(bs *BridgeServer)             { m.bridgeServer = bs }
+
+// SetAPIServerStatus reports the outcome of starting the local API socket so
+// that a daemon running without it is visible in /status, not only in logs.
+func (m *ManagementServer) SetAPIServerStatus(err error) {
+	status := map[string]any{"listening": err == nil, "last_error": ""}
+	if err != nil {
+		status["last_error"] = err.Error()
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.apiServerStatus = status
+}
+
 func (m *ManagementServer) SetSetupFeishuSave(fn func(FeishuSetupSaveRequest) error) {
 	m.setupFeishuSave = fn
 }
@@ -480,6 +497,9 @@ func (m *ManagementServer) handleStatus(w http.ResponseWriter, r *http.Request) 
 		bridgeStatus["token_set"] = m.bridgeServer.token != ""
 	}
 	resp["bridge"] = bridgeStatus
+	if m.apiServerStatus != nil {
+		resp["api_server"] = m.apiServerStatus
+	}
 	mgmtJSON(w, http.StatusOK, resp)
 }
 
