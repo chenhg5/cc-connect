@@ -354,8 +354,8 @@ func (p *Platform) apiRequestJSON(method, url string, body any, result any) erro
 		defer resp2.Body.Close()
 
 		if resp2.StatusCode >= 300 {
-			raw, _ := io.ReadAll(resp2.Body)
-			return fmt.Errorf("qqbot: api %s %s returned %d (after retry): %s", method, url, resp2.StatusCode, raw)
+			raw, _ := io.ReadAll(io.LimitReader(resp2.Body, 4096))
+			return core.HTTPError("qqbot: api "+method+" after retry", resp2.StatusCode, raw, token, p.appSecret)
 		}
 		if result != nil {
 			if err := json.NewDecoder(resp2.Body).Decode(result); err != nil {
@@ -366,8 +366,8 @@ func (p *Platform) apiRequestJSON(method, url string, body any, result any) erro
 	}
 
 	if resp.StatusCode >= 300 {
-		raw, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("qqbot: api %s %s returned %d: %s", method, url, resp.StatusCode, raw)
+		raw, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		return core.HTTPError("qqbot: api "+method, resp.StatusCode, raw, token, p.appSecret)
 	}
 	if result != nil {
 		if err := json.NewDecoder(resp.Body).Decode(result); err != nil {
@@ -578,8 +578,8 @@ func (p *Platform) refreshToken() error {
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		raw, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("token request returned %d: %s", resp.StatusCode, raw)
+		raw, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		return core.HTTPError("qqbot: token request", resp.StatusCode, raw, p.appSecret)
 	}
 
 	var result struct {
@@ -1065,7 +1065,7 @@ func (p *Platform) handleInteractionCreate(data json.RawMessage) {
 	if d.ID == "" {
 		return
 	}
-	slog.Debug("qqbot: INTERACTION_CREATE", "id", d.ID, "button_data", d.Data.Resolved.ButtonData)
+	slog.Debug("qqbot: INTERACTION_CREATE", "id", d.ID, "button_data_len", len(d.Data.Resolved.ButtonData))
 
 	// ACK the interaction (required by QQ Bot API to prevent "请求超时" on buttons)
 	_ = p.ackInteraction(d.ID)
@@ -1073,7 +1073,7 @@ func (p *Platform) handleInteractionCreate(data json.RawMessage) {
 	// Parse button_data: perm:<decision>:<session_key>
 	buttonData := d.Data.Resolved.ButtonData
 	if !strings.HasPrefix(buttonData, buttonDataPrefix) {
-		slog.Debug("qqbot: unknown interaction button_data format", "data", buttonData)
+		slog.Debug("qqbot: unknown interaction button_data format", "data_len", len(buttonData))
 		return
 	}
 
@@ -1081,13 +1081,13 @@ func (p *Platform) handleInteractionCreate(data json.RawMessage) {
 	// rest = "<decision>:<session_key>"
 	colonIdx := strings.Index(rest, ":")
 	if colonIdx < 0 {
-		slog.Warn("qqbot: invalid interaction button_data", "data", buttonData)
+		slog.Warn("qqbot: invalid interaction button_data", "data_len", len(buttonData))
 		return
 	}
 	decision := rest[:colonIdx]
 	sessionKey := rest[colonIdx+1:]
 	if decision == "" || sessionKey == "" {
-		slog.Warn("qqbot: empty decision or session_key in button_data", "data", buttonData)
+		slog.Warn("qqbot: empty decision or session_key in button_data", "data_len", len(buttonData))
 		return
 	}
 
@@ -1467,15 +1467,15 @@ func (p *Platform) apiRequest(method, url string, body any) error {
 		defer resp2.Body.Close()
 
 		if resp2.StatusCode >= 300 {
-			raw, _ := io.ReadAll(resp2.Body)
-			return fmt.Errorf("qqbot: api %s %s returned %d (after retry): %s", method, url, resp2.StatusCode, raw)
+			raw, _ := io.ReadAll(io.LimitReader(resp2.Body, 4096))
+			return core.HTTPError("qqbot: api "+method+" after retry", resp2.StatusCode, raw, token, p.appSecret)
 		}
 		return nil
 	}
 
 	if resp.StatusCode >= 300 {
-		raw, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("qqbot: api %s %s returned %d: %s", method, url, resp.StatusCode, raw)
+		raw, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		return core.HTTPError("qqbot: api "+method, resp.StatusCode, raw, token, p.appSecret)
 	}
 	return nil
 }
@@ -1545,11 +1545,11 @@ func downloadAttachmentImages(attachments []attachment) []core.ImageAttachment {
 		}
 		resp, err := core.HTTPClient.Get(url)
 		if err != nil {
-			slog.Warn("qqbot: download image failed", "url", url, "error", err)
+			slog.Warn("qqbot: download image failed", "host", core.SafeURLHost(url), "error", core.SafeError(err))
 			continue
 		}
 		if resp.StatusCode != http.StatusOK {
-			slog.Warn("qqbot: download image returned non-200 status", "url", url, "status", resp.StatusCode)
+			slog.Warn("qqbot: download image returned non-200 status", "host", core.SafeURLHost(url), "status", resp.StatusCode)
 			resp.Body.Close()
 			continue
 		}
@@ -1588,11 +1588,11 @@ func downloadAttachmentFiles(attachments []attachment) []core.FileAttachment {
 		}
 		resp, err := core.HTTPClient.Get(url)
 		if err != nil {
-			slog.Warn("qqbot: download file failed", "url", url, "error", err)
+			slog.Warn("qqbot: download file failed", "host", core.SafeURLHost(url), "error", core.SafeError(err))
 			continue
 		}
 		if resp.StatusCode != http.StatusOK {
-			slog.Warn("qqbot: download file returned non-200 status", "url", url, "status", resp.StatusCode)
+			slog.Warn("qqbot: download file returned non-200 status", "host", core.SafeURLHost(url), "status", resp.StatusCode)
 			resp.Body.Close()
 			continue
 		}

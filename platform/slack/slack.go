@@ -47,6 +47,7 @@ type Platform struct {
 	appToken         string
 	allowFrom        string
 	sessionScope     string // "user" (default) | "channel" | "thread"
+	apiURL           string // Web API root override (base_url); "" = SDK default
 	client           *slack.Client
 	socket           *socketmode.Client
 	handler          core.MessageHandler
@@ -71,6 +72,14 @@ func New(opts map[string]any) (core.Platform, error) {
 	if botToken == "" || appToken == "" {
 		return nil, fmt.Errorf("slack: bot_token and app_token are required")
 	}
+	apiURL, err := apiURLOption(opts)
+	if err != nil {
+		return nil, err
+	}
+	if apiURL != "" {
+		// Log where both tokens will go, so a typo in base_url is visible.
+		slog.Info("slack: using custom Web API root", "base_url", describeAPIURL(apiURL))
+	}
 	scope := normalizeSessionScope(opts["session_scope"], shareSessionInChannel)
 	if scope == "thread" {
 		slog.Warn("slack: session_scope=thread gives each Slack thread its own session; " +
@@ -82,6 +91,7 @@ func New(opts map[string]any) (core.Platform, error) {
 		appToken:         appToken,
 		allowFrom:        allowFrom,
 		sessionScope:     scope,
+		apiURL:           apiURL,
 		channelNameCache: make(map[string]string),
 	}, nil
 }
@@ -158,9 +168,7 @@ func (p *Platform) Name() string { return "slack" }
 func (p *Platform) Start(handler core.MessageHandler) error {
 	p.handler = handler
 
-	p.client = slack.New(p.botToken,
-		slack.OptionAppLevelToken(p.appToken),
-	)
+	p.client = p.newClient()
 	p.socket = socketmode.New(p.client)
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -205,6 +213,16 @@ func (p *Platform) handleEvent(evt socketmode.Event) {
 			switch ev := data.InnerEvent.Data.(type) {
 			case *slackevents.AppMentionEvent:
 				if ev.BotID != "" || ev.User == "" {
+					return
+				}
+
+				// Editing a mention re-fires a fresh app_mention with Edited set;
+				// ignore it rather than reprocessing the edit as a new prompt.
+				// This also drops edit-to-add-mention (a message edited to newly
+				// @-mention the bot) — an accepted limitation, matching how
+				// Telegram and Discord ignore all inbound edits.
+				if ev.Edited != nil {
+					slog.Debug("slack: ignoring edited app_mention", "user", ev.User, "channel", ev.Channel)
 					return
 				}
 
@@ -365,7 +383,7 @@ func (p *Platform) handleEvent(evt socketmode.Event) {
 			Content:  content,
 			ReplyCtx: replyContext{channel: cmd.ChannelID},
 		}
-		slog.Debug("slack: slash command", "command", cmd.Command, "text", cmd.Text, "user", cmd.UserID)
+		slog.Debug("slack: slash command", "command", cmd.Command, "text_len", len(cmd.Text), "user", cmd.UserID)
 		p.handler(p, msg)
 
 	case socketmode.EventTypeConnecting:
@@ -623,7 +641,7 @@ func (p *Platform) downloadSlackFile(url string) ([]byte, error) {
 	// Check if we got an unexpected status code (e.g., redirect to login page)
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
-		return nil, fmt.Errorf("download failed with status %d: %s", resp.StatusCode, string(body))
+		return nil, core.HTTPError("slack: download", resp.StatusCode, body, p.botToken)
 	}
 
 	data, err := io.ReadAll(resp.Body)
@@ -633,7 +651,7 @@ func (p *Platform) downloadSlackFile(url string) ([]byte, error) {
 
 	// Basic sanity check: detect if we received HTML instead of binary data
 	if len(data) > 0 && (bytes.HasPrefix(data, []byte("<!DOCTYPE")) || bytes.HasPrefix(data, []byte("<html"))) {
-		return nil, fmt.Errorf("received HTML response (likely missing auth); first 100 bytes: %s", string(data[:min(100, len(data))]))
+		return nil, fmt.Errorf("received HTML response (likely missing auth, body_bytes=%d)", len(data))
 	}
 
 	return data, nil

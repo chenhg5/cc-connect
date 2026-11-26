@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 // newClaudeFooterEngine returns an Engine with all three footer-related flags
@@ -253,6 +254,31 @@ func TestBuildReplyFooter_LegacyAllSegments(t *testing.T) {
 	// Segments joined by " · ".
 	if !strings.Contains(got, " · ") {
 		t.Errorf("legacy footer = %q, expected ' · ' separators", got)
+	}
+}
+
+func TestBuildReplyFooter_NoUsageShowsUnknownContext(t *testing.T) {
+	e := newLegacyFooterEngine()
+	e.ctx = context.Background()
+	e.i18n = NewI18n(LangEnglish)
+	agent := &stubFooterAgent{model: "claude-test", workDir: "/tmp/ws"}
+	got := e.buildReplyFooter(agent, nil, "/tmp/ws", "")
+	for _, segment := range []string{"claude-test", "ctx: ?", "ws"} {
+		if !strings.Contains(got, segment) {
+			t.Errorf("footer with missing usage = %q, missing %q", got, segment)
+		}
+	}
+}
+
+func TestComposeRichStatusFooter_NoUsageShowsUnknownContext(t *testing.T) {
+	e := newClaudeFooterEngine()
+	e.i18n = NewI18n(LangEnglish)
+	agent := &stubFooterAgent{model: "claude-test", workDir: "/tmp/ws"}
+	got := e.composeRichStatusFooter(false, time.Now(), agent, nil, "/tmp/ws")
+	for _, segment := range []string{"claude-test", "ctx: ?", "ws"} {
+		if !strings.Contains(got, segment) {
+			t.Errorf("rich footer with missing usage = %q, missing %q", got, segment)
+		}
 	}
 }
 

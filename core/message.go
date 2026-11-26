@@ -412,7 +412,9 @@ type Message struct {
 	ChannelID    string
 	UserID       string
 	UserName     string
+	ChatID       string // source chat ID, when distinct from ChannelID
 	ChatName     string // human-readable chat/group name (optional)
+	ChatType     string // source chat type, when supplied by the platform
 	Content      string
 	Images       []ImageAttachment   // attached images (if any)
 	Files        []FileAttachment    // attached files (if any)
@@ -427,7 +429,9 @@ type Message struct {
 	LegacyChannelKey string
 	ReplyCtx         any    // platform-specific context needed for replying
 	FromVoice        bool   // true if message originated from voice transcription
+	SilentEmpty      bool   // suppress fallback reply for an empty synthetic turn
 	ModeOverride     string // if set, temporarily override agent permission mode for this message
+	DeliveryLabel    string // displayed on an automated final reply; not sent to the agent
 	// IsPermissionResponse is set by inline-button / card-action paths in
 	// platforms when a synthesized message is forwarded as a permission
 	// decision (e.g. Telegram handleCallbackQuery for perm:allow/deny,
@@ -443,6 +447,14 @@ type Message struct {
 	// drop late redeliveries that reuse a new message_id but an older create_time
 	// than a message already processed. Zero means unset (no ordering hint).
 	UserMessageTimeMs int64
+	// CardAnswerRendered is set by platforms whose card/button callback both
+	// forwards the answer and replaces the original card with the rendered
+	// result in the callback response (e.g. Feishu askq: option clicks and
+	// askq_text form submits). The engine then skips the "✅ question: answer"
+	// chat echo, which would otherwise duplicate a result the user can already
+	// see in the card. Plain-text answers and platforms without in-place card
+	// updates leave it false and keep the echo.
+	CardAnswerRendered bool
 }
 
 // EventType distinguishes different kinds of agent output.

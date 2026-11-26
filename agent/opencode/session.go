@@ -39,6 +39,8 @@ type opencodeSession struct {
 	alive             atomic.Bool
 	expectingContinue atomic.Bool // true when compaction_continue received, waiting for next step
 	resultSent        atomic.Bool // true when EventResult has been sent for this turn
+	errorSent         atomic.Bool // true when an explicit agent error has been sent for this turn
+	textSent          atomic.Bool // true when this turn streamed visible answer text
 }
 
 func newOpencodeSession(ctx context.Context, cmd string, extraArgs []string, workDir, model, mode, agentName, resumeID string, extraEnv []string) (*opencodeSession, error) {
@@ -79,6 +81,8 @@ func (s *opencodeSession) Send(prompt string, messageID string, images []core.Im
 	}
 
 	s.resultSent.Store(false)
+	s.errorSent.Store(false)
+	s.textSent.Store(false)
 	s.expectingContinue.Store(false)
 
 	chatID := s.CurrentSessionID()
@@ -97,11 +101,7 @@ func (s *opencodeSession) Send(prompt string, messageID string, images []core.Im
 	// that readLoop waits for the process before delivering the result.
 	// Same setting as the gemini/kimi/antigravity adapters.
 	cmd.WaitDelay = 1 * time.Second
-	env := os.Environ()
-	if len(s.extraEnv) > 0 {
-		env = core.MergeEnv(env, s.extraEnv)
-	}
-	cmd.Env = env
+	cmd.Env = opencodeRunEnv(s.workDir, s.extraEnv)
 
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
@@ -120,6 +120,26 @@ func (s *opencodeSession) Send(prompt string, messageID string, images []core.Im
 	go s.readLoop(cmd, stdout, &stderrBuf)
 
 	return nil
+}
+
+// opencodeRunEnv builds the environment for `opencode run`. opencode takes its
+// project directory from $PWD rather than the process cwd, and os/exec only
+// syncs PWD with cmd.Dir when cmd.Env is nil. Without the override, `run`
+// (which gets no --dir) would work in cc-connect's own directory instead of
+// the session's work dir.
+func opencodeRunEnv(workDir string, extraEnv []string) []string {
+	env := os.Environ()
+	if len(extraEnv) > 0 {
+		env = core.MergeEnv(env, extraEnv)
+	}
+	if workDir != "" {
+		pwd := workDir
+		if abs, err := filepath.Abs(pwd); err == nil {
+			pwd = abs
+		}
+		env = core.MergeEnv(env, []string{"PWD=" + pwd})
+	}
+	return env
 }
 
 func (s *opencodeSession) stageImages(prompt string, images []core.ImageAttachment) (string, []string, error) {
@@ -175,8 +195,8 @@ func (s *opencodeSession) buildRunArgs(prompt string, imagePaths []string, chatI
 	if s.model != "" {
 		args = append(args, "--model", s.model)
 	}
-	// The working directory is set as the process cwd in Send (cmd.Dir), like
-	// the other opencode invocations. `opencode run` has no --dir flag in
+	// The working directory reaches opencode as the process cwd and $PWD in
+	// Send (see opencodeRunEnv). `opencode run` has no --dir flag in
 	// opencode v2 and rejects it ("Unrecognized flag: --dir").
 
 	// Enable thinking blocks.
@@ -226,6 +246,10 @@ func (s *opencodeSession) readLoop(cmd *exec.Cmd, stdout io.ReadCloser, stderrBu
 	}
 
 	if err := scanner.Err(); err != nil {
+		if !s.alive.Load() || s.ctx.Err() != nil {
+			return
+		}
+		s.alive.Store(false)
 		slog.Error("opencodeSession: scanner error", "error", err)
 		evt := core.Event{Type: core.EventError, Error: fmt.Errorf("read stdout: %w", err)}
 		select {
@@ -238,17 +262,28 @@ func (s *opencodeSession) readLoop(cmd *exec.Cmd, stdout io.ReadCloser, stderrBu
 
 	// exec copies stderr into stderrBuf from its own goroutine until Wait
 	// returns, so the buffer is only safe to read after that.
-	_ = cmd.Wait()
+	waitErr := cmd.Wait()
 	waited = true
+	if !s.alive.Load() || s.ctx.Err() != nil {
+		return
+	}
 
 	stderrMsg := stderrBuf.String()
-	if stderrMsg != "" {
-		slog.Error("opencodeSession: process error", "stderr", truncate(stderrMsg, 500))
+	if waitErr != nil {
+		s.alive.Store(false)
+		slog.Error("opencodeSession: process error", "error", waitErr, "stderr", truncate(stderrMsg, 500))
 		if strings.Contains(stderrMsg, "Session not found") {
 			s.chatID.Store("")
 			slog.Warn("opencodeSession: cleared stale session ID")
 		}
-		evt := core.Event{Type: core.EventError, Error: fmt.Errorf("%s", stderrMsg)}
+		if s.errorSent.Load() {
+			return
+		}
+		err := fmt.Errorf("opencode exited without a result: %w", waitErr)
+		if stderrMsg != "" {
+			err = fmt.Errorf("opencode exited without a result: %w: %s", waitErr, stderrMsg)
+		}
+		evt := core.Event{Type: core.EventError, Error: err}
 		select {
 		case s.events <- evt:
 		case <-s.ctx.Done():
@@ -265,8 +300,26 @@ func (s *opencodeSession) readLoop(cmd *exec.Cmd, stdout io.ReadCloser, stderrBu
 		return
 	}
 
-	slog.Debug("opencodeSession: readLoop complete, sending fallback EventResult", "session_id", s.CurrentSessionID())
-	s.sendEventResult()
+	if s.resultSent.Load() {
+		return
+	}
+	if s.errorSent.Load() {
+		return
+	}
+	if s.textSent.Load() {
+		s.sendEventResult()
+		return
+	}
+	s.alive.Store(false)
+	err := fmt.Errorf("opencode exited without a result")
+	if stderrMsg != "" {
+		err = fmt.Errorf("opencode exited without a result: %s", stderrMsg)
+	}
+	slog.Error("opencodeSession: turn ended without a result", "error", err, "session_id", s.CurrentSessionID())
+	select {
+	case s.events <- core.Event{Type: core.EventError, Error: err}:
+	case <-s.ctx.Done():
+	}
 }
 
 // OpenCode NDJSON event structure:
@@ -290,8 +343,7 @@ func (s *opencodeSession) handleEvent(raw map[string]any) {
 	case "error":
 		s.handleError(raw)
 	default:
-		b, _ := json.Marshal(raw)
-		slog.Debug("opencodeSession: unhandled event", "type", eventType, "raw", string(b))
+		slog.Debug("opencodeSession: unhandled event", "type", eventType, "raw_fields", len(raw))
 	}
 }
 
@@ -322,6 +374,9 @@ func (s *opencodeSession) handleText(raw map[string]any) {
 		evt := core.Event{Type: core.EventText, Content: text, Metadata: metadata, Synthetic: synthetic}
 		select {
 		case s.events <- evt:
+			if !synthetic {
+				s.textSent.Store(true)
+			}
 		case <-s.ctx.Done():
 			return
 		}
@@ -393,23 +448,21 @@ func extractToolInput(state map[string]any) string {
 	if state == nil {
 		return ""
 	}
-	// Prefer title as a concise description (e.g. "List files in current directory")
-	if title, ok := state["title"].(string); ok && title != "" {
-		return title
-	}
 	switch input := state["input"].(type) {
 	case string:
 		return input
 	case map[string]any:
-		// Use "description" or "command" fields if available
-		if desc, ok := input["description"].(string); ok && desc != "" {
-			return desc
-		}
-		if cmd, ok := input["command"].(string); ok && cmd != "" {
-			return cmd
-		}
+		// Preserve structured input for downstream card renderers. They apply
+		// their own allowlist and redaction; reducing this to title/command here
+		// loses useful fields such as grep include/path and read offset/limit.
+		// The size cap prevents an unusually large tool payload from flooding cards.
 		b, _ := json.Marshal(input)
-		return truncate(string(b), 200)
+		return truncate(string(b), 2000)
+	}
+	// Fall back to the human-readable title only when the event has no structured
+	// input to preserve.
+	if title, ok := state["title"].(string); ok && title != "" {
+		return title
 	}
 	return ""
 }
@@ -433,6 +486,7 @@ func (s *opencodeSession) handleReasoning(raw map[string]any) {
 func (s *opencodeSession) handleError(raw map[string]any) {
 	errMsg := extractErrorMessage(raw)
 	slog.Error("opencodeSession: agent error", "error", errMsg)
+	s.errorSent.Store(true)
 	evt := core.Event{Type: core.EventError, Error: fmt.Errorf("%s", errMsg)}
 	select {
 	case s.events <- evt:
@@ -504,7 +558,7 @@ func (s *opencodeSession) handleStepFinish(raw map[string]any) {
 	}
 	slog.Debug("opencodeSession: step finished", "reason", reason, "session_id", s.CurrentSessionID())
 
-	if reason == "stop" {
+	if reason == "stop" && s.textSent.Load() {
 		s.sendEventResult()
 	}
 }

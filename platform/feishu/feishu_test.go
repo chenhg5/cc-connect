@@ -3,6 +3,7 @@ package feishu
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -11,10 +12,23 @@ import (
 	"testing"
 	"time"
 
+	"github.com/BurntSushi/toml"
 	"github.com/chenhg5/cc-connect/core"
 	lark "github.com/larksuite/oapi-sdk-go/v3"
 	larkim "github.com/larksuite/oapi-sdk-go/v3/service/im/v1"
 )
+
+func TestInvalidNumericOptionsOmitRawInput(t *testing.T) {
+	const sentinel = "SENTINEL_FEISHU_CONFIG_CONTENT"
+	for _, key := range []string{"image_batch_window_ms", "resource_chunk_size_bytes"} {
+		_, err := newPlatform("feishu", lark.FeishuBaseUrl, map[string]any{
+			"app_id": "cli_test", "app_secret": "secret", key: sentinel,
+		})
+		if err == nil || strings.Contains(err.Error(), sentinel) {
+			t.Fatalf("unsafe %s option error: %v", key, err)
+		}
+	}
+}
 
 func TestOnMessageRecalledDispatchesCoreRecallMessage(t *testing.T) {
 	got := make(chan *core.Message, 1)
@@ -465,11 +479,11 @@ func TestDispatchMessageExpandsQuotedMergeForward(t *testing.T) {
 				"data": map[string]any{
 					"items": []map[string]any{
 						{
-							"message_id":        subMessageID,
-							"msg_type":          "text",
-							"upper_message_id":  parentMessageID,
-							"parent_id":         "",
-							"create_time":       "1786522200000",
+							"message_id":       subMessageID,
+							"msg_type":         "text",
+							"upper_message_id": parentMessageID,
+							"parent_id":        "",
+							"create_time":      "1786522200000",
 							"sender": map[string]any{
 								"id":          "ou_liangchen",
 								"id_type":     "open_id",
@@ -748,6 +762,103 @@ func TestOnMessageDropsUnauthorizedOverheardGroupMessage(t *testing.T) {
 	}
 }
 
+// Several platform entries can share one Feishu app, and each receives the
+// same message event. An entry must not reply "unauthorized" to a message
+// outside its allow_chat / group_only scope, because another entry may own
+// that chat and answer it normally.
+func TestOnMessageSilentForOutOfScopeUnauthorizedSender(t *testing.T) {
+	const appID = "cli_out_of_scope"
+	const appSecret = "secret-out-of-scope"
+	const botOpenID = "ou_bot"
+
+	cases := []struct {
+		name      string
+		chatType  string
+		chatID    string
+		allowChat string
+		groupOnly bool
+	}{
+		{name: "group not in allow_chat", chatType: "group", chatID: "oc_other", allowChat: "oc_mine"},
+		{name: "p2p with group_only", chatType: "p2p", chatID: "oc_p2p", groupOnly: true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			apiCalls := make(chan string, 4)
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				if r.URL.Path == "/open-apis/auth/v3/tenant_access_token/internal" {
+					writeJSON(t, w, map[string]any{
+						"code":                0,
+						"msg":                 "success",
+						"expire":              7200,
+						"tenant_access_token": "tenant-token",
+					})
+					return
+				}
+				apiCalls <- r.URL.Path
+				writeJSON(t, w, map[string]any{"code": 0, "msg": "success"})
+			}))
+			defer srv.Close()
+
+			p := &Platform{
+				platformName: "feishu",
+				domain:       srv.URL,
+				appID:        appID,
+				appSecret:    appSecret,
+				allowFrom:    "ou_allowed",
+				allowChat:    tc.allowChat,
+				groupOnly:    tc.groupOnly,
+				botOpenID:    botOpenID,
+				dedup:        &core.MessageDedup{},
+				client: lark.NewClient(appID, appSecret,
+					lark.WithOpenBaseUrl(srv.URL),
+					lark.WithHttpClient(srv.Client()),
+				),
+				handler: func(core.Platform, *core.Message) {
+					t.Error("handler should not run for out-of-scope message")
+				},
+			}
+
+			msgType := "text"
+			senderType := "user"
+			content := `{"text":"@_user_1 hello"}`
+			createTime := strconv.FormatInt(time.Now().UnixMilli(), 10)
+			err := p.onMessage(context.Background(), &larkim.P2MessageReceiveV1{
+				Event: &larkim.P2MessageReceiveV1Data{
+					Sender: &larkim.EventSender{
+						SenderId:   &larkim.UserId{OpenId: stringPtr("ou_blocked")},
+						SenderType: &senderType,
+					},
+					Message: &larkim.EventMessage{
+						MessageId:   stringPtr("om_out_of_scope"),
+						ChatId:      stringPtr(tc.chatID),
+						ChatType:    &tc.chatType,
+						MessageType: &msgType,
+						Content:     &content,
+						CreateTime:  &createTime,
+						Mentions: []*larkim.MentionEvent{
+							{
+								Key:  stringPtr("@_user_1"),
+								Id:   &larkim.UserId{OpenId: stringPtr(botOpenID)},
+								Name: stringPtr("bot"),
+							},
+						},
+					},
+				},
+			})
+			if err != nil {
+				t.Fatalf("onMessage() error = %v", err)
+			}
+
+			select {
+			case path := <-apiCalls:
+				t.Fatalf("unexpected API call %s, want silent drop", path)
+			case <-time.After(300 * time.Millisecond):
+			}
+		})
+	}
+}
+
 func TestIsMessageRecalledDetectsWithdrawnMessageFromGetAPI(t *testing.T) {
 	const appID = "cli_recall_probe"
 	const appSecret = "secret-recall-probe"
@@ -977,7 +1088,7 @@ func TestExtractPostParts_Markdown(t *testing.T) {
 func TestParsePostContent_FlatFormat(t *testing.T) {
 	p := &Platform{}
 	raw := `{"title":"test","content":[[{"tag":"text","text":"hello"}]]}`
-	texts, _ := p.parsePostContent("", raw)
+	texts, _ := p.extractPostParts("", mustParsePost(t, p, raw))
 	if len(texts) != 2 || texts[0] != "test" || texts[1] != "hello" {
 		t.Errorf("unexpected result: %v", texts)
 	}
@@ -986,7 +1097,7 @@ func TestParsePostContent_FlatFormat(t *testing.T) {
 func TestParsePostContent_LangKeyedFormat(t *testing.T) {
 	p := &Platform{}
 	raw := `{"zh_cn":{"title":"标题","content":[[{"tag":"text","text":"内容"}]]}}`
-	texts, _ := p.parsePostContent("", raw)
+	texts, _ := p.extractPostParts("", mustParsePost(t, p, raw))
 	if len(texts) != 2 || texts[0] != "标题" || texts[1] != "内容" {
 		t.Errorf("unexpected result: %v", texts)
 	}
@@ -994,9 +1105,8 @@ func TestParsePostContent_LangKeyedFormat(t *testing.T) {
 
 func TestParsePostContent_InvalidJSON(t *testing.T) {
 	p := &Platform{}
-	texts, images := p.parsePostContent("", "not json")
-	if texts != nil || images != nil {
-		t.Errorf("expected nil results for invalid json")
+	if post := p.parsePostBody("not json"); post != nil {
+		t.Errorf("expected nil post for invalid json, got %#v", post)
 	}
 }
 
@@ -1089,7 +1199,7 @@ func TestHasComplexMarkdown(t *testing.T) {
 	}
 }
 
-func TestCountMarkdownTables(t *testing.T) {
+func TestFindMarkdownTablesOutsideCodeBlocks(t *testing.T) {
 	tests := []struct {
 		name  string
 		input string
@@ -1100,47 +1210,77 @@ func TestCountMarkdownTables(t *testing.T) {
 		{"two tables separated by text", "| A |\n|---|\n\nsome text\n\n| B |\n|---|", 2},
 		{"consecutive tables no gap", "| A |\n|---|\n| 1 |\n| B |\n|---|", 1},
 		{"six tables", "| A |\n|---|\n\nx\n\n| B |\n|---|\n\nx\n\n| C |\n|---|\n\nx\n\n| D |\n|---|\n\nx\n\n| E |\n|---|\n\nx\n\n| F |\n|---|", 6},
-		{"table inside code block is still counted", "```\n| A |\n```\n\n| B |\n|---|", 2},
+		{"table inside code block is ignored", "```\n| A |\n|---|\n```\n\n| B |\n|---|", 1},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := countMarkdownTables(tt.input)
+			got := len(findMarkdownTablesOutsideCodeBlocks(tt.input))
 			if got != tt.want {
-				t.Errorf("countMarkdownTables() = %d, want %d", got, tt.want)
+				t.Errorf("table matches = %d, want %d", got, tt.want)
 			}
 		})
 	}
 }
 
-func TestBuildReplyContent_FallbackWhenManyTables(t *testing.T) {
-	// Build content with 6 tables (exceeds the 5-table card limit).
+func TestBuildReplyContent_SixTablesStayRendered(t *testing.T) {
+	// Six small tables can be drawn as row components without using any of
+	// Feishu's limited native table or Markdown-table slots.
 	var sb strings.Builder
 	for i := 0; i < 6; i++ {
 		if i > 0 {
 			sb.WriteString("\n\nsome text\n\n")
 		}
-		sb.WriteString("| H |\n|---|\n| V |")
+		fmt.Fprintf(&sb, "| T%d | Value |\n|---|---|\n| row | %d |", i+1, i+1)
 	}
 	content := sb.String()
 
-	msgType, _ := buildReplyContent(content)
-	if msgType == larkim.MsgTypeInteractive {
-		t.Errorf("expected non-card message type for >5 tables, got interactive")
+	msgType, body := buildReplyContent(content)
+	if msgType != larkim.MsgTypeInteractive {
+		t.Fatalf("six tables sent as %s, want interactive card", msgType)
 	}
-
-	// With exactly 5 tables, card should still be used.
-	sb.Reset()
-	for i := 0; i < 5; i++ {
-		if i > 0 {
-			sb.WriteString("\n\nsome text\n\n")
+	card := decodeTestReplyCard(t, body)
+	if strings.Contains(body, "```") {
+		t.Fatalf("small table was downgraded to a code block: %s", body)
+	}
+	tables := 0
+	for _, element := range card.Body.Elements {
+		if element.Tag == "column_set" || element.Tag == "table" {
+			tables++
 		}
-		sb.WriteString("| H |\n|---|\n| V |")
 	}
-	content5 := sb.String()
+	if tables != 6 {
+		t.Fatalf("rendered tables = %d, want 6: %s", tables, body)
+	}
+}
 
-	msgType5, _ := buildReplyContent(content5)
-	if msgType5 != larkim.MsgTypeInteractive {
-		t.Errorf("expected interactive card for 5 tables, got %s", msgType5)
+func TestSplitMarkdownByTables_PreservesInterleavedText(t *testing.T) {
+	var sb strings.Builder
+	for i := 1; i <= 6; i++ {
+		fmt.Fprintf(&sb, "Before T%d\n\n| T%d | V |\n|---|---|\n| row | %d |\n\n", i, i, i)
+	}
+	sb.WriteString("After all tables")
+	parts := splitMarkdownByTables(sb.String(), 3)
+	if len(parts) != 2 {
+		t.Fatalf("parts = %d, want two cards: %q", len(parts), parts)
+	}
+	if !strings.HasPrefix(parts[1], "Before T4") {
+		t.Fatalf("fourth table lost its preceding caption: %q", parts[1])
+	}
+	joined := strings.Join(parts, "\n\n")
+	for i := 1; i <= 6; i++ {
+		for _, marker := range []string{fmt.Sprintf("Before T%d", i), fmt.Sprintf("| T%d | V |", i)} {
+			if strings.Count(joined, marker) != 1 {
+				t.Errorf("marker %q was lost or duplicated: %q", marker, parts)
+			}
+		}
+	}
+	if !strings.Contains(joined, "After all tables") {
+		t.Errorf("trailing prose lost: %q", parts)
+	}
+	for i, part := range parts {
+		if count := len(findMarkdownTablesOutsideCodeBlocks(part)); count > 3 {
+			t.Errorf("part %d has %d tables, want at most 3", i, count)
+		}
 	}
 }
 
@@ -1660,6 +1800,183 @@ func TestNewPlatform_RequireMentionTrueDoesNotForceGroupReplyAll(t *testing.T) {
 	}
 	if fp.groupReplyAll {
 		t.Error("require_mention=true should leave groupReplyAll=false, but it is true")
+	}
+}
+
+func TestOnMessageSkipWhenMentionOthers(t *testing.T) {
+	botMention := &larkim.MentionEvent{
+		Key: strPtr("@_user_1"), Id: &larkim.UserId{OpenId: strPtr("ou_bot")}, Name: strPtr("Bot"),
+	}
+	otherMention := &larkim.MentionEvent{
+		Key: strPtr("@_user_2"), Id: &larkim.UserId{OpenId: strPtr("ou_other")}, Name: strPtr("Other"),
+	}
+	scenarios := []struct {
+		name           string
+		chatType       string
+		text           string
+		mentions       []*larkim.MentionEvent
+		wantContent    string
+		unknownContent string
+	}{
+		{"other only", "group", "@_user_2 hello", []*larkim.MentionEvent{otherMention}, "@Other hello", "@Other hello"},
+		{"self only", "group", "@_user_1 hello", []*larkim.MentionEvent{botMention}, "hello", "@Bot hello"},
+		{"both", "group", "@_user_1 @_user_2 hello", []*larkim.MentionEvent{botMention, otherMention}, "@Other hello", "@Bot @Other hello"},
+		{"no mention", "group", "hello", nil, "hello", "hello"},
+		// Feishu represents @all in content, with an empty Mentions list.
+		{"all", "group", "@_all hello", nil, "@_all hello", "@_all hello"},
+		{"private other", "p2p", "@_user_2 hello", []*larkim.MentionEvent{otherMention}, "@Other hello", "@Other hello"},
+		{"private no mention", "p2p", "hello", nil, "hello", "hello"},
+	}
+	configs := []struct {
+		name         string
+		all          bool
+		skip         bool
+		alias        bool
+		unknownBot   bool
+		selectedChat bool
+		want         [7]bool
+	}{
+		{"reply all skip on", true, true, false, false, false, [7]bool{false, true, true, true, true, true, true}},
+		{"reply all skip off", true, false, false, false, false, [7]bool{true, true, true, true, true, true, true}},
+		{"mention required skip on", false, true, false, false, false, [7]bool{false, true, true, false, false, true, true}},
+		{"mention required skip off", false, false, false, false, false, [7]bool{false, true, true, false, false, true, true}},
+		{"require mention false skip on", false, true, true, false, false, [7]bool{false, true, true, true, true, true, true}},
+		{"require mention false skip off", false, false, true, false, false, [7]bool{true, true, true, true, true, true, true}},
+		{"unknown identity skip on", true, true, false, true, false, [7]bool{false, false, false, true, true, true, true}},
+		{"unknown identity skip off", true, false, false, true, false, [7]bool{true, true, true, true, true, true, true}},
+		{"selected chat skip on", false, true, false, false, true, [7]bool{false, true, true, true, true, true, true}},
+		{"selected chat skip off", false, false, false, false, true, [7]bool{true, true, true, true, true, true, true}},
+		{"selected chat unknown identity", false, true, false, true, true, [7]bool{false, false, false, true, true, true, true}},
+	}
+
+	for _, cfg := range configs {
+		t.Run(cfg.name, func(t *testing.T) {
+			for i, tc := range scenarios {
+				t.Run(tc.name, func(t *testing.T) {
+					srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+						t.Errorf("unexpected API request: %s %s", r.Method, r.URL.Path)
+						http.Error(w, "unexpected API request", http.StatusInternalServerError)
+					}))
+					defer srv.Close()
+					opts := map[string]any{
+						"app_id":                   "cli_skip_mentions",
+						"app_secret":               "test-secret",
+						"group_reply_all":          cfg.all,
+						"skip_when_mention_others": cfg.skip,
+					}
+					if cfg.selectedChat {
+						opts["group_reply_all_chats"] = []string{"oc_chat"}
+					}
+					if cfg.alias {
+						opts["require_mention"] = false
+					}
+					platform, err := newPlatform("feishu", srv.URL, opts)
+					if err != nil {
+						t.Fatalf("newPlatform() error = %v", err)
+					}
+					p := extractBasePlatform(platform)
+					if p == nil {
+						t.Fatal("expected a Feishu platform")
+					}
+					p.client = lark.NewClient("cli_skip_mentions", "test-secret",
+						lark.WithOpenBaseUrl(srv.URL), lark.WithHttpClient(srv.Client()))
+					if !cfg.unknownBot {
+						p.botOpenID = "ou_bot"
+					}
+					p.userNameCache.Store("ou_user", "User")
+					p.chatNameCache.Store("oc_chat", "Chat")
+					received := make(chan *core.Message, 1)
+					p.handler = func(_ core.Platform, msg *core.Message) { received <- msg }
+					content, err := json.Marshal(map[string]string{"text": tc.text})
+					if err != nil {
+						t.Fatalf("marshal content: %v", err)
+					}
+					event := &larkim.P2MessageReceiveV1{
+						Event: &larkim.P2MessageReceiveV1Data{
+							Sender: &larkim.EventSender{
+								SenderId: &larkim.UserId{OpenId: strPtr("ou_user")}, SenderType: strPtr("user"),
+							},
+							Message: &larkim.EventMessage{
+								MessageId: strPtr("om_skip_mentions"), ChatId: strPtr("oc_chat"),
+								ChatType: strPtr(tc.chatType), MessageType: strPtr("text"),
+								Content: strPtr(string(content)), Mentions: tc.mentions,
+								CreateTime: strPtr(strconv.FormatInt(time.Now().Add(time.Second).UnixMilli(), 10)),
+							},
+						},
+					}
+					if err := p.onMessage(context.Background(), event); err != nil {
+						t.Fatalf("onMessage() error = %v", err)
+					}
+					if !cfg.want[i] {
+						select {
+						case msg := <-received:
+							t.Fatalf("filtered message reached handler: %+v", msg)
+						case <-time.After(300 * time.Millisecond):
+						}
+						return
+					}
+					select {
+					case msg := <-received:
+						wantContent := tc.wantContent
+						if cfg.unknownBot {
+							wantContent = tc.unknownContent
+						}
+						if msg.Content != wantContent {
+							t.Errorf("Content = %q, want %q", msg.Content, wantContent)
+						}
+						if msg.MessageID != "om_skip_mentions" || msg.SessionKey != "feishu:oc_chat:ou_user" || msg.UserID != "ou_user" {
+							t.Errorf("unexpected dispatched message identity: %+v", msg)
+						}
+					case <-time.After(2 * time.Second):
+						t.Fatal("timed out waiting for handler dispatch")
+					}
+				})
+			}
+		})
+	}
+}
+
+func TestShouldSkipMentionedOthers(t *testing.T) {
+	tests := []struct {
+		name       string
+		chatType   string
+		all        bool
+		skip       bool
+		mentions   int
+		botMention bool
+		want       bool
+	}{
+		{"group mentions other", "group", true, true, 1, false, true},
+		{"group mentions bot", "group", true, true, 1, true, false},
+		{"group mentions both", "group", true, true, 2, true, false},
+		{"group no mention", "group", true, true, 0, false, false},
+		{"all message has no mention", "group", true, true, 0, false, false},
+		{"option disabled", "group", true, false, 1, false, false},
+		{"group reply all disabled", "group", false, true, 1, false, false},
+		{"private chat", "p2p", true, true, 1, false, false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := shouldSkipMentionedOthers(tc.chatType, tc.all, tc.skip, tc.mentions, tc.botMention); got != tc.want {
+				t.Fatalf("shouldSkipMentionedOthers() = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestNewPlatform_SkipWhenMentionOthers(t *testing.T) {
+	p, err := newPlatform("feishu", lark.FeishuBaseUrl, map[string]any{
+		"app_id":                   "cli_test",
+		"app_secret":               "secret",
+		"group_reply_all":          true,
+		"skip_when_mention_others": true,
+	})
+	if err != nil {
+		t.Fatalf("newPlatform error: %v", err)
+	}
+	fp := extractBasePlatform(p)
+	if fp == nil || !fp.skipWhenMentionOthers {
+		t.Fatal("skip_when_mention_others should be enabled")
 	}
 }
 
@@ -2440,7 +2757,7 @@ func TestFlushImageBatchForSession_NoBatchIsSafe(t *testing.T) {
 func TestParsePostFiles_FlatFormat(t *testing.T) {
 	p := &Platform{platformName: "feishu"}
 	raw := `{"title":"","content":[[{"tag":"text","text":"按这个表里的字段,重新填充"}]],"files":[{"file_key":"file_v3_0015o_b1621303","file_name":"Huidive -询盘跟进表.xlsx","is_folder":false}]}`
-	got := p.parsePostFiles(raw)
+	got := mustParsePost(t, p, raw).Files
 	if len(got) != 1 {
 		t.Fatalf("len(files) = %d, want 1", len(got))
 	}
@@ -2458,7 +2775,7 @@ func TestParsePostFiles_FlatFormat(t *testing.T) {
 func TestParsePostFiles_LangKeyedFormat(t *testing.T) {
 	p := &Platform{platformName: "feishu"}
 	raw := `{"zh_cn":{"title":"","content":[[{"tag":"text","text":"看这个"}]],"files":[{"file_key":"file_lang_k","file_name":"LANG.pdf"}]}}`
-	got := p.parsePostFiles(raw)
+	got := mustParsePost(t, p, raw).Files
 	if len(got) != 1 {
 		t.Fatalf("len(files) = %d, want 1", len(got))
 	}
@@ -2473,7 +2790,7 @@ func TestParsePostFiles_LangKeyedFormat(t *testing.T) {
 func TestParsePostFiles_NoFiles(t *testing.T) {
 	p := &Platform{platformName: "feishu"}
 	raw := `{"title":"","content":[[{"tag":"text","text":"just text, no files"}]]}`
-	if got := p.parsePostFiles(raw); len(got) != 0 {
+	if got := mustParsePost(t, p, raw).Files; len(got) != 0 {
 		t.Fatalf("len(files) = %d, want 0", len(got))
 	}
 }
@@ -2563,5 +2880,185 @@ func TestDispatchMessagePostWithFiles(t *testing.T) {
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("timed out waiting for dispatched message")
+	}
+}
+
+func TestStreamingConfigFromTOML(t *testing.T) {
+	var config struct {
+		Options map[string]any `toml:"options"`
+	}
+	_, err := toml.Decode(`[options]
+app_id = "cli_test"
+app_secret = "secret"
+print_frequency_ms = 20
+print_step = 2
+print_strategy = "delay"
+`, &config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"feishu", "lark"} {
+		t.Run(name, func(t *testing.T) {
+			platform, err := newPlatform(name, "https://example.invalid", config.Options)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var card struct {
+				Config struct {
+					StreamingConfig struct {
+						Frequency map[string]int `json:"print_frequency_ms"`
+						Step      map[string]int `json:"print_step"`
+						Strategy  string         `json:"print_strategy"`
+					} `json:"streaming_config"`
+				} `json:"config"`
+			}
+			data := platform.(core.RichCardSupporter).BuildRichCard(core.CardStatusWorking, "", nil, "body", true, "")
+			if err := json.Unmarshal([]byte(data), &card); err != nil {
+				t.Fatal(err)
+			}
+			sc := card.Config.StreamingConfig
+			if sc.Frequency["default"] != 20 || sc.Step["default"] != 2 || sc.Strategy != "delay" {
+				t.Fatalf("TOML options not preserved: %s", data)
+			}
+		})
+	}
+}
+
+func TestStreamingConfigValidation(t *testing.T) {
+	for _, tc := range []struct {
+		key   string
+		value any
+		valid bool
+	}{
+		{"print_frequency_ms", int64(20), true}, {"print_frequency_ms", 1000, true},
+		{"print_frequency_ms", 19, false}, {"print_frequency_ms", 1001, false},
+		{"print_frequency_ms", 20.5, false}, {"print_frequency_ms", "20", false},
+		{"print_step", int64(2), true}, {"print_step", 1000, true},
+		{"print_step", 0, false}, {"print_step", 1001, false}, {"print_step", true, false},
+		{"print_strategy", " FAST ", true}, {"print_strategy", "delay", true},
+		{"print_strategy", "", false}, {"print_strategy", "other", false}, {"print_strategy", 1, false},
+	} {
+		opts := map[string]any{"app_id": "cli_test", "app_secret": "secret", tc.key: tc.value}
+		_, err := New(opts)
+		if (err == nil) != tc.valid {
+			t.Fatalf("%s=%v: valid=%v, err=%v", tc.key, tc.value, tc.valid, err)
+		}
+		if err != nil && !strings.Contains(err.Error(), tc.key) {
+			t.Fatalf("missing field in error: %v", err)
+		}
+		if _, isString := tc.value.(string); tc.key == "print_strategy" && isString && !tc.valid {
+			if !strings.Contains(err.Error(), "must be 'fast' or 'delay' (case-insensitive)") {
+				t.Fatalf("missing accepted values or case-insensitive guidance: %v", err)
+			}
+		}
+	}
+}
+
+func TestStreamingConfigRendering(t *testing.T) {
+	for _, configured := range []bool{false, true} {
+		opts := map[string]any{"app_id": "cli_test", "app_secret": "secret"}
+		if configured {
+			opts["print_frequency_ms"] = int64(20)
+			opts["print_step"] = int64(2)
+			opts["print_strategy"] = " FAST "
+		}
+		platform, err := New(opts)
+		if err != nil {
+			t.Fatal(err)
+		}
+		p := extractBasePlatform(platform)
+		for _, streaming := range []bool{true, false} {
+			for _, compact := range []bool{false, true} {
+				var steps []core.ToolStep
+				if compact {
+					for i := 0; i < 80; i++ {
+						steps = append(steps, core.ToolStep{Kind: core.ToolStepKindTool, Name: "Bash", Result: strings.Repeat("long output ", 100)})
+					}
+				}
+				data := p.BuildRichCard(core.CardStatusWorking, "", steps, "body", streaming, "")
+				var card map[string]any
+				if err := json.Unmarshal([]byte(data), &card); err != nil {
+					t.Fatal(err)
+				}
+				cfg := card["config"].(map[string]any)
+				actual, exists := cfg["streaming_config"]
+				if exists != (configured && streaming) {
+					t.Fatalf("unexpected config: %s", data)
+				}
+				if exists {
+					sc := actual.(map[string]any)
+					if sc["print_frequency_ms"].(map[string]any)["default"] != float64(20) || sc["print_step"].(map[string]any)["default"] != float64(2) || sc["print_strategy"] != "fast" {
+						t.Fatalf("wrong config: %v", sc)
+					}
+				}
+			}
+		}
+	}
+}
+
+func TestStreamingConfigPartialOverride(t *testing.T) {
+	platform, err := New(map[string]any{"app_id": "cli_test", "app_secret": "secret", "print_step": int64(3)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := extractBasePlatform(platform)
+	if len(p.streamingConfig) != 1 {
+		t.Fatalf("unspecified defaults overridden: %v", p.streamingConfig)
+	}
+	if _, ok := p.streamingConfig["print_step"]; !ok {
+		t.Fatal("print_step missing")
+	}
+}
+
+func TestRichCardTypewriterPreservesWorkingPanels(t *testing.T) {
+	p := &Platform{streamingConfig: map[string]any{"print_step": map[string]any{"default": 2}}}
+	baseline := &Platform{}
+	for _, working := range []bool{true, false} {
+		status := core.CardStatusWorking
+		if !working {
+			status = core.CardStatusDone
+		}
+		data := p.BuildRichCard(status, "", []core.ToolStep{{Kind: core.ToolStepKindTool, Name: "Bash", Result: "TOOL OUTPUT", Done: !working}}, "BODY INCREMENT", working, "FOOTER")
+		var card map[string]any
+		if err := json.Unmarshal([]byte(data), &card); err != nil {
+			t.Fatal(err)
+		}
+		if got := card["config"].(map[string]any)["streaming_mode"]; got != working {
+			t.Fatalf("wrong animation flag: %s", data)
+		}
+		elements := card["body"].(map[string]any)["elements"].([]any)
+		// Typewriter settings must preserve the renderer's panel behavior.
+		// The default layout can evolve independently of this configuration.
+		baselineData := baseline.BuildRichCard(status, "", []core.ToolStep{{Kind: core.ToolStepKindTool, Name: "Bash", Result: "TOOL OUTPUT", Done: !working}}, "BODY INCREMENT", working, "FOOTER")
+		var baselineCard map[string]any
+		if err := json.Unmarshal([]byte(baselineData), &baselineCard); err != nil {
+			t.Fatal(err)
+		}
+		baselineElements := baselineCard["body"].(map[string]any)["elements"].([]any)
+		if elements[0].(map[string]any)["expanded"] != baselineElements[0].(map[string]any)["expanded"] {
+			t.Fatalf("typewriter settings changed tool panel state: %s", data)
+		}
+		if !strings.Contains(data, "BODY INCREMENT") || !strings.Contains(data, "TOOL OUTPUT") || !strings.Contains(data, "FOOTER") {
+			t.Fatal("card lost content")
+		}
+	}
+}
+
+func TestRichCardTypewriterSurvivesCardSizeCompaction(t *testing.T) {
+	p := &Platform{}
+	var steps []core.ToolStep
+	for i := 0; i < 80; i++ {
+		steps = append(steps, core.ToolStep{Kind: core.ToolStepKindTool, Name: "Bash", Result: strings.Repeat("LONG OUTPUT ", 100)})
+	}
+	data := p.BuildRichCard(core.CardStatusWorking, "", steps, "BODY", true, "")
+	var card map[string]any
+	if err := json.Unmarshal([]byte(data), &card); err != nil {
+		t.Fatal(err)
+	}
+	if card["config"].(map[string]any)["streaming_mode"] != true {
+		t.Fatal("compaction disabled typewriter")
+	}
+	if !strings.Contains(data, "BODY") {
+		t.Fatal("compaction lost body")
 	}
 }

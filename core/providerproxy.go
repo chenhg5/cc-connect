@@ -36,7 +36,7 @@ type ProviderProxy struct {
 func NewProviderProxy(targetURL, thinkingOverride string) (*ProviderProxy, string, error) {
 	target, err := url.Parse(strings.TrimRight(targetURL, "/"))
 	if err != nil {
-		return nil, "", fmt.Errorf("providerproxy: parse target: %w", err)
+		return nil, "", fmt.Errorf("providerproxy: parse target: %s", SafeError(err))
 	}
 
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
@@ -79,7 +79,7 @@ func NewProviderProxy(targetURL, thinkingOverride string) (*ProviderProxy, strin
 	}()
 
 	localURL := fmt.Sprintf("http://127.0.0.1:%d", listener.Addr().(*net.TCPAddr).Port)
-	slog.Info("providerproxy: started", "target", targetURL, "local", localURL, "thinking", thinkingOverride)
+	slog.Info("providerproxy: started", "target", RedactURL(targetURL), "local", localURL, "thinking", thinkingOverride)
 	return pp, localURL, nil
 }
 

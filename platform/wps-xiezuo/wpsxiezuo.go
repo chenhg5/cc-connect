@@ -178,6 +178,7 @@ type wpsRichTextElement struct {
 	Elements         []wpsRichTextElement    `json:"elements"`
 	TextContent      *wpsRichTextTextContent `json:"text_content"`
 	StyleTextContent *wpsStyleTextContent    `json:"style_text_content"`
+	StyleContent     *wpsStyleTextContent    `json:"style_content"`
 	MentionContent   *wpsMentionContent      `json:"mention_content"`
 	ImageContent     *wpsImageContent        `json:"image_content"`
 	LinkContent      *wpsRichTextLinkContent `json:"link_content"`
@@ -498,7 +499,7 @@ func (p *Platform) runConnection(ctx context.Context) error {
 		if err != nil {
 			return fmt.Errorf("read: %w", err)
 		}
-		slog.Info("wps-xiezuo: message received", "type", msgType, "len", len(raw), "data", string(raw))
+		slog.Info("wps-xiezuo: message received", "type", msgType, "len", len(raw))
 
 		// Reset deadline on successful read
 		_ = conn.SetReadDeadline(time.Now().Add(pingTimeout))
@@ -612,7 +613,7 @@ func (p *Platform) handleRawMessage(ctx context.Context, raw []byte) {
 		return
 	}
 
-	slog.Debug("wps-xiezuo: unknown frame", "data", string(raw))
+	slog.Debug("wps-xiezuo: unknown frame", "bytes", len(raw))
 }
 
 // --- GoAway handling ---
@@ -1135,6 +1136,8 @@ func flattenWPSRichTextElement(element wpsRichTextElement) (string, []wpsImageCo
 			parts = appendNonEmpty(parts, element.TextContent.Content)
 		} else if element.StyleTextContent != nil {
 			parts = appendNonEmpty(parts, element.StyleTextContent.Text)
+		} else if element.StyleContent != nil {
+			parts = appendNonEmpty(parts, element.StyleContent.Text)
 		}
 	case "mention":
 		if element.MentionContent != nil {
@@ -1157,6 +1160,8 @@ func flattenWPSRichTextElement(element wpsRichTextElement) (string, []wpsImageCo
 			parts = appendNonEmpty(parts, element.TextContent.Content)
 		} else if element.StyleTextContent != nil {
 			parts = appendNonEmpty(parts, element.StyleTextContent.Text)
+		} else if element.StyleContent != nil {
+			parts = appendNonEmpty(parts, element.StyleContent.Text)
 		}
 	}
 
@@ -1730,7 +1735,7 @@ func (p *Platform) uploadMessageResource(ctx context.Context, fileName string, d
 		return "", fmt.Errorf("upload credentials response exceeds %d bytes", maxResourceAPIResponse)
 	}
 	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("request upload credentials: status=%d body=%s", resp.StatusCode, core.RedactToken(string(body), token))
+		return "", core.HTTPError("wps-xiezuo: upload credentials", resp.StatusCode, body, token)
 	}
 
 	var result resourceUploadResponse
@@ -1807,7 +1812,7 @@ func (p *Platform) uploadResourceData(ctx context.Context, entry resourceUploadE
 	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
 		respBody, _ := io.ReadAll(io.LimitReader(resp.Body, maxResourceAPIResponse))
-		return fmt.Errorf("upload resource: status=%d body=%s", resp.StatusCode, core.RedactToken(string(respBody), entry.URL))
+		return core.HTTPError("wps-xiezuo: upload resource", resp.StatusCode, respBody, entry.URL)
 	}
 	return nil
 }
@@ -1856,7 +1861,7 @@ func (p *Platform) createWPSMessage(ctx context.Context, reqBody sendMessageRequ
 
 	if resp.StatusCode != http.StatusOK {
 		respBody, _ := io.ReadAll(io.LimitReader(resp.Body, maxResourceAPIResponse))
-		return fmt.Errorf("wps-xiezuo: send failed: status=%d body=%s", resp.StatusCode, core.RedactToken(string(respBody), token))
+		return core.HTTPError("wps-xiezuo: send", resp.StatusCode, respBody, token)
 	}
 	respBody, err := io.ReadAll(io.LimitReader(resp.Body, maxResourceAPIResponse+1))
 	if err != nil {
@@ -1941,7 +1946,7 @@ func (p *Platform) getToken(ctx context.Context) (string, error) {
 		}
 
 		if resp.StatusCode != http.StatusOK {
-			lastErr = fmt.Errorf("status=%d body=%s", resp.StatusCode, string(respBody))
+			lastErr = core.HTTPError("wps-xiezuo: token", resp.StatusCode, respBody, p.appID, p.appSecret)
 			continue
 		}
 
@@ -1996,7 +2001,7 @@ func (p *Platform) addReaction(ctx context.Context, rctx replyContext, reactionT
 
 	if resp.StatusCode != http.StatusOK {
 		respBody, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("add reaction failed: status=%d body=%s", resp.StatusCode, string(respBody))
+		return core.HTTPError("wps-xiezuo: add reaction", resp.StatusCode, respBody, token)
 	}
 	return nil
 }
@@ -2025,7 +2030,7 @@ func (p *Platform) deleteReaction(ctx context.Context, rctx replyContext, reacti
 
 	if resp.StatusCode != http.StatusOK {
 		respBody, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("delete reaction failed: status=%d body=%s", resp.StatusCode, string(respBody))
+		return core.HTTPError("wps-xiezuo: delete reaction", resp.StatusCode, respBody, token)
 	}
 	return nil
 }

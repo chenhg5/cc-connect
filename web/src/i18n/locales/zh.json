@@ -81,6 +81,16 @@
     "title": "会话",
     "id": "编号",
     "sessionKey": "会话键",
+    "userName": "用户名称",
+    "userId": "用户 ID",
+    "chatName": "聊天名称",
+    "chatId": "聊天 ID",
+    "chatType": "聊天类型",
+    "chatTypeGroup": "群聊",
+    "chatTypeSingle": "单聊",
+    "sessionId": "会话 ID",
+    "agentSessionId": "Agent 会话 ID",
+    "copy": "复制",
     "name": "名称",
     "platform": "平台",
     "active": "活跃",
@@ -100,7 +110,9 @@
     "bridgeConnected": "已连接",
     "bridgeConnecting": "连接中...",
     "bridgeDisconnected": "未连接",
-    "bridgeNotAvailable": "Bridge 未启用。请在 config.toml 中启用 [bridge] 以支持网页聊天。"
+    "bridgeNotAvailable": "Bridge 未启用。请在 config.toml 中启用 [bridge] 以支持网页聊天。",
+    "managementUnavailable": "无法连接管理 API，或鉴权失败。请检查 API 连接和令牌。",
+    "bridgeStartFailed": "Bridge 启动失败{{detail}}。请检查服务端日志。"
   },
   "providers": {
     "title": "模型提供方",

@@ -10,7 +10,7 @@ import { Badge, Button } from '@/components/ui';
 import { listSessions, getSession, type Session, type SessionDetail } from '@/api/sessions';
 import {
   useBridgeSocket, fetchBridgeConfig,
-  type BridgeConfig, type BridgeIncoming, type BridgeStatus,
+  type BridgeConfigResult, type BridgeIncoming, type BridgeStatus,
 } from '@/hooks/useBridgeSocket';
 import CommandPalette, { type SlashCommand, slashCommands } from './CommandPalette';
 import SessionDrawer from './SessionDrawer';
@@ -299,7 +299,8 @@ export default function ChatView() {
   const [sending, setSending] = useState(false);
   const [loading, setLoading] = useState(true);
   const [typing, setTyping] = useState(false);
-  const [bridgeCfg, setBridgeCfg] = useState<BridgeConfig | null>(null);
+  const [bridgeAvailability, setBridgeAvailability] = useState<BridgeConfigResult>({ config: null, unavailable: 'disabled' });
+  const bridgeCfg = bridgeAvailability.config;
   // Whether the user explicitly picked a session from the drawer
   const [userPickedSession, setUserPickedSession] = useState(false);
 
@@ -334,7 +335,7 @@ export default function ChatView() {
         listSessions(projectName),
         fetchBridgeConfig(),
       ]);
-      setBridgeCfg(cfg);
+      setBridgeAvailability(cfg);
       const sorted = (allSessions || []).sort(
         (a, b) => (b.updated_at || b.created_at || '').localeCompare(a.updated_at || a.created_at || ''),
       );
@@ -726,7 +727,11 @@ export default function ChatView() {
         ) : !bridgeCfg ? (
           <div className="flex items-center gap-2 px-4 py-3 text-sm text-amber-600 dark:text-amber-400 bg-amber-50 dark:bg-amber-900/20 rounded-xl">
             <WifiOff size={14} />
-            <span>{t('sessions.bridgeNotAvailable')}</span>
+            <span>{bridgeAvailability.unavailable === 'management-error'
+              ? t('sessions.managementUnavailable')
+              : bridgeAvailability.unavailable === 'start-failed'
+                ? t('sessions.bridgeStartFailed', { detail: bridgeAvailability.detail ? `: ${bridgeAvailability.detail}` : '' })
+                : t('sessions.bridgeNotAvailable')}</span>
           </div>
         ) : bridgeStatus === 'disconnected' || bridgeStatus === 'error' ? (
           <div className="flex items-center gap-2 px-4 py-3 text-sm text-amber-600 dark:text-amber-400 bg-amber-50 dark:bg-amber-900/20 rounded-xl">

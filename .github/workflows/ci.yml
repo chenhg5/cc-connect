@@ -2,7 +2,7 @@ name: CI
 
 on:
   push:
-    branches: [main]
+    branches: [main, 'release/**']
   pull_request:
     branches: [main]
   release:
@@ -34,11 +34,29 @@ jobs:
           pnpm install --frozen-lockfile
           pnpm build
 
+      - name: Reject browser console and debugger statements
+        run: |
+          set -euo pipefail
+          # Print paths only: a matching source line may itself contain a secret.
+          status=0
+          matches=$(grep -RIlE --include='*.ts' --include='*.tsx' --include='*.js' --include='*.jsx' \
+            'console[[:space:]]*(\.|\[)|(^|[^[:alnum:]_$])debugger([^[:alnum:]_$]|$)' web/src) || status=$?
+          if [ "$status" -gt 1 ]; then
+            exit "$status"
+          fi
+          if [ -n "$matches" ]; then
+            printf 'Remove console/debugger usage from:\n%s\n' "$matches" >&2
+            exit 1
+          fi
+
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
           go-version-file: 'go.mod'
           cache: true
+
+      - name: Check direct payload logging
+        run: go run ./cmd/logcheck .
 
       - name: Lint code
         run: |
@@ -147,6 +165,40 @@ jobs:
 
       - name: Run smoke tests
         run: go test -v -tags=smoke,no_web ./tests/e2e/...
+
+  blackbox-smoke:
+    # Real cc-connect binary driven over its bridge, real Claude Code and
+    # Codex CLIs, scripted fake model (tests/blackbox/fakemodel): no model
+    # key needed.
+    # Report-only while the suite settles; drop continue-on-error to gate.
+    runs-on: ubuntu-latest
+    needs: unit-test
+    continue-on-error: true
+    env:
+      CLAUDE_CODE_VERSION: '2.1.317'
+      CODEX_VERSION: '0.166.0'
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: 'go.mod'
+          cache: true
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Install agent CLIs
+        run: npm install -g "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}" "@openai/codex@${CODEX_VERSION}"
+
+      # Same fail-closed target the release gate runs: a missing agent CLI
+      # fails the job instead of skipping its scenarios.
+      - name: Run release smoke
+        run: make test-release-smoke
 
   regression-test:
     runs-on: ubuntu-latest

@@ -231,6 +231,7 @@ func (rc replyContext) useThreadChannel() bool {
 
 type discordThreadOps interface {
 	ResolveChannel(channelID string) (*discordgo.Channel, error)
+	ListActiveThreads(guildID string) ([]*discordgo.Channel, error)
 	StartThread(channelID, messageID, name string, archiveDuration int) (*discordgo.Channel, error)
 	StartStandaloneThread(channelID, name string, typ discordgo.ChannelType, archiveDuration int) (*discordgo.Channel, error)
 	JoinThread(threadID string) error
@@ -248,6 +249,17 @@ func (o sessionThreadOps) ResolveChannel(channelID string) (*discordgo.Channel, 
 		return ch, nil
 	}
 	return o.session.Channel(channelID)
+}
+
+func (o sessionThreadOps) ListActiveThreads(guildID string) ([]*discordgo.Channel, error) {
+	if o.session == nil {
+		return nil, fmt.Errorf("discord: session not initialized")
+	}
+	list, err := o.session.GuildThreadsActive(guildID)
+	if err != nil {
+		return nil, err
+	}
+	return list.Threads, nil
 }
 
 func (o sessionThreadOps) StartThread(channelID, messageID, name string, archiveDuration int) (*discordgo.Channel, error) {
@@ -410,9 +422,30 @@ func resolveThreadReplyContext(m *discordgo.MessageCreate, botID string, ops dis
 		return buildThreadSessionKey(threadID), rc, m.ChannelID, nil
 	}
 
-	thread, err := ops.StartThread(m.ChannelID, m.ID, threadNameForMessage(m, botID), 1440)
+	threadName := threadNameForMessage(m, botID)
+	thread, err := ops.StartThread(m.ChannelID, m.ID, threadName, 1440)
 	if err != nil {
-		return "", replyContext{}, "", fmt.Errorf("start thread for message %s: %w", m.ID, err)
+		// Another bot may have won the create race. Message-created thread IDs
+		// equal the message ID, so check that exact thread before falling back.
+		if existing, lookupErr := ops.ResolveChannel(m.ID); lookupErr == nil && existing != nil && isThreadChannelType(existing.Type) && existing.ParentID == m.ChannelID {
+			thread = existing
+		} else if m.GuildID != "" {
+			active, listErr := ops.ListActiveThreads(m.GuildID)
+			if listErr == nil {
+				for _, candidate := range active {
+					if candidate != nil && isThreadChannelType(candidate.Type) && candidate.ParentID == m.ChannelID && candidate.Name == threadName {
+						if thread != nil {
+							thread = nil
+							break
+						} // ambiguous name
+						thread = candidate
+					}
+				}
+			}
+		}
+		if thread == nil {
+			return "", replyContext{}, "", fmt.Errorf("start thread for message %s in channel %s: %w (exact thread and active-thread lookup found no unique match)", m.ID, m.ChannelID, err)
+		}
 	}
 	if err := ops.JoinThread(thread.ID); err != nil {
 		slog.Debug("discord: join new thread failed", "thread", thread.ID, "error", err)
@@ -916,14 +949,20 @@ func (p *Platform) handleComponentInteraction(s *discordgo.Session, i *discordgo
 	}
 
 	origText := ""
+	echo := "> " + command
 	if i.Message != nil {
 		origText = i.Message.Content
+		if strings.HasPrefix(data.CustomID, "askq:") {
+			if label := discordButtonLabel(i.Message.Components, data.CustomID); label != "" {
+				echo = "✅ " + label
+			}
+		}
 	}
 	emptyComponents := []discordgo.MessageComponent{}
 	if err := s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
 		Type: discordgo.InteractionResponseUpdateMessage,
 		Data: &discordgo.InteractionResponseData{
-			Content:    origText + "\n\n> " + command,
+			Content:    origText + "\n\n" + echo,
 			Components: emptyComponents,
 		},
 	}); err != nil {
@@ -960,6 +999,10 @@ func discordComponentCommand(customID string) (command string, isPermissionRespo
 	if command, found := strings.CutPrefix(customID, "cmd:"); found && command != "" {
 		return command, false, true
 	}
+	// AskUserQuestion option: the engine parses the raw askq: value itself (#2157).
+	if strings.HasPrefix(customID, "askq:") {
+		return customID, false, true
+	}
 	if action, found := strings.CutPrefix(customID, "perm:"); found {
 		switch action {
 		case "allow", "deny":
@@ -969,6 +1012,33 @@ func discordComponentCommand(customID string) (command string, isPermissionRespo
 		}
 	}
 	return "", false, false
+}
+
+// discordButtonLabel returns the label of the button whose custom ID matches,
+// so the acknowledgement can show the chosen option instead of its raw value.
+func discordButtonLabel(components []discordgo.MessageComponent, customID string) string {
+	for _, c := range components {
+		var children []discordgo.MessageComponent
+		switch v := c.(type) {
+		case *discordgo.ActionsRow:
+			children = v.Components
+		case discordgo.ActionsRow:
+			children = v.Components
+		}
+		for _, child := range children {
+			switch b := child.(type) {
+			case *discordgo.Button:
+				if b.CustomID == customID {
+					return b.Label
+				}
+			case discordgo.Button:
+				if b.CustomID == customID {
+					return b.Label
+				}
+			}
+		}
+	}
+	return ""
 }
 
 func (p *Platform) Reply(ctx context.Context, rctx any, content string) error {
@@ -1515,7 +1585,7 @@ func classifyAttachments(atts []*discordgo.MessageAttachment, download func(stri
 		case strings.HasPrefix(ct, "audio/"):
 			data, err := download(att.URL)
 			if err != nil {
-				slog.Error("discord: download audio failed", "url", att.URL, "error", err)
+				slog.Error("discord: download audio failed", "host", core.SafeURLHost(att.URL), "error", core.SafeError(err))
 				continue
 			}
 			format := "ogg"
@@ -1526,14 +1596,14 @@ func classifyAttachments(atts []*discordgo.MessageAttachment, download func(stri
 		case strings.HasPrefix(ct, "image/"), ct == "" && att.Width > 0 && att.Height > 0:
 			data, err := download(att.URL)
 			if err != nil {
-				slog.Error("discord: download image failed", "url", att.URL, "file_name", att.Filename, "error", err)
+				slog.Error("discord: download image failed", "host", core.SafeURLHost(att.URL), "error", core.SafeError(err))
 				continue
 			}
 			images = append(images, core.ImageAttachment{MimeType: att.ContentType, Data: data, FileName: att.Filename})
 		default:
 			data, err := download(att.URL)
 			if err != nil {
-				slog.Error("discord: download file failed", "url", att.URL, "file_name", att.Filename, "error", err)
+				slog.Error("discord: download file failed", "host", core.SafeURLHost(att.URL), "error", core.SafeError(err))
 				continue
 			}
 			files = append(files, core.FileAttachment{MimeType: att.ContentType, Data: data, FileName: att.Filename})
@@ -1551,7 +1621,7 @@ func downloadURL(u string) ([]byte, error) {
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("download %s: status %d", u, resp.StatusCode)
+		return nil, fmt.Errorf("download failed: status %d", resp.StatusCode)
 	}
 	return io.ReadAll(io.LimitReader(resp.Body, maxDownloadBytes+1))
 }
@@ -1570,7 +1640,7 @@ func applyReferencedMessage(ref *discordgo.Message, content string, images []cor
 		if att.Width > 0 && att.Height > 0 {
 			data, err := download(att.URL)
 			if err != nil {
-				slog.Error("discord: download referenced attachment failed", "url", att.URL, "error", err)
+				slog.Error("discord: download referenced attachment failed", "host", core.SafeURLHost(att.URL), "error", core.SafeError(err))
 				continue
 			}
 			images = append([]core.ImageAttachment{{

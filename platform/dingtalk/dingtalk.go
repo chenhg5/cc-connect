@@ -33,6 +33,7 @@ type replyContext struct {
 	sessionWebhookExpiredTime int64
 	conversationId            string
 	senderStaffId             string
+	senderNick                string // sender display name, used to strip the injected "@<nick>" reply prefix
 	messageID                 string
 	isGroup                   bool
 	proactive                 bool // true when constructed by ReconstructReplyCtx (no sessionWebhook)
@@ -96,6 +97,12 @@ type Platform struct {
 	cardFinalPreviewMessage bool
 	degradeUntil            time.Time
 	degradeMu               sync.Mutex
+
+	// atGroups enables clickable group @-mentions. When true, group replies are
+	// delivered as text messages (DingTalk only highlights @ in text msgtype,
+	// never in markdown/AI cards) carrying the asker's userId both inline and in
+	// at.atUserIds. Default false keeps the existing markdown/card behaviour.
+	atGroups bool
 }
 
 func New(opts map[string]any) (core.Platform, error) {
@@ -158,6 +165,9 @@ func New(opts map[string]any) (core.Platform, error) {
 	}
 	cardFinalPreviewMessage, _ := opts["card_final_preview_message"].(bool)
 
+	// Group clickable @-mention (default off = unchanged behaviour).
+	atGroups, _ := opts["at_mention_groups"].(bool)
+
 	return &Platform{
 		clientID:                clientID,
 		clientSecret:            clientSecret,
@@ -172,6 +182,7 @@ func New(opts map[string]any) (core.Platform, error) {
 		cardTemplateKey:         cardTemplateKey,
 		cardThrottleMs:          cardThrottleMs,
 		cardFinalPreviewMessage: cardFinalPreviewMessage,
+		atGroups:                atGroups,
 	}, nil
 }
 
@@ -339,6 +350,7 @@ func (p *Platform) onMessage(data *chatbot.BotCallbackDataModel, richText *richT
 				sessionWebhookExpiredTime: data.SessionWebhookExpiredTime,
 				conversationId:            data.ConversationId,
 				senderStaffId:             data.SenderStaffId,
+				senderNick:                data.SenderNick,
 				messageID:                 data.MsgId,
 				isGroup:                   data.ConversationType == "2",
 			},
@@ -386,6 +398,7 @@ func (p *Platform) onMessage(data *chatbot.BotCallbackDataModel, richText *richT
 			sessionWebhookExpiredTime: data.SessionWebhookExpiredTime,
 			conversationId:            data.ConversationId,
 			senderStaffId:             data.SenderStaffId,
+			senderNick:                data.SenderNick,
 			messageID:                 data.MsgId,
 			isGroup:                   data.ConversationType == "2",
 		},
@@ -405,6 +418,7 @@ func (p *Platform) replyUnauthorized(data *chatbot.BotCallbackDataModel) {
 		sessionWebhookExpiredTime: data.SessionWebhookExpiredTime,
 		conversationId:            data.ConversationId,
 		senderStaffId:             data.SenderStaffId,
+		senderNick:                data.SenderNick,
 		isGroup:                   data.ConversationType == "2",
 	}, core.UnauthorizedAccessMessage)
 	if err != nil {
@@ -496,6 +510,7 @@ func (p *Platform) handleAudioMessage(data *chatbot.BotCallbackDataModel, sessio
 					sessionWebhookExpiredTime: data.SessionWebhookExpiredTime,
 					conversationId:            data.ConversationId,
 					senderStaffId:             data.SenderStaffId,
+					senderNick:                data.SenderNick,
 					messageID:                 data.MsgId,
 					isGroup:                   data.ConversationType == "2",
 				},
@@ -522,6 +537,7 @@ func (p *Platform) handleAudioMessage(data *chatbot.BotCallbackDataModel, sessio
 			sessionWebhookExpiredTime: data.SessionWebhookExpiredTime,
 			conversationId:            data.ConversationId,
 			senderStaffId:             data.SenderStaffId,
+			senderNick:                data.SenderNick,
 			messageID:                 data.MsgId,
 			isGroup:                   data.ConversationType == "2",
 		},
@@ -569,6 +585,7 @@ func (p *Platform) handleImageMessage(data *chatbot.BotCallbackDataModel, sessio
 			sessionWebhookExpiredTime: data.SessionWebhookExpiredTime,
 			conversationId:            data.ConversationId,
 			senderStaffId:             data.SenderStaffId,
+			senderNick:                data.SenderNick,
 			messageID:                 data.MsgId,
 			isGroup:                   data.ConversationType == "2",
 		},
@@ -685,6 +702,7 @@ func (p *Platform) handleFileMessage(data *chatbot.BotCallbackDataModel, session
 			sessionWebhookExpiredTime: data.SessionWebhookExpiredTime,
 			conversationId:            data.ConversationId,
 			senderStaffId:             data.SenderStaffId,
+			senderNick:                data.SenderNick,
 			messageID:                 data.MsgId,
 			isGroup:                   data.ConversationType == "2",
 		},
@@ -824,8 +842,8 @@ func (p *Platform) getAccessToken() (string, error) {
 	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
-		return "", fmt.Errorf("api returned status %d: %s", resp.StatusCode, body)
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 8<<10))
+		return "", core.HTTPError("dingtalk: access token", resp.StatusCode, body, p.clientSecret)
 	}
 
 	var tokenResp struct {
@@ -1004,6 +1022,15 @@ func (p *Platform) Send(ctx context.Context, rctx any, content string) error {
 	if rc.useProactiveAPI() {
 		return p.sendProactiveMessage(ctx, rc, content)
 	}
+	// Group clickable @-mention: deliver as text (only text highlights @ in
+	// DingTalk). Fall back to the original markdown path on any failure.
+	if p.atGroups && rc.isGroup && rc.senderStaffId != "" {
+		if err := p.ReplyWithAt(ctx, rctx, mentionText(content, rc.senderStaffId, rc.senderNick), []string{rc.senderStaffId}, false); err != nil {
+			slog.Warn("dingtalk: group text @-reply failed, falling back to markdown", "error", err)
+		} else {
+			return nil
+		}
+	}
 	return p.Reply(ctx, rctx, content)
 }
 
@@ -1073,7 +1100,7 @@ func (p *Platform) sendEmotion(ctx context.Context, rc replyContext, emoji strin
 
 	respBody, _ := io.ReadAll(resp.Body)
 	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("dingtalk: emotion returned status %d: %s", resp.StatusCode, string(respBody))
+		return core.HTTPError("dingtalk: emotion", resp.StatusCode, respBody, token)
 	}
 	if len(respBody) == 0 {
 		return nil
@@ -1170,10 +1197,10 @@ func (p *Platform) SendImage(ctx context.Context, rctx any, img core.ImageAttach
 	defer func() { _ = resp.Body.Close() }()
 
 	respBody, _ := io.ReadAll(resp.Body)
-	slog.Debug("dingtalk: image message response", "status", resp.StatusCode, "body", string(respBody))
+	slog.Debug("dingtalk: image message response", "status", resp.StatusCode, "body_bytes", len(respBody))
 
 	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("dingtalk: send image failed: status=%d, body=%s", resp.StatusCode, string(respBody))
+		return core.HTTPError("dingtalk: send image", resp.StatusCode, respBody, token)
 	}
 
 	slog.Info("dingtalk: image message sent", "media_id", mediaID, "user", rc.senderStaffId)
@@ -1198,6 +1225,12 @@ func (p *Platform) CreateStreamingCard(ctx context.Context, replyCtx any) (core.
 	rc, ok := replyCtx.(replyContext)
 	if !ok {
 		return nil, fmt.Errorf("dingtalk: invalid reply context type %T", replyCtx)
+	}
+	if p.bypassCardForGroupAt(rc) {
+		// Group @-mention replies must go out as text (see mentionText); returning
+		// an error here makes the engine fall back to the normal message path
+		// (p.Send), where the text @-mention is produced.
+		return nil, fmt.Errorf("dingtalk: group at-mention bypasses streaming card")
 	}
 	return p.createAICard(ctx, rc)
 }
@@ -1263,10 +1296,10 @@ func (p *Platform) SendFile(ctx context.Context, rctx any, file core.FileAttachm
 	defer func() { _ = resp.Body.Close() }()
 
 	respBody, _ := io.ReadAll(resp.Body)
-	slog.Debug("dingtalk: file message response", "status", resp.StatusCode, "body", string(respBody))
+	slog.Debug("dingtalk: file message response", "status", resp.StatusCode, "body_bytes", len(respBody))
 
 	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("dingtalk: send file failed: status=%d, body=%s", resp.StatusCode, string(respBody))
+		return core.HTTPError("dingtalk: send file", resp.StatusCode, respBody, token)
 	}
 
 	slog.Info("dingtalk: file message sent", "media_id", mediaID, "name", name, "user", rc.senderStaffId)
@@ -1409,10 +1442,10 @@ func (p *Platform) SendAudio(ctx context.Context, rctx any, audio []byte, format
 	defer func() { _ = resp.Body.Close() }()
 
 	respBody, _ := io.ReadAll(resp.Body)
-	slog.Debug("dingtalk: oToMessages API response", "status", resp.StatusCode, "body", string(respBody))
+	slog.Debug("dingtalk: oToMessages API response", "status", resp.StatusCode, "body_bytes", len(respBody))
 
 	if resp.StatusCode != 200 {
-		return fmt.Errorf("dingtalk: send audio failed: status=%d, body=%s", resp.StatusCode, string(respBody))
+		return core.HTTPError("dingtalk: send audio", resp.StatusCode, respBody, token)
 	}
 
 	slog.Info("dingtalk: voice message sent successfully", "media_id", mediaID, "conversation_id", rc.conversationId)
@@ -1505,10 +1538,10 @@ func (p *Platform) uploadMedia(ctx context.Context, data []byte, fileName, media
 	}
 
 	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("upload returned status %d: %s", resp.StatusCode, respBody)
+		return "", core.HTTPError("dingtalk: upload media", resp.StatusCode, respBody, token)
 	}
 
-	slog.Debug("dingtalk: media upload response", "status", resp.StatusCode, "body", string(respBody))
+	slog.Debug("dingtalk: media upload response", "status", resp.StatusCode, "body_bytes", len(respBody))
 
 	var uploadResp struct {
 		ErrCode int    `json:"errcode"`
@@ -1517,15 +1550,15 @@ func (p *Platform) uploadMedia(ctx context.Context, data []byte, fileName, media
 		Type    string `json:"type"`
 	}
 	if err := json.Unmarshal(respBody, &uploadResp); err != nil {
-		return "", fmt.Errorf("decode upload response: %w, body: %s", err, respBody)
+		return "", fmt.Errorf("decode upload response: %w (body_bytes=%d)", err, len(respBody))
 	}
 
 	if uploadResp.ErrCode != 0 {
-		return "", fmt.Errorf("upload API error %d: %s", uploadResp.ErrCode, uploadResp.ErrMsg)
+		return "", fmt.Errorf("upload API error %d", uploadResp.ErrCode)
 	}
 
 	if uploadResp.MediaID == "" {
-		return "", fmt.Errorf("empty media_id in upload response: %s", respBody)
+		return "", fmt.Errorf("empty media_id in upload response (body_bytes=%d)", len(respBody))
 	}
 
 	slog.Debug("dingtalk: media uploaded successfully", "media_id", uploadResp.MediaID, "type", mediaType, "size", len(data))
@@ -1842,6 +1875,60 @@ func extractAtUserIds(content string) []string {
 		}
 	}
 	return ids
+}
+
+// stripLeadingMention removes one leading mention of the sender. It compensates
+// for an EXTERNAL component (the ACP filter, acp-filter.js) that injects an
+// "@<name>" prefix into agent replies; cc-connect itself never injects mentions
+// into reply bodies. Only the exact sender nick or the exact staff-ID mention is
+// stripped, so tokens that merely start with "@" — file paths ("@src/main.go"),
+// TODO markers ("@TODO:") or salutations ("@Alice") — survive verbatim.
+func stripLeadingMention(content, nick, staffID string) string {
+	for _, name := range [2]string{nick, staffID} {
+		if name == "" {
+			continue
+		}
+		rest, ok := strings.CutPrefix(content, "@"+name)
+		if !ok {
+			continue
+		}
+		if rest == "" {
+			return ""
+		}
+		// The mention must end at a word boundary so "@123" cannot match "@1234".
+		if c := rest[0]; c == ' ' || c == '\t' || c == '\n' || c == '\r' {
+			return strings.TrimLeft(rest, " \t\n\r")
+		}
+	}
+	return content
+}
+
+// bypassCardForGroupAt reports whether streaming-card delivery should be skipped
+// so a group reply can be sent as a text message with a clickable @-mention.
+// When it returns true, CreateStreamingCard reports an error so the engine falls
+// back to its normal Send() path, which builds the text @-mention.
+func (p *Platform) bypassCardForGroupAt(rc replyContext) bool {
+	return p.atGroups && rc.isGroup
+}
+
+// mentionText formats reply content for a clickable DingTalk group @-mention.
+//
+// DingTalk highlights an @ only when the text body contains "@<userId>" AND the
+// same id is present in at.atUserIds (text msgtype only — markdown and
+// ActionCard render an @ as plain text). The injected "@<nick>" prefix
+// (see stripLeadingMention) is dropped first so the mention is not duplicated.
+//
+// It intentionally strips only ONE leading mention (the externally injected
+// one); see extractAtUserIds for full @userId extraction.
+func mentionText(content, staffID, nick string) string {
+	if staffID == "" {
+		return content
+	}
+	body := stripLeadingMention(content, nick, staffID)
+	if strings.TrimSpace(body) == "" {
+		return "@" + staffID
+	}
+	return "@" + staffID + " " + body
 }
 
 // preprocessDingTalkMarkdown adapts content for DingTalk's markdown renderer:
