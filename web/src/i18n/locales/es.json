@@ -8,7 +8,10 @@
     "cron": "Tareas programadas",
     "bridge": "Puente",
     "skills": "Habilidades",
-    "system": "Sistema"
+    "system": "Sistema",
+    "openMenu": "Abrir menú",
+    "closeMenu": "Cerrar menú",
+    "navigation": "Navegación"
   },
   "dashboard": {
     "title": "Panel",

@@ -8,7 +8,10 @@
     "cron": "定时任务",
     "bridge": "桥接",
     "skills": "技能",
-    "system": "系统"
+    "system": "系统",
+    "openMenu": "打开菜单",
+    "closeMenu": "关闭菜单",
+    "navigation": "导航菜单"
   },
   "dashboard": {
     "title": "概览",

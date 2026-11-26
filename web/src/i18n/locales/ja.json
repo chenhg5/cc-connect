@@ -8,7 +8,10 @@
     "cron": "スケジュールジョブ",
     "bridge": "ブリッジ",
     "skills": "スキル",
-    "system": "システム"
+    "system": "システム",
+    "openMenu": "メニューを開く",
+    "closeMenu": "メニューを閉じる",
+    "navigation": "ナビゲーション"
   },
   "dashboard": {
     "title": "ダッシュボード",

@@ -1,7 +1,7 @@
 import { useTranslation } from 'react-i18next';
-import { useState, useRef, useEffect } from 'react';
+import { useState, useRef, useEffect, type RefObject } from 'react';
 import {
-  RefreshCw, Sun, Moon, Monitor, LogOut, Languages, ChevronDown,
+  RefreshCw, Sun, Moon, Monitor, LogOut, Languages, ChevronDown, Menu,
 } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { useThemeStore } from '@/store/theme';
@@ -17,7 +17,14 @@ const languages = [
   { code: 'ru', label: 'RU' },
 ];
 
-export default function Header() {
+interface HeaderProps {
+  menuButtonRef: RefObject<HTMLButtonElement | null>;
+  menuOpen: boolean;
+  menuControlsId: string;
+  onMenuClick: () => void;
+}
+
+export default function Header({ menuButtonRef, menuOpen, menuControlsId, onMenuClick }: HeaderProps) {
   const { t, i18n } = useTranslation();
   const { theme, setTheme } = useThemeStore();
   const logout = useAuthStore((s) => s.logout);
@@ -49,11 +56,12 @@ export default function Header() {
     setLangOpen(false);
   };
 
-  const btnCls = cn(
-    'p-2 rounded-lg transition-all duration-200',
+  const btnBaseCls = cn(
+    'rounded-lg transition-all duration-200',
     'text-gray-500 dark:text-gray-400',
     'hover:bg-gray-100/90 dark:hover:bg-white/[0.08] hover:text-gray-800 dark:hover:text-white',
   );
+  const btnCls = cn(btnBaseCls, 'p-2');
 
   return (
     <header
@@ -63,6 +71,24 @@ export default function Header() {
         'bg-white/70 backdrop-blur-xl dark:bg-[rgba(0,0,0,0.72)]',
       )}
     >
+      {/* Mobile drawer trigger */}
+      <div className="mr-auto flex items-center gap-2 md:hidden">
+        <button
+          ref={menuButtonRef}
+          type="button"
+          onClick={onMenuClick}
+          className={cn(btnBaseCls, 'p-2.5 -ml-2')}
+          aria-label={t('nav.openMenu')}
+          aria-expanded={menuOpen}
+          aria-controls={menuControlsId}
+        >
+          <Menu size={18} />
+        </button>
+        <span className="hidden min-[420px]:inline text-sm font-bold tracking-tight text-gray-900 dark:text-white">
+          CC<span className="text-accent">-</span>Connect
+        </span>
+      </div>
+
       <button type="button" onClick={handleRefresh} className={btnCls} aria-label={t('common.refresh')}>
         <RefreshCw size={16} className={spinning ? 'animate-spin' : ''} />
       </button>

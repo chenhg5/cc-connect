@@ -8,7 +8,10 @@
     "cron": "排程工作",
     "bridge": "橋接",
     "skills": "技能",
-    "system": "系統"
+    "system": "系統",
+    "openMenu": "開啟選單",
+    "closeMenu": "關閉選單",
+    "navigation": "導覽選單"
   },
   "dashboard": {
     "title": "總覽",
