@@ -1660,7 +1660,7 @@ type = "feishu"
 
 [projects.platforms.options]
 app_id = "your-feishu-app-id"
-app_secret = "${FEISHU_APP_SECRET}" # Set the Feishu app secret in your environment.
+app_secret = "your-feishu-app-secret"
 
 # For more platforms (DingTalk, Telegram, Slack, Discord, LINE, WeChat Work)
 # see: https://github.com/chenhg5/cc-connect/blob/main/config.example.toml
