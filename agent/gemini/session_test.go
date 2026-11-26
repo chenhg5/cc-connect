@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -11,6 +12,33 @@ import (
 
 	"github.com/chenhg5/cc-connect/core"
 )
+
+func TestGetSessionHistory_GeminiSavedConversation(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	workDir := t.TempDir()
+	chats := filepath.Join(home, ".gemini", "tmp", geminiProjectSlug(workDir), "chats")
+	if err := os.MkdirAll(chats, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	files := map[string]string{
+		"01-subagent.json":     `{"sessionId":"target","kind":"subagent","messages":[{"type":"user","content":"internal"}]}`,
+		"02-conversation.json": `{"sessionId":"target","messages":[{"type":"user","content":"first"},{"type":"gemini","content":[{"text":"answer one"},{"text":"answer two"}]},{"type":"user","content":"  latest question  "},{"type":"gemini","content":" latest answer "}]}`,
+	}
+	for name, content := range files {
+		if err := os.WriteFile(filepath.Join(chats, name), []byte(content), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	a := &Agent{workDir: workDir}
+	history, err := a.GetSessionHistory(context.Background(), "target", 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(history) != 2 || history[0].Role != "user" || history[0].Content != "latest question" || history[1].Role != "assistant" || history[1].Content != "latest answer" {
+		t.Fatalf("recent Gemini history = %#v", history)
+	}
+}
 
 // sanitizeFileName mirrors the logic in geminiSession.Send for file name sanitization.
 func sanitizeFileName(fileName string, index int) string {
@@ -250,9 +278,9 @@ func TestHandleMessage_MixedDeltaAndNonDelta(t *testing.T) {
 		"content": "Let me look at the files.",
 	})
 	gs.handleEvent(map[string]any{
-		"type":      "tool_use",
-		"tool_name": "shell",
-		"tool_id":   "t1",
+		"type":       "tool_use",
+		"tool_name":  "shell",
+		"tool_id":    "t1",
 		"parameters": map[string]any{"command": "ls"},
 	})
 	gs.handleEvent(map[string]any{
@@ -445,10 +473,10 @@ func TestSessionMessage_TextContent(t *testing.T) {
 
 func TestComputeLineDiff(t *testing.T) {
 	tests := []struct {
-		name     string
-		old      string
-		new_     string
-		want     string
+		name string
+		old  string
+		new_ string
+		want string
 	}{
 		{
 			"single line fully different",

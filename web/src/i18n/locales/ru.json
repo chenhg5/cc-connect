@@ -81,6 +81,16 @@
     "title": "Сессии",
     "id": "ID",
     "sessionKey": "Ключ сессии",
+    "userName": "Имя пользователя",
+    "userId": "ID пользователя",
+    "chatName": "Название чата",
+    "chatId": "ID чата",
+    "chatType": "Тип чата",
+    "chatTypeGroup": "Группа",
+    "chatTypeSingle": "Личный чат",
+    "sessionId": "ID сеанса",
+    "agentSessionId": "ID сеанса агента",
+    "copy": "Копировать",
     "name": "Название",
     "platform": "Платформа",
     "active": "Активна",
@@ -100,7 +110,9 @@
     "bridgeConnected": "подключено",
     "bridgeConnecting": "подключение…",
     "bridgeDisconnected": "отключено",
-    "bridgeNotAvailable": "Мост недоступен. Включите [bridge] в config.toml, чтобы общаться из веба."
+    "bridgeNotAvailable": "Мост недоступен. Включите [bridge] в config.toml, чтобы общаться из веба.",
+    "managementUnavailable": "Не удалось подключиться к API управления или пройти проверку токена. Проверьте подключение и токен.",
+    "bridgeStartFailed": "Не удалось запустить мост{{detail}}. Проверьте журналы сервера."
   },
   "providers": {
     "title": "Провайдеры",

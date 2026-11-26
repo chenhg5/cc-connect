@@ -252,6 +252,9 @@ func TestHandleMsgCallback_SingleChat_ChatIDFallback(t *testing.T) {
 		if rc.chatID != "zhangsan" {
 			t.Fatalf("expected chatID to fall back to userID 'zhangsan', got %q", rc.chatID)
 		}
+		if msg.ChatID != "zhangsan" || msg.ChatType != "single" {
+			t.Fatalf("single chat identity = (%q, %q)", msg.ChatID, msg.ChatType)
+		}
 	case <-time.After(1 * time.Second):
 		t.Fatal("handler not called")
 	}
@@ -280,6 +283,9 @@ func TestHandleMsgCallback_GroupChat_ChatIDPreserved(t *testing.T) {
 		rc := msg.ReplyCtx.(wsReplyContext)
 		if rc.chatID != "group_chat_id_123" {
 			t.Fatalf("expected chatID 'group_chat_id_123', got %q", rc.chatID)
+		}
+		if msg.ChatID != "group_chat_id_123" || msg.ChatType != "group" {
+			t.Fatalf("group chat identity = (%q, %q)", msg.ChatID, msg.ChatType)
 		}
 	case <-time.After(1 * time.Second):
 		t.Fatal("handler not called")

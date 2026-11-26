@@ -353,6 +353,45 @@ func TestAppServerSession_ReadLoopHandlesLargeResponseLine(t *testing.T) {
 	s.wg.Wait()
 }
 
+func TestAppServerSession_StderrLoopDrainsPastOverlongLine(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	s := &appServerSession{ctx: ctx}
+	r, w := io.Pipe()
+	s.wg.Add(1)
+	go s.stderrLoop(r)
+
+	// io.Pipe is unbuffered, so every write below only returns once the loop
+	// has consumed it; a loop that stopped reading would block the writer.
+	written := make(chan error, 1)
+	writerDone := make(chan struct{})
+	t.Cleanup(func() {
+		_ = r.Close()
+		_ = w.Close()
+		<-writerDone
+		s.wg.Wait()
+	})
+	go func() {
+		defer close(writerDone)
+		if _, err := w.Write([]byte(strings.Repeat("x", 2*1024*1024) + "\n")); err != nil {
+			written <- err
+			return
+		}
+		_, err := w.Write([]byte("after overlong line\n"))
+		written <- err
+	}()
+
+	select {
+	case err := <-written:
+		if err != nil {
+			t.Fatalf("write stderr: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("stderrLoop stopped draining after an over-long line")
+	}
+}
+
 func TestAppServerSession_ResumeDoesNotRequestExtendedHistory(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -386,6 +425,9 @@ func TestAppServerSession_ResumeDoesNotRequestExtendedHistory(t *testing.T) {
 	}
 	if got := request.Params["persistExtendedHistory"]; got != false {
 		t.Fatalf("persistExtendedHistory = %#v, want false", got)
+	}
+	if got := request.Params["excludeTurns"]; got != true {
+		t.Fatalf("excludeTurns = %#v, want true", got)
 	}
 
 	s.handleResponse(rpcResponseEnvelope{

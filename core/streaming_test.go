@@ -180,6 +180,74 @@ type mockCleanerPlatform struct {
 	deleted []any
 }
 
+func TestProcessInteractiveEvents_StopPreviewBehavior(t *testing.T) {
+	for _, tc := range []struct {
+		name, behavior string
+		wantDeletes    int
+	}{
+		{"default discards", "", 1},
+		{"freeze preserves", StopBehaviorFreeze, 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			p := &mockCleanerPlatform{}
+			p.n = "test"
+			e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+			e.SetStreamPreviewCfg(StreamPreviewCfg{Enabled: true, IntervalMs: 10, MinDeltaChars: 1, MaxChars: 500, StopBehavior: tc.behavior})
+			key := "test:user1"
+			sess := newControllableSession("stop-preview")
+			state := &interactiveState{agentSession: sess, platform: p, replyCtx: "ctx"}
+			state.stopSignal()
+			done := make(chan struct{})
+			go func() {
+				e.processInteractiveEvents(state, e.sessions.GetOrCreateActive(key), e.sessions, key, "msg", time.Now(), nil, nil, "ctx", 0)
+				close(done)
+			}()
+			sess.events <- Event{Type: EventText, Content: "partial answer"}
+			deadline := time.After(2 * time.Second)
+			for len(p.getMessages()) == 0 {
+				select {
+				case <-deadline:
+					t.Fatal("preview was not sent")
+				case <-time.After(10 * time.Millisecond):
+				}
+			}
+			state.mu.Lock()
+			state.stopped = true
+			close(state.stopCh)
+			state.mu.Unlock()
+			select {
+			case <-done:
+			case <-time.After(2 * time.Second):
+				t.Fatal("event loop did not stop")
+			}
+			p.mu.Lock()
+			deletes := len(p.deleted)
+			last := p.lastMsg
+			p.mu.Unlock()
+			if deletes != tc.wantDeletes {
+				t.Fatalf("preview deletions = %d, want %d", deletes, tc.wantDeletes)
+			}
+			if tc.behavior == StopBehaviorFreeze && !strings.Contains(last, "partial answer") {
+				t.Fatalf("frozen preview = %q", last)
+			}
+		})
+	}
+}
+
+func TestStopBehaviorIsValid(t *testing.T) {
+	for _, tc := range []struct {
+		value string
+		want  bool
+	}{
+		{"", true}, {StopBehaviorDiscard, true}, {StopBehaviorFreeze, true},
+		{"keep", false}, {"Freeze", false},
+	} {
+		if got := StopBehaviorIsValid(tc.value); got != tc.want {
+			t.Errorf("StopBehaviorIsValid(%q) = %v, want %v", tc.value, got, tc.want)
+		}
+	}
+}
+
 func (m *mockCleanerPlatform) DeletePreviewMessage(_ context.Context, handle any) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()

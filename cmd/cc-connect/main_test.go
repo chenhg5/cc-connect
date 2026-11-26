@@ -246,6 +246,39 @@ func TestWireAgentProvidersStartsRefreshAfterProviderWiring(t *testing.T) {
 	}
 }
 
+func TestWireAgentProvidersAutoSelectsOnlyProvider(t *testing.T) {
+	agent := &stubProviderRefreshAgent{activateOK: true}
+	result := wireAgentProviders(agent, config.AgentConfig{Type: "claudecode", Providers: []config.ProviderConfig{{Name: "only", BaseURL: "https://example.com"}}})
+	if result.explicitProviderRequested || !result.activeProviderApplied || agent.activeName != "only" {
+		t.Fatalf("single provider was not selected: result=%+v active=%q", result, agent.activeName)
+	}
+	if !reflect.DeepEqual(agent.calls, []string{"set_providers", "set_active_provider"}) {
+		t.Fatalf("calls = %v", agent.calls)
+	}
+}
+
+func TestWireAgentProvidersDoesNotGuessAmongMultiple(t *testing.T) {
+	agent := &stubProviderRefreshAgent{activateOK: true}
+	result := wireAgentProviders(agent, config.AgentConfig{Type: "claudecode", Providers: []config.ProviderConfig{{Name: "first"}, {Name: "second"}}})
+	if result.activeProviderApplied || agent.activeName != "" {
+		t.Fatalf("multiple providers unexpectedly selected: result=%+v active=%q", result, agent.activeName)
+	}
+	if !reflect.DeepEqual(agent.calls, []string{"set_providers"}) {
+		t.Fatalf("calls = %v", agent.calls)
+	}
+}
+
+func TestWireAgentProvidersSelectsOnlyApplicableProvider(t *testing.T) {
+	agent := &stubProviderRefreshAgent{activateOK: true}
+	result := wireAgentProviders(agent, config.AgentConfig{Type: "claudecode", Providers: []config.ProviderConfig{
+		{Name: "codex-only", AgentTypes: []string{"codex"}},
+		{Name: "claude-only", AgentTypes: []string{"claudecode"}},
+	}})
+	if !result.activeProviderApplied || agent.activeName != "claude-only" {
+		t.Fatalf("applicable provider was not selected: result=%+v active=%q", result, agent.activeName)
+	}
+}
+
 func TestWireAgentProviders_SkipsRefreshWhenExplicitProviderActivationFails(t *testing.T) {
 	agent := &stubProviderRefreshAgent{}
 	agent.activateOK = false
