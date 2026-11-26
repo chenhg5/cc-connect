@@ -38,6 +38,11 @@ advertised options. Invalid explicit selections fail session startup.
 `agent_preset` selects the native preset for new sessions. `timeout_mins`
 limits ordinary turns and native commands; `0` disables that watchdog.
 
+A commented project block covering these options is in
+[`config.example.toml`](config.example.toml); copy it into your
+`config.toml`. This README is the authoritative description of the options;
+the example's comments only summarize it.
+
 ## Behavior
 
 - Each chat has its own authenticated peer and socket. It receives only its
