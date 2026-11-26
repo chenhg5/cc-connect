@@ -4,7 +4,9 @@
 // release but failures must be recorded.
 //
 // This file covers engine-dispatched slash commands:
-//   /whoami, /agent-sid, /skills, /cron list, /quiet, /effort, /search
+//
+//	/whoami, /agent-sid, /skills, /cron list, /quiet, /effort, /search
+//
 // and security guard: non-authorized user rejection.
 //
 // Run:

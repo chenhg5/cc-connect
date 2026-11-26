@@ -12,7 +12,7 @@ import (
 // dedup_enabled / dedup_window_seconds config keys (issue #1667).
 func TestPickBool(t *testing.T) {
 	cases := []struct {
-		in  any
+		in   any
 		want bool
 	}{
 		{true, true},
@@ -76,8 +76,8 @@ func TestNew_DedupCanBeDisabled(t *testing.T) {
 // TestNew_DedupWindowRespected covers the per-deployment TTL override.
 func TestNew_DedupWindowRespected(t *testing.T) {
 	p, err := New(map[string]any{
-		"token":                 "t",
-		"dedup_window_seconds":  15,
+		"token":                "t",
+		"dedup_window_seconds": 15,
 	})
 	if err != nil {
 		t.Fatalf("New error = %v", err)
@@ -93,8 +93,8 @@ func TestNew_DedupWindowRespected(t *testing.T) {
 // must reach the handler.
 func TestDispatchInbound_DropsDuplicateMessageID(t *testing.T) {
 	p, err := New(map[string]any{
-		"token":                 "t",
-		"dedup_window_seconds":  60,
+		"token":                "t",
+		"dedup_window_seconds": 60,
 	})
 	if err != nil {
 		t.Fatalf("New error = %v", err)

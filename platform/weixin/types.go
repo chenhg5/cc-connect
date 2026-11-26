@@ -138,10 +138,10 @@ type sendMessageResp struct {
 }
 
 type sendTypingReq struct {
-	IlinkUserID   string   `json:"ilink_user_id"`
-	TypingTicket  string   `json:"typing_ticket"`
-	Status        int      `json:"status"`
-	BaseInfo      baseInfo `json:"base_info"`
+	IlinkUserID  string   `json:"ilink_user_id"`
+	TypingTicket string   `json:"typing_ticket"`
+	Status       int      `json:"status"`
+	BaseInfo     baseInfo `json:"base_info"`
 }
 
 type getConfigReq struct {
