@@ -41,6 +41,14 @@ type opencodeSession struct {
 	resultSent        atomic.Bool // true when EventResult has been sent for this turn
 	errorSent         atomic.Bool // true when an explicit agent error has been sent for this turn
 	textSent          atomic.Bool // true when this turn streamed visible answer text
+
+	// stepMu guards stepTexts. Non-synthetic text parts are buffered per step
+	// and released only on step_finish: an intermediate step forwards its
+	// narration as EventText (the engine folds it into the process panel),
+	// while the final step's text becomes the reply via EventResult.Content,
+	// so per-step narration never leaks into the final answer.
+	stepMu    sync.Mutex
+	stepTexts []string
 }
 
 func newOpencodeSession(ctx context.Context, cmd string, extraArgs []string, workDir, model, mode, agentName, resumeID string, extraEnv []string) (*opencodeSession, error) {
@@ -279,6 +287,22 @@ func (s *opencodeSession) readLoop(cmd *exec.Cmd, stdout io.ReadCloser, stderrBu
 		if s.errorSent.Load() {
 			return
 		}
+		// Flush any answer text buffered for the interrupted step so it is not
+		// lost when the process errors out mid-step.
+		s.stepMu.Lock()
+		texts := s.stepTexts
+		s.stepTexts = nil
+		s.stepMu.Unlock()
+		for _, text := range texts {
+			if text == "" {
+				continue
+			}
+			select {
+			case s.events <- core.Event{Type: core.EventText, Content: text}:
+			case <-s.ctx.Done():
+				return
+			}
+		}
 		err := fmt.Errorf("opencode exited without a result: %w", waitErr)
 		if stderrMsg != "" {
 			err = fmt.Errorf("opencode exited without a result: %w: %s", waitErr, stderrMsg)
@@ -307,7 +331,11 @@ func (s *opencodeSession) readLoop(cmd *exec.Cmd, stdout io.ReadCloser, stderrBu
 		return
 	}
 	if s.textSent.Load() {
-		s.sendEventResult()
+		s.stepMu.Lock()
+		texts := s.stepTexts
+		s.stepTexts = nil
+		s.stepMu.Unlock()
+		s.sendEventResult(strings.Join(texts, "\n"))
 		return
 	}
 	s.alive.Store(false)
@@ -370,17 +398,29 @@ func (s *opencodeSession) handleText(raw map[string]any) {
 		}
 	}
 
-	if text != "" {
-		evt := core.Event{Type: core.EventText, Content: text, Metadata: metadata, Synthetic: synthetic}
+	if text == "" {
+		return
+	}
+
+	// Synthetic text (e.g. "Thinking...") is a UI hint, not answer content;
+	// forward it immediately like before.
+	if synthetic {
+		evt := core.Event{Type: core.EventText, Content: text, Metadata: metadata, Synthetic: true}
 		select {
 		case s.events <- evt:
-			if !synthetic {
-				s.textSent.Store(true)
-			}
 		case <-s.ctx.Done():
-			return
 		}
+		return
 	}
+
+	// Buffer the real answer text for the current step. handleStepFinish decides
+	// whether this step was intermediate (narration, folded into the process
+	// panel) or the final answer (delivered once via EventResult.Content), so
+	// per-step narration never leaks into the final reply.
+	s.stepMu.Lock()
+	s.stepTexts = append(s.stepTexts, text)
+	s.stepMu.Unlock()
+	s.textSent.Store(true)
 }
 
 func (s *opencodeSession) handleToolUse(raw map[string]any) {
@@ -537,6 +577,12 @@ func extractErrorMessage(raw map[string]any) string {
 }
 
 func (s *opencodeSession) handleStepStart(raw map[string]any) {
+	// A new step begins; drop any text buffered outside a step boundary (stale
+	// narration from a previous step that never reached its step_finish).
+	s.stepMu.Lock()
+	s.stepTexts = nil
+	s.stepMu.Unlock()
+
 	sessionID, _ := raw["sessionID"].(string)
 	if sessionID == "" {
 		part, _ := raw["part"].(map[string]any)
@@ -558,19 +604,45 @@ func (s *opencodeSession) handleStepFinish(raw map[string]any) {
 	}
 	slog.Debug("opencodeSession: step finished", "reason", reason, "session_id", s.CurrentSessionID())
 
-	if reason == "stop" && s.textSent.Load() {
-		s.sendEventResult()
+	// Release the text buffered for this step.
+	s.stepMu.Lock()
+	texts := s.stepTexts
+	s.stepTexts = nil
+	s.stepMu.Unlock()
+
+	// The final step's narration is the real answer: deliver it once via
+	// EventResult.Content so the reply holds only the answer, never the
+	// accumulated per-step narration.
+	if reason == "stop" {
+		if len(texts) > 0 || s.textSent.Load() {
+			s.sendEventResult(strings.Join(texts, "\n"))
+		}
+		return
+	}
+
+	// An intermediate step (e.g. "tool-calls") forwards its narration as
+	// EventText, which the engine folds into the process panel.
+	for _, text := range texts {
+		if text == "" {
+			continue
+		}
+		evt := core.Event{Type: core.EventText, Content: text}
+		select {
+		case s.events <- evt:
+		case <-s.ctx.Done():
+			return
+		}
 	}
 }
 
-func (s *opencodeSession) sendEventResult() {
+func (s *opencodeSession) sendEventResult(content string) {
 	if s.resultSent.Load() {
 		slog.Debug("opencodeSession: EventResult already sent, skipping", "session_id", s.CurrentSessionID())
 		return
 	}
 	s.resultSent.Store(true)
 	sid := s.CurrentSessionID()
-	evt := core.Event{Type: core.EventResult, SessionID: sid, Done: true}
+	evt := core.Event{Type: core.EventResult, SessionID: sid, Content: content, Done: true}
 	select {
 	case s.events <- evt:
 	case <-s.ctx.Done():
