@@ -492,13 +492,6 @@ func (cs *codexSession) handleEvent(raw map[string]any) {
 		errMsg := ""
 		if errObj, ok := raw["error"].(map[string]any); ok {
 			errMsg, _ = errObj["message"].(string)
-			if code, _ := errObj["codex_error_info"].(string); code == "usageLimitExceeded" {
-				select {
-				case cs.events <- core.Event{Type: core.EventError, Error: quotaError{}, Metadata: map[string]any{"quota_exhausted": true}}:
-				case <-cs.ctx.Done():
-				}
-				return
-			}
 		}
 		if errMsg == "" {
 			errMsg = "turn failed (no details)"

@@ -8,7 +8,6 @@ import (
 )
 
 type agyOutputParser struct {
-	terminal  *agyStreamResult
 	sessionID string
 	hasText   bool
 	toolSteps map[int]bool
@@ -48,19 +47,6 @@ type agyStreamResult struct {
 	Status         string `json:"status"`
 	Response       string `json:"response"`
 	Error          string `json:"error"`
-}
-
-func (r agyStreamResult) terminalStatus() string {
-	if strings.EqualFold(r.Status, "ERROR") {
-		return "error"
-	}
-	if strings.EqualFold(r.Status, "SUCCESS") {
-		return "success"
-	}
-	if r.Error != "" {
-		return "error"
-	}
-	return ""
 }
 
 func newAgyOutputParser() *agyOutputParser {
@@ -148,8 +134,6 @@ func (p *agyOutputParser) parseLine(line []byte) (recognized bool, events []core
 			}
 		}
 	case "result":
-		current := envelope.Result
-		p.terminal = &current
 		if !p.hasText && envelope.Result.Response != "" {
 			p.hasText = true
 			events = append(events, core.Event{Type: core.EventText, Content: envelope.Result.Response})

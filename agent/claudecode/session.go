@@ -645,8 +645,8 @@ func (cs *claudeSession) finishReadLoop(waitErrCh <-chan error, stderrBuf *bytes
 			stderrMsg = strings.TrimSpace(stderrBuf.String())
 		}
 		if stderrMsg != "" {
-			slog.Error("claudeSession: process failed", "error", err, "stderr_bytes", len(stderrMsg))
-			evt := core.Event{Type: core.EventError, Error: fmt.Errorf("claude CLI process failed")}
+			slog.Error("claudeSession: process failed", "error", err, "stderr", stderrMsg)
+			evt := core.Event{Type: core.EventError, Error: fmt.Errorf("%s", stderrMsg)}
 			select {
 			case cs.events <- evt:
 			case <-cs.ctx.Done():
@@ -698,6 +698,9 @@ func (cs *claudeSession) handleReadLoopLine(line string) {
 
 	switch eventType {
 	case "rate_limit_event":
+		// Field names follow the CLI's SDKRateLimitEvent (status, resetsAt,
+		// errorCode). A rejected snapshot alone does not mark the turn as
+		// quota-exhausted; it only annotates a confirmed terminal refusal.
 		info, _ := raw["rate_limit_info"].(map[string]any)
 		status, _ := info["status"].(string)
 		switch status {
@@ -1431,6 +1434,10 @@ func (cs *claudeSession) handleResult(raw map[string]any) {
 		CacheReadInputTokens:     cacheReadTokens,
 	}
 	if !isCompaction {
+		// Claude Code sets the typed api_error kind "usage_limit_reached" on
+		// the turn's result when the account's usage limit refused the request
+		// (checked against CLI 2.1.308); api_error_status is the HTTP status.
+		// Result text and a bare HTTP 429 are deliberately not enough.
 		isError, _ := raw["is_error"].(bool)
 		code, _ := raw["api_error"].(string)
 		status, hasStatus := raw["api_error_status"].(float64)

@@ -1330,6 +1330,8 @@ func (s *appServerSession) handleNotification(method string, paramsRaw json.RawM
 				if errMsg == "" {
 					errMsg = "turn failed (no details)"
 				}
+				// TurnError.codexErrorInfo is the app-server v2 typed error;
+				// usageLimitExceeded is a unit variant, so it decodes as a string.
 				if notif.Turn.Error != nil {
 					var code string
 					_ = json.Unmarshal(notif.Turn.Error.CodexErrorInfo, &code)

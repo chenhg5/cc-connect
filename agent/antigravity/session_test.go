@@ -274,10 +274,10 @@ func TestAntigravitySession_ReportsHeadlessExitFailures(t *testing.T) {
 	for _, tt := range []struct {
 		name, script, want string
 	}{
-		{"soft_denied_success", "printf 'headless mode cannot prompt; auto-denied' >&2; exit 0", "agy returned no response"},
+		{"soft_denied_success", "printf 'headless mode cannot prompt; auto-denied' >&2; exit 0", "headless mode cannot prompt"},
 		{"empty_success", "exit 0", "without producing a response"},
 		{"failed_without_stderr", "exit 2", "exit status 2"},
-		{"failed_with_stderr", "printf 'tool execution failed' >&2; exit 2", "exit status 2"},
+		{"failed_with_stderr", "printf 'tool execution failed' >&2; exit 2", "tool execution failed"},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Setenv("HOME", t.TempDir())
