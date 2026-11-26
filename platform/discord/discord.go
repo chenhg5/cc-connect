@@ -1044,9 +1044,9 @@ func discordButtonLabel(components []discordgo.MessageComponent, customID string
 func (p *Platform) Reply(ctx context.Context, rctx any, content string) error {
 	switch rc := rctx.(type) {
 	case *interactionReplyCtx:
-		return p.sendInteraction(rc, content)
+		return p.sendInteraction(ctx, rc, content)
 	case replyContext:
-		return p.sendChannelReply(rc, content)
+		return p.sendChannelReply(ctx, rc, content)
 	default:
 		return fmt.Errorf("discord: invalid reply context type %T", rctx)
 	}
@@ -1056,9 +1056,9 @@ func (p *Platform) Reply(ctx context.Context, rctx any, content string) error {
 func (p *Platform) Send(ctx context.Context, rctx any, content string) error {
 	switch rc := rctx.(type) {
 	case *interactionReplyCtx:
-		return p.sendInteraction(rc, content)
+		return p.sendInteraction(ctx, rc, content)
 	case replyContext:
-		return p.sendChannel(rc, content)
+		return p.sendChannel(ctx, rc, content)
 	default:
 		return fmt.Errorf("discord: invalid reply context type %T", rctx)
 	}
@@ -1067,7 +1067,7 @@ func (p *Platform) Send(ctx context.Context, rctx any, content string) error {
 // sendInteraction delivers a message through the Discord interaction response
 // mechanism. The first call edits the deferred "thinking" response; subsequent
 // calls create followup messages.
-func (p *Platform) sendInteraction(ictx *interactionReplyCtx, content string) error {
+func (p *Platform) sendInteraction(ctx context.Context, ictx *interactionReplyCtx, content string) error {
 	chunks := core.SplitMessageCodeFenceAware(wrapTablesInCodeBlocks(content), maxDiscordLen)
 	for _, chunk := range chunks {
 		ictx.mu.Lock()
@@ -1080,14 +1080,14 @@ func (p *Platform) sendInteraction(ictx *interactionReplyCtx, content string) er
 		var err error
 		if first {
 			c := chunk
-			_, err = p.session.InteractionResponseEdit(ictx.interaction, &discordgo.WebhookEdit{Content: &c})
+			_, err = p.session.InteractionResponseEdit(ictx.interaction, &discordgo.WebhookEdit{Content: &c}, discordgo.WithContext(ctx))
 		} else {
-			_, err = p.session.FollowupMessageCreate(ictx.interaction, true, &discordgo.WebhookParams{Content: chunk})
+			_, err = p.session.FollowupMessageCreate(ictx.interaction, true, &discordgo.WebhookParams{Content: chunk}, discordgo.WithContext(ctx))
 		}
 
 		if err != nil {
 			slog.Warn("discord: interaction response failed, falling back to channel message", "error", err)
-			_, err = p.session.ChannelMessageSend(ictx.channelID, chunk)
+			_, err = p.session.ChannelMessageSend(ictx.channelID, chunk, discordgo.WithContext(ctx))
 			if err != nil {
 				return fmt.Errorf("discord: send fallback: %w", err)
 			}
@@ -1096,15 +1096,15 @@ func (p *Platform) sendInteraction(ictx *interactionReplyCtx, content string) er
 	return nil
 }
 
-func (p *Platform) sendChannelReply(rc replyContext, content string) error {
+func (p *Platform) sendChannelReply(ctx context.Context, rc replyContext, content string) error {
 	chunks := core.SplitMessageCodeFenceAware(wrapTablesInCodeBlocks(content), maxDiscordLen)
 	for _, chunk := range chunks {
 		var err error
 		if rc.useThreadChannel() || rc.messageID == "" {
-			_, err = p.session.ChannelMessageSend(rc.targetChannelID(), chunk)
+			_, err = p.session.ChannelMessageSend(rc.targetChannelID(), chunk, discordgo.WithContext(ctx))
 		} else {
 			ref := &discordgo.MessageReference{MessageID: rc.messageID}
-			_, err = p.session.ChannelMessageSendReply(rc.channelID, chunk, ref)
+			_, err = p.session.ChannelMessageSendReply(rc.channelID, chunk, ref, discordgo.WithContext(ctx))
 		}
 		if err != nil {
 			return fmt.Errorf("discord: send: %w", err)
@@ -1113,10 +1113,10 @@ func (p *Platform) sendChannelReply(rc replyContext, content string) error {
 	return nil
 }
 
-func (p *Platform) sendChannel(rc replyContext, content string) error {
+func (p *Platform) sendChannel(ctx context.Context, rc replyContext, content string) error {
 	chunks := core.SplitMessageCodeFenceAware(wrapTablesInCodeBlocks(content), maxDiscordLen)
 	for _, chunk := range chunks {
-		_, err := p.session.ChannelMessageSend(rc.targetChannelID(), chunk)
+		_, err := p.session.ChannelMessageSend(rc.targetChannelID(), chunk, discordgo.WithContext(ctx))
 		if err != nil {
 			return fmt.Errorf("discord: send: %w", err)
 		}
@@ -1277,13 +1277,13 @@ func (p *Platform) SendWithButtons(ctx context.Context, rctx any, content string
 
 	switch rc := rctx.(type) {
 	case *interactionReplyCtx:
-		if err := p.sendInteraction(rc, content); err != nil {
+		if err := p.sendInteraction(ctx, rc, content); err != nil {
 			return err
 		}
 		_, err := p.session.FollowupMessageCreate(rc.interaction, true, &discordgo.WebhookParams{
 			Content:    content,
 			Components: components,
-		})
+		}, discordgo.WithContext(ctx))
 		if err != nil {
 			return fmt.Errorf("discord: send button followup: %w", err)
 		}
@@ -1292,7 +1292,7 @@ func (p *Platform) SendWithButtons(ctx context.Context, rctx any, content string
 		_, err := p.session.ChannelMessageSendComplex(rc.targetChannelID(), &discordgo.MessageSend{
 			Content:    content,
 			Components: components,
-		})
+		}, discordgo.WithContext(ctx))
 		if err != nil {
 			return fmt.Errorf("discord: send channel buttons: %w", err)
 		}
@@ -1401,7 +1401,7 @@ func (p *Platform) StartTyping(ctx context.Context, rctx any) (stop func()) {
 		return func() {}
 	}
 
-	_ = p.session.ChannelTyping(channelID)
+	_ = p.session.ChannelTyping(channelID, discordgo.WithContext(ctx))
 
 	done := make(chan struct{})
 	go func() {
@@ -1414,7 +1414,7 @@ func (p *Platform) StartTyping(ctx context.Context, rctx any) (stop func()) {
 			case <-ctx.Done():
 				return
 			case <-ticker.C:
-				_ = p.session.ChannelTyping(channelID)
+				_ = p.session.ChannelTyping(channelID, discordgo.WithContext(ctx))
 			}
 		}
 	}()
