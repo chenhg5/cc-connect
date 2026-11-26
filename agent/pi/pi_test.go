@@ -1,9 +1,11 @@
 package pi
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -14,6 +16,22 @@ import (
 
 	"github.com/chenhg5/cc-connect/core"
 )
+
+func TestStateProbeLogsDoNotExposeRawResponse(t *testing.T) {
+	const secret = "PI-PROBE-SENTINEL"
+	var logs bytes.Buffer
+	previous := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logs, &slog.HandlerOptions{Level: slog.LevelDebug})))
+	t.Cleanup(func() { slog.SetDefault(previous) })
+	s := &piSession{}
+	s.handleEvent(map[string]any{"type": "response", "id": stateProbeID, "success": false, "error": secret, "preview": secret})
+	s.handleEvent(map[string]any{"type": "response", "id": stateProbeID, "success": true, "preview": secret})
+	s.handleEvent(map[string]any{"type": "response", "id": stateProbeID, "success": true, "data": map[string]any{"preview": secret}})
+	s.handleEvent(map[string]any{"type": "unexpected", "preview": secret})
+	if strings.Contains(logs.String(), secret) {
+		t.Fatal("Pi state probe or unknown event log exposed response data")
+	}
+}
 
 // ── normalizeMode ────────────────────────────────────────────
 

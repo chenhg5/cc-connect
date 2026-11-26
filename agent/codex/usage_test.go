@@ -113,8 +113,20 @@ func TestFetchUsage_HTTPError(t *testing.T) {
 		AccessToken: "token-123",
 		AccountID:   "acct-123",
 	})
-	if err == nil || !strings.Contains(err.Error(), "status 401") {
+	if err == nil || !strings.Contains(err.Error(), "HTTP 401") {
 		t.Fatalf("err = %v, want status 401", err)
+	}
+}
+
+func TestFetchUsage_HTTPErrorRedactsBody(t *testing.T) {
+	const sentinel = "SENTINEL_USAGE_CREDENTIAL"
+	agent := &Agent{}
+	client := &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+		return &http.Response{StatusCode: http.StatusForbidden, Body: io.NopCloser(strings.NewReader(`{"message":"` + sentinel + `"}`))}, nil
+	})}
+	_, err := agent.fetchUsage(context.Background(), client, codexOAuthTokens{AccessToken: sentinel})
+	if err == nil || strings.Contains(err.Error(), sentinel) || !strings.Contains(err.Error(), "403") {
+		t.Fatalf("unsafe usage error: %v", err)
 	}
 }
 

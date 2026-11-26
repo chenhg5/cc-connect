@@ -412,7 +412,9 @@ type Message struct {
 	ChannelID    string
 	UserID       string
 	UserName     string
+	ChatID       string // source chat ID, when distinct from ChannelID
 	ChatName     string // human-readable chat/group name (optional)
+	ChatType     string // source chat type, when supplied by the platform
 	Content      string
 	Images       []ImageAttachment   // attached images (if any)
 	Files        []FileAttachment    // attached files (if any)
@@ -427,7 +429,9 @@ type Message struct {
 	LegacyChannelKey string
 	ReplyCtx         any    // platform-specific context needed for replying
 	FromVoice        bool   // true if message originated from voice transcription
+	SilentEmpty      bool   // suppress fallback reply for an empty synthetic turn
 	ModeOverride     string // if set, temporarily override agent permission mode for this message
+	DeliveryLabel    string // displayed on an automated final reply; not sent to the agent
 	// IsPermissionResponse is set by inline-button / card-action paths in
 	// platforms when a synthesized message is forwarded as a permission
 	// decision (e.g. Telegram handleCallbackQuery for perm:allow/deny,

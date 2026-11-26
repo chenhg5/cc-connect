@@ -22,6 +22,12 @@ export interface BridgeConfig {
   token: string;
 }
 
+export interface BridgeConfigResult {
+  config: BridgeConfig | null;
+  unavailable?: 'disabled' | 'start-failed' | 'management-error';
+  detail?: string;
+}
+
 export type BridgeStatus = 'connecting' | 'registering' | 'connected' | 'disconnected' | 'error';
 
 export interface UseBridgeSocketOptions {
@@ -148,16 +154,21 @@ export function useBridgeSocket({ bridgeCfg, platformName = 'web', sessionKey, p
 }
 
 // Fetch bridge config from the management API status endpoint.
-export async function fetchBridgeConfig(): Promise<BridgeConfig | null> {
+export async function fetchBridgeConfig(): Promise<BridgeConfigResult> {
   try {
     const status = await api.get<any>('/status');
-    if (status.bridge?.enabled) {
-      return {
+    if (!status.bridge?.enabled) return { config: null, unavailable: 'disabled' };
+    if (!status.bridge.listening) {
+      return { config: null, unavailable: 'start-failed', detail: status.bridge.last_error || '' };
+    }
+    return {
+      config: {
         port: status.bridge.port,
         path: status.bridge.path,
         token: status.bridge.token,
-      };
-    }
-  } catch { /* bridge not available */ }
-  return null;
+      },
+    };
+  } catch {
+    return { config: null, unavailable: 'management-error' };
+  }
 }

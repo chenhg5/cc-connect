@@ -3,6 +3,7 @@ package feishu
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -16,6 +17,18 @@ import (
 	lark "github.com/larksuite/oapi-sdk-go/v3"
 	larkim "github.com/larksuite/oapi-sdk-go/v3/service/im/v1"
 )
+
+func TestInvalidNumericOptionsOmitRawInput(t *testing.T) {
+	const sentinel = "SENTINEL_FEISHU_CONFIG_CONTENT"
+	for _, key := range []string{"image_batch_window_ms", "resource_chunk_size_bytes"} {
+		_, err := newPlatform("feishu", lark.FeishuBaseUrl, map[string]any{
+			"app_id": "cli_test", "app_secret": "secret", key: sentinel,
+		})
+		if err == nil || strings.Contains(err.Error(), sentinel) {
+			t.Fatalf("unsafe %s option error: %v", key, err)
+		}
+	}
+}
 
 func TestOnMessageRecalledDispatchesCoreRecallMessage(t *testing.T) {
 	got := make(chan *core.Message, 1)
@@ -466,11 +479,11 @@ func TestDispatchMessageExpandsQuotedMergeForward(t *testing.T) {
 				"data": map[string]any{
 					"items": []map[string]any{
 						{
-							"message_id":        subMessageID,
-							"msg_type":          "text",
-							"upper_message_id":  parentMessageID,
-							"parent_id":         "",
-							"create_time":       "1786522200000",
+							"message_id":       subMessageID,
+							"msg_type":         "text",
+							"upper_message_id": parentMessageID,
+							"parent_id":        "",
+							"create_time":      "1786522200000",
 							"sender": map[string]any{
 								"id":          "ou_liangchen",
 								"id_type":     "open_id",
@@ -1186,7 +1199,7 @@ func TestHasComplexMarkdown(t *testing.T) {
 	}
 }
 
-func TestCountMarkdownTables(t *testing.T) {
+func TestFindMarkdownTablesOutsideCodeBlocks(t *testing.T) {
 	tests := []struct {
 		name  string
 		input string
@@ -1197,47 +1210,77 @@ func TestCountMarkdownTables(t *testing.T) {
 		{"two tables separated by text", "| A |\n|---|\n\nsome text\n\n| B |\n|---|", 2},
 		{"consecutive tables no gap", "| A |\n|---|\n| 1 |\n| B |\n|---|", 1},
 		{"six tables", "| A |\n|---|\n\nx\n\n| B |\n|---|\n\nx\n\n| C |\n|---|\n\nx\n\n| D |\n|---|\n\nx\n\n| E |\n|---|\n\nx\n\n| F |\n|---|", 6},
-		{"table inside code block is still counted", "```\n| A |\n```\n\n| B |\n|---|", 2},
+		{"table inside code block is ignored", "```\n| A |\n|---|\n```\n\n| B |\n|---|", 1},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := countMarkdownTables(tt.input)
+			got := len(findMarkdownTablesOutsideCodeBlocks(tt.input))
 			if got != tt.want {
-				t.Errorf("countMarkdownTables() = %d, want %d", got, tt.want)
+				t.Errorf("table matches = %d, want %d", got, tt.want)
 			}
 		})
 	}
 }
 
-func TestBuildReplyContent_FallbackWhenManyTables(t *testing.T) {
-	// Build content with 6 tables (exceeds the 5-table card limit).
+func TestBuildReplyContent_SixTablesStayRendered(t *testing.T) {
+	// Six small tables can be drawn as row components without using any of
+	// Feishu's limited native table or Markdown-table slots.
 	var sb strings.Builder
 	for i := 0; i < 6; i++ {
 		if i > 0 {
 			sb.WriteString("\n\nsome text\n\n")
 		}
-		sb.WriteString("| H |\n|---|\n| V |")
+		fmt.Fprintf(&sb, "| T%d | Value |\n|---|---|\n| row | %d |", i+1, i+1)
 	}
 	content := sb.String()
 
-	msgType, _ := buildReplyContent(content)
-	if msgType == larkim.MsgTypeInteractive {
-		t.Errorf("expected non-card message type for >5 tables, got interactive")
+	msgType, body := buildReplyContent(content)
+	if msgType != larkim.MsgTypeInteractive {
+		t.Fatalf("six tables sent as %s, want interactive card", msgType)
 	}
-
-	// With exactly 5 tables, card should still be used.
-	sb.Reset()
-	for i := 0; i < 5; i++ {
-		if i > 0 {
-			sb.WriteString("\n\nsome text\n\n")
+	card := decodeTestReplyCard(t, body)
+	if strings.Contains(body, "```") {
+		t.Fatalf("small table was downgraded to a code block: %s", body)
+	}
+	tables := 0
+	for _, element := range card.Body.Elements {
+		if element.Tag == "column_set" || element.Tag == "table" {
+			tables++
 		}
-		sb.WriteString("| H |\n|---|\n| V |")
 	}
-	content5 := sb.String()
+	if tables != 6 {
+		t.Fatalf("rendered tables = %d, want 6: %s", tables, body)
+	}
+}
 
-	msgType5, _ := buildReplyContent(content5)
-	if msgType5 != larkim.MsgTypeInteractive {
-		t.Errorf("expected interactive card for 5 tables, got %s", msgType5)
+func TestSplitMarkdownByTables_PreservesInterleavedText(t *testing.T) {
+	var sb strings.Builder
+	for i := 1; i <= 6; i++ {
+		fmt.Fprintf(&sb, "Before T%d\n\n| T%d | V |\n|---|---|\n| row | %d |\n\n", i, i, i)
+	}
+	sb.WriteString("After all tables")
+	parts := splitMarkdownByTables(sb.String(), 3)
+	if len(parts) != 2 {
+		t.Fatalf("parts = %d, want two cards: %q", len(parts), parts)
+	}
+	if !strings.HasPrefix(parts[1], "Before T4") {
+		t.Fatalf("fourth table lost its preceding caption: %q", parts[1])
+	}
+	joined := strings.Join(parts, "\n\n")
+	for i := 1; i <= 6; i++ {
+		for _, marker := range []string{fmt.Sprintf("Before T%d", i), fmt.Sprintf("| T%d | V |", i)} {
+			if strings.Count(joined, marker) != 1 {
+				t.Errorf("marker %q was lost or duplicated: %q", marker, parts)
+			}
+		}
+	}
+	if !strings.Contains(joined, "After all tables") {
+		t.Errorf("trailing prose lost: %q", parts)
+	}
+	for i, part := range parts {
+		if count := len(findMarkdownTablesOutsideCodeBlocks(part)); count > 3 {
+			t.Errorf("part %d has %d tables, want at most 3", i, count)
+		}
 	}
 }
 
