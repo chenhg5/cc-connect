@@ -79,6 +79,7 @@ func buildCardBodyElements(content string) []map[string]any {
 	}
 	var elements []map[string]any
 	components := 0
+	nativeTables := 0
 	appendText := func(text string) {
 		text = strings.Trim(text, "\n")
 		if strings.TrimSpace(text) == "" {
@@ -99,15 +100,22 @@ func buildCardBodyElements(content string) []map[string]any {
 			el, n := buildCardTableRows(table, weights)
 			elements = append(elements, el)
 			components += n
-		} else {
+		} else if nativeTables < maxCardTables {
 			elements = append(elements, buildNativeCardTable(table, cardTableColumnWidths(columns)))
+			components++
+			nativeTables++
+		} else {
+			// Feishu rejects a sixth native table. Keep the remaining table
+			// readable as an explicit code block rather than sending a post
+			// message that renders pipe syntax as unformatted prose.
+			elements = append(elements, map[string]any{"tag": "markdown", "content": "```\n" + m.raw + "\n```"})
 			components++
 		}
 		prev = m.end
 	}
 	appendText(content[prev:])
 	if len(elements) == 0 || components > cardTableMaxComponents {
-		return plain
+		return []map[string]any{{"tag": "markdown", "content": sanitizeCardMarkdownForCard(content)}}
 	}
 	return elements
 }

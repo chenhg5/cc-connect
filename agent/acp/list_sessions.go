@@ -11,7 +11,9 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
+	"unicode/utf8"
 
 	"github.com/chenhg5/cc-connect/core"
 )
@@ -105,22 +107,25 @@ func (a *Agent) probeSpawn(ctx context.Context, cwd string) (*transport, *bytes.
 	readCtx, cancelRead := context.WithCancel(ctx)
 	go tr.readLoop(readCtx)
 
+	var teardownOnce sync.Once
 	teardown := func() {
-		cancelRead()
-		_ = stdin.Close()
-		done := make(chan struct{})
-		go func() {
-			_ = cmd.Wait()
-			close(done)
-		}()
-		select {
-		case <-done:
-		case <-time.After(2 * time.Second):
-			if cmd.Process != nil {
-				_ = cmd.Process.Kill()
+		teardownOnce.Do(func() {
+			cancelRead()
+			_ = stdin.Close()
+			done := make(chan struct{})
+			go func() {
+				_ = cmd.Wait()
+				close(done)
+			}()
+			select {
+			case <-done:
+			case <-time.After(2 * time.Second):
+				if cmd.Process != nil {
+					_ = cmd.Process.Kill()
+				}
+				<-done
 			}
-			<-done
-		}
+		})
 	}
 	return tr, &stderrBuf, teardown, nil
 }
@@ -206,6 +211,7 @@ func (a *Agent) ListSessions(ctx context.Context) ([]core.AgentSessionInfo, erro
 
 	init, err := probeInitialize(probeCtx, tr)
 	if err != nil {
+		teardown() // cmd.Wait joins the stderr writer before we read its buffer.
 		if msg := strings.TrimSpace(stderrBuf.String()); msg != "" {
 			return nil, fmt.Errorf("%w (stderr: %s)", err, truncateForLog(msg, 200))
 		}
@@ -263,6 +269,10 @@ func convertSessionList(entries []acpSessionListEntry, cwdFilter string) []core.
 func truncateForLog(s string, n int) string {
 	if len(s) <= n {
 		return s
+	}
+	// Keep the byte limit without splitting a multi-byte rune.
+	for n > 0 && !utf8.RuneStart(s[n]) {
+		n--
 	}
 	return s[:n] + "…"
 }
