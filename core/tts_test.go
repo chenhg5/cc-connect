@@ -10,10 +10,33 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"sync"
 	"testing"
 	"time"
 )
+
+func TestLocalTTSErrorsOmitUserTextAndProcessOutput(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell test fixture")
+	}
+	const sentinel = "SENTINEL_TTS_USER_CONTENT"
+	path := filepath.Join(t.TempDir(), "fail-tts")
+	if err := os.WriteFile(path, []byte("#!/bin/sh\nprintf '%s\\n' '"+sentinel+"' >&2\nexit 1\n"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	providers := []TextToSpeech{
+		NewEspeakTTS(path, "en"),
+		NewPicoTTS(path, "en-US"),
+		&EdgeTTS{Path: path, Voice: "en-US"},
+	}
+	for _, provider := range providers {
+		_, _, err := provider.Synthesize(context.Background(), sentinel, TTSSynthesisOpts{})
+		if err == nil || strings.Contains(err.Error(), sentinel) {
+			t.Fatalf("unsafe TTS error: %v", err)
+		}
+	}
+}
 
 // ──────────────────────────────────────────────────────────────
 // TTSCfg concurrency tests

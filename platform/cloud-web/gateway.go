@@ -13,6 +13,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/chenhg5/cc-connect/core"
 )
 
 type gatewayTransport struct {
@@ -151,7 +153,7 @@ func (t *gatewayTransport) register(ctx context.Context) (map[string]bool, error
 		return nil, err
 	}
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("cloud_web: register HTTP %d: %s", resp.StatusCode, string(raw))
+		return nil, core.HTTPError("cloud_web: register", resp.StatusCode, raw, t.token)
 	}
 	return parseRegisterAck(raw)
 }
@@ -282,7 +284,7 @@ func (t *gatewayTransport) Send(ctx context.Context, msg map[string]any) error {
 	defer func() { _ = resp.Body.Close() }()
 	raw, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 	if resp.StatusCode >= 300 {
-		return fmt.Errorf("cloud_web: send HTTP %d: %s", resp.StatusCode, string(raw))
+		return core.HTTPError("cloud_web: send", resp.StatusCode, raw, t.token)
 	}
 	var ack wirePreviewAck
 	if json.Unmarshal(raw, &ack) == nil && ack.Type == "preview_ack" && ack.RefID != "" {

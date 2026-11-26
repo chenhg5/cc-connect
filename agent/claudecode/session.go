@@ -1172,6 +1172,10 @@ func (cs *claudeSession) handleAssistant(raw map[string]any) {
 			}
 		case "text":
 			if text, ok := item["text"].(string); ok && text != "" {
+				text = stripClaudeInternalOutput(text)
+				if text == "" {
+					continue
+				}
 				evt := core.Event{Type: core.EventText, Content: text}
 				select {
 				case cs.events <- evt:
@@ -1228,7 +1232,7 @@ func (cs *claudeSession) handleUser(raw map[string]any) {
 				result = strings.Join(parts, "\n")
 			}
 			if isError {
-				slog.Debug("claudeSession: tool error", "content", result)
+				slog.Debug("claudeSession: tool error", "content_bytes", len(result))
 			}
 			result = core.RedactToolText(strings.TrimSpace(result))
 			success := !isError
@@ -1253,10 +1257,43 @@ func (cs *claudeSession) handleUser(raw map[string]any) {
 	}
 }
 
+// stripClaudeInternalOutput removes CLI-internal instructions that sometimes
+// arrive inside assistant text and would otherwise be relayed to chat. An
+// unclosed reminder is discarded through the end of the block: forwarding a
+// partial internal instruction is worse than losing that malformed tail.
+func stripClaudeInternalOutput(text string) string {
+	const opening = "<system-reminder>"
+	const closing = "</system-reminder>"
+	var clean strings.Builder
+	for {
+		start := strings.Index(text, opening)
+		if start < 0 {
+			clean.WriteString(text)
+			break
+		}
+		clean.WriteString(text[:start])
+		text = text[start+len(opening):]
+		end := strings.Index(text, closing)
+		if end < 0 {
+			break
+		}
+		text = text[end+len(closing):]
+	}
+	lines := strings.Split(clean.String(), "\n")
+	kept := lines[:0]
+	for _, line := range lines {
+		if strings.TrimSpace(strings.TrimSuffix(line, ".")) == "Continue from where you left off" {
+			continue
+		}
+		kept = append(kept, line)
+	}
+	return strings.Join(kept, "\n")
+}
+
 func (cs *claudeSession) handleResult(raw map[string]any) {
 	var content string
 	if result, ok := raw["result"].(string); ok {
-		content = result
+		content = stripClaudeInternalOutput(result)
 	}
 	if sid, ok := raw["session_id"].(string); ok && sid != "" {
 		cs.sessionID.Store(sid)

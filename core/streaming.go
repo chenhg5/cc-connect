@@ -115,7 +115,7 @@ type RichCardMarkdownResolver interface {
 // MarkdownTableSplitter is an optional interface for platforms that need
 // platform-specific markdown table chunking before final send.
 type MarkdownTableSplitter interface {
-	SplitMarkdownByTables(md string, maxTables int) []string
+	SplitMarkdownByTables(md string) []string
 }
 
 // RichCardTextStreamer is an optional interface for platforms that support
@@ -564,7 +564,7 @@ func (sp *streamPreview) detachPreview() {
 func (sp *streamPreview) appendSeparator(sep string) bool {
 	sp.mu.Lock()
 	defer sp.mu.Unlock()
-	if sp.degraded || !sp.cfg.Enabled || sp.fullText == "" {
+	if sp.degraded || !sp.cfg.Enabled || sp.fullText == "" || strings.HasSuffix(sp.fullText, sep) {
 		return false
 	}
 	sp.fullText += sep
