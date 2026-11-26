@@ -39,11 +39,22 @@ func (p *commentaryPlatform) SendPreviewStart(_ context.Context, _ any, _ string
 }
 func (p *commentaryPlatform) UpdateMessage(context.Context, any, string) error { return nil }
 
+// exitOnAgyVersionProbe answers StartSession's `--version` ACP capability
+// probe with a pre-ACP version, so the helper runs the stream-json transport
+// this file covers instead of blocking the probe until it times out.
+func exitOnAgyVersionProbe() {
+	if os.Args[len(os.Args)-1] == "--version" {
+		_, _ = io.WriteString(os.Stdout, "1.0.0\n")
+		os.Exit(0)
+	}
+}
+
 // Exercise the real adapter, subprocess reader and Engine, mocking only AGY
 // and the messaging transport. Hold the CLI before its final answer so a
 // progress-card edit cannot accidentally satisfy the notification assertion.
 func TestAntigravityCommentary_ReachesChatBeforeTurnCompletion(t *testing.T) {
 	if os.Getenv("CC_AGY_COMMENTARY_HELPER") == "1" {
+		exitOnAgyVersionProbe()
 		_, _ = io.WriteString(os.Stdout, `{"event":"init","conversation_id":"commentary-session"}`+"\n"+
 			`{"event":"step_update","step_update":{"step_index":0,"step_type":"agent_response","text_delta":"Checking "}}`+"\n"+
 			`{"event":"step_update","step_update":{"step_index":0,"step_type":"agent_response","text_delta":"the build"}}`+"\n"+
