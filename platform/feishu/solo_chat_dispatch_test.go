@@ -56,6 +56,7 @@ func TestSoloChatDispatch_AdmittedTopicAndReplyAreTriggers(t *testing.T) {
 			if reply {
 				p.threadIsolation = true
 				event.Event.Message.RootId = stringPtr("om_root")
+				event.Event.Message.ThreadId = stringPtr("omt_thread")
 				event.Event.Message.ParentId = stringPtr("om_parent")
 				// An already engaged isolated thread needs no quoted-message
 				// bootstrap. Keep this test entirely off the SDK/HTTP path.
@@ -97,6 +98,7 @@ func TestSoloChatDispatch_MentionWaitStagesBeforeSolo(t *testing.T) {
 			file := makeGroupHistoryEvent(t, "om_staged", "ou_alice", "file",
 				`{"file_key":"fixture_file","file_name":"note.txt"}`, "oc_main", "", false)
 			file.Event.Message.RootId = stringPtr("om_root")
+			file.Event.Message.ThreadId = stringPtr("omt_thread")
 			key := p.makeSessionKey(file.Event.Message, "oc_main", "ou_alice")
 			last := time.Now().Add(-59 * time.Minute)
 			switch mode {
@@ -121,6 +123,7 @@ func TestSoloChatDispatch_MentionWaitStagesBeforeSolo(t *testing.T) {
 			plain := makeGroupHistoryEvent(t, "om_solo_plain", "ou_alice", "text",
 				`{"text":"plain instruction"}`, "oc_main", "", false)
 			plain.Event.Message.RootId = stringPtr("om_root")
+			plain.Event.Message.ThreadId = stringPtr("omt_thread")
 			if err := p.onMessage(context.Background(), plain); err != nil {
 				t.Fatal(err)
 			}
