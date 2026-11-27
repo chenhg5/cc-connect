@@ -980,6 +980,33 @@
           "models": ["deepseek/deepseek-v4-1-flash-1017", "claude-sonnet-5-5", "gpt-6.1-sol", "gemini-4-argon"]
         }
       }
+    },
+    {
+      "name": "llmtr",
+      "display_name": "LLMTR",
+      "description": "Prepaid AI gateway with models from many providers behind one key, through Anthropic Messages, OpenAI Responses and Chat Completions APIs.",
+      "description_zh": "预付费 AI 网关，一个密钥即可通过 Anthropic Messages、OpenAI Responses 和 Chat Completions 接口使用多家供应商的模型。",
+      "features": ["OpenAI Compatible", "Anthropic Compatible", "Responses API"],
+      "tier": 3,
+      "website": "https://llmtr.com",
+      "agents": {
+        "claudecode": {
+          "base_url": "https://llmtr.com",
+          "model": "anthropic/claude-sonnet-5.5",
+          "models": ["anthropic/claude-sonnet-5.5", "anthropic/claude-opus-5.5", "anthropic/claude-haiku-5.5"]
+        },
+        "codex": {
+          "base_url": "https://llmtr.com/v1",
+          "model": "openai/gpt-6.2-sol",
+          "models": ["openai/gpt-6.2-sol", "openai/gpt-6.2-astra", "openai/gpt-6.1-sol"],
+          "codex_config": { "wire_api": "responses" }
+        },
+        "opencode": {
+          "base_url": "https://llmtr.com/v1",
+          "model": "qwen/qwen3.8-flash",
+          "models": ["qwen/qwen3.8-flash", "anthropic/claude-sonnet-5.5", "deepseek/deepseek-v4.1-flash-1017", "google/gemini-3.6-flash"]
+        }
+      }
     }
   ]
 }
