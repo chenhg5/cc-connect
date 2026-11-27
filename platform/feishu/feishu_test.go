@@ -3,6 +3,7 @@ package feishu
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -2160,6 +2161,45 @@ func TestSendWithStatusFooter_NoFallbackOnNonMentionAt(t *testing.T) {
 				t.Errorf("mention: content must contain resolved mention + inline footer; got %s", gotContent)
 			}
 		}
+	}
+}
+
+// TestReplyMessage_2200MarksMaybeDelivered: Feishu's code=2200 "internal error"
+// on a reply is ambiguous — the message may already have been delivered. The
+// reply error must wrap core.ErrMaybeDelivered so callers do not re-send the
+// same content and post a duplicate.
+func TestReplyMessage_2200MarksMaybeDelivered(t *testing.T) {
+	const appID = "cli_reply_2200"
+	const appSecret = "secret"
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.URL.Path == "/open-apis/auth/v3/tenant_access_token/internal":
+			writeJSON(t, w, map[string]any{"code": 0, "expire": 7200, "tenant_access_token": "t"})
+		case strings.HasPrefix(r.URL.Path, "/open-apis/im/v1/messages/") && strings.HasSuffix(r.URL.Path, "/reply"):
+			writeJSON(t, w, map[string]any{"code": 2200, "msg": "internal error"})
+		default:
+			t.Errorf("unexpected path %s", r.URL.Path)
+		}
+	}))
+	defer srv.Close()
+
+	p := &Platform{
+		platformName: "feishu",
+		domain:       srv.URL,
+		appID:        appID,
+		appSecret:    appSecret,
+		client:       lark.NewClient(appID, appSecret, lark.WithOpenBaseUrl(srv.URL), lark.WithHttpClient(srv.Client())),
+		replayClient: lark.NewClient(appID, appSecret, lark.WithEnableTokenCache(false), lark.WithOpenBaseUrl(srv.URL), lark.WithHttpClient(srv.Client())),
+	}
+
+	err := p.replyMessage(context.Background(), replyContext{chatID: "oc_x", messageID: "om_parent"}, larkim.MsgTypeText, `{"text":"hi"}`)
+	if err == nil {
+		t.Fatal("expected error for code=2200 reply")
+	}
+	if !errors.Is(err, core.ErrMaybeDelivered) {
+		t.Fatalf("code=2200 reply error must wrap core.ErrMaybeDelivered, got %v", err)
 	}
 }
 
