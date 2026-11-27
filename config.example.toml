@@ -144,6 +144,9 @@ level = "info" # debug, info, warn, error
 #                                # 在助手回复底部显示类似 Codex 的状态行（默认 true 显示）
 # hide_agent_footer = false      # Strip standalone model/token footer lines emitted by agents (default: false)
 #                                # 过滤 agent 自己混入正文的模型/token 统计 footer 行（默认 false 不过滤）
+# progress_max_tools = 10        # Max tool entries kept in a progress card (default: 10, >= 1) / 进度卡片最多保留的工具调用条目数（默认 10，>= 1）
+# progress_max_thinking = 3      # Max thinking entries kept in a progress card (default: 3, >= 1) / 进度卡片最多保留的思考条目数（默认 3，>= 1）
+# progress_max_updates = 3       # Max update entries (info/error) kept in a progress card (default: 3, >= 1) / 进度卡片最多保留的更新条目数（默认 3，>= 1）
 
 # Per-project override: each [[projects]] entry may have its own [projects.display]
 # block that overrides individual fields of the global [display] block above.
@@ -159,6 +162,7 @@ level = "info" # debug, info, warn, error
 # thinking_messages = false  # Override only this field; others inherit from global
 # tool_messages = false
 # hide_agent_footer = true   # Hide agent-emitted model/token footer only for this project
+# progress_max_tools = 10    # Optional per-project progress card quotas (progress_max_thinking, progress_max_updates)
 
 # Agent idle timeout: max minutes between consecutive agent events before
 # considering the session stuck. Set to 0 to disable the timeout entirely.

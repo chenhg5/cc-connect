@@ -17886,3 +17886,67 @@ func TestCmdCurrent_UsesNativeSummaryForCurrentAgentSession(t *testing.T) {
 		t.Fatalf("/list item count = %d, want %d\n%s", got, len(nativeSessions), p.sent[0])
 	}
 }
+
+func TestEngine_ProgressCardQuotasFromDisplayConfig(t *testing.T) {
+	p := &stubCompactProgressPlatform{
+		stubPlatformEngine: stubPlatformEngine{n: "feishu"},
+		style:              "card",
+		supportPayload:     true,
+	}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	e.SetDisplayConfig(DisplayCfg{
+		ThinkingMessages:    true,
+		ToolMessages:        true,
+		Mode:                "full",
+		ProgressMaxTools:    2,
+		ProgressMaxThinking: 2,
+		ProgressMaxUpdates:  1,
+	})
+	sessionKey := "feishu:user-progress-quotas"
+	session := e.sessions.GetOrCreateActive(sessionKey)
+	agentSession := newControllableSession("s-progress-quotas")
+	state := &interactiveState{
+		agentSession: agentSession,
+		platform:     p,
+		replyCtx:     "ctx-progress-quotas",
+	}
+	e.interactiveStates[sessionKey] = state
+
+	agentSession.events <- Event{Type: EventThinking, Content: "think-1"}
+	agentSession.events <- Event{Type: EventThinking, Content: "think-2"}
+	agentSession.events <- Event{Type: EventThinking, Content: "think-3"}
+	agentSession.events <- Event{Type: EventToolUse, ToolName: "Bash", ToolInput: "cmd-1"}
+	agentSession.events <- Event{Type: EventToolUse, ToolName: "Bash", ToolInput: "cmd-2"}
+	agentSession.events <- Event{Type: EventToolUse, ToolName: "Bash", ToolInput: "cmd-3"}
+	agentSession.events <- Event{Type: EventText, Content: "done"}
+	agentSession.events <- Event{Type: EventResult, Content: "done", Done: true}
+
+	e.processInteractiveEvents(state, session, e.sessions, sessionKey, "m-quotas", time.Now(), nil, nil, state.replyCtx, 0)
+
+	edits := p.getPreviewEdits()
+	if len(edits) == 0 {
+		t.Fatal("expected preview edits for progress card updates")
+	}
+	finalPayload, ok := ParseProgressCardPayload(edits[len(edits)-1])
+	if !ok {
+		t.Fatalf("failed to parse final progress payload: %q", edits[len(edits)-1])
+	}
+	if !finalPayload.Truncated {
+		t.Fatal("finalPayload.Truncated = false, want true")
+	}
+	var thinkTexts, toolTexts []string
+	for _, item := range finalPayload.Items {
+		switch item.Kind {
+		case ProgressEntryThinking:
+			thinkTexts = append(thinkTexts, item.Text)
+		case ProgressEntryToolUse:
+			toolTexts = append(toolTexts, item.Text)
+		}
+	}
+	if len(thinkTexts) != 2 || thinkTexts[0] != "think-2" || thinkTexts[1] != "think-3" {
+		t.Fatalf("thinking items = %v, want [think-2 think-3]", thinkTexts)
+	}
+	if len(toolTexts) != 2 || !strings.Contains(toolTexts[0], "cmd-2") || !strings.Contains(toolTexts[1], "cmd-3") {
+		t.Fatalf("tool items = %v, want [cmd-2 cmd-3]", toolTexts)
+	}
+}

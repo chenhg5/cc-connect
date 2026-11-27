@@ -564,6 +564,198 @@ func TestValidateProjectDisplayConfig(t *testing.T) {
 	}
 }
 
+func TestEffectiveProgressQuotas(t *testing.T) {
+	globalTools, globalThink, globalUpd := 15, 5, 4
+	projTools, projThink := 20, 7
+	zero := 0
+
+	tests := []struct {
+		name         string
+		cfg          Config
+		proj         ProjectConfig
+		wantTools    int
+		wantThinking int
+		wantUpdates  int
+	}{
+		{
+			name:         "both unset falls back to defaults",
+			cfg:          Config{},
+			proj:         ProjectConfig{},
+			wantTools:    DefaultProgressMaxTools,
+			wantThinking: DefaultProgressMaxThinking,
+			wantUpdates:  DefaultProgressMaxUpdates,
+		},
+		{
+			name: "global overrides defaults",
+			cfg: Config{
+				Display: DisplayConfig{
+					ProgressMaxTools:    &globalTools,
+					ProgressMaxThinking: &globalThink,
+					ProgressMaxUpdates:  &globalUpd,
+				},
+			},
+			proj:         ProjectConfig{},
+			wantTools:    15,
+			wantThinking: 5,
+			wantUpdates:  4,
+		},
+		{
+			name: "project overrides individual fields and inherits others",
+			cfg: Config{
+				Display: DisplayConfig{
+					ProgressMaxTools:    &globalTools,
+					ProgressMaxThinking: &globalThink,
+					ProgressMaxUpdates:  &globalUpd,
+				},
+			},
+			proj: ProjectConfig{
+				Display: &DisplayConfig{
+					ProgressMaxTools:    &projTools,
+					ProgressMaxThinking: &projThink,
+				},
+			},
+			wantTools:    20,
+			wantThinking: 7,
+			wantUpdates:  4,
+		},
+		{
+			name: "non-positive programmatic values fall back",
+			cfg: Config{
+				Display: DisplayConfig{
+					ProgressMaxTools:    &zero,
+					ProgressMaxThinking: &globalThink,
+				},
+			},
+			proj: ProjectConfig{
+				Display: &DisplayConfig{
+					ProgressMaxUpdates: &zero,
+				},
+			},
+			wantTools:    DefaultProgressMaxTools,
+			wantThinking: 5,
+			wantUpdates:  DefaultProgressMaxUpdates,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			tools, thinking, updates := EffectiveProgressQuotas(&tt.cfg, &tt.proj)
+			if tools != tt.wantTools || thinking != tt.wantThinking || updates != tt.wantUpdates {
+				t.Fatalf("EffectiveProgressQuotas() = (%d, %d, %d), want (%d, %d, %d)",
+					tools, thinking, updates, tt.wantTools, tt.wantThinking, tt.wantUpdates)
+			}
+		})
+	}
+
+	rawTOML := `
+[display]
+progress_max_tools = 12
+progress_max_thinking = 4
+progress_max_updates = 6
+
+[[projects]]
+name = "demo"
+[projects.agent]
+type = "codex"
+[[projects.platforms]]
+type = "feishu"
+[projects.platforms.options]
+app_id = "id"
+app_secret = "secret"
+[projects.display]
+progress_max_thinking = 2
+`
+	var parsed Config
+	if err := toml.Unmarshal([]byte(rawTOML), &parsed); err != nil {
+		t.Fatalf("toml.Unmarshal: %v", err)
+	}
+	if err := parsed.validate(); err != nil {
+		t.Fatalf("parsed.validate(): %v", err)
+	}
+	tools, thinking, updates := EffectiveProgressQuotas(&parsed, &parsed.Projects[0])
+	if tools != 12 || thinking != 2 || updates != 6 {
+		t.Fatalf("TOML EffectiveProgressQuotas() = (%d, %d, %d), want (12, 2, 6)", tools, thinking, updates)
+	}
+}
+
+func TestValidateDisplayConfig_ProgressQuotas(t *testing.T) {
+	zero, neg, one := 0, -1, 1
+
+	tests := []struct {
+		name    string
+		global  DisplayConfig
+		project *DisplayConfig
+		wantErr string
+	}{
+		{
+			name:    "global tools zero rejected",
+			global:  DisplayConfig{ProgressMaxTools: &zero},
+			wantErr: "display.progress_max_tools must be >= 1",
+		},
+		{
+			name:    "global thinking negative rejected",
+			global:  DisplayConfig{ProgressMaxThinking: &neg},
+			wantErr: "display.progress_max_thinking must be >= 1",
+		},
+		{
+			name:    "global updates zero rejected",
+			global:  DisplayConfig{ProgressMaxUpdates: &zero},
+			wantErr: "display.progress_max_updates must be >= 1",
+		},
+		{
+			name:    "project tools zero rejected",
+			project: &DisplayConfig{ProgressMaxTools: &zero},
+			wantErr: "projects[0].display.progress_max_tools must be >= 1",
+		},
+		{
+			name:    "project thinking zero rejected",
+			project: &DisplayConfig{ProgressMaxThinking: &zero},
+			wantErr: "projects[0].display.progress_max_thinking must be >= 1",
+		},
+		{
+			name:    "project updates negative rejected",
+			project: &DisplayConfig{ProgressMaxUpdates: &neg},
+			wantErr: "projects[0].display.progress_max_updates must be >= 1",
+		},
+		{
+			name: "positive minimum accepted",
+			global: DisplayConfig{
+				ProgressMaxTools:    &one,
+				ProgressMaxThinking: &one,
+				ProgressMaxUpdates:  &one,
+			},
+			project: &DisplayConfig{
+				ProgressMaxTools:    &one,
+				ProgressMaxThinking: &one,
+				ProgressMaxUpdates:  &one,
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := Config{
+				Display:  tt.global,
+				Projects: []ProjectConfig{validProject("demo")},
+			}
+			cfg.Projects[0].Display = tt.project
+			err := cfg.validate()
+			if tt.wantErr == "" {
+				if err != nil {
+					t.Fatalf("validate() unexpected error: %v", err)
+				}
+				return
+			}
+			if err == nil {
+				t.Fatalf("validate() = nil, want %q", tt.wantErr)
+			}
+			if !strings.Contains(err.Error(), tt.wantErr) {
+				t.Fatalf("validate() = %q, want contains %q", err.Error(), tt.wantErr)
+			}
+		})
+	}
+}
+
 func TestLoad_DefaultsDataDir(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("HOME", dir)
