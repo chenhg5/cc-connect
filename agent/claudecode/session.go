@@ -1317,7 +1317,8 @@ func (cs *claudeSession) handleResult(raw map[string]any) {
 	// assistant messages after the compaction step. Treating these as
 	// Done=true would make the engine's processInteractiveEvents return
 	// early and drop the rest of the turn (issue #481).
-	isCompaction := isCompactionResult(raw)
+	status := sdkResultStatus(raw)
+	isCompaction := isCompactionResult(raw) && status != core.ResultStatusError
 	if isCompaction {
 		slog.Info("claudeSession: mid-turn compaction event; continuing turn", "subtype", resultSubtype(raw))
 	} else {
@@ -1409,10 +1410,17 @@ func (cs *claudeSession) handleResult(raw map[string]any) {
 		Content:                  content,
 		SessionID:                cs.CurrentSessionID(),
 		Done:                     !isCompaction,
+		ResultStatus:             status,
 		InputTokens:              inputTokens,
 		OutputTokens:             outputTokens,
 		CacheCreationInputTokens: cacheCreationTokens,
 		CacheReadInputTokens:     cacheReadTokens,
+	}
+	if status == core.ResultStatusError {
+		evt.Type = core.EventError
+		evt.Error = sdkResultError(raw)
+		// Keep provider payloads out of user-visible terminal replies.
+		evt.Content = evt.Error.Error()
 	}
 	select {
 	case cs.events <- evt:
