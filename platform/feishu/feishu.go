@@ -166,6 +166,7 @@ type Platform struct {
 	noReplyToTrigger bool
 	resolveMentions  bool
 	client           *lark.Client
+	messageTransport *feishuMessageTransport // nil uses the authenticated SDK transport
 	replayClient     *lark.Client
 	replayClientMu   sync.Mutex
 	handler          core.MessageHandler
@@ -4781,11 +4782,11 @@ func (p *Platform) buildReplyMessageReqBodyWithUUID(rc replyContext, msgType, co
 	body := larkim.NewReplyMessageReqBodyBuilder().
 		MsgType(msgType).
 		Content(content)
-	if idempotencyKey != "" {
-		body.Uuid(idempotencyKey)
-	}
 	if p.shouldReplyInThread(rc) {
 		body.ReplyInThread(true)
+	}
+	if idempotencyKey != "" {
+		body.Uuid(idempotencyKey)
 	}
 	return body.Build()
 }
@@ -4795,14 +4796,22 @@ func (p *Platform) replyMessage(ctx context.Context, rc replyContext, msgType, c
 	// Uuid, so a transient retry (or a caller re-send that reuses the same
 	// logical send) does not post a duplicate when an earlier attempt already
 	// delivered despite returning code=2200 "internal error".
-	replyUUID := uuid.NewString()
+	_, err := p.replyMessageID(ctx, rc, msgType, content, uuid.NewString())
+	return err
+}
+
+// replyMessageID is replyMessage that also returns the new message's id; a
+// non-empty idempotencyKey is Feishu's deduplication key for the send.
+func (p *Platform) replyMessageID(ctx context.Context, rc replyContext, msgType, content, idempotencyKey string) (string, error) {
+	body := p.buildReplyMessageReqBodyWithUUID(rc, msgType, content, idempotencyKey)
 	req := larkim.NewReplyMessageReqBuilder().
 		MessageId(rc.messageID).
-		Body(p.buildReplyMessageReqBodyWithUUID(rc, msgType, content, replyUUID)).
+		Body(body).
 		Build()
-	return p.withTransientRetry(ctx, "reply", func() error {
+	var messageID string
+	err := p.withTransientRetry(ctx, "reply", func() error {
 		return p.withFreshTenantAccessTokenRetry(ctx, "reply", func(client *lark.Client, options ...larkcore.RequestOptionFunc) error {
-			resp, err := client.Im.Message.Reply(ctx, req, options...)
+			resp, err := p.callReplyMessage(ctx, client, rc.messageID, body, req, options...)
 			if err != nil {
 				return fmt.Errorf("%s: reply api call: %w", p.tag(), err)
 			}
@@ -4815,9 +4824,13 @@ func (p *Platform) replyMessage(ctx context.Context, rc replyContext, msgType, c
 				}
 				return fmt.Errorf("%s: reply failed code=%d msg=%s", p.tag(), resp.Code, resp.Msg)
 			}
+			if resp.Data != nil && resp.Data.MessageId != nil {
+				messageID = *resp.Data.MessageId
+			}
 			return nil
 		})
 	})
+	return messageID, err
 }
 
 // createMessageReceiveIDType maps the reply context's receive ID type onto the
@@ -4835,26 +4848,41 @@ func createMessageReceiveIDType(receiveIDType string) string {
 }
 
 func (p *Platform) createMessage(ctx context.Context, chatID, receiveIDType, msgType, content, op string) error {
+	_, err := p.createMessageIDWithReceiveID(ctx, chatID, receiveIDType, msgType, content, op, "")
+	return err
+}
+
+func (p *Platform) createMessageIDWithReceiveID(ctx context.Context, chatID, receiveIDType, msgType, content, op, uuid string) (string, error) {
+	body := larkim.NewCreateMessageReqBodyBuilder().
+		ReceiveId(chatID).
+		MsgType(msgType).
+		Content(content)
+	if uuid != "" {
+		body.Uuid(uuid)
+	}
+	receiveIDType = createMessageReceiveIDType(receiveIDType)
+	requestBody := body.Build()
 	req := larkim.NewCreateMessageReqBuilder().
-		ReceiveIdType(createMessageReceiveIDType(receiveIDType)).
-		Body(larkim.NewCreateMessageReqBodyBuilder().
-			ReceiveId(chatID).
-			MsgType(msgType).
-			Content(content).
-			Build()).
+		ReceiveIdType(receiveIDType).
+		Body(requestBody).
 		Build()
-	return p.withTransientRetry(ctx, op, func() error {
+	var messageID string
+	err := p.withTransientRetry(ctx, op, func() error {
 		return p.withFreshTenantAccessTokenRetry(ctx, op, func(client *lark.Client, options ...larkcore.RequestOptionFunc) error {
-			resp, err := client.Im.Message.Create(ctx, req, options...)
+			resp, err := p.callCreateMessage(ctx, client, receiveIDType, requestBody, req, options...)
 			if err != nil {
 				return fmt.Errorf("%s: %s api call: %w", p.tag(), op, err)
 			}
 			if !resp.Success() {
 				return fmt.Errorf("%s: %s failed code=%d msg=%s", p.tag(), op, resp.Code, resp.Msg)
 			}
+			if resp.Data != nil && resp.Data.MessageId != nil {
+				messageID = *resp.Data.MessageId
+			}
 			return nil
 		})
 	})
+	return messageID, err
 }
 
 func (p *Platform) withFreshTenantAccessTokenRetry(ctx context.Context, operation string, fn feishuRequestFunc) error {
@@ -6062,15 +6090,14 @@ func (p *Platform) UpdateMessageWithStatusFooter(ctx context.Context, previewHan
 }
 
 func (p *Platform) patchCardMessage(ctx context.Context, messageID, cardJSON string) error {
+	body := larkim.NewPatchMessageReqBodyBuilder().Content(cardJSON).Build()
 	req := larkim.NewPatchMessageReqBuilder().
 		MessageId(messageID).
-		Body(larkim.NewPatchMessageReqBodyBuilder().
-			Content(cardJSON).
-			Build()).
+		Body(body).
 		Build()
 	return p.withTransientRetry(ctx, "patch message", func() error {
 		return p.withFreshTenantAccessTokenRetry(ctx, "patch message", func(client *lark.Client, options ...larkcore.RequestOptionFunc) error {
-			resp, err := client.Im.Message.Patch(ctx, req, options...)
+			resp, err := p.callPatchMessage(ctx, client, messageID, body, req, options...)
 			if err != nil {
 				return fmt.Errorf("%s: patch message: %w", p.tag(), err)
 			}

@@ -18,6 +18,7 @@ Complete guide to using cc-connect features.
 - [Voice Messages (STT)](#voice-messages-speech-to-text)
 - [Voice Reply (TTS)](#voice-reply-text-to-speech)
 - [Image and File Send-Back](#image-and-file-send-back)
+- [Platform-Native Cards](#platform-native-cards)
 - [Lifecycle Hooks](#lifecycle-hooks)
 - [Scheduled Tasks (Cron)](#scheduled-tasks-cron)
 - [Shell Configuration](#shell-configuration)
@@ -906,6 +907,18 @@ Notes:
 - The files must exist on the local machine where the agent runs.
 - There must be an active session; otherwise the command fails because cc-connect has no chat context to deliver to.
 - The target platform also enforces its own file-size/type limit at delivery; the effective per-attachment ceiling is the smaller of that limit and `max_attachment_size_mb` (a file that passes cc-connect may still be rejected by the platform).
+
+---
+
+## Platform-Native Cards
+
+Scripts and agents can send a card in the platform's own format (currently Feishu/Lark card JSON) and later replace it in place, for example to turn a "running" status card into a "done" card:
+
+```bash
+id=$(cc-connect send --card /tmp/build-card.json --uuid build-1234)
+```
+
+`cc-connect send --card` prints the card's message id; `POST /cards/update` on the local API replaces the card by that id. Platforms that cannot send or update raw cards answer `501 Not Implemented`. See [Platform-Native Cards](native-cards.md) for the full request format, the `uuid` deduplication key and the update endpoint.
 
 ---
 

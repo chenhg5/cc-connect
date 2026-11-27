@@ -60,6 +60,15 @@ type SendRequest struct {
 	Videos     []FileAttachment  `json:"videos,omitempty"`
 	AtUsers    []string          `json:"at_users,omitempty"`
 	AtAll      bool              `json:"at_all,omitempty"`
+	// Card is a card in the platform's own format (a Feishu card JSON
+	// object, for example), sent as it is. It stands alone: no message,
+	// tts_text or attachments with it. The response then carries the card's
+	// message_id, which POST /cards/update accepts.
+	Card json.RawMessage `json:"card,omitempty"`
+	// UUID, only with Card, is the platform's deduplication key for the
+	// send (at most MaxCardUUIDLen characters): a retry with the same uuid
+	// does not send a second card.
+	UUID string `json:"uuid,omitempty"`
 }
 
 // NewAPIServer creates an API server on a Unix socket.
@@ -90,6 +99,7 @@ func NewAPIServer(dataDir string) (*APIServer, error) {
 		maxAttachmentBytes: DefaultMaxAttachmentSize,
 	}
 	s.mux.HandleFunc("/send", s.handleSend)
+	s.mux.HandleFunc("/cards/update", s.handleCardsUpdate)
 	s.mux.HandleFunc("/sessions", s.handleSessions)
 	s.mux.HandleFunc("/cron/add", s.handleCronAdd)
 	s.mux.HandleFunc("/cron/list", s.handleCronList)
@@ -200,6 +210,28 @@ func apiJSON(w http.ResponseWriter, status int, v any) {
 	}
 }
 
+// resolveEngine picks the engine a /send or /cards/update request targets:
+// the named project, or the only one when none is named. On failure it
+// returns a nil engine with the HTTP status and message to answer. An
+// unknown project name never falls back to the single engine -- that would
+// misroute the request (same rule as webhook.go and handleCronAdd).
+func (s *APIServer) resolveEngine(project string) (*Engine, int, string) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if project != "" {
+		if engine, ok := s.engines[project]; ok {
+			return engine, 0, ""
+		}
+		return nil, http.StatusNotFound, fmt.Sprintf("project %q not found", project)
+	}
+	if len(s.engines) == 1 {
+		for _, engine := range s.engines {
+			return engine, 0, ""
+		}
+	}
+	return nil, http.StatusBadRequest, "project is required (multiple projects configured)"
+}
+
 func (s *APIServer) handleSend(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "POST only", http.StatusMethodNotAllowed)
@@ -217,34 +249,22 @@ func (s *APIServer) handleSend(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid JSON: "+err.Error(), http.StatusBadRequest)
 		return
 	}
+	if req.hasCard() {
+		s.sendCard(w, req)
+		return
+	}
+	if req.UUID != "" {
+		http.Error(w, "uuid is only accepted with card", http.StatusBadRequest)
+		return
+	}
 	if req.Message == "" && strings.TrimSpace(req.TTSText) == "" && len(req.Images) == 0 && len(req.Files) == 0 && len(req.Audios) == 0 && len(req.Videos) == 0 {
 		http.Error(w, "message, tts_text, or attachment is required", http.StatusBadRequest)
 		return
 	}
 
-	s.mu.RLock()
-	var engine *Engine
-	var ok bool
-	if req.Project != "" {
-		engine, ok = s.engines[req.Project]
-	} else if len(s.engines) == 1 {
-		// No project specified and only one engine: use it by default.
-		// Do NOT silently fall back when a non-empty project name is unknown —
-		// that misroutes the message to the wrong engine. Mirrors the resolve
-		// pattern in webhook.go and handleCronAdd.
-		for _, e := range s.engines {
-			engine = e
-			ok = true
-		}
-	}
-	s.mu.RUnlock()
-
-	if !ok {
-		if req.Project == "" {
-			http.Error(w, "project is required (multiple projects configured)", http.StatusBadRequest)
-			return
-		}
-		http.Error(w, fmt.Sprintf("project %q not found", req.Project), http.StatusNotFound)
+	engine, status, msg := s.resolveEngine(req.Project)
+	if engine == nil {
+		http.Error(w, msg, status)
 		return
 	}
 
