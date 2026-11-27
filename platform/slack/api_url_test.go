@@ -387,7 +387,10 @@ func TestNewClient_TransportErrorHidesPath(t *testing.T) {
 		t.Fatalf("listen: %v", err)
 	}
 	addr := ln.Addr().String()
-	ln.Close() // nothing listens here now, so the request fails in transport
+	// Nothing listens here once it's closed, so the request fails in transport.
+	if err := ln.Close(); err != nil {
+		t.Fatalf("close listener: %v", err)
+	}
 
 	apiURL, err := normalizeAPIURL("http://" + addr + "/sup3rsecret/api/")
 	if err != nil {
