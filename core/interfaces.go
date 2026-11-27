@@ -414,6 +414,11 @@ type Agent interface {
 	Stop() error
 }
 
+type UserFacingError interface {
+	error
+	UserMessage() string
+}
+
 // AgentSession represents a running interactive agent session with a persistent process.
 type AgentSession interface {
 	// Send sends a user message (with optional images and files) to the running

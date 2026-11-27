@@ -1318,6 +1318,17 @@ func newTestSession(opts ...bool) *piSession {
 	return s
 }
 
+// openPromptedRPCTurn marks the state a user prompt owns before its first
+// events arrive, so handleEvent scenarios exercise the prompted terminal
+// contract rather than unsolicited extension activity (which emits no
+// terminal event at all).
+func openPromptedRPCTurn(s *piSession) {
+	s.rpcLifecycleMu.Lock()
+	s.rpcGeneration++
+	s.rpcTurnPending = true
+	s.rpcLifecycleMu.Unlock()
+}
+
 func drainEvents(s *piSession) []core.Event {
 	var evts []core.Event
 	for {
@@ -1365,7 +1376,7 @@ func TestHandleEvent_LifecycleEventsNoOp(t *testing.T) {
 	defer s.cancel()
 
 	// agent_start, turn_start, turn_end, message_start are no-ops
-	// agent_end now also emits EventResult (RPC mode turn completion marker)
+	// RPC completion is emitted separately at agent_settled.
 	for _, evType := range []string{"agent_start", "turn_start", "turn_end", "message_start"} {
 		s.handleEvent(map[string]any{"type": evType})
 	}
@@ -1375,17 +1386,20 @@ func TestHandleEvent_LifecycleEventsNoOp(t *testing.T) {
 	}
 }
 
-func TestHandleEvent_AgentEndEmitsResult(t *testing.T) {
-	s := newTestSession(true) // rpc=true: agent_end emits EventResult
+func TestHandleEvent_AgentSettledEmitsResult(t *testing.T) {
+	s := newTestSession(true)
 	defer s.cancel()
 
+	openPromptedRPCTurn(s)
+	s.handleEvent(map[string]any{"type": "agent_start"})
 	s.handleEvent(map[string]any{"type": "agent_end", "messages": []any{}})
-	evts := drainEvents(s)
-	if len(evts) != 1 {
-		t.Fatalf("expected 1 EventResult from agent_end, got %d", len(evts))
+	if evts := drainEvents(s); len(evts) != 0 {
+		t.Fatalf("agent_end must not end the logical turn, got %#v", evts)
 	}
-	if evts[0].Type != core.EventResult {
-		t.Errorf("expected EventResult, got %s", evts[0].Type)
+	s.handleEvent(map[string]any{"type": "agent_settled"})
+	evts := drainEvents(s)
+	if len(evts) != 1 || evts[0].Type != core.EventResult || !evts[0].Done {
+		t.Fatalf("expected one completed result from agent_settled, got %#v", evts)
 	}
 }
 
@@ -1400,6 +1414,9 @@ func TestHandleEvent_AgentEndEmitsResult(t *testing.T) {
 func TestHandleEvent_AgentEndWillRetryKeepsTurnOpen(t *testing.T) {
 	s := newTestSession(true) // rpc=true
 	defer s.cancel()
+
+	openPromptedRPCTurn(s)
+	s.handleEvent(map[string]any{"type": "agent_start"})
 
 	s.handleEvent(map[string]any{
 		"type": "message_end",
@@ -1419,31 +1436,27 @@ func TestHandleEvent_AgentEndWillRetryKeepsTurnOpen(t *testing.T) {
 	}
 }
 
-func TestHandleEvent_AgentEndFlushesPendingError(t *testing.T) {
-	s := newTestSession(true) // rpc=true
+func TestHandleEvent_AgentSettledFlushesPendingError(t *testing.T) {
+	s := newTestSession(true)
 	defer s.cancel()
 
+	openPromptedRPCTurn(s)
+	s.handleEvent(map[string]any{"type": "agent_start"})
 	s.handleEvent(map[string]any{
-		"type": "message_end",
-		"message": map[string]any{
-			"role":         "assistant",
-			"errorMessage": "429 rate_limit_error",
-		},
+		"type":    "message_end",
+		"message": map[string]any{"role": "assistant", "errorMessage": "429 rate_limit_error"},
 	})
 	s.handleEvent(map[string]any{"type": "agent_end", "willRetry": false, "messages": []any{}})
-
-	evts := drainEvents(s)
-	if len(evts) != 2 {
-		t.Fatalf("expected EventError + EventResult, got %d events: %#v", len(evts), evts)
+	if evts := drainEvents(s); len(evts) != 0 {
+		t.Fatalf("agent_end must retain a potentially recoverable error, got %#v", evts)
 	}
-	if evts[0].Type != core.EventError {
-		t.Errorf("first event = %s, want EventError", evts[0].Type)
+	s.handleEvent(map[string]any{"type": "agent_settled"})
+	evts := drainEvents(s)
+	if len(evts) != 1 || evts[0].Type != core.EventError {
+		t.Fatalf("expected one terminal EventError, got %#v", evts)
 	}
 	if evts[0].Error == nil || !strings.Contains(evts[0].Error.Error(), "429") {
 		t.Errorf("error = %v, want deferred 429", evts[0].Error)
-	}
-	if evts[1].Type != core.EventResult {
-		t.Errorf("second event = %s, want EventResult", evts[1].Type)
 	}
 	if s.pendingErr != "" {
 		t.Errorf("pendingErr must be cleared after flush, got %q", s.pendingErr)
@@ -1454,6 +1467,9 @@ func TestHandleEvent_AgentEndRetrySuccessDropsPendingError(t *testing.T) {
 	s := newTestSession(true) // rpc=true
 	defer s.cancel()
 
+	openPromptedRPCTurn(s)
+	s.handleEvent(map[string]any{"type": "agent_start"})
+
 	// Transient 429 -> Pi retries (willRetry) -> retry succeeds.
 	s.handleEvent(map[string]any{
 		"type": "message_end",
@@ -1463,11 +1479,13 @@ func TestHandleEvent_AgentEndRetrySuccessDropsPendingError(t *testing.T) {
 		},
 	})
 	s.handleEvent(map[string]any{"type": "agent_end", "willRetry": true, "messages": []any{}})
+	s.handleEvent(map[string]any{"type": "agent_start"})
 	s.handleEvent(map[string]any{
 		"type":    "message_end",
 		"message": map[string]any{"role": "assistant"},
 	})
 	s.handleEvent(map[string]any{"type": "agent_end", "willRetry": false, "messages": []any{}})
+	s.handleEvent(map[string]any{"type": "agent_settled"})
 
 	evts := drainEvents(s)
 	if len(evts) != 1 {
@@ -1489,15 +1507,10 @@ func TestHandleEvent_UnhandledType(t *testing.T) {
 	}
 }
 
-// ── handleEvent: compaction_* (regression for /cmp silent-hang bug) ──
+// ── handleEvent: compaction_* ─────────────────────────────────
 //
-// Prior to the fix, ctx.compact() was fire-and-forget: pi emits
-// compaction_start/compaction_end events on stdout but never sends agent_end.
-// Without an explicit handler, cc-connect's processInteractiveEvents hangs
-// forever waiting for a turn-end signal that never arrives. The fix in
-// handleEvent adds a compaction_end case that synthesizes EventResult so
-// the engine can finalize the turn. On errors it also surfaces an
-// EventError so the user sees the failure even when no extension does.
+// Compaction events describe an internal operation, not the end of an RPC
+// prompt. Only agent_settled or a handled prompt response may end that turn.
 
 func TestHandleEvent_CompactionStartNoEvent(t *testing.T) {
 	s := newTestSession(true) // rpc=true
@@ -1513,26 +1526,19 @@ func TestHandleEvent_CompactionStartNoEvent(t *testing.T) {
 	}
 }
 
-func TestHandleEvent_CompactionEndEmitsResultInRPCMode(t *testing.T) {
-	// Regression: this is the exact scenario that caused /cmp to hang.
-	// Before the fix, this case fell through to "unrecognized event type"
-	// and processInteractiveEvents never saw EventResult.
-	s := newTestSession(true) // rpc=true
-	defer s.cancel()
-
-	s.handleEvent(map[string]any{
-		"type":    "compaction_end",
-		"aborted": false,
-	})
-	evts := drainEvents(s)
-	if len(evts) != 1 {
-		t.Fatalf("compaction_end in RPC mode must emit exactly 1 EventResult, got %d: %#v", len(evts), evts)
-	}
-	if evts[0].Type != core.EventResult {
-		t.Errorf("expected EventResult, got %s", evts[0].Type)
-	}
-	if !evts[0].Done {
-		t.Errorf("expected Done=true, got false")
+func TestHandleEvent_CompactionEndDoesNotEmitResultInRPCMode(t *testing.T) {
+	for _, active := range []bool{false, true} {
+		t.Run(fmt.Sprintf("active_%v", active), func(t *testing.T) {
+			s := newTestSession(true)
+			defer s.cancel()
+			if active {
+				s.handleEvent(map[string]any{"type": "agent_start"})
+			}
+			s.handleEvent(map[string]any{"type": "compaction_end", "aborted": false})
+			if evts := drainEvents(s); len(evts) != 0 {
+				t.Fatalf("compaction_end must not end a prompt, got %#v", evts)
+			}
+		})
 	}
 }
 
@@ -1551,49 +1557,46 @@ func TestHandleEvent_CompactionEndJSONModeNoEvent(t *testing.T) {
 	}
 }
 
-func TestHandleEvent_CompactionEndWithErrorMessageEmitsError(t *testing.T) {
-	// Covers trigger-compact/auto-trigger paths that have no extension
-	// to surface pi's own compaction error to the user.
+func TestHandleEvent_CompactionEndWithErrorMessageJSONModeEmitsError(t *testing.T) {
+	s := newTestSession(false)
+	defer s.cancel()
+
+	const message = "Compaction failed: Nothing to compact (session too small)"
+	s.handleEvent(map[string]any{"type": "compaction_end", "aborted": false, "errorMessage": message})
+	evts := drainEvents(s)
+	if len(evts) != 1 || evts[0].Type != core.EventError {
+		t.Fatalf("expected one JSON-mode compaction error, got %#v", evts)
+	}
+	if evts[0].Error == nil || evts[0].Error.Error() != message {
+		t.Errorf("EventError message not preserved verbatim: %v", evts[0].Error)
+	}
+}
+
+func TestHandleEvent_CompactionEndWithErrorMessageRPCModeKeepsTurnOpen(t *testing.T) {
 	s := newTestSession(true)
 	defer s.cancel()
 
-	s.handleEvent(map[string]any{
-		"type":         "compaction_end",
-		"aborted":      false,
-		"errorMessage": "Compaction failed: Nothing to compact (session too small)",
-	})
-	evts := drainEvents(s)
-	if len(evts) != 2 {
-		t.Fatalf("expected 2 events (EventError + EventResult), got %d: %#v", len(evts), evts)
+	openPromptedRPCTurn(s)
+	s.handleEvent(map[string]any{"type": "agent_start"})
+	s.handleEvent(map[string]any{"type": "compaction_end", "aborted": false,
+		"errorMessage": "Auto-compaction failed: provider overloaded"})
+	if evts := drainEvents(s); len(evts) != 0 {
+		t.Fatalf("a recoverable RPC compaction error must not end the prompt, got %#v", evts)
 	}
-	if evts[0].Type != core.EventError {
-		t.Errorf("first event must be EventError, got %s", evts[0].Type)
-	}
-	if evts[0].Error == nil || evts[0].Error.Error() != "Compaction failed: Nothing to compact (session too small)" {
-		t.Errorf("EventError message not preserved verbatim: %v", evts[0].Error)
-	}
-	if evts[1].Type != core.EventResult || !evts[1].Done {
-		t.Errorf("second event must be EventResult{Done:true}, got %s done=%v", evts[1].Type, evts[1].Done)
+	s.handleEvent(map[string]any{"type": "agent_end"})
+	s.handleEvent(map[string]any{"type": "agent_settled"})
+	if evts := drainEvents(s); len(evts) != 1 || evts[0].Type != core.EventResult {
+		t.Fatalf("the eventual prompt outcome must remain successful, got %#v", evts)
 	}
 }
 
 func TestHandleEvent_CompactionEndEmptyErrorMessageDoesNotEmitError(t *testing.T) {
-	// pi sometimes sends {"errorMessage": ""} on success-shaped events;
-	// treat empty as "no error" so we don't spam EventError on every turn.
 	s := newTestSession(true)
 	defer s.cancel()
 
-	s.handleEvent(map[string]any{
-		"type":         "compaction_end",
-		"aborted":      false,
-		"errorMessage": "",
-	})
-	evts := drainEvents(s)
-	if len(evts) != 1 {
-		t.Fatalf("empty errorMessage must not emit EventError; got %d events: %#v", len(evts), evts)
-	}
-	if evts[0].Type != core.EventResult {
-		t.Errorf("expected EventResult, got %s", evts[0].Type)
+	s.handleEvent(map[string]any{"type": "compaction_end", "aborted": false, "errorMessage": ""})
+	if evts := drainEvents(s); len(evts) != 0 {
+		t.Fatalf("empty errorMessage must not emit a terminal, got %#v", evts)
 	}
 }
 
@@ -2629,9 +2632,10 @@ func TestPiSession_Close(t *testing.T) {
 // ── Full event stream simulation ─────────────────────────────
 
 func TestHandleEvent_FullConversation(t *testing.T) {
-	s := newTestSession(true) // rpc=true: agent_end emits EventResult
+	s := newTestSession(true) // RPC completes at agent_settled.
 	defer s.cancel()
 
+	openPromptedRPCTurn(s)
 	// Simulate a full pi conversation: session → thinking → text → tool → tool result → text → done
 	events := []map[string]any{
 		{"type": "session", "id": "conv-123"},
@@ -2674,6 +2678,7 @@ func TestHandleEvent_FullConversation(t *testing.T) {
 		}},
 		{"type": "turn_end"},
 		{"type": "agent_end"},
+		{"type": "agent_settled"},
 	}
 
 	for _, ev := range events {
@@ -2682,7 +2687,7 @@ func TestHandleEvent_FullConversation(t *testing.T) {
 
 	evts := drainEvents(s)
 
-	// Expected: thinking(accumulated), tool_use, tool_result, text, result(agent_end)
+	// Expected: thinking(accumulated), tool_use, tool_result, text, result(agent_settled)
 	if len(evts) != 5 {
 		var types []string
 		for _, e := range evts {
@@ -2715,16 +2720,18 @@ func TestHandleEvent_FullConversation(t *testing.T) {
 // ── readLoop with real process ───────────────────────────────
 
 func TestPiSession_ReadLoopWithEcho(t *testing.T) {
-	// Create a process that emits Pi RPC JSONL: session, text delta, agent_end.
+	// Feed a complete Pi RPC run through the real JSONL reader.
 	sessionJSON, _ := json.Marshal(map[string]any{"type": "session", "id": "echo-sess"})
 	textJSON, _ := json.Marshal(map[string]any{
 		"type":                  "message_update",
 		"assistantMessageEvent": map[string]any{"type": "text_delta", "delta": "hi"},
 	})
+	agentStartJSON, _ := json.Marshal(map[string]any{"type": "agent_start"})
 	agentEndJSON, _ := json.Marshal(map[string]any{"type": "agent_end"})
+	agentSettledJSON, _ := json.Marshal(map[string]any{"type": "agent_settled"})
 
 	// Build one long string with all events separated by newlines
-	allData := string(sessionJSON) + "\n" + string(textJSON) + "\n" + string(agentEndJSON) + "\n"
+	allData := string(sessionJSON) + "\n" + string(agentStartJSON) + "\n" + string(textJSON) + "\n" + string(agentEndJSON) + "\n" + string(agentSettledJSON) + "\n"
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
@@ -2742,6 +2749,9 @@ func TestPiSession_ReadLoopWithEcho(t *testing.T) {
 	s.alive.Store(true)
 	s.ctx, s.cancel = context.WithCancel(ctx)
 	s.modelsCW = nil
+	// The fed transcript is a complete user-prompt run, so open the turn
+	// ownership a real prompt ACK would establish before its events.
+	openPromptedRPCTurn(s)
 
 	// Create a pipe and feed the data through it
 	r, w, err := os.Pipe()
@@ -2787,7 +2797,7 @@ loop:
 	s.cancel()
 	s.wg.Wait()
 
-	// Should have at least a text event and a result event (from agent_end).
+	// Should have at least a text event and a result event (from agent_settled).
 	hasText := false
 	hasResult := false
 	for _, ev := range evts {
@@ -2802,7 +2812,7 @@ loop:
 		t.Error("missing text event")
 	}
 	if !hasResult {
-		t.Error("missing result event (from agent_end)")
+		t.Error("missing result event (from agent_settled)")
 	}
 	if s.CurrentSessionID() != "echo-sess" {
 		t.Errorf("sessionID = %q, want echo-sess", s.CurrentSessionID())
