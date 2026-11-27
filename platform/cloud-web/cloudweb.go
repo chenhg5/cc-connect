@@ -22,17 +22,18 @@ type Platform struct {
 	project string
 	token   string
 
-	transportKind string
-	allowFrom     string
+	transportKind  string
+	allowFrom      string
 	shareInChannel bool
 	groupReplyAll  bool
 
-	mu               sync.RWMutex
-	handler          core.MessageHandler
-	navHandler       core.CardNavigationHandler
-	lifecycleHandler core.PlatformLifecycleHandler
-	cancel           context.CancelFunc
-	stopping         bool
+	mu                  sync.RWMutex
+	handler             core.MessageHandler
+	navHandler          core.CardNavigationHandler
+	userAwareNavHandler core.UserAwareCardNavigationHandler
+	lifecycleHandler    core.PlatformLifecycleHandler
+	cancel              context.CancelFunc
+	stopping            bool
 
 	tp    transport
 	dedup core.MessageDedup
@@ -161,7 +162,17 @@ func (p *Platform) SetLifecycleHandler(h core.PlatformLifecycleHandler) {
 }
 
 func (p *Platform) SetCardNavigationHandler(h core.CardNavigationHandler) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
 	p.navHandler = h
+	p.userAwareNavHandler = nil
+}
+
+func (p *Platform) SetUserAwareCardNavigationHandler(h core.UserAwareCardNavigationHandler) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.userAwareNavHandler = h
+	p.navHandler = nil
 }
 
 func (p *Platform) Start(handler core.MessageHandler) error {
@@ -374,12 +385,15 @@ func (p *Platform) handleCardAction(raw []byte) {
 	}
 
 	p.mu.RLock()
-	nav := p.navHandler
+	nav, userAwareNav := p.navHandler, p.userAwareNavHandler
 	p.mu.RUnlock()
-	if nav == nil {
-		return
+	var card *core.Card
+	if userAwareNav != nil {
+		// Match the identity used by cmd: callbacks in dispatchAsMessage.
+		card = userAwareNav(ca.Action, ca.SessionKey, "system")
+	} else if nav != nil {
+		card = nav(ca.Action, ca.SessionKey)
 	}
-	card := nav(ca.Action, ca.SessionKey)
 	if card == nil {
 		return
 	}
