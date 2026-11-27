@@ -152,6 +152,7 @@ type Platform struct {
 	reactionEmoji              string
 	ackEmoji                   string
 	doneEmoji                  string
+	cardActionWebhook          string
 	allowFrom                  string
 	allowChat                  string
 	groupOnly                  bool
@@ -448,6 +449,10 @@ func newPlatform(name, domain string, opts map[string]any) (core.Platform, error
 	if doneEmoji == "none" {
 		doneEmoji = ""
 	}
+	webhook, err := parseCardActionWebhook(opts["card_action_webhook"])
+	if err != nil {
+		return nil, err
+	}
 	allowFrom, _ := opts["allow_from"].(string)
 	core.CheckAllowFrom(name, allowFrom)
 	allowChat, _ := opts["allow_chat"].(string)
@@ -624,6 +629,7 @@ func newPlatform(name, domain string, opts map[string]any) (core.Platform, error
 		reactionEmoji:              reactionEmoji,
 		ackEmoji:                   ackEmoji,
 		doneEmoji:                  doneEmoji,
+		cardActionWebhook:          webhook,
 		allowFrom:                  allowFrom,
 		allowChat:                  allowChat,
 		groupOnly:                  groupOnly,
@@ -1087,6 +1093,13 @@ func (p *Platform) onCardAction(event *callback.CardActionTriggerEvent) (*callba
 		chatID = userID
 	}
 	sessionKey := p.sessionKeyFromCardAction(chatID, userID, event.Event.Action.Value)
+
+	if p.cardActionWebhook != "" && strings.HasPrefix(actionVal, "app:") {
+		if rejected := rejectNonRequester(sessionKey, userID, p.localize(core.MsgCardRequesterOnly, requesterOnlyFallback)); rejected != nil {
+			return rejected, nil
+		}
+		return forwardCardAction(p.cardActionWebhook, cardActionPayload{Action: actionVal, UserID: userID, ChatID: chatID, MessageID: messageID, Value: event.Event.Action.Value, Form: event.Event.Action.FormValue, Option: event.Event.Action.Option})
+	}
 
 	// nav: / act: — synchronous card update
 	if strings.HasPrefix(actionVal, "nav:") || strings.HasPrefix(actionVal, "act:") {
