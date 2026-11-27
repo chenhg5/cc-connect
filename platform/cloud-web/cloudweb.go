@@ -18,9 +18,11 @@ func init() {
 }
 
 type Platform struct {
-	name    string
-	project string
-	token   string
+	name             string
+	project          string
+	token            string
+	inputReceiptFile string
+	inputReceipts    *inputReceipts
 
 	transportKind  string
 	allowFrom      string
@@ -66,6 +68,7 @@ func New(opts map[string]any) (core.Platform, error) {
 		name = "cloud_web"
 	}
 	project, _ := opts["cc_project"].(string)
+	dataDir, _ := opts["cc_data_dir"].(string)
 	token, _ := opts["token"].(string)
 	if strings.TrimSpace(token) == "" {
 		return nil, fmt.Errorf("cloud_web: token is required")
@@ -122,7 +125,7 @@ func New(opts map[string]any) (core.Platform, error) {
 		tp = newGatewayTransport(baseURL, token, name, project, listen, webhookPath, registerURL, publicURL, sendPath)
 	}
 
-	return &Platform{
+	p := &Platform{
 		name:           name,
 		project:        project,
 		token:          token,
@@ -132,7 +135,11 @@ func New(opts map[string]any) (core.Platform, error) {
 		groupReplyAll:  groupReplyAll,
 		tp:             tp,
 		replyCtxs:      make(map[string]string),
-	}, nil
+	}
+	if dataDir != "" {
+		p.inputReceiptFile = inputReceiptPath(dataDir, project, name)
+	}
+	return p, nil
 }
 
 func pickInt(v any) int {
@@ -185,6 +192,14 @@ func (p *Platform) Start(handler core.MessageHandler) error {
 	ctx, cancel := context.WithCancel(context.Background())
 	p.cancel = cancel
 	p.mu.Unlock()
+	if p.inputReceiptFile != "" {
+		q, err := openInputReceipts(p.inputReceiptFile)
+		if err != nil {
+			cancel()
+			return err
+		}
+		p.inputReceipts = q
+	}
 
 	if ws, ok := p.tp.(*wsTransport); ok {
 		ws.onConnected = p.notifyReady
@@ -193,7 +208,19 @@ func (p *Platform) Start(handler core.MessageHandler) error {
 
 	if err := p.tp.Start(ctx, p.handleWire); err != nil {
 		cancel()
+		if p.inputReceipts != nil {
+			_ = p.inputReceipts.db.Close() // Preserve the transport startup error.
+			p.inputReceipts = nil
+		}
 		return err
+	}
+	if p.hasCap("input_receipts_v1") && p.inputReceipts == nil {
+		cancel()
+		_ = p.tp.Stop()
+		return fmt.Errorf("cloud_web: input receipts require cc_data_dir")
+	}
+	if p.inputReceipts != nil {
+		go p.runInputReceipts(ctx)
 	}
 
 	// WebSocket connects asynchronously; readiness is signaled after register_ack.
@@ -205,6 +232,10 @@ func (p *Platform) Start(handler core.MessageHandler) error {
 }
 
 func (p *Platform) notifyReady() {
+	if p.hasCap("input_receipts_v1") && p.inputReceipts == nil {
+		p.notifyUnavailable(fmt.Errorf("cloud_web: input receipts require cc_data_dir"))
+		return
+	}
 	if p.lifecycleHandler != nil {
 		p.lifecycleHandler.OnPlatformReady(p)
 	}
@@ -233,7 +264,12 @@ func (p *Platform) Stop() error {
 	if cancel != nil {
 		cancel()
 	}
-	return p.tp.Stop()
+	err := p.tp.Stop()
+	if p.inputReceipts != nil {
+		<-p.inputReceipts.done
+		_ = p.inputReceipts.db.Close()
+	}
+	return err
 }
 
 func (p *Platform) caps() map[string]bool {

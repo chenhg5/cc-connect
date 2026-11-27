@@ -366,6 +366,8 @@ type Engine struct {
 	tts                   *TTSCfg
 	display               DisplayCfg
 	injectSender          bool
+	busyActionMu          sync.RWMutex
+	busyAction            string // BusyActionQueue (default) or BusyActionInject
 	attachmentSendEnabled bool
 	startedAt             time.Time
 
@@ -829,6 +831,7 @@ func NewEngine(name string, ag Agent, platforms []Platform, sessionStorePath str
 		eventIdleTimeout:           defaultEventIdleTimeout,
 		staleLockBreakAfter:        busyStaleLockMaxHeld,
 		maxQueuedMessages:          defaultMaxQueuedMessages,
+		busyAction:                 BusyActionQueue,
 		showContextIndicator:       true,
 		showWorkdirIndicator:       true,
 		shell:                      defaultShell(),
@@ -1090,6 +1093,35 @@ func (e *Engine) SetWebStatusFunc(fn func() string)                    { e.webSt
 
 func (e *Engine) SetSkipGit(skipGit bool) {
 	e.skipGit = skipGit
+}
+
+// Busy actions: what a user message does when it arrives while the session
+// is still running a turn.
+const (
+	// BusyActionQueue waits for the running turn to finish (default).
+	BusyActionQueue = "queue"
+	// BusyActionInject delivers the message into the running turn, like
+	// /ps, when the agent can take mid-turn input; otherwise it queues.
+	BusyActionInject = "inject"
+)
+
+// SetBusyAction sets the project's busy_action. Unknown values fall back to
+// BusyActionQueue; config validation rejects them earlier.
+func (e *Engine) SetBusyAction(v string) {
+	e.busyActionMu.Lock()
+	defer e.busyActionMu.Unlock()
+	if strings.EqualFold(strings.TrimSpace(v), BusyActionInject) {
+		e.busyAction = BusyActionInject
+		return
+	}
+	e.busyAction = BusyActionQueue
+}
+
+// getBusyAction synchronizes routing with configuration reloads.
+func (e *Engine) getBusyAction() string {
+	e.busyActionMu.RLock()
+	defer e.busyActionMu.RUnlock()
+	return e.busyAction
 }
 
 // SetInjectSender controls whether sender identity (platform and user ID) is
@@ -3381,7 +3413,14 @@ func (e *Engine) handleMessage(p Platform, msg *Message) {
 			}
 		}
 		// ── end self-heal; queueing path below is unchanged ────────────────
-		// Session is busy — try to queue the message for the running turn
+		// Session is busy — with busy_action = "inject", deliver the message
+		// into the running turn when the agent can take mid-turn input, the
+		// same way /ps does, so the user does not wait for the whole turn
+		// before it is seen.
+		if e.getBusyAction() == BusyActionInject && e.injectMessageIntoBusyTurn(p, msg, interactiveKey, session, sessions) {
+			return
+		}
+		// Otherwise try to queue the message for the running turn
 		// so the agent processes it immediately after the current turn ends.
 		if e.queueMessageForBusySession(p, msg, interactiveKey) {
 			// Race guard: the drain loop in processInteractiveMessageWith may
@@ -3577,6 +3616,76 @@ func (e *Engine) maybeAutoResetSessionOnIdle(p Platform, msg *Message, sessions 
 	return newSession, newGen
 }
 
+// injectMessageIntoBusyTurn delivers a message that arrived while the session
+// is busy directly to the running turn, as if the user had typed /ps. It is
+// used only when the agent session can take mid-turn input safely:
+// UserInputSteerer (native steer RPC, text only) or MidTurnInputSender
+// (SendMidTurn writes to the same live process). Returns false when the message
+// should fall through to the queue instead: unsupported agent, agent not yet
+// running, an existing queue whose order must be kept, a stale or voice
+// message, or a delivery error.
+func (e *Engine) injectMessageIntoBusyTurn(p Platform, msg *Message, interactiveKey string, session *Session, sessions *SessionManager) bool {
+	e.interactiveMu.Lock()
+	state, ok := e.interactiveStates[interactiveKey]
+	e.interactiveMu.Unlock()
+	if !ok || state == nil {
+		return false
+	}
+	state.mu.Lock()
+	agentSession := state.agentSession
+	queued := len(state.pendingMessages)
+	stale := e.isStaleUserMessageLocked(state, msg.UserMessageTimeMs)
+	targetMessageID := state.currentMessageID
+	state.mu.Unlock()
+	// A voice message keeps the queue, as in upstream #523: its turn is the
+	// one that answers by voice (state.fromVoice), which an injection is not.
+	if agentSession == nil || !agentSession.Alive() || queued > 0 || stale || msg.FromVoice {
+		return false
+	}
+
+	prompt := e.buildSenderPrompt(msg.Content, msg.UserID, msg.UserName, msg.Platform, msg.SessionKey, msg.ChannelKey)
+	hasAttachments := len(msg.Images) > 0 || len(msg.Files) > 0
+	delivered := false
+	var err error
+	if steerer, ok := agentSession.(UserInputSteerer); ok {
+		if hasAttachments {
+			return false
+		}
+		reportQueuedInput(e.ctx, p, msg.ReplyCtx)
+		delivered, err = steerer.SteerUserInput(prompt)
+	} else if sender, ok := agentSession.(MidTurnInputSender); ok {
+		reportQueuedInput(e.ctx, p, msg.ReplyCtx)
+		err = sender.SendMidTurn(prompt, msg.MessageID, msg.Images, msg.Files)
+		delivered = err == nil
+	}
+	if err != nil {
+		slog.Warn("busy message injection failed; falling back to queue",
+			"session", msg.SessionKey, "msg_id", msg.MessageID, "error", err)
+		return false
+	}
+	if !delivered {
+		return false
+	}
+
+	e.noteUserMessageAccepted(interactiveKey, msg.UserMessageTimeMs)
+	session.TouchUserActivity()
+	session.AddHistory("user", msg.Content)
+	sessions.Save()
+	runMessageAccepted(msg)
+	if reporter, ok := p.(interface {
+		ReportInjected(context.Context, any, string)
+	}); ok {
+		reporter.ReportInjected(e.ctx, msg.ReplyCtx, targetMessageID)
+	}
+	slog.Info("message injected into busy session",
+		"session", msg.SessionKey,
+		"user", msg.UserName,
+		"msg_id", msg.MessageID,
+	)
+	e.reply(p, msg.ReplyCtx, e.i18n.T(MsgMessageInjected))
+	return true
+}
+
 // queueMessageForBusySession queues a message for later delivery when the
 // session is busy. The message is NOT sent to agent stdin at queue time;
 // the event loop sends it after the current turn's EventResult is received.
@@ -3609,13 +3718,16 @@ func (e *Engine) queueMessageForBusySession(p Platform, msg *Message, interactiv
 	if e.isStaleUserMessageLocked(state, msg.UserMessageTimeMs) {
 		snap := userMessageWatermarkSnapshotLocked(state)
 		e.logStaleUserMessageDropped("reject_before_queue", msg, interactiveKey, snap)
+		reportDroppedInput(e.ctx, p, msg.ReplyCtx, "stale")
 		return true
 	}
 	if len(state.pendingMessages) >= e.maxQueuedMessages {
 		depth := len(state.pendingMessages)
+		reportDroppedInput(e.ctx, p, msg.ReplyCtx, "rejected")
 		e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgQueueFull), depth))
 		return true // handled: queue-full reply sent
 	}
+	reportQueuedInput(e.ctx, p, msg.ReplyCtx)
 	state.pendingMessages = append(state.pendingMessages, queuedMessage{
 		messageID:         msg.MessageID,
 		platform:          p,
@@ -4445,6 +4557,7 @@ func (e *Engine) processInteractiveMessageWith(p Platform, msg *Message, session
 			sendDone <- fmt.Errorf("agent session became nil")
 			return
 		}
+		reportStartedInput(e.ctx, p, msg.ReplyCtx)
 		err := as.Send(promptContent, msg.MessageID, msg.Images, msg.Files)
 		if err == nil && bootstrapHistory {
 			session.MarkHistoryBootstrapped(agent.Name())
@@ -7181,17 +7294,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			// Check for queued messages — if present, continue the event loop
 			// for the next turn instead of returning.
 			state.mu.Lock()
-			droppedStale := 0
-			for len(state.pendingMessages) > 0 && e.isQueuedUserMessageStaleForDrainLocked(state, state.pendingMessages[0].userMessageTimeMs) {
-				state.pendingMessages = state.pendingMessages[1:]
-				droppedStale++
-			}
-			if droppedStale > 0 {
-				slog.Info("dropped stale queued user messages after completed turn",
-					"session", sessionKey,
-					"dropped", droppedStale,
-				)
-			}
+			droppedStale := e.popStaleQueuedInputsLocked(state)
 			if len(state.pendingMessages) > 0 {
 				queued := state.pendingMessages[0]
 				state.pendingMessages = state.pendingMessages[1:]
@@ -7203,6 +7306,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				state.silentEmpty = queued.silentEmpty
 				state.currentTurnUserMessageTimeMs = queued.userMessageTimeMs
 				state.mu.Unlock()
+				e.reportStaleQueuedInputs(droppedStale, sessionKey, "after completed turn")
 
 				// Stop the previous turn's typing indicator
 				if stopTyping != nil {
@@ -7239,6 +7343,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 						nextSend <- fmt.Errorf("agent session became nil")
 						return
 					}
+					reportStartedInput(e.ctx, queued.platform, queued.replyCtx)
 					nextSend <- as.Send(queuedPrompt, queued.messageID, queued.images, queued.files)
 				}()
 				pendingSend = nextSend
@@ -7324,6 +7429,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				continue
 			}
 			state.mu.Unlock()
+			e.reportStaleQueuedInputs(droppedStale, sessionKey, "after completed turn")
 
 			if pendingSend != nil {
 				if err := <-pendingSend; err != nil {
@@ -7510,6 +7616,7 @@ func (e *Engine) notifyDroppedQueuedMessages(state *interactiveState, reason err
 	state.pendingMessages = nil
 	state.mu.Unlock()
 	for _, q := range remaining {
+		reportDroppedInput(e.ctx, q.platform, q.replyCtx, "failed")
 		e.send(q.platform, q.replyCtx, fmt.Sprintf(e.i18n.T(MsgError), reason))
 	}
 }
@@ -7549,20 +7656,11 @@ func (e *Engine) drainPendingMessages(state *interactiveState, session *Session,
 			state.mu.Unlock()
 			return true
 		}
-		droppedStale := 0
-		for len(state.pendingMessages) > 0 && e.isQueuedUserMessageStaleForDrainLocked(state, state.pendingMessages[0].userMessageTimeMs) {
-			state.pendingMessages = state.pendingMessages[1:]
-			droppedStale++
-		}
-		if droppedStale > 0 {
-			slog.Info("dropped stale queued user messages while draining",
-				"session", sessionKey,
-				"dropped", droppedStale,
-			)
-		}
+		droppedStale := e.popStaleQueuedInputsLocked(state)
 		if len(state.pendingMessages) == 0 {
 			// Re-check from the top so a deferred restart is not skipped.
 			state.mu.Unlock()
+			e.reportStaleQueuedInputs(droppedStale, sessionKey, "while draining")
 			continue
 		}
 		queued := state.pendingMessages[0]
@@ -7574,6 +7672,7 @@ func (e *Engine) drainPendingMessages(state *interactiveState, session *Session,
 		state.silentEmpty = queued.silentEmpty
 		state.currentTurnUserMessageTimeMs = queued.userMessageTimeMs
 		state.mu.Unlock()
+		e.reportStaleQueuedInputs(droppedStale, sessionKey, "while draining")
 
 		e.i18n.DetectAndSet(queued.content)
 		prompt := e.buildSenderPrompt(queued.content, queued.userID, queued.userName, queued.msgPlatform, queued.msgSessionKey, queued.channelKey)
@@ -7605,6 +7704,7 @@ func (e *Engine) drainPendingMessages(state *interactiveState, session *Session,
 				sendDone <- fmt.Errorf("agent session became nil")
 				return
 			}
+			reportStartedInput(e.ctx, queued.platform, queued.replyCtx)
 			sendDone <- as.Send(prompt, queued.messageID, queued.images, queued.files)
 		}()
 
@@ -11772,9 +11872,7 @@ func (e *Engine) stopInteractiveSessionWithOptions(sessionKey string, notifyQueu
 		if notifyQueued {
 			e.notifyDroppedQueuedMessages(state, fmt.Errorf("session cancelled"))
 		} else {
-			state.mu.Lock()
-			state.pendingMessages = nil
-			state.mu.Unlock()
+			e.discardQueuedInputs(state, "cancelled")
 		}
 
 		// Mark eventsNeedResync so the next turn drains stale events from
@@ -11832,9 +11930,7 @@ normalCleanup:
 	if notifyQueued {
 		e.notifyDroppedQueuedMessages(state, fmt.Errorf("session reset"))
 	} else {
-		state.mu.Lock()
-		state.pendingMessages = nil
-		state.mu.Unlock()
+		e.discardQueuedInputs(state, "cancelled")
 	}
 	e.closeAgentSessionAsync(sessionKey, agentSession, closePlatform, closeReplyCtx)
 
@@ -12282,7 +12378,7 @@ func (e *Engine) cmdProviderAdd(p Platform, msg *Message, switcher ProviderSwitc
 	raw = strings.TrimSpace(raw)
 
 	if strings.HasPrefix(raw, "{") {
-		// JSON format: /provider add {"name":"relay","api_key":"sk-xxx",...}
+		// JSON format: /provider add {"name":"relay","api_key":"<provider API key>",...}
 		var jp struct {
 			Name    string            `json:"name"`
 			APIKey  string            `json:"api_key"`
