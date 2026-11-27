@@ -1,14 +1,31 @@
 package codex
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"log/slog"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/chenhg5/cc-connect/core"
 )
+
+func TestInvalidRequestUserInputTimeoutLogOmitsRawValue(t *testing.T) {
+	const sentinel = "SENTINEL_TIMEOUT_VALUE"
+	var logs bytes.Buffer
+	previous := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logs, nil)))
+	t.Cleanup(func() { slog.SetDefault(previous) })
+	if got := parseRequestUserInputTimeoutMins(sentinel); got != defaultRequestUserInputTimeout {
+		t.Fatalf("fallback = %s", got)
+	}
+	if strings.Contains(logs.String(), sentinel) {
+		t.Fatal("invalid timeout log exposed raw config value")
+	}
+}
 
 // TestParseRequestUserInputTimeoutMins covers the default and fallback rules for request_user_input_timeout_mins.
 func TestParseRequestUserInputTimeoutMins(t *testing.T) {

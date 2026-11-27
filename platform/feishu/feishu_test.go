@@ -3,6 +3,8 @@ package feishu
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -16,6 +18,18 @@ import (
 	lark "github.com/larksuite/oapi-sdk-go/v3"
 	larkim "github.com/larksuite/oapi-sdk-go/v3/service/im/v1"
 )
+
+func TestInvalidNumericOptionsOmitRawInput(t *testing.T) {
+	const sentinel = "SENTINEL_FEISHU_CONFIG_CONTENT"
+	for _, key := range []string{"image_batch_window_ms", "resource_chunk_size_bytes"} {
+		_, err := newPlatform("feishu", lark.FeishuBaseUrl, map[string]any{
+			"app_id": "cli_test", "app_secret": "secret", key: sentinel,
+		})
+		if err == nil || strings.Contains(err.Error(), sentinel) {
+			t.Fatalf("unsafe %s option error: %v", key, err)
+		}
+	}
+}
 
 func TestOnMessageRecalledDispatchesCoreRecallMessage(t *testing.T) {
 	got := make(chan *core.Message, 1)
@@ -466,11 +480,11 @@ func TestDispatchMessageExpandsQuotedMergeForward(t *testing.T) {
 				"data": map[string]any{
 					"items": []map[string]any{
 						{
-							"message_id":        subMessageID,
-							"msg_type":          "text",
-							"upper_message_id":  parentMessageID,
-							"parent_id":         "",
-							"create_time":       "1786522200000",
+							"message_id":       subMessageID,
+							"msg_type":         "text",
+							"upper_message_id": parentMessageID,
+							"parent_id":        "",
+							"create_time":      "1786522200000",
 							"sender": map[string]any{
 								"id":          "ou_liangchen",
 								"id_type":     "open_id",
@@ -1186,7 +1200,7 @@ func TestHasComplexMarkdown(t *testing.T) {
 	}
 }
 
-func TestCountMarkdownTables(t *testing.T) {
+func TestFindMarkdownTablesOutsideCodeBlocks(t *testing.T) {
 	tests := []struct {
 		name  string
 		input string
@@ -1197,47 +1211,77 @@ func TestCountMarkdownTables(t *testing.T) {
 		{"two tables separated by text", "| A |\n|---|\n\nsome text\n\n| B |\n|---|", 2},
 		{"consecutive tables no gap", "| A |\n|---|\n| 1 |\n| B |\n|---|", 1},
 		{"six tables", "| A |\n|---|\n\nx\n\n| B |\n|---|\n\nx\n\n| C |\n|---|\n\nx\n\n| D |\n|---|\n\nx\n\n| E |\n|---|\n\nx\n\n| F |\n|---|", 6},
-		{"table inside code block is still counted", "```\n| A |\n```\n\n| B |\n|---|", 2},
+		{"table inside code block is ignored", "```\n| A |\n|---|\n```\n\n| B |\n|---|", 1},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := countMarkdownTables(tt.input)
+			got := len(findMarkdownTablesOutsideCodeBlocks(tt.input))
 			if got != tt.want {
-				t.Errorf("countMarkdownTables() = %d, want %d", got, tt.want)
+				t.Errorf("table matches = %d, want %d", got, tt.want)
 			}
 		})
 	}
 }
 
-func TestBuildReplyContent_FallbackWhenManyTables(t *testing.T) {
-	// Build content with 6 tables (exceeds the 5-table card limit).
+func TestBuildReplyContent_SixTablesStayRendered(t *testing.T) {
+	// Six small tables can be drawn as row components without using any of
+	// Feishu's limited native table or Markdown-table slots.
 	var sb strings.Builder
 	for i := 0; i < 6; i++ {
 		if i > 0 {
 			sb.WriteString("\n\nsome text\n\n")
 		}
-		sb.WriteString("| H |\n|---|\n| V |")
+		fmt.Fprintf(&sb, "| T%d | Value |\n|---|---|\n| row | %d |", i+1, i+1)
 	}
 	content := sb.String()
 
-	msgType, _ := buildReplyContent(content)
-	if msgType == larkim.MsgTypeInteractive {
-		t.Errorf("expected non-card message type for >5 tables, got interactive")
+	msgType, body := buildReplyContent(content)
+	if msgType != larkim.MsgTypeInteractive {
+		t.Fatalf("six tables sent as %s, want interactive card", msgType)
 	}
-
-	// With exactly 5 tables, card should still be used.
-	sb.Reset()
-	for i := 0; i < 5; i++ {
-		if i > 0 {
-			sb.WriteString("\n\nsome text\n\n")
+	card := decodeTestReplyCard(t, body)
+	if strings.Contains(body, "```") {
+		t.Fatalf("small table was downgraded to a code block: %s", body)
+	}
+	tables := 0
+	for _, element := range card.Body.Elements {
+		if element.Tag == "column_set" || element.Tag == "table" {
+			tables++
 		}
-		sb.WriteString("| H |\n|---|\n| V |")
 	}
-	content5 := sb.String()
+	if tables != 6 {
+		t.Fatalf("rendered tables = %d, want 6: %s", tables, body)
+	}
+}
 
-	msgType5, _ := buildReplyContent(content5)
-	if msgType5 != larkim.MsgTypeInteractive {
-		t.Errorf("expected interactive card for 5 tables, got %s", msgType5)
+func TestSplitMarkdownByTables_PreservesInterleavedText(t *testing.T) {
+	var sb strings.Builder
+	for i := 1; i <= 6; i++ {
+		fmt.Fprintf(&sb, "Before T%d\n\n| T%d | V |\n|---|---|\n| row | %d |\n\n", i, i, i)
+	}
+	sb.WriteString("After all tables")
+	parts := splitMarkdownByTables(sb.String(), 3)
+	if len(parts) != 2 {
+		t.Fatalf("parts = %d, want two cards: %q", len(parts), parts)
+	}
+	if !strings.HasPrefix(parts[1], "Before T4") {
+		t.Fatalf("fourth table lost its preceding caption: %q", parts[1])
+	}
+	joined := strings.Join(parts, "\n\n")
+	for i := 1; i <= 6; i++ {
+		for _, marker := range []string{fmt.Sprintf("Before T%d", i), fmt.Sprintf("| T%d | V |", i)} {
+			if strings.Count(joined, marker) != 1 {
+				t.Errorf("marker %q was lost or duplicated: %q", marker, parts)
+			}
+		}
+	}
+	if !strings.Contains(joined, "After all tables") {
+		t.Errorf("trailing prose lost: %q", parts)
+	}
+	for i, part := range parts {
+		if count := len(findMarkdownTablesOutsideCodeBlocks(part)); count > 3 {
+			t.Errorf("part %d has %d tables, want at most 3", i, count)
+		}
 	}
 }
 
@@ -1642,6 +1686,7 @@ func TestOnMessageThreadIsolationAdmitsAttachmentWithoutMention(t *testing.T) {
 		}
 		if rootID != "" {
 			ev.Event.Message.RootId = stringPtr(rootID)
+			ev.Event.Message.ThreadId = stringPtr("omt_" + rootID)
 		}
 		return ev
 	}
@@ -2117,6 +2162,45 @@ func TestSendWithStatusFooter_NoFallbackOnNonMentionAt(t *testing.T) {
 				t.Errorf("mention: content must contain resolved mention + inline footer; got %s", gotContent)
 			}
 		}
+	}
+}
+
+// TestReplyMessage_2200MarksMaybeDelivered: Feishu's code=2200 "internal error"
+// on a reply is ambiguous — the message may already have been delivered. The
+// reply error must wrap core.ErrMaybeDelivered so callers do not re-send the
+// same content and post a duplicate.
+func TestReplyMessage_2200MarksMaybeDelivered(t *testing.T) {
+	const appID = "cli_reply_2200"
+	const appSecret = "secret"
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.URL.Path == "/open-apis/auth/v3/tenant_access_token/internal":
+			writeJSON(t, w, map[string]any{"code": 0, "expire": 7200, "tenant_access_token": "t"})
+		case strings.HasPrefix(r.URL.Path, "/open-apis/im/v1/messages/") && strings.HasSuffix(r.URL.Path, "/reply"):
+			writeJSON(t, w, map[string]any{"code": 2200, "msg": "internal error"})
+		default:
+			t.Errorf("unexpected path %s", r.URL.Path)
+		}
+	}))
+	defer srv.Close()
+
+	p := &Platform{
+		platformName: "feishu",
+		domain:       srv.URL,
+		appID:        appID,
+		appSecret:    appSecret,
+		client:       lark.NewClient(appID, appSecret, lark.WithOpenBaseUrl(srv.URL), lark.WithHttpClient(srv.Client())),
+		replayClient: lark.NewClient(appID, appSecret, lark.WithEnableTokenCache(false), lark.WithOpenBaseUrl(srv.URL), lark.WithHttpClient(srv.Client())),
+	}
+
+	err := p.replyMessage(context.Background(), replyContext{chatID: "oc_x", messageID: "om_parent"}, larkim.MsgTypeText, `{"text":"hi"}`)
+	if err == nil {
+		t.Fatal("expected error for code=2200 reply")
+	}
+	if !errors.Is(err, core.ErrMaybeDelivered) {
+		t.Fatalf("code=2200 reply error must wrap core.ErrMaybeDelivered, got %v", err)
 	}
 }
 
@@ -3017,5 +3101,132 @@ func TestRichCardTypewriterSurvivesCardSizeCompaction(t *testing.T) {
 	}
 	if !strings.Contains(data, "BODY") {
 		t.Fatal("compaction lost body")
+	}
+}
+
+// A plain reply in the main channel carries the root of the chain it quotes
+// but no thread_id. The bot answers it in a new thread on the reply itself,
+// so the reply, not the quoted root, keys the session: otherwise the first
+// turn and every later message of that thread land in two sessions.
+func TestMakeSessionKeyKeysPlainReplyOnItself(t *testing.T) {
+	p := &Platform{platformName: "feishu", threadIsolation: true}
+	group := "group"
+	cases := []struct {
+		name                        string
+		messageID, rootID, threadID string
+		want                        string
+	}{
+		{"top-level message", "om_top", "", "", "om_top"},
+		{"plain reply quoting a main-channel message", "om_reply", "om_quoted", "", "om_reply"},
+		{"message in the thread opened on that reply", "om_followup", "om_reply", "omt_1", "om_reply"},
+		{"first message of a topic-group topic", "om_topic", "", "omt_2", "om_topic"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			msg := &larkim.EventMessage{MessageId: strPtr(c.messageID), ChatType: &group}
+			if c.rootID != "" {
+				msg.RootId = strPtr(c.rootID)
+			}
+			if c.threadID != "" {
+				msg.ThreadId = strPtr(c.threadID)
+			}
+			if got, want := p.makeSessionKey(msg, "oc_chat", "ou_user"), "feishu:oc_chat:root:"+c.want; got != want {
+				t.Fatalf("makeSessionKey = %q, want %q", got, want)
+			}
+		})
+	}
+}
+
+// The case that lost a task in production: someone posts a request in the
+// main channel without mentioning the bot, and someone else replies to it
+// (a plain reply, no thread yet) with only "@bot". The turn must run in the
+// session of the thread the bot opens on that reply, with the request as
+// its quoted context.
+func TestOnMessagePlainMentionOnlyReplyRootsItsOwnThread(t *testing.T) {
+	const (
+		appID      = "cli_plain_reply"
+		appSecret  = "secret-plain-reply"
+		botOpenID  = "ou_bot"
+		chatID     = "oc_chat"
+		quotedID   = "om_request"
+		replyID    = "om_mention_only"
+		userOpenID = "ou_asker"
+	)
+	got := make(chan *core.Message, 1)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.URL.Path == "/open-apis/auth/v3/tenant_access_token/internal":
+			writeJSON(t, w, map[string]any{"code": 0, "msg": "success", "expire": 7200, "tenant_access_token": "tenant-token"})
+		case r.URL.Path == "/open-apis/im/v1/messages/"+quotedID:
+			writeJSON(t, w, map[string]any{"code": 0, "msg": "success", "data": map[string]any{"items": []map[string]any{{
+				"msg_type":  "text",
+				"parent_id": "",
+				"sender":    map[string]any{"id": "ou_writer", "sender_type": "user"},
+				"body":      map[string]any{"content": `{"text":"读取 C798 的 enable_odometry_net"}`},
+			}}}})
+		case strings.HasPrefix(r.URL.Path, "/open-apis/contact/v3/users/"),
+			strings.HasPrefix(r.URL.Path, "/open-apis/im/v1/chats/"):
+			writeJSON(t, w, map[string]any{"code": 0, "msg": "success"})
+		default:
+			t.Errorf("unexpected path %s", r.URL.Path)
+			writeJSON(t, w, map[string]any{"code": 0, "msg": "success"})
+		}
+	}))
+	defer srv.Close()
+
+	p := &Platform{
+		platformName:    "feishu",
+		domain:          srv.URL,
+		appID:           appID,
+		appSecret:       appSecret,
+		botOpenID:       botOpenID,
+		threadIsolation: true,
+		dedup:           &core.MessageDedup{},
+		client: lark.NewClient(appID, appSecret,
+			lark.WithOpenBaseUrl(srv.URL),
+			lark.WithHttpClient(srv.Client()),
+		),
+		handler: func(_ core.Platform, msg *core.Message) { got <- msg },
+	}
+	chatType, senderType, msgType := "group", "user", "text"
+	content := `{"text":"@_user_1"}`
+	createTime := strconv.FormatInt(time.Now().Add(time.Second).UnixMilli(), 10)
+	err := p.onMessage(context.Background(), &larkim.P2MessageReceiveV1{
+		Event: &larkim.P2MessageReceiveV1Data{
+			Sender: &larkim.EventSender{SenderId: &larkim.UserId{OpenId: strPtr(userOpenID)}, SenderType: &senderType},
+			Message: &larkim.EventMessage{
+				MessageId:   strPtr(replyID),
+				RootId:      strPtr(quotedID),
+				ParentId:    strPtr(quotedID),
+				ChatId:      strPtr(chatID),
+				ChatType:    &chatType,
+				MessageType: &msgType,
+				Content:     &content,
+				CreateTime:  &createTime,
+				Mentions: []*larkim.MentionEvent{{
+					Key:  strPtr("@_user_1"),
+					Id:   &larkim.UserId{OpenId: strPtr(botOpenID)},
+					Name: strPtr("Bot"),
+				}},
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("onMessage() error = %v", err)
+	}
+	select {
+	case msg := <-got:
+		if want := "feishu:" + chatID + ":root:" + replyID; msg.SessionKey != want {
+			t.Fatalf("SessionKey = %q, want %q (the thread the bot opens on the reply)", msg.SessionKey, want)
+		}
+		if msg.Content != "" {
+			t.Fatalf("Content = %q, want empty: the reply only mentions the bot", msg.Content)
+		}
+		if !strings.Contains(msg.ExtraContent, "读取 C798 的 enable_odometry_net") {
+			t.Fatalf("ExtraContent = %q, want the quoted request", msg.ExtraContent)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for the mention-only reply")
 	}
 }

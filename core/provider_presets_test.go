@@ -456,3 +456,251 @@ func TestProviderPresetsIncludesWorldRouter(t *testing.T) {
 		t.Fatalf("opencode base_url = %q", opencode.BaseURL)
 	}
 }
+
+func TestProviderPresetsIncludesLazu(t *testing.T) {
+	body, err := os.ReadFile("../provider-presets.json")
+	if err != nil {
+		t.Fatalf("read provider-presets.json: %v", err)
+	}
+
+	var presets ProviderPresetsResponse
+	if err := json.Unmarshal(body, &presets); err != nil {
+		t.Fatalf("parse provider-presets.json: %v", err)
+	}
+
+	var lazu *ProviderPreset
+	for i := range presets.Providers {
+		if presets.Providers[i].Name == "lazu" {
+			lazu = &presets.Providers[i]
+			break
+		}
+	}
+	if lazu == nil {
+		t.Fatal("lazu preset not found")
+	}
+	if lazu.InviteURL != "" {
+		t.Fatalf("lazu invite_url = %q, want empty", lazu.InviteURL)
+	}
+
+	claude := lazu.AgentConfig("claudecode")
+	if claude == nil {
+		t.Fatal("lazu claudecode config missing")
+	}
+	if claude.BaseURL != "https://api.lazu.ai" {
+		t.Fatalf("claudecode base_url = %q", claude.BaseURL)
+	}
+	if claude.Model != "claude-sonnet-5-5" {
+		t.Fatalf("claudecode model = %q", claude.Model)
+	}
+
+	codex := lazu.AgentConfig("codex")
+	if codex == nil {
+		t.Fatal("lazu codex config missing")
+	}
+	if codex.BaseURL != "https://api.lazu.ai/v1" {
+		t.Fatalf("codex base_url = %q", codex.BaseURL)
+	}
+	if codex.Model != "gpt-6.2-astra" {
+		t.Fatalf("codex model = %q", codex.Model)
+	}
+	if codex.CodexConfig == nil || codex.CodexConfig.WireAPI != "responses" {
+		t.Fatalf("codex_config = %#v", codex.CodexConfig)
+	}
+
+	opencode := lazu.AgentConfig("opencode")
+	if opencode == nil {
+		t.Fatal("lazu opencode config missing")
+	}
+	if opencode.BaseURL != "https://api.lazu.ai/v1" {
+		t.Fatalf("opencode base_url = %q", opencode.BaseURL)
+	}
+}
+
+func TestProviderPresetsIncludesOnomeo(t *testing.T) {
+	body, err := os.ReadFile("../provider-presets.json")
+	if err != nil {
+		t.Fatalf("read provider-presets.json: %v", err)
+	}
+
+	var presets ProviderPresetsResponse
+	if err := json.Unmarshal(body, &presets); err != nil {
+		t.Fatalf("parse provider-presets.json: %v", err)
+	}
+
+	var onomeo *ProviderPreset
+	for i := range presets.Providers {
+		if presets.Providers[i].Name == "onomeo" {
+			onomeo = &presets.Providers[i]
+			break
+		}
+	}
+	if onomeo == nil {
+		t.Fatal("onomeo preset not found")
+	}
+	if onomeo.InviteURL != "" {
+		t.Fatalf("onomeo invite_url = %q, want empty", onomeo.InviteURL)
+	}
+
+	claude := onomeo.AgentConfig("claudecode")
+	if claude == nil {
+		t.Fatal("onomeo claudecode config missing")
+	}
+	if claude.BaseURL != "https://onomeo.com" {
+		t.Fatalf("claudecode base_url = %q", claude.BaseURL)
+	}
+	if claude.Model != "claude-sonnet-5.5" {
+		t.Fatalf("claudecode model = %q", claude.Model)
+	}
+
+	codex := onomeo.AgentConfig("codex")
+	if codex == nil {
+		t.Fatal("onomeo codex config missing")
+	}
+	if codex.BaseURL != "https://onomeo.com/v1" {
+		t.Fatalf("codex base_url = %q", codex.BaseURL)
+	}
+	if codex.Model != "gpt-6.2-sol" {
+		t.Fatalf("codex model = %q", codex.Model)
+	}
+	if codex.CodexConfig == nil || codex.CodexConfig.WireAPI != "responses" {
+		t.Fatalf("codex_config = %#v", codex.CodexConfig)
+	}
+
+	opencode := onomeo.AgentConfig("opencode")
+	if opencode == nil {
+		t.Fatal("onomeo opencode config missing")
+	}
+	if opencode.BaseURL != "https://onomeo.com/v1" {
+		t.Fatalf("opencode base_url = %q", opencode.BaseURL)
+	}
+	if opencode.Model != "deepseek-v4.1-flash" {
+		t.Fatalf("opencode model = %q", opencode.Model)
+	}
+}
+
+func TestProviderPresetsIncludesTeamoRouter(t *testing.T) {
+	body, err := os.ReadFile("../provider-presets.json")
+	if err != nil {
+		t.Fatalf("read provider-presets.json: %v", err)
+	}
+
+	var presets ProviderPresetsResponse
+	if err := json.Unmarshal(body, &presets); err != nil {
+		t.Fatalf("parse provider-presets.json: %v", err)
+	}
+
+	var teamorouter *ProviderPreset
+	for i := range presets.Providers {
+		if presets.Providers[i].Name == "teamorouter" {
+			teamorouter = &presets.Providers[i]
+			break
+		}
+	}
+	if teamorouter == nil {
+		t.Fatal("teamorouter preset not found")
+	}
+	if teamorouter.InviteURL != "" {
+		t.Fatalf("teamorouter invite_url = %q, want empty", teamorouter.InviteURL)
+	}
+
+	claude := teamorouter.AgentConfig("claudecode")
+	if claude == nil {
+		t.Fatal("teamorouter claudecode config missing")
+	}
+	if claude.BaseURL != "https://api.teamorouter.com" {
+		t.Fatalf("claudecode base_url = %q", claude.BaseURL)
+	}
+	if claude.Model != "claude-sonnet-5-5" {
+		t.Fatalf("claudecode model = %q", claude.Model)
+	}
+
+	codex := teamorouter.AgentConfig("codex")
+	if codex == nil {
+		t.Fatal("teamorouter codex config missing")
+	}
+	if codex.BaseURL != "https://api.teamorouter.com/v1" {
+		t.Fatalf("codex base_url = %q", codex.BaseURL)
+	}
+	if codex.Model != "gpt-6.2-sol" {
+		t.Fatalf("codex model = %q", codex.Model)
+	}
+	if codex.CodexConfig == nil || codex.CodexConfig.WireAPI != "responses" {
+		t.Fatalf("codex_config = %#v", codex.CodexConfig)
+	}
+
+	opencode := teamorouter.AgentConfig("opencode")
+	if opencode == nil {
+		t.Fatal("teamorouter opencode config missing")
+	}
+	if opencode.BaseURL != "https://api.teamorouter.com/v1" {
+		t.Fatalf("opencode base_url = %q", opencode.BaseURL)
+	}
+	if opencode.Model != "deepseek-v4-flash" {
+		t.Fatalf("opencode model = %q", opencode.Model)
+	}
+}
+
+func TestProviderPresetsIncludesStraitly(t *testing.T) {
+	body, err := os.ReadFile("../provider-presets.json")
+	if err != nil {
+		t.Fatalf("read provider-presets.json: %v", err)
+	}
+
+	var presets ProviderPresetsResponse
+	if err := json.Unmarshal(body, &presets); err != nil {
+		t.Fatalf("parse provider-presets.json: %v", err)
+	}
+
+	var straitly *ProviderPreset
+	for i := range presets.Providers {
+		if presets.Providers[i].Name == "straitly" {
+			straitly = &presets.Providers[i]
+			break
+		}
+	}
+	if straitly == nil {
+		t.Fatal("straitly preset not found")
+	}
+	if straitly.InviteURL != "" {
+		t.Fatalf("straitly invite_url = %q, want empty", straitly.InviteURL)
+	}
+	if straitly.Website != "https://straitly.ai" {
+		t.Fatalf("straitly website = %q", straitly.Website)
+	}
+
+	claude := straitly.AgentConfig("claudecode")
+	if claude == nil {
+		t.Fatal("straitly claudecode config missing")
+	}
+	if claude.BaseURL != "https://api.straitly.ai" {
+		t.Fatalf("claudecode base_url = %q", claude.BaseURL)
+	}
+	if claude.Model != "claude-sonnet-5-5" {
+		t.Fatalf("claudecode model = %q", claude.Model)
+	}
+
+	codex := straitly.AgentConfig("codex")
+	if codex == nil {
+		t.Fatal("straitly codex config missing")
+	}
+	if codex.BaseURL != "https://api.straitly.ai/v1" {
+		t.Fatalf("codex base_url = %q", codex.BaseURL)
+	}
+	if codex.Model != "gpt-6.1-sol" {
+		t.Fatalf("codex model = %q", codex.Model)
+	}
+	if codex.CodexConfig == nil || codex.CodexConfig.WireAPI != "responses" {
+		t.Fatalf("codex_config = %#v", codex.CodexConfig)
+	}
+
+	opencode := straitly.AgentConfig("opencode")
+	if opencode == nil {
+		t.Fatal("straitly opencode config missing")
+	}
+	if opencode.BaseURL != "https://api.straitly.ai/v1" {
+		t.Fatalf("opencode base_url = %q", opencode.BaseURL)
+	}
+	if opencode.Model != "deepseek/deepseek-v4-1-flash-1017" {
+		t.Fatalf("opencode model = %q", opencode.Model)
+	}
+}

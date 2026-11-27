@@ -10,6 +10,31 @@ import (
 	"time"
 )
 
+func TestClaudeUsageResetErrorOmitsRawInput(t *testing.T) {
+	const sentinel = "SENTINEL_RESET_LABEL_CONTENT"
+	_, err := parseClaudeUsageResetTime(sentinel, time.Now())
+	if err == nil || strings.Contains(err.Error(), sentinel) {
+		t.Fatalf("unsafe usage reset error: %v", err)
+	}
+}
+
+func TestPromptActionForScreen_Claude2336FolderTrust(t *testing.T) {
+	const prompt = "Quick safety check: Is this a project you created or one you trust?\n"
+	const footer = "Enter to confirm · Esc to cancel"
+	for _, tc := range []struct {
+		name, screen, want string
+	}{
+		{"no selected in 2.1.330", prompt + "❯ No, exit\n  Yes, I trust this folder\n" + footer, "\x1b[B\r"},
+		{"yes selected", prompt + "  No, exit\n❯ Yes, I trust this folder\n" + footer, "\r"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := promptActionForScreen(tc.screen); got != tc.want {
+				t.Fatalf("promptActionForScreen() = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
 func TestSanitizeClaudeUsageOutput_RendersCursorMoves(t *testing.T) {
 	raw := "" +
 		"\x1b[?2026h\rSettings:\x1b[1CStatus\x1b[1CConfig\x1b[1CUsage (tab to cycle)\r\n" +

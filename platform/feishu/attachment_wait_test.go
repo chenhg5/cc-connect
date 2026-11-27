@@ -88,6 +88,7 @@ func (h *attachmentWaitHarness) send(sender, msgID, msgType, content string, men
 	}
 	if inThread {
 		m.RootId = stringPtr(awRootID)
+		m.ThreadId = stringPtr("omt_" + awRootID)
 	}
 	if mentionBot {
 		m.Mentions = []*larkim.MentionEvent{{

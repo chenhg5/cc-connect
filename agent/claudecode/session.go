@@ -28,20 +28,21 @@ import (
 // In "auto" mode, permission requests are auto-approved internally
 // (avoiding --dangerously-skip-permissions which fails under root).
 type claudeSession struct {
-	cmd             *exec.Cmd
-	stdin           io.WriteCloser
-	stdinMu         sync.Mutex
-	events          chan core.Event
-	sessionID       atomic.Value // stores string
-	permissionMode  atomic.Value // stores string
-	autoApprove     atomic.Bool
-	acceptEditsOnly atomic.Bool
-	dontAsk         atomic.Bool
-	workDir         string
-	ctx             context.Context
-	cancel          context.CancelFunc
-	done            chan struct{}
-	alive           atomic.Bool
+	cmd              *exec.Cmd
+	stdin            io.WriteCloser
+	stdinMu          sync.Mutex
+	events           chan core.Event
+	sessionID        atomic.Value // stores string
+	permissionMode   atomic.Value // stores string
+	autoApprove      atomic.Bool
+	acceptEditsOnly  atomic.Bool
+	dontAsk          atomic.Bool
+	workDir          string
+	ctx              context.Context
+	cancel           context.CancelFunc
+	done             chan struct{}
+	alive            atomic.Bool
+	toolResultMaxLen int
 
 	// activeModel stores the model id reported by the CLI's init event (e.g.
 	// "claude-opus-4-7[1m]"). It may be empty if the init event hasn't
@@ -293,8 +294,12 @@ func buildAppendSystemPrompt(agentPrompt, platformPrompt, userAppend string) str
 	return strings.Join(parts, "\n")
 }
 
-func newClaudeSession(ctx context.Context, workDir, cliBin string, cliExtraArgs []string, cmdArgsFlag string, model, effort, sessionID, mode, systemPrompt, appendSystemPrompt string, allowedTools, disallowedTools []string, pluginDirs []string, extraEnv []string, platformPrompt string, disableVerbose bool, spawnOpts core.SpawnOptions, maxContextTokens int, ctxWindowTokens int, ccDataDir string, lang core.Language) (*claudeSession, error) {
+func newClaudeSession(ctx context.Context, workDir, cliBin string, cliExtraArgs []string, cmdArgsFlag string, model, effort, sessionID, mode, systemPrompt, appendSystemPrompt string, allowedTools, disallowedTools []string, pluginDirs []string, extraEnv []string, platformPrompt string, spawnOpts core.SpawnOptions, maxContextTokens int, ctxWindowTokens int, ccDataDir string, lang core.Language, toolResultMaxLen ...int) (*claudeSession, error) {
 	sessionCtx, cancel := context.WithCancel(ctx)
+	resultLimit := defaultToolResultMaxLen
+	if len(toolResultMaxLen) > 0 && toolResultMaxLen[0] > 0 {
+		resultLimit = toolResultMaxLen[0]
+	}
 
 	// Claude Code rejects bypassPermissions when running as root.
 	// Downgrade to "auto" which auto-approves internally in cc-connect.
@@ -320,9 +325,7 @@ func newClaudeSession(ctx context.Context, workDir, cliBin string, cliExtraArgs 
 		"--output-format", "stream-json",
 		"--input-format", "stream-json",
 		"--permission-prompt-tool", "stdio",
-	}
-	if !disableVerbose {
-		innerArgs = append(innerArgs, "--verbose")
+		"--verbose",
 	}
 
 	if mode != "" && mode != "default" {
@@ -570,6 +573,7 @@ func newClaudeSession(ctx context.Context, workDir, cliBin string, cliExtraArgs 
 		promptFilePath:       cleanupPromptPath,
 		ctxWindowOverride:    ctxWindowTokens,
 		configuredEffort:     effort,
+		toolResultMaxLen:     resultLimit,
 	}
 	cs.setPermissionMode(mode)
 	cs.sessionID.Store(sessionID)
@@ -1167,6 +1171,10 @@ func (cs *claudeSession) handleAssistant(raw map[string]any) {
 			}
 		case "text":
 			if text, ok := item["text"].(string); ok && text != "" {
+				text = stripClaudeInternalOutput(text)
+				if text == "" {
+					continue
+				}
 				evt := core.Event{Type: core.EventText, Content: text}
 				select {
 				case cs.events <- evt:
@@ -1223,7 +1231,7 @@ func (cs *claudeSession) handleUser(raw map[string]any) {
 				result = strings.Join(parts, "\n")
 			}
 			if isError {
-				slog.Debug("claudeSession: tool error", "content", result)
+				slog.Debug("claudeSession: tool error", "content_bytes", len(result))
 			}
 			success := !isError
 			code := 0
@@ -1232,7 +1240,7 @@ func (cs *claudeSession) handleUser(raw map[string]any) {
 			}
 			evt := core.Event{
 				Type:         core.EventToolResult,
-				ToolResult:   truncateStr(strings.TrimSpace(result), 500),
+				ToolResult:   truncateToolResult(strings.TrimSpace(result), cs.toolResultMaxLen),
 				ToolExitCode: &code,
 				ToolSuccess:  &success,
 			}
@@ -1245,10 +1253,43 @@ func (cs *claudeSession) handleUser(raw map[string]any) {
 	}
 }
 
+// stripClaudeInternalOutput removes CLI-internal instructions that sometimes
+// arrive inside assistant text and would otherwise be relayed to chat. An
+// unclosed reminder is discarded through the end of the block: forwarding a
+// partial internal instruction is worse than losing that malformed tail.
+func stripClaudeInternalOutput(text string) string {
+	const opening = "<system-reminder>"
+	const closing = "</system-reminder>"
+	var clean strings.Builder
+	for {
+		start := strings.Index(text, opening)
+		if start < 0 {
+			clean.WriteString(text)
+			break
+		}
+		clean.WriteString(text[:start])
+		text = text[start+len(opening):]
+		end := strings.Index(text, closing)
+		if end < 0 {
+			break
+		}
+		text = text[end+len(closing):]
+	}
+	lines := strings.Split(clean.String(), "\n")
+	kept := lines[:0]
+	for _, line := range lines {
+		if strings.TrimSpace(strings.TrimSuffix(line, ".")) == "Continue from where you left off" {
+			continue
+		}
+		kept = append(kept, line)
+	}
+	return strings.Join(kept, "\n")
+}
+
 func (cs *claudeSession) handleResult(raw map[string]any) {
 	var content string
 	if result, ok := raw["result"].(string); ok {
-		content = result
+		content = stripClaudeInternalOutput(result)
 	}
 	if sid, ok := raw["session_id"].(string); ok && sid != "" {
 		cs.sessionID.Store(sid)

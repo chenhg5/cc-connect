@@ -1,12 +1,29 @@
 package core
 
 import (
+	"bytes"
 	"context"
 	"fmt"
+	"log/slog"
+	"strings"
 	"sync"
 	"testing"
 	"time"
 )
+
+func TestStaleAskQuestionLogOmitsCallbackContent(t *testing.T) {
+	const sentinel = "SENTINEL_ASK_CALLBACK_CONTENT"
+	var logs bytes.Buffer
+	previous := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logs, nil)))
+	t.Cleanup(func() { slog.SetDefault(previous) })
+	e := newTestEngine()
+	p := &stubPlatformEngine{n: "test"}
+	e.dropStaleAskQuestionCallback(p, &Message{SessionKey: "test:user", ReplyCtx: "ctx"}, sentinel)
+	if strings.Contains(logs.String(), sentinel) {
+		t.Fatal("stale callback log exposed content")
+	}
+}
 
 // askqJourneySession is a busy agent session the test drives event by event,
 // recording both prompts and AskUserQuestion answers sent to the agent.
