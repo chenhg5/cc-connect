@@ -1814,7 +1814,7 @@ func (p *Platform) groupHistoryScope(msg *larkim.EventMessage, chatID string) st
 		return ""
 	}
 	if p.threadIsolation && msg != nil && stringValue(msg.ChatType) == "group" {
-		if rootID := stringValue(msg.RootId); rootID != "" {
+		if rootID := threadRootID(msg); rootID != "" {
 			return "thread:" + chatID + ":" + rootID
 		}
 	}
@@ -4629,11 +4629,26 @@ func stripMentions(text string, mentions []*larkim.MentionEvent, botOpenID strin
 	return strings.TrimSpace(text)
 }
 
+// threadRootID is the root of the thread msg is in, or "" outside threads.
+// root_id names a thread only alongside thread_id: a plain reply in the main
+// channel carries the root of the chain it quotes, yet the bot answers it in
+// a new thread on the reply itself, and every later message there carries
+// the reply's id as root_id. Taking the quoted root would put the first turn
+// and the rest of that thread in two sessions.
+func threadRootID(msg *larkim.EventMessage) string {
+	if stringValue(msg.ThreadId) == "" {
+		return ""
+	}
+	return stringValue(msg.RootId)
+}
+
 // TODO: Session-key derivation and reply-thread behavior are split across multiple code paths here.
 // Should revisit thread/root handling without changing thread_isolation=false behavior.
 func (p *Platform) makeSessionKey(msg *larkim.EventMessage, chatID, userID string) string {
 	if p.threadIsolation && msg != nil && stringValue(msg.ChatType) == "group" {
-		rootID := stringValue(msg.RootId)
+		// A plain reply in the main channel is answered in a new thread
+		// on the reply itself (reply_in_thread): it roots its own session.
+		rootID := threadRootID(msg)
 		if rootID == "" {
 			rootID = stringValue(msg.MessageId)
 		}

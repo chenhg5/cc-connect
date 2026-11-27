@@ -726,6 +726,7 @@ func TestLark_ThreadIsolationUsesRootSessionKey(t *testing.T) {
 
 	messageID := "om_reply"
 	rootID := "om_root"
+	threadID := "omt_root"
 	chatID := "oc_test"
 	openID := "ou_test"
 	msgType := "text"
@@ -752,6 +753,7 @@ func TestLark_ThreadIsolationUsesRootSessionKey(t *testing.T) {
 			Message: &larkim.EventMessage{
 				MessageId:   &messageID,
 				RootId:      &rootID,
+				ThreadId:    &threadID,
 				ChatId:      &chatID,
 				ChatType:    &chatType,
 				MessageType: &msgType,
