@@ -14,13 +14,25 @@ import (
 	"github.com/chenhg5/cc-connect/internal/taskkill"
 )
 
-func prepareCmdForKill(cmd *exec.Cmd) {
+// CREATE_NO_WINDOW creates a Windows console application without a console.
+const createNoWindow uint32 = 0x08000000
+
+func prepareAppServerCmd(cmd *exec.Cmd) {
 	if cmd == nil {
 		return
 	}
 	if cmd.SysProcAttr == nil {
 		cmd.SysProcAttr = &syscall.SysProcAttr{}
 	}
+	cmd.SysProcAttr.HideWindow = true
+	cmd.SysProcAttr.CreationFlags |= createNoWindow
+}
+
+func prepareCmdForKill(cmd *exec.Cmd) {
+	if cmd == nil {
+		return
+	}
+	prepareAppServerCmd(cmd)
 	cmd.SysProcAttr.CreationFlags |= syscall.CREATE_NEW_PROCESS_GROUP
 }
 
@@ -28,7 +40,7 @@ func forceKillCmd(cmd *exec.Cmd) error {
 	if cmd == nil || cmd.Process == nil {
 		return nil
 	}
-	killCmd := exec.Command("taskkill", "/T", "/F", "/PID", strconv.Itoa(cmd.Process.Pid))
+	killCmd := taskkillCommand(cmd.Process.Pid)
 	output, err := killCmd.CombinedOutput()
 	if err == nil {
 		return nil
@@ -41,6 +53,12 @@ func forceKillCmd(cmd *exec.Cmd) error {
 	} else {
 		return fmt.Errorf("taskkill failed: %w: %s; process kill fallback failed: %w", err, processKillOutput(output), killErr)
 	}
+}
+
+func taskkillCommand(pid int) *exec.Cmd {
+	command := exec.Command("taskkill", "/T", "/F", "/PID", strconv.Itoa(pid))
+	command.SysProcAttr = &syscall.SysProcAttr{HideWindow: true, CreationFlags: createNoWindow}
+	return command
 }
 
 func processKillOutput(output []byte) string {
