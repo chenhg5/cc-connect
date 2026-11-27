@@ -120,3 +120,24 @@ func TestIsOldMessage(t *testing.T) {
 		t.Error("message 1s before startup should be within grace period")
 	}
 }
+
+// A host can boot with its RTC hours in the future (local time stored where UTC
+// is expected). cc-connect then records a StartTime far ahead, and once NTP steps
+// the clock back every inbound message looks older than the process and is
+// dropped — the bot stays connected but never answers. This is the regression
+// test for that failure mode: it fails on the pre-fix code (the raw StartTime
+// comparison) and passes once the cutoff is corrected with the monotonic clock.
+func TestIsOldMessage_ClockRollbackDoesNotDropFreshMessages(t *testing.T) {
+	oldStartTime := StartTime
+	defer func() { StartTime = oldStartTime }()
+
+	now := time.Now()
+	StartTime = now.Add(8 * time.Hour) // process "started" 8h in the future
+
+	if IsOldMessage(now) {
+		t.Error("fresh message must not be classified as pre-startup after the wall clock steps back")
+	}
+	if !IsOldMessage(now.Add(-30 * time.Minute)) {
+		t.Error("a message from before this process started must still be filtered out")
+	}
+}
