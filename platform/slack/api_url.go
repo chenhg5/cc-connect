@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net"
+	"net/http"
 	"net/url"
 	"strings"
 
@@ -213,7 +214,46 @@ func isLoopbackHost(host string) bool {
 func (p *Platform) newClient() *slack.Client {
 	opts := []slack.Option{slack.OptionAppLevelToken(p.appToken)}
 	if p.apiURL != "" {
-		opts = append(opts, slack.OptionAPIURL(p.apiURL))
+		opts = append(opts,
+			slack.OptionAPIURL(p.apiURL),
+			slack.OptionHTTPClient(&redactingHTTPClient{inner: &http.Client{}, root: p.apiURL}))
 	}
 	return slack.New(p.botToken, opts...)
+}
+
+// redactingHTTPClient applies the display rule to transport errors. A failed
+// request comes back from net/http as a *url.Error whose message embeds the
+// full request URL, and every SDK error wrapped with %w in this package would
+// print it, path prefix included. Rewriting the URL here, the one place every
+// Web API call passes through, covers those call sites and any added later.
+//
+// It is only installed for a custom base_url: the default slack.com root
+// carries nothing to hide, so the default configuration is unchanged. The
+// inner client matches the SDK's own default (&http.Client{}).
+type redactingHTTPClient struct {
+	inner *http.Client
+	root  string // normalized base_url, ends with "/"
+}
+
+func (c *redactingHTTPClient) Do(req *http.Request) (*http.Response, error) {
+	resp, err := c.inner.Do(req)
+	if ue, ok := err.(*url.Error); ok {
+		cp := *ue // keep Op and the wrapped error, so errors.Is/As still work
+		cp.URL = c.describeRequestURL(ue.URL)
+		return resp, &cp
+	}
+	return resp, err
+}
+
+// describeRequestURL renders a request URL for an error: the configured root
+// by the display rule, followed by the Web API method name, which is the part
+// worth keeping for diagnosis. Anything else falls back to describeAPIURL.
+func (c *redactingHTTPClient) describeRequestURL(raw string) string {
+	if method, ok := strings.CutPrefix(raw, c.root); ok {
+		if i := strings.IndexAny(method, "?#"); i >= 0 {
+			method = method[:i]
+		}
+		return describeAPIURL(c.root) + method
+	}
+	return describeAPIURL(raw)
 }

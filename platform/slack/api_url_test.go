@@ -3,9 +3,12 @@ package slack
 import (
 	"bytes"
 	"context"
+	"errors"
 	"log/slog"
+	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"testing"
 )
@@ -372,5 +375,51 @@ func TestNewClient_UsesBaseURL(t *testing.T) {
 	}
 	if wsURL != "wss://relay.example.com/link" {
 		t.Errorf("websocket URL = %q, want the one returned by base_url", wsURL)
+	}
+}
+
+// TestNewClient_TransportErrorHidesPath exercises the SDK end to end against a
+// closed port: the connection error must not echo a secret in the path prefix,
+// but should keep the host and the method name, and stay a *url.Error.
+func TestNewClient_TransportErrorHidesPath(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	addr := ln.Addr().String()
+	ln.Close() // nothing listens here now, so the request fails in transport
+
+	apiURL, err := normalizeAPIURL("http://" + addr + "/sup3rsecret/api/")
+	if err != nil {
+		t.Fatalf("normalizeAPIURL: %v", err)
+	}
+	p := &Platform{botToken: "xoxb-test", appToken: "xapp-test", apiURL: apiURL}
+	_, err = p.newClient().AuthTestContext(context.Background())
+	if err == nil {
+		t.Fatal("AuthTest against a closed port: want error")
+	}
+	msg := err.Error()
+	if strings.Contains(msg, "sup3r") {
+		t.Errorf("transport error echoes the path secret: %v", err)
+	}
+	if !strings.Contains(msg, addr) || !strings.Contains(msg, "auth.test") {
+		t.Errorf("transport error should keep host and method for diagnosis: %v", err)
+	}
+	var ue *url.Error
+	if !errors.As(err, &ue) {
+		t.Errorf("error should still unwrap to *url.Error: %T %v", err, err)
+	}
+}
+
+func TestDescribeRequestURL(t *testing.T) {
+	c := &redactingHTTPClient{root: "https://relay.example.com/sup3rsecret/api/"}
+	for in, want := range map[string]string{
+		"https://relay.example.com/sup3rsecret/api/chat.postMessage":  "https://relay.example.com/<omitted>/api/chat.postMessage",
+		"https://relay.example.com/sup3rsecret/api/auth.test?x=sup3r": "https://relay.example.com/<omitted>/api/auth.test",
+		"https://other.example.com/sup3rsecret/files/x":               "https://other.example.com/<path omitted>",
+	} {
+		if got := c.describeRequestURL(in); got != want {
+			t.Errorf("describeRequestURL(%q) = %q, want %q", in, got, want)
+		}
 	}
 }
