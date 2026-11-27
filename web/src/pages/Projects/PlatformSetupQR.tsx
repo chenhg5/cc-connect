@@ -123,19 +123,15 @@ export default function PlatformSetupQR({ platformType, projectName, workDir, ag
     pollingRef.current = false;
     try {
       const res = await setupWeixinBegin();
-      console.log('[weixin-setup] begin response:', { qr_key: res.qr_key, qr_url_len: res.qr_url?.length, qr_url_prefix: res.qr_url?.slice(0, 80) });
       const qrKey = res.qr_key;
       weixinRef.current.qrKey = qrKey;
       setQrUrl(res.qr_url);
       setPhase('scanning');
 
-      console.log('[weixin-setup] starting poll loop, qrKey=', qrKey, 'cancelledRef=', cancelledRef.current);
       let consecutiveErrors = 0;
       while (!cancelledRef.current) {
         try {
-          console.log('[weixin-setup] sending poll request, qrKey=', qrKey);
           const pollRes = await setupWeixinPoll(qrKey);
-          console.log('[weixin-setup] poll response:', pollRes);
           consecutiveErrors = 0;
           if (cancelledRef.current) break;
 
@@ -161,7 +157,6 @@ export default function PlatformSetupQR({ platformType, projectName, workDir, ag
               return;
           }
         } catch (e: any) {
-          console.error('[weixin-setup] poll error:', e);
           if (cancelledRef.current) break;
           consecutiveErrors++;
           if (consecutiveErrors >= 5) {
@@ -173,7 +168,6 @@ export default function PlatformSetupQR({ platformType, projectName, workDir, ag
         await sleep(500);
       }
     } catch (e: any) {
-      console.error('[weixin-setup] begin error:', e);
       setError(e?.message || String(e));
       setPhase('error');
     }

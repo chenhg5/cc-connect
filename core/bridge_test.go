@@ -6,6 +6,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -15,6 +16,44 @@ import (
 
 	"github.com/gorilla/websocket"
 )
+
+func TestBridgeServerStart_PortInUseReturnsError(t *testing.T) {
+	occupied, err := net.Listen("tcp", ":0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := occupied.Close(); err != nil {
+			t.Errorf("close occupied listener: %v", err)
+		}
+	})
+	port := occupied.Addr().(*net.TCPAddr).Port
+	bs := NewBridgeServer(port, "test-token", "/bridge/ws", nil)
+	if err := bs.Start(); err == nil {
+		t.Fatal("expected occupied bridge port to fail synchronously")
+	}
+	if bs.Listening() {
+		t.Fatal("failed bridge must not report listening")
+	}
+	if bs.LastError() == "" {
+		t.Fatal("failed bridge must expose the bind error")
+	}
+}
+
+func TestBridgeServerStartStopListeningState(t *testing.T) {
+	bs := NewBridgeServer(0, "test-token", "/bridge/ws", nil)
+	bs.port = 0 // bind an ephemeral listener; constructor defaults zero to 9810
+	if err := bs.Start(); err != nil {
+		t.Fatal(err)
+	}
+	if !bs.Listening() || bs.LastError() != "" {
+		t.Fatalf("expected listening bridge without error, got listening=%t error=%q", bs.Listening(), bs.LastError())
+	}
+	bs.Stop()
+	if bs.Listening() {
+		t.Fatal("stopped bridge still reports listening")
+	}
+}
 
 // helpers ------------------------------------------------------------------
 

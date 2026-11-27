@@ -726,6 +726,7 @@ func TestLark_ThreadIsolationUsesRootSessionKey(t *testing.T) {
 
 	messageID := "om_reply"
 	rootID := "om_root"
+	threadID := "omt_root"
 	chatID := "oc_test"
 	openID := "ou_test"
 	msgType := "text"
@@ -752,6 +753,7 @@ func TestLark_ThreadIsolationUsesRootSessionKey(t *testing.T) {
 			Message: &larkim.EventMessage{
 				MessageId:   &messageID,
 				RootId:      &rootID,
+				ThreadId:    &threadID,
 				ChatId:      &chatID,
 				ChatType:    &chatType,
 				MessageType: &msgType,
@@ -1043,9 +1045,13 @@ func TestBuildPreviewCardJSON_ProgressPayloadUsesStructuredCard(t *testing.T) {
 	if err := json.Unmarshal([]byte(cardJSON), &card); err != nil {
 		t.Fatalf("card JSON is invalid: %v", err)
 	}
-	header, ok := card["header"].(map[string]any)
-	if !ok || header == nil {
-		t.Fatalf("expected header in card json, got %#v", card["header"])
+	// The status is the first body element: a card header cannot be updated
+	// in place, and progress cards are refreshed in place.
+	elements := card["body"].(map[string]any)["elements"].([]any)
+	status, _ := elements[0].(map[string]any)
+	content, _ := status["content"].(string)
+	if status["element_id"] != progressStatusElementID || !strings.Contains(content, "Codex · Running") {
+		t.Fatalf("first body element should be the status line, got %#v", status)
 	}
 }
 
@@ -1495,7 +1501,7 @@ func containsMarkdownLine(content string, want string) bool {
 	return false
 }
 
-func TestBuildCardJSONWithStatusFooter_SharesCardTableBudget(t *testing.T) {
+func TestBuildCardJSONWithStatusFooter_BodyRowsLeaveFooterTableBudget(t *testing.T) {
 	body := strings.Join([]string{
 		"| A |",
 		"|---|",
@@ -1516,11 +1522,11 @@ func TestBuildCardJSONWithStatusFooter_SharesCardTableBudget(t *testing.T) {
 	}, "\n")
 
 	content := strings.Join(collectCardMarkdownContents(t, buildCardJSONWithStatusFooter(body, footer)), "\n")
-	if !strings.Contains(content, "| C |\n|---|\n| 3 |") {
-		t.Fatalf("third table should remain renderable, got %q", content)
+	if !strings.Contains(content, "| C |\n|---|\n| 3 |") || !strings.Contains(content, "| D |\n|---|\n| 4 |") {
+		t.Fatalf("footer tables should remain renderable after body uses row components, got %q", content)
 	}
-	if !strings.Contains(content, "```\n| D |\n|---|\n| 4 |\n```") {
-		t.Fatalf("fourth table across card elements should be downgraded, got %q", content)
+	if strings.Contains(content, "```\n| D |") {
+		t.Fatalf("footer table was unnecessarily downgraded, got %q", content)
 	}
 }
 

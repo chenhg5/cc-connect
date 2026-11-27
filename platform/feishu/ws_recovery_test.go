@@ -17,6 +17,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/chenhg5/cc-connect/core"
 	"github.com/gorilla/websocket"
 	"github.com/larksuite/oapi-sdk-go/v3/event/dispatcher"
 	larkim "github.com/larksuite/oapi-sdk-go/v3/service/im/v1"
@@ -27,20 +28,26 @@ import (
 // when silent is set. This reproduces a live socket with a dead inbound path,
 // rather than the ordinary disconnect that the old SDK already recovered.
 type wsRecoveryGateway struct {
-	server      *httptest.Server
-	silent      atomic.Bool
-	connections atomic.Int32
-	active      atomic.Int32
-	pongs       chan struct{}
-	closed      chan struct{}
-	replies     chan string
-	mu          sync.Mutex
-	sockets     []*websocket.Conn
+	server         *httptest.Server
+	silent         atomic.Bool
+	connections    atomic.Int32
+	active         atomic.Int32
+	endpoints      chan struct{}
+	failEndpoint   atomic.Bool
+	endpointCode   atomic.Int32
+	reconnectCount atomic.Int32
+	pongs          chan struct{}
+	closed         chan struct{}
+	replies        chan string
+	mu             sync.Mutex
+	sockets        []*websocket.Conn
 }
 
 func newWSRecoveryGateway(t *testing.T) *wsRecoveryGateway {
 	t.Helper()
 	g := &wsRecoveryGateway{pongs: make(chan struct{}, 32), closed: make(chan struct{}, 32), replies: make(chan string, 32)}
+	g.endpoints = make(chan struct{}, 32)
+	g.reconnectCount.Store(3)
 	g.server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if strings.HasPrefix(r.URL.Path, "/open-apis/") {
 			w.Header().Set("Content-Type", "application/json")
@@ -58,11 +65,16 @@ func newWSRecoveryGateway(t *testing.T) *wsRecoveryGateway {
 			return
 		}
 		if r.URL.Path == larkws.GenEndpointUri {
+			g.endpoints <- struct{}{}
+			if g.failEndpoint.Swap(false) {
+				http.Error(w, "temporary gateway outage", http.StatusServiceUnavailable)
+				return
+			}
 			w.Header().Set("Content-Type", "application/json")
-			_ = json.NewEncoder(w).Encode(larkws.EndpointResp{Data: &larkws.Endpoint{
+			_ = json.NewEncoder(w).Encode(larkws.EndpointResp{Code: int(g.endpointCode.Load()), Data: &larkws.Endpoint{
 				Url: "ws" + strings.TrimPrefix(g.server.URL, "http") + "/ws?service_id=1&device_id=test",
 				ClientConfig: &larkws.ClientConfig{
-					PingInterval: 1, ReconnectCount: 3, ReconnectInterval: 1,
+					PingInterval: 1, ReconnectCount: int(g.reconnectCount.Load()), ReconnectInterval: 1,
 				},
 			}})
 			return
@@ -145,16 +157,118 @@ func startWSRecoveryPlatform(t *testing.T, g *wsRecoveryGateway) (*Platform, <-c
 
 func startWSRecoveryPlatformWithHandler(t *testing.T, g *wsRecoveryGateway, handler func(context.Context, *larkim.P2MessageReceiveV1) error) *Platform {
 	t.Helper()
+	return startWSRecoveryPlatformWithLifecycle(t, g, handler, nil)
+}
+
+func startWSRecoveryPlatformWithLifecycle(t *testing.T, g *wsRecoveryGateway, handler func(context.Context, *larkim.P2MessageReceiveV1) error, lifecycle core.PlatformLifecycleHandler) *Platform {
+	t.Helper()
 	p := &Platform{
 		appID: "test-app", appSecret: "test-secret", domain: g.server.URL,
 		platformName: "feishu", isWSPrimary: true,
-		eventHandler: dispatcher.NewEventDispatcher("", "").OnP2MessageReceiveV1(handler),
+		eventHandler:     dispatcher.NewEventDispatcher("", "").OnP2MessageReceiveV1(handler),
+		lifecycleHandler: lifecycle,
 	}
+	p.sharedGroup = &sharedWSGroup{platforms: []*Platform{p}}
 	if err := p.startWebSocketMode(); err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = p.Stop() })
 	return p
+}
+
+// A finite server-provided reconnect budget can terminate the SDK even though
+// the outage is temporary. The platform must then create a fresh SDK client.
+func TestWebSocketRecoversAfterReconnectAttemptsExhausted(t *testing.T) {
+	t.Parallel()
+	g := newWSRecoveryGateway(t)
+	g.reconnectCount.Store(1)
+	primaryState := &wsRecoveryLifecycle{events: make(chan bool, 4)}
+	secondaryState := &wsRecoveryLifecycle{events: make(chan bool, 4)}
+	events := make(chan string, 16)
+	p := startWSRecoveryPlatformWithLifecycle(t, g, func(_ context.Context, event *larkim.P2MessageReceiveV1) error {
+		events <- *event.Event.Message.MessageId
+		return nil
+	}, primaryState)
+	waitWSRecoveryEvent(t, events, "message-1")
+	primaryState.expect(t, true)
+	secondary := &Platform{}
+	secondary.SetLifecycleHandler(secondaryState)
+	p.sharedGroup.mu.Lock()
+	p.sharedGroup.platforms = append(p.sharedGroup.platforms, secondary)
+	p.sharedGroup.mu.Unlock()
+	p.sharedGroup.syncLifecycle(secondary)
+	secondaryState.expect(t, true)
+	g.failEndpoint.Store(true)
+	g.mu.Lock()
+	_ = g.sockets[0].Close()
+	g.mu.Unlock()
+	waitWSRecoveryEvent(t, events, "message-2")
+	for _, state := range []*wsRecoveryLifecycle{primaryState, secondaryState} {
+		state.expect(t, false)
+		state.expect(t, true)
+	}
+	if got := g.active.Load(); got != 1 {
+		t.Fatalf("active connections = %d, want one recovered connection", got)
+	}
+}
+
+func TestWebSocketStopAfterReconnectFailure(t *testing.T) {
+	t.Parallel()
+	g := newWSRecoveryGateway(t)
+	g.reconnectCount.Store(1)
+	p, _ := startWSRecoveryPlatform(t, g)
+	<-g.endpoints // Initial bootstrap.
+	g.failEndpoint.Store(true)
+	g.mu.Lock()
+	_ = g.sockets[0].Close()
+	g.mu.Unlock()
+	select {
+	case <-g.endpoints: // The SDK's last reconnect attempt fails.
+	case <-time.After(5 * time.Second):
+		t.Fatal("SDK did not attempt to reconnect")
+	}
+	if err := p.Stop(); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-g.endpoints:
+		t.Fatal("Stop allowed another WebSocket bootstrap")
+	case <-time.After(2 * time.Second):
+	}
+}
+
+type wsRecoveryLifecycle struct{ events chan bool }
+
+func (r *wsRecoveryLifecycle) OnPlatformReady(core.Platform)              { r.events <- true }
+func (r *wsRecoveryLifecycle) OnPlatformUnavailable(core.Platform, error) { r.events <- false }
+
+func (r *wsRecoveryLifecycle) expect(t *testing.T, want bool) {
+	t.Helper()
+	select {
+	case ready := <-r.events:
+		if ready != want {
+			t.Fatalf("platform ready = %v, want %v", ready, want)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatalf("missing platform ready = %v notification", want)
+	}
+}
+
+func TestWebSocketDoesNotRetryPermanentClientError(t *testing.T) {
+	t.Parallel()
+	g := newWSRecoveryGateway(t)
+	g.endpointCode.Store(19001) // Invalid app credentials: SDK ClientError.
+	startWSRecoveryPlatformWithHandler(t, g, func(context.Context, *larkim.P2MessageReceiveV1) error { return nil })
+	select {
+	case <-g.endpoints:
+	case <-time.After(5 * time.Second):
+		t.Fatal("SDK did not attempt to connect")
+	}
+	select {
+	case <-g.endpoints:
+		t.Fatal("permanent configuration failure was retried")
+	case <-time.After(2 * time.Second):
+	}
 }
 
 func waitWSRecoveryEvent(t *testing.T, events <-chan string, want string) {

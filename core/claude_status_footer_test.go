@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 // newClaudeFooterEngine returns an Engine with all three footer-related flags
@@ -256,6 +257,31 @@ func TestBuildReplyFooter_LegacyAllSegments(t *testing.T) {
 	}
 }
 
+func TestBuildReplyFooter_NoUsageShowsUnknownContext(t *testing.T) {
+	e := newLegacyFooterEngine()
+	e.ctx = context.Background()
+	e.i18n = NewI18n(LangEnglish)
+	agent := &stubFooterAgent{model: "claude-test", workDir: "/tmp/ws"}
+	got := e.buildReplyFooter(agent, nil, "/tmp/ws", "")
+	for _, segment := range []string{"claude-test", "ctx: ?", "ws"} {
+		if !strings.Contains(got, segment) {
+			t.Errorf("footer with missing usage = %q, missing %q", got, segment)
+		}
+	}
+}
+
+func TestComposeRichStatusFooter_NoUsageShowsUnknownContext(t *testing.T) {
+	e := newClaudeFooterEngine()
+	e.i18n = NewI18n(LangEnglish)
+	agent := &stubFooterAgent{model: "claude-test", workDir: "/tmp/ws"}
+	got := e.composeRichStatusFooter(false, time.Now(), agent, nil, "/tmp/ws")
+	for _, segment := range []string{"claude-test", "ctx: ?", "ws"} {
+		if !strings.Contains(got, segment) {
+			t.Errorf("rich footer with missing usage = %q, missing %q", got, segment)
+		}
+	}
+}
+
 func TestCompactReplyFooterPath_HomeRelativeDeepPathStaysFull(t *testing.T) {
 	homeDir := t.TempDir()
 	t.Setenv("HOME", homeDir)
@@ -320,10 +346,14 @@ type stubFooterSendingPlatform struct {
 	stubPlatformEngine
 	footerCalls []string // "<content>|FOOTER|<footer>"
 	failFooter  bool     // when true, SendWithStatusFooter returns an error
+	maybeSent   bool     // when true, SendWithStatusFooter returns ErrMaybeDelivered
 }
 
 func (p *stubFooterSendingPlatform) SendWithStatusFooter(_ context.Context, _ any, content, footer string) error {
 	p.footerCalls = append(p.footerCalls, content+"|FOOTER|"+footer)
+	if p.maybeSent {
+		return fmt.Errorf("simulated ambiguous delivery: %w", ErrMaybeDelivered)
+	}
 	if p.failFooter {
 		return fmt.Errorf("simulated SendWithStatusFooter failure")
 	}
@@ -370,6 +400,26 @@ func TestSendChunksWithStatusFooter_FallsBackInlineWhenFooterSenderFails(t *test
 	// Inline fallback applies appendReplyFooter using the upstream core footer shape.
 	if !strings.Contains(sent[0], "hello body") || !strings.Contains(sent[0], "*model · ctx 5%*") {
 		t.Errorf("inline fallback content = %q, missing body or footer", sent[0])
+	}
+}
+
+func TestSendChunksWithStatusFooter_DoesNotDuplicateOnMaybeDelivered(t *testing.T) {
+	// When SendWithStatusFooter reports a failure that may have delivered (e.g.
+	// Feishu code=2200), re-sending the same chunk inline would duplicate the
+	// message in the chat. The helper must bail instead of falling back.
+	p := &stubFooterSendingPlatform{stubPlatformEngine: stubPlatformEngine{n: "test"}, maybeSent: true}
+	send := func(pl Platform, rctx any, content string) error {
+		return pl.Send(context.Background(), rctx, content)
+	}
+	ok := sendChunksWithStatusFooter(context.Background(), p, "ctx", "hello body", "model · ctx 5%", send)
+	if ok {
+		t.Fatal("expected false when footer send may have delivered")
+	}
+	if len(p.footerCalls) != 1 {
+		t.Fatalf("expected 1 attempted footer call, got %d", len(p.footerCalls))
+	}
+	if sent := p.getSent(); len(sent) != 0 {
+		t.Fatalf("expected no inline re-send on maybe-delivered error, got %#v", sent)
 	}
 }
 
