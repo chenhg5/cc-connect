@@ -1231,10 +1231,10 @@ func (p *Platform) onCardAction(event *callback.CardActionTriggerEvent) (*callba
 
 	if strings.HasPrefix(actionVal, "askq:") || actionVal == "askq_text" {
 		token, _ := event.Event.Action.Value["askq_token"].(string)
-		// A callback carrying no token is the generic fallback card (what the
-		// engine renders when the native card fails to send) and any card
-		// rendered before tokens existed. It answers the question pending in
-		// this session; without one it is stale like any other.
+		// A callback carrying no token is a card rendered before tokens
+		// existed: the generic fallback card now carries the engine-issued
+		// token too. It answers the question pending in this session; without
+		// one it is stale like any other.
 		if token == "" {
 			if t, ok := p.askq.pendingToken(sessionKey); ok {
 				token = t

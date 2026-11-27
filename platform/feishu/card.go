@@ -463,6 +463,25 @@ func renderCard(card *core.Card, sessionKey string) string {
 	return string(b)
 }
 
+// IssueAskQuestionClaim implements core.AskQuestionClaimIssuer. The engine
+// calls it once per question, before rendering, so the native card and the
+// generic fallback card can carry the same one-time token. Validation matches
+// SendAskQuestionCard: a claim must name both the chat and the exact session
+// (including its thread identity under thread_isolation) it answers for.
+func (p *interactivePlatform) IssueAskQuestionClaim(_ context.Context, rctx any, qIdx int, question string, texts core.AskQuestionCardTexts) (string, error) {
+	rc, ok := rctx.(replyContext)
+	if !ok {
+		return "", fmt.Errorf("%s: invalid reply context type %T", p.tag(), rctx)
+	}
+	if rc.chatID == "" {
+		return "", fmt.Errorf("%s: chatID is empty, cannot issue ask-question claim", p.tag())
+	}
+	if rc.sessionKey == "" {
+		return "", fmt.Errorf("%s: sessionKey is empty, cannot bind ask-question claim", p.tag())
+	}
+	return p.askq.mint(rc.sessionKey, rc.chatID, qIdx, question, "", texts.ExpiredNotice, texts.TooLongNotice), nil
+}
+
 // SendAskQuestionCard renders an AskUserQuestion prompt as a Feishu card with
 // schema 2.0, combining option buttons with a free-form text input:
 //   - option buttons use a behaviors callback whose value reuses the legacy
@@ -472,13 +491,14 @@ func renderCard(card *core.Card, sessionKey string) string {
 //     into the "answer" field; onCardAction forwards that text as the user's
 //     answer (resolved by the engine's resolveAskQuestionAnswer free-form path).
 //
-// Every interactive element carries an opaque one-time token minted for the
-// exact originating session (rc.sessionKey, including its thread identity
-// under thread_isolation) and this question batch. onCardAction claims the
-// token before dispatching, so answers always route back to the session the
+// Every interactive element carries the opaque one-time token the engine
+// issued for the exact originating session (rc.sessionKey, including its
+// thread identity under thread_isolation) and this question batch. The same
+// token goes on the generic fallback card, so onCardAction can claim it
+// whichever card was delivered: answers always route back to the session the
 // question was asked in, and a stale, replayed or superseded card is rejected
 // instead of silently answering whatever is pending now.
-func (p *interactivePlatform) SendAskQuestionCard(ctx context.Context, rctx any, texts core.AskQuestionCardTexts, q core.UserQuestion, qIdx int) error {
+func (p *interactivePlatform) SendAskQuestionCard(ctx context.Context, rctx any, texts core.AskQuestionCardTexts, q core.UserQuestion, qIdx int, token string) error {
 	rc, ok := rctx.(replyContext)
 	if !ok {
 		return fmt.Errorf("%s: invalid reply context type %T", p.tag(), rctx)
@@ -489,7 +509,12 @@ func (p *interactivePlatform) SendAskQuestionCard(ctx context.Context, rctx any,
 	if rc.sessionKey == "" {
 		return fmt.Errorf("%s: sessionKey is empty, cannot bind ask-question card", p.tag())
 	}
-	token := p.askq.mint(rc.sessionKey, rc.chatID, qIdx, q.Question, "", texts.ExpiredNotice, texts.TooLongNotice)
+	if token == "" {
+		// The engine mints the claim through IssueAskQuestionClaim; without it
+		// the card could not accept an answer. Signal the generic fallback
+		// instead of rendering an unanswerable card.
+		return fmt.Errorf("%s: ask-question claim token is empty", p.tag())
+	}
 	cardJSON, err := json.Marshal(buildAskQuestionCard2(texts, q, qIdx, rc.sessionKey, token))
 	if err != nil {
 		return fmt.Errorf("%s: marshal ask-question card: %w", p.tag(), err)

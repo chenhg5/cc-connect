@@ -13203,29 +13203,47 @@ func (e *Engine) sendAskQuestionPrompt(p Platform, replyCtx any, questions []Use
 		titleSuffix = fmt.Sprintf(" (%d/%d)", qIdx+1, total)
 	}
 
+	body := "**" + q.Question + "**\n\n"
+	for i, opt := range q.Options {
+		body += fmt.Sprintf("%d. **%s**", i+1, opt.Label)
+		if opt.Description != "" {
+			body += " — " + opt.Description
+		}
+		body += "\n"
+	}
+	texts := AskQuestionCardTexts{
+		Title:            e.i18n.T(MsgAskQuestionTitle) + titleSuffix,
+		Body:             body,
+		Note:             e.i18n.T(MsgAskQuestionNoteFreeform),
+		InputPlaceholder: e.i18n.T(MsgAskQuestionFreeformPlaceholder),
+		InputLabel:       e.i18n.T(MsgAskQuestionFreeformLabel),
+		SubmitLabel:      e.i18n.T(MsgAskQuestionFreeformSubmit),
+		ExpiredNotice:    e.i18n.T(MsgAskqCardExpired),
+		TooLongNotice:    e.i18n.T(MsgAskqCardTooLong),
+	}
+
+	// Mint the claim before choosing which card to render, so the native card
+	// and the generic fallback carry the same one-time token. Minting only
+	// inside the native send leaves the fallback card unanswerable: its
+	// buttons carry no token, and with no pending claim in the session every
+	// click is rejected as stale (#1778 review).
+	claimToken := ""
+	if issuer, ok := p.(AskQuestionClaimIssuer); ok {
+		token, err := issuer.IssueAskQuestionClaim(context.Background(), replyCtx, qIdx, q.Question, texts)
+		if err != nil {
+			slog.Warn("sendAskQuestionPrompt: could not issue ask-question claim",
+				"platform", p.Name(), "error", err)
+		} else {
+			claimToken = token
+		}
+	}
+
 	// Try native rich ask-question card (Feishu schema 2.0: option buttons +
 	// free-form input in one card). Single-select only — for multiSelect,
 	// buttons would resolve on the first click and prevent selecting multiple.
 	if !q.MultiSelect {
 		if aqs, ok := p.(AskQuestionCardSender); ok {
-			body := "**" + q.Question + "**\n\n"
-			for i, opt := range q.Options {
-				body += fmt.Sprintf("%d. **%s**", i+1, opt.Label)
-				if opt.Description != "" {
-					body += " — " + opt.Description
-				}
-				body += "\n"
-			}
-			err := aqs.SendAskQuestionCard(context.Background(), replyCtx, AskQuestionCardTexts{
-				Title:            e.i18n.T(MsgAskQuestionTitle) + titleSuffix,
-				Body:             body,
-				Note:             e.i18n.T(MsgAskQuestionNoteFreeform),
-				InputPlaceholder: e.i18n.T(MsgAskQuestionFreeformPlaceholder),
-				InputLabel:       e.i18n.T(MsgAskQuestionFreeformLabel),
-				SubmitLabel:      e.i18n.T(MsgAskQuestionFreeformSubmit),
-				ExpiredNotice:    e.i18n.T(MsgAskqCardExpired),
-				TooLongNotice:    e.i18n.T(MsgAskqCardTooLong),
-			}, q, qIdx)
+			err := aqs.SendAskQuestionCard(context.Background(), replyCtx, texts, q, qIdx, claimToken)
 			if err == nil {
 				return
 			}
@@ -13281,14 +13299,21 @@ func (e *Engine) sendAskQuestionPrompt(p Platform, replyCtx any, questions []Use
 				}
 				answerData := answerValue(i + 1)
 				cb.Markdown("**" + desc + "**")
+				extra := map[string]string{
+					"askq_label":    opt.Label,
+					"askq_question": q.Question,
+				}
+				// The fallback card must be claimable exactly like the native
+				// card: carry the engine-issued token so its clicks answer the
+				// question instead of being rejected as stale (#1778 review).
+				if claimToken != "" {
+					extra["askq_token"] = claimToken
+				}
 				cb.Buttons(CardButton{
 					Text:  opt.Label,
 					Type:  "primary",
 					Value: answerData,
-					Extra: map[string]string{
-						"askq_label":    opt.Label,
-						"askq_question": q.Question,
-					},
+					Extra: extra,
 				})
 			}
 			cb.Note(e.i18n.T(MsgAskQuestionNote))

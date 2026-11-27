@@ -128,8 +128,8 @@ func (r *askqRegistry) claim(token string) (*askqClaim, bool) {
 }
 
 // pendingToken returns the live token for a session, for a callback that
-// carries none: the generic fallback card, and any card rendered by a version
-// before the token existed. False when nothing is pending there.
+// carries none: any card rendered by a version before the token existed.
+// False when nothing is pending there.
 func (r *askqRegistry) pendingToken(sessionKey string) (string, bool) {
 	if r == nil || sessionKey == "" {
 		return "", false

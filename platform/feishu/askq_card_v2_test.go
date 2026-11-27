@@ -40,7 +40,7 @@ func newAskqTestPlatform(t *testing.T) (*interactivePlatform, chan *core.Message
 	return ip, msgCh
 }
 
-// mintAskq registers a claim exactly like SendAskQuestionCard would, with
+// mintAskq registers a claim exactly like IssueAskQuestionClaim would, with
 // marker notices so rejection cards are assertable.
 func mintAskq(ip *interactivePlatform, sessionKey, chatID string, qIdx int) string {
 	return ip.askq.mint(sessionKey, chatID, qIdx, "采用哪种部署方式？", "", "expired-notice", "too-long-notice")
@@ -582,6 +582,53 @@ func TestOnCardActionAskqTokenlessFallbackAnswersPendingQuestion(t *testing.T) {
 	resp, _ = ip.onCardAction(askqOptionEvent("askq:0:2", "oc_c"))
 	if resp == nil || cardBodyMarkdown(resp.Card.Data) != "expired-notice" {
 		t.Fatalf("second click = %+v, want the expired notice", resp)
+	}
+}
+
+// The generic fallback card carries the engine-issued token and the bound
+// session key. Its click must answer through that token and route to the
+// session the question was asked in — including its thread identity under
+// thread_isolation — not to the chat/user that happened to click. A replay
+// is still rejected.
+func TestOnCardActionAskqFallbackTokenRoutesToBoundSession(t *testing.T) {
+	ip, msgCh := newAskqTestPlatform(t)
+	const threadSession = "feishu:oc_root_chat:root:om_thread_root"
+	token := mintAskq(ip, threadSession, "oc_root_chat", 0)
+
+	ev := askqOptionEvent("askq:0:1", "oc_root_chat")
+	ev.Event.Action.Value["askq_token"] = token
+	ev.Event.Action.Value["session_key"] = threadSession
+
+	resp, err := ip.onCardAction(ev)
+	if err != nil {
+		t.Fatalf("onCardAction() error = %v", err)
+	}
+	if resp == nil || resp.Card == nil {
+		t.Fatal("expected a confirmation card for the fallback card's option")
+	}
+	select {
+	case msg := <-msgCh:
+		if msg.Content != "askq:0:1" {
+			t.Fatalf("dispatched content = %q, want the legacy action", msg.Content)
+		}
+		if msg.SessionKey != threadSession {
+			t.Fatalf("session = %q, want the question's bound thread session %q", msg.SessionKey, threadSession)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("the fallback card's option should be dispatched")
+	}
+
+	resp, err = ip.onCardAction(ev)
+	if err != nil {
+		t.Fatalf("replayed onCardAction() error = %v", err)
+	}
+	if resp == nil || cardBodyMarkdown(resp.Card.Data) != "expired-notice" {
+		t.Fatalf("replayed click = %+v, want the expired notice", resp)
+	}
+	select {
+	case msg := <-msgCh:
+		t.Fatalf("replayed answer must not be dispatched, got %q", msg.Content)
+	default:
 	}
 }
 
