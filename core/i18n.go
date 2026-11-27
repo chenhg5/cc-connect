@@ -567,6 +567,18 @@ const (
 	MsgPsEmpty           MsgKey = "ps_empty"
 	MsgPsNoSession       MsgKey = "ps_no_session"
 
+	// Busy-steer delivery outcomes (busy_message_mode = "steer"): reported
+	// from the harness prompt ACK, not from the transport write succeeding.
+	MsgSteerDeliveryUnknown   MsgKey = "steer_delivery_unknown"
+	MsgSteerRunInterrupted    MsgKey = "steer_run_interrupted"
+	MsgSteerInputPaused       MsgKey = "steer_input_paused"
+	MsgSteerQueueNotDelivered MsgKey = "steer_queue_not_delivered"
+	MsgSteerWaiting           MsgKey = "steer_waiting"
+	MsgSteerQueued            MsgKey = "steer_queued"
+	MsgSteerStarted           MsgKey = "steer_started"
+	MsgSteerHandled           MsgKey = "steer_handled"
+	MsgSteerFallbackQueue     MsgKey = "steer_fallback_queue"
+
 	MsgWhoamiTitle     MsgKey = "whoami_title"
 	MsgWhoamiCardTitle MsgKey = "whoami_card_title"
 	MsgWhoamiName      MsgKey = "whoami_name"
@@ -696,6 +708,8 @@ const (
 	MsgWsInitInvalidTarget      MsgKey = "ws_init_invalid_target"
 	MsgWsInitLocalPathsDisabled MsgKey = "ws_init_local_paths_disabled"
 	MsgBackgroundAutoDenied     MsgKey = "background_auto_denied"
+	MsgAgentVersionRequired     MsgKey = "agent_version_required"
+	MsgAgentVersionUnreadable   MsgKey = "agent_version_unreadable"
 
 	// Agent system-prompt tool sections (Issue #1655). These are appended
 	// to the agent's own system prompt by core/interfaces.go AgentSystemPromptForLang
@@ -710,6 +724,20 @@ const (
 )
 
 var messages = map[MsgKey]map[Language]string{
+	MsgAgentVersionRequired: {
+		LangEnglish:            "%s requires %s %s or newer (stable). Upgrade with `%s`; custom command wrappers must forward `--version` and return the plain CLI version.",
+		LangChinese:            "%s 需要 %s %s 或更高的稳定版本。请运行 `%s` 升级；自定义命令包装器必须透传 `--version` 并返回纯 CLI 版本号。",
+		LangTraditionalChinese: "%s 需要 %s %s 或更新的穩定版本。請執行 `%s` 升級；自訂命令包裝器必須轉送 `--version` 並回傳純 CLI 版本號。",
+		LangJapanese:           "%s には %s %s 以降の安定版が必要です。`%s` で更新してください。カスタムコマンドのラッパーは `--version` を転送し、CLI のバージョン番号のみを返す必要があります。",
+		LangSpanish:            "%s requiere %s %s o una versión estable posterior. Actualice con `%s`; los comandos envoltorios deben reenviar `--version` y devolver solo la versión de la CLI.",
+	},
+	MsgAgentVersionUnreadable: {
+		LangEnglish:            "%s could not read the %s version: `--version` did not print a plain version number such as 1.2.3. Version %s or newer (stable) is required; custom command wrappers must forward `--version` unchanged. Install or upgrade with `%s`.",
+		LangChinese:            "%s 无法读取 %s 的版本号：`--version` 未返回类似 1.2.3 的纯版本号。需要 %s 或更高的稳定版本；自定义命令包装器必须原样透传 `--version`。请运行 `%s` 安装或升级。",
+		LangTraditionalChinese: "%s 無法讀取 %s 的版本號：`--version` 未回傳類似 1.2.3 的純版本號。需要 %s 或更新的穩定版本；自訂命令包裝器必須原樣轉送 `--version`。請執行 `%s` 安裝或升級。",
+		LangJapanese:           "%s は %s のバージョンを判別できませんでした。`--version` が 1.2.3 のような単純なバージョン番号を返しませんでした。%s 以降の安定版が必要です。カスタムコマンドのラッパーは `--version` をそのまま転送する必要があります。`%s` でインストールまたは更新してください。",
+		LangSpanish:            "%s no pudo leer la versión de %s: `--version` no devolvió un número de versión simple como 1.2.3. Se requiere la versión %s o una posterior estable; los comandos envoltorios deben reenviar `--version` sin cambios. Instale o actualice con `%s`.",
+	},
 	MsgStarting: {
 		LangEnglish:            "⏳ Processing...",
 		LangChinese:            "⏳ 处理中...",
@@ -3531,6 +3559,70 @@ var messages = map[MsgKey]map[Language]string{
 		LangTraditionalChinese: "❌ P.S. 傳送失敗。",
 		LangJapanese:           "❌ P.S. の送信に失敗しました。",
 		LangSpanish:            "❌ Error al entregar el P.S.",
+	},
+	MsgSteerRunInterrupted: {
+		LangEnglish:            "⚠️ The accepted input's agent process exited before its reply finished. The input will not be resent.",
+		LangChinese:            "⚠️ Agent 已接收输入，但在回复完成前退出；该输入不会自动重发。",
+		LangTraditionalChinese: "⚠️ Agent 已接收輸入，但在回覆完成前退出；該輸入不會自動重送。",
+		LangJapanese:           "⚠️ 入力は受理されましたが、応答完了前にエージェントが終了しました。自動再送はしません。",
+		LangSpanish:            "⚠️ El agente aceptó la entrada, pero salió antes de completar la respuesta. No se reenviará.",
+	},
+	MsgSteerDeliveryUnknown: {
+		LangEnglish:            "⚠️ Input delivery could not be confirmed. It will not be resent automatically. Use /stop or /new before sending more input; the current task may still finish.",
+		LangChinese:            "⚠️ 无法确认输入是否送达，不会自动重发。请先 /stop 或 /new 再发送后续消息；当前任务仍可能完成。",
+		LangTraditionalChinese: "⚠️ 無法確認輸入是否送達，不會自動重送。請先 /stop 或 /new 再傳送後續訊息；目前任務仍可能完成。",
+		LangJapanese:           "⚠️ 入力の配信を確認できず、自動再送はしません。追加の入力前に /stop または /new を実行してください。現在のタスクは完了する場合があります。",
+		LangSpanish:            "⚠️ No se pudo confirmar la entrega y no se reenviará automáticamente. Usa /stop o /new antes de enviar más; la tarea actual puede terminar.",
+	},
+	MsgSteerInputPaused: {
+		LangEnglish:            "⚠️ Earlier input has unconfirmed delivery. Use /stop or /new before sending more input; the current task may still finish.",
+		LangChinese:            "⚠️ 之前输入的送达状态未知。请先 /stop 或 /new，再发送后续消息；当前任务仍可能完成。",
+		LangTraditionalChinese: "⚠️ 先前輸入的送達狀態未知。請先 /stop 或 /new，再傳送後續訊息；目前任務仍可能完成。",
+		LangJapanese:           "⚠️ 前の入力の配信を確認できません。追加の入力前に /stop または /new を実行してください。現在のタスクは完了する場合があります。",
+		LangSpanish:            "⚠️ La entrega de una entrada anterior es incierta. Usa /stop o /new antes de enviar más; la tarea actual puede terminar.",
+	},
+	MsgSteerQueueNotDelivered: {
+		LangEnglish:            "⚠️ This queued message was not delivered because an earlier input has unconfirmed delivery. Use /stop or /new, then resend this message.",
+		LangChinese:            "⚠️ 之前输入的送达状态未知，这条排队消息尚未发送。请先 /stop 或 /new，再重发此消息。",
+		LangTraditionalChinese: "⚠️ 先前輸入的送達狀態未知，這則排隊訊息尚未傳送。請先 /stop 或 /new，再重新傳送此訊息。",
+		LangJapanese:           "⚠️ 前の入力の配信が不明なため、この予約メッセージは未送信です。/stop または /new の後で再送してください。",
+		LangSpanish:            "⚠️ Este mensaje en cola no se entregó porque una entrada anterior tiene entrega incierta. Usa /stop o /new y vuelve a enviarlo.",
+	},
+	MsgSteerWaiting: {
+		LangEnglish:            "📨 Received — waiting for the agent to accept this input.",
+		LangChinese:            "📨 已收到，正在等待 Agent 接收这条输入。",
+		LangTraditionalChinese: "📨 已收到，正在等待 Agent 接收這則輸入。",
+		LangJapanese:           "📨 受信しました。Agent がこの入力を受け付けるまで待機しています。",
+		LangSpanish:            "📨 Recibido; esperando a que el agente acepte esta entrada.",
+	},
+	MsgSteerQueued: {
+		LangEnglish:            "✅ Added to the running task.",
+		LangChinese:            "✅ 已插入当前任务。",
+		LangTraditionalChinese: "✅ 已插入目前任務。",
+		LangJapanese:           "✅ 実行中のタスクに追加しました。",
+		LangSpanish:            "✅ Añadido a la tarea en curso.",
+	},
+	MsgSteerStarted: {
+		LangEnglish:            "✅ Previous task had already finished — started a new turn with this instead.",
+		LangChinese:            "✅ 上一个任务已结束，这条已作为新一轮开始。",
+		LangTraditionalChinese: "✅ 上一個任務已結束，這則已作為新一輪開始。",
+		LangJapanese:           "✅ 前のタスクは既に終了していたため、この内容で新しいターンを開始しました。",
+		LangSpanish:            "✅ La tarea anterior ya había terminado; se inició un nuevo turno con esto.",
+	},
+	MsgSteerHandled: {
+		LangEnglish:            "✅ Handled by an extension (no model run).",
+		LangChinese:            "✅ 已由扩展接管（未走模型）。",
+		LangTraditionalChinese: "✅ 已由擴充接管（未走模型）。",
+		LangJapanese:           "✅ 拡張機能が処理しました（モデル実行なし）。",
+		LangSpanish:            "✅ Gestionado por una extensión (sin ejecución del modelo).",
+	},
+
+	MsgSteerFallbackQueue: {
+		LangEnglish:            "📨 Steer not available for this message — queued for the next turn.",
+		LangChinese:            "📨 当前消息无法 steer，已排入下一轮处理。",
+		LangTraditionalChinese: "📨 目前訊息無法 steer，已排入下一輪處理。",
+		LangJapanese:           "📨 このメッセージは steer できないため、次のターンに予約しました。",
+		LangSpanish:            "📨 Steer no disponible para este mensaje — encolado para el próximo turno.",
 	},
 	MsgPsEmpty: {
 		LangEnglish:            "Usage: `/ps <message>`",

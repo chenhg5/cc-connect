@@ -3,6 +3,7 @@ package pi
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -21,6 +22,12 @@ import (
 func TestPiRPCSteeringHelperProcess(t *testing.T) {
 	if os.Getenv("CC_CONNECT_PI_STEERING_HELPER") != "1" {
 		return
+	}
+	for _, arg := range os.Args[1:] {
+		if arg == "--version" {
+			_, _ = fmt.Fprintln(os.Stdout, "1.5.0")
+			os.Exit(0)
+		}
 	}
 	decoder := json.NewDecoder(os.Stdin)
 	encoder := json.NewEncoder(os.Stdout)
@@ -72,6 +79,7 @@ func TestPiRPCSteeringHelperProcess(t *testing.T) {
 			}
 			if command.Type == "steer" && !busy {
 				queued = append(queued, command.Message)
+				response["data"] = map[string]any{"disposition": "queued"}
 				emit(response)
 				continue
 			}
@@ -81,6 +89,11 @@ func TestPiRPCSteeringHelperProcess(t *testing.T) {
 				emit(response)
 				continue
 			}
+			disposition := "started"
+			if busy {
+				disposition = "queued"
+			}
+			response["data"] = map[string]any{"disposition": disposition}
 			emit(response)
 			if !busy {
 				emit(map[string]any{"type": "agent_start"})
@@ -95,6 +108,7 @@ func TestPiRPCSteeringHelperProcess(t *testing.T) {
 			queued = nil
 			busy = false
 			emit(map[string]any{"type": "agent_end"})
+			emit(map[string]any{"type": "agent_settled"})
 		default:
 			os.Exit(2)
 		}
@@ -196,8 +210,9 @@ func TestPiRPCSend_SteersWhileStreaming(t *testing.T) {
 	}
 }
 
-// Block the first final delivery after Pi has emitted agent_end. The engine
-// still considers this turn busy, so /ps must also handle Pi already being idle.
+// Block the first final delivery after Pi has emitted agent_settled. The engine
+// still considers this turn busy. A late /ps becomes an ordinary queued
+// follow-up instead of racing the foreground reader with a native prompt.
 type rpcSteeringPlatform struct {
 	blocked     chan struct{}
 	release     chan struct{}
@@ -275,26 +290,23 @@ func TestPiRPCPs_AfterRemoteTurnEnds(t *testing.T) {
 		}
 	})
 	marker := filepath.Join(agent.workDir, "supplement-received")
-	ticker := time.NewTicker(5 * time.Millisecond)
-	defer ticker.Stop()
-	arrivalDeadline := time.NewTimer(3 * time.Second)
-	defer arrivalDeadline.Stop()
-	for {
-		if _, err := os.Stat(marker); err == nil {
-			break
-		}
-		select {
-		case <-ticker.C:
-		case <-arrivalDeadline.C:
-			t.Fatal("/ps never reached the RPC peer during final platform delivery")
-		}
-	}
-	p.unblock()
 	select {
 	case <-supplementDone:
 	case <-time.After(3 * time.Second):
-		t.Fatal("/ps did not return after final delivery was released")
+		t.Fatal("/ps did not return after queue admission")
 	}
+	select {
+	case message := <-p.messages:
+		if !strings.Contains(message, "queue") {
+			t.Fatalf("expected queue notice, got %q", message)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("missing queue notice")
+	}
+	if _, err := os.Stat(marker); err == nil {
+		t.Fatal("/ps reached RPC before foreground final delivery finished")
+	}
+	p.unblock()
 	deadline := time.NewTimer(3 * time.Second)
 	defer deadline.Stop()
 	var messages []string

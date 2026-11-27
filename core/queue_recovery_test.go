@@ -387,3 +387,96 @@ func TestCmdNewNilSnapshotCleansConcurrentState(t *testing.T) {
 		t.Fatal("/new left the concurrently created interactive state behind")
 	}
 }
+
+// A primary RPC request whose process exits before its first ACK fails via
+// Send, rather than through EventError. The primary must not be replayed;
+// queued, never-sent follow-ups must still be recovered by the engine.
+type dyingSendQueueSession struct {
+	*dyingQueueSession
+	started chan struct{}
+	fail    chan struct{}
+}
+
+func (s *dyingSendQueueSession) Send(_ string, _ string, _ []ImageAttachment, _ []FileAttachment) error {
+	close(s.started)
+	<-s.fail
+	s.dead.Store(true)
+	return errors.New("RPC exited before prompt acknowledgement")
+}
+
+func TestDeadForegroundDrainsQueuedMessageAfterSendError(t *testing.T) {
+	p := &stubPlatformEngine{n: "test"}
+	old := &dyingSendQueueSession{
+		dyingQueueSession: &dyingQueueSession{queuingAgentSession: newQueuingSession("old")},
+		started:           make(chan struct{}), fail: make(chan struct{}),
+	}
+	fresh := newQueuingSession("fresh")
+	var starts atomic.Int32
+	agent := &controllableAgent{startSessionFn: func(context.Context, string) (AgentSession, error) {
+		if starts.Add(1) == 1 {
+			return old, nil
+		}
+		return fresh, nil
+	}}
+	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+	t.Cleanup(func() { _ = e.Stop() })
+	key := "test:send-error-dead"
+	session := e.sessions.GetOrCreateActive(key)
+	gen, ok := session.TryLock()
+	if !ok {
+		t.Fatal("failed to lock session")
+	}
+	done := make(chan struct{})
+	go func() {
+		e.processInteractiveMessageWith(p, &Message{SessionKey: key, Platform: "test", Content: "primary", MessageID: "primary"}, session, agent, e.sessions, key, "", key, gen)
+		close(done)
+	}()
+	select {
+	case <-old.started:
+	case <-time.After(3 * time.Second):
+		t.Fatal("primary Send did not start")
+	}
+	if !e.queueMessageForBusySession(p, &Message{SessionKey: key, Platform: "test", Content: "follow-up", MessageID: "follow-up", ReplyCtx: "reply"}, key) {
+		t.Fatal("queue rejected")
+	}
+	close(old.fail)
+	deadline := time.After(3 * time.Second)
+	ticker := time.NewTicker(time.Millisecond)
+	defer ticker.Stop()
+	for {
+		fresh.sendMu.Lock()
+		sends := append([]string(nil), fresh.sendCalls...)
+		fresh.sendMu.Unlock()
+		if len(sends) > 0 {
+			if len(sends) != 1 || !strings.Contains(sends[0], "follow-up") {
+				t.Fatalf("restarted sends=%v: want only unsent follow-up", sends)
+			}
+			break
+		}
+		select {
+		case <-done:
+			t.Fatalf("foreground returned without recovering queue: %v", p.getSent())
+		case <-ticker.C:
+		case <-deadline:
+			t.Fatal("follow-up not recovered")
+		}
+	}
+	fresh.events <- Event{Type: EventResult, Content: "follow-up answer", Done: true}
+	select {
+	case <-done:
+	case <-time.After(3 * time.Second):
+		t.Fatal("foreground did not finish")
+	}
+	if session.Busy() || starts.Load() != 2 {
+		t.Fatalf("busy=%v starts=%d", session.Busy(), starts.Load())
+	}
+	count := 0
+	for _, reply := range p.getSent() {
+		if reply == "follow-up answer" {
+			count++
+		}
+	}
+	if count != 1 {
+		t.Fatalf("wanted exactly one follow-up answer, got %v", p.getSent())
+	}
+}

@@ -85,15 +85,24 @@ type piSession struct {
 	pendingErr string
 
 	// RPC-only fields (nil/zero when rpc=false)
-	rpcCmd           *exec.Cmd
-	rpcStdin         io.WriteCloser
-	rpcStdinMu       sync.Mutex
-	stderrBuf        cappedStderrWriter
-	rpcWaitOnce      sync.Once
-	rpcReady         chan struct{} // closed once after handleEvent stores sessionId from the get_state probe written by startRPC
-	rpcResultSent    atomic.Bool
-	rpcPromptPending atomic.Bool
-	rpcAgentActive   bool // readLoopRPC alone owns this flag
+	rpcCmd            *exec.Cmd
+	rpcStdin          io.WriteCloser
+	rpcStdinMu        sync.Mutex
+	rpcWaitOnce       sync.Once
+	stderrBuf         cappedStderrWriter
+	rpcReady          chan struct{} // closed once after handleEvent stores sessionId from the get_state probe written by startRPC
+	rpcLifecycleMu    sync.Mutex    // Send and the stdout reader share request ownership
+	rpcSendMu         sync.Mutex    // preserve request registration order on the wire
+	rpcDone           chan struct{} // closed only by readLoopRPC
+	rpcRequests       map[string]*rpcRequest
+	rpcNextRequest    uint64
+	rpcGeneration     uint64
+	rpcTurnPending    bool
+	rpcRunStarted     bool
+	rpcCompactID      string
+	rpcSettlingGen    uint64
+	rpcUnsolicitedRun bool        // extension-initiated run tracked outside prompted-turn ownership
+	rpcStaleTimer     *time.Timer // log-only watch for a turn with no settled event
 
 	// Extension UI: maps Pi's extension_ui_request id -> cc-connect RequestID
 	extPendingMu  sync.Mutex
@@ -142,6 +151,7 @@ func newPiSession(ctx context.Context, cmd string, extraArgs []string, workDir, 
 
 	if rpc {
 		s.rpcReady = make(chan struct{})
+		s.rpcDone = make(chan struct{})
 		s.extPending = make(map[string]string)
 		s.extPendingRev = make(map[string]string)
 		s.extMethod = make(map[string]string)
@@ -257,6 +267,11 @@ func (s *piSession) killRPC() {
 func (s *piSession) readLoopRPC(stdout io.ReadCloser) {
 	defer s.wg.Done()
 	defer func() { _ = stdout.Close() }()
+	defer func() {
+		if s.rpcDone != nil {
+			close(s.rpcDone)
+		}
+	}()
 
 	scanner := bufio.NewScanner(stdout)
 	scanner.Buffer(make([]byte, 0, 64*1024), 10*1024*1024)
@@ -294,30 +309,17 @@ func (s *piSession) readLoopRPC(stdout io.ReadCloser) {
 	// Process exited — reap the child and signal the engine.
 	// killRPC (now with Wait()) ensures the zombie is collected.
 	s.killRPC()
-
-	if err := scanner.Err(); err != nil {
-		slog.Error("piSession: scanner error", "error", err)
-		evt := core.Event{Type: core.EventError, Error: fmt.Errorf("read stdout: %w", err)}
-		select {
-		case s.events <- evt:
-		case <-s.ctx.Done():
-		}
-	}
-
-	// Signal process death to the engine (unless Close() already did).
-	// Following the claudecode finishReadLoop pattern: always set alive=false,
-	// and emit EventError with the captured stderr when present.
-	// All writes to s.events happen before the deferred wg.Done(), so
-	// Close()'s wg.Wait() → close(s.events) is correctly ordered.
-	stderrMsg := strings.TrimSpace(s.stderrBuf.String())
-	if stderrMsg != "" {
-		evt := core.Event{Type: core.EventError, Error: fmt.Errorf("pi: %s", stderrMsg)}
-		select {
-		case s.events <- evt:
-		case <-s.ctx.Done():
-		}
-	}
 	s.alive.Store(false)
+	err := fmt.Errorf("pi: RPC process exited before completion")
+	if scanErr := scanner.Err(); scanErr != nil {
+		err = fmt.Errorf("pi: read stdout: %w", scanErr)
+	} else if stderr := strings.TrimSpace(s.stderrBuf.String()); stderr != "" {
+		err = fmt.Errorf("pi: %s", stderr)
+	}
+	if s.ctx.Err() == nil {
+		slog.Error("piSession: RPC process exited", "error", err)
+	}
+	s.failSettledRPCRequests(err)
 }
 
 // ── Send ─────────────────────────────────────────────────────
@@ -331,6 +333,20 @@ func (s *piSession) Send(msg string, messageID string, images []core.ImageAttach
 
 	if !s.alive.Load() {
 		return fmt.Errorf("session is closed")
+	}
+
+	if s.rpc {
+		cmd, err := s.prepareModernRPCPrompt(msg, images, files, false)
+		if err != nil {
+			return err
+		}
+		if trimmed := strings.TrimSpace(msg); len(images) == 0 && len(files) == 0 && (trimmed == "/compact" || strings.HasPrefix(trimmed, "/compact ")) {
+			cmd = map[string]any{"type": "compact"}
+			if instructions := strings.TrimSpace(strings.TrimPrefix(trimmed, "/compact")); instructions != "" {
+				cmd["customInstructions"] = instructions
+			}
+		}
+		return s.sendSettledRPC(cmd)
 	}
 
 	attachDir := s.attachDir
@@ -364,9 +380,6 @@ func (s *piSession) Send(msg string, messageID string, images []core.ImageAttach
 		filePaths = append(filePaths, saveFilesToDisk(attachDir, files)...)
 	}
 
-	if s.rpc {
-		return s.sendRPC(msg, imageAtFiles, filePaths)
-	}
 	return s.sendJSON(msg, imageAtFiles, filePaths)
 }
 
@@ -461,25 +474,34 @@ func (s *piSession) sendJSON(prompt string, imageAtFiles []string, filePaths []s
 func (s *piSession) writeRPCCommand(cmd map[string]any) error {
 	b, err := json.Marshal(cmd)
 	if err != nil {
-		return fmt.Errorf("piSession: marshal command: %w", err)
+		return &core.SteerNotAcceptedError{Err: fmt.Errorf("piSession: marshal command: %w", err)}
 	}
 	b = append(b, '\n')
 
 	s.rpcStdinMu.Lock()
-	_, err = s.rpcStdin.Write(b)
+	n, err := s.rpcStdin.Write(b)
 	s.rpcStdinMu.Unlock()
+	if err == nil && n != len(b) {
+		err = io.ErrShortWrite
+	}
 	if err != nil {
-		return fmt.Errorf("piSession: write stdin: %w", err)
+		wrapped := fmt.Errorf("piSession: write stdin: %w", err)
+		if n == 0 {
+			return &core.SteerNotAcceptedError{Err: wrapped}
+		}
+		return wrapped
 	}
 	return nil
 }
 
 // sendRPC writes a JSON "prompt" command to the persistent RPC process stdin.
-// Events are read asynchronously by readLoopRPC, including agent_end which
-// triggers EventResult.
+// Events are read asynchronously by readLoopRPC; agent_settled owns the
+// ordinary-run terminal while agent_end only updates run metadata.
 // streamingBehavior lets Pi steer an active run or start a prompt if it has
 // already finished, even while the engine is still delivering the last reply.
 //
+// This helper accepts already-saved image paths for existing callers/tests;
+// public Send and SendBusySteer use prepareModernRPCPrompt's native images.
 // Issue #1723: image paths are embedded into the message text as
 // @<path> references (pi's standard mechanism, parsed the same way as in
 // json mode). The rpc stdin pipe doesn't crash on NUL bytes, but the
@@ -493,19 +515,19 @@ func (s *piSession) writeRPCCommand(cmd map[string]any) error {
 // locally, please read them: …" trailer instead so pi's own file
 // tools load only what the model actually needs.
 func (s *piSession) sendRPC(prompt string, imageAtFiles []string, filePaths []string) error {
-	s.rpcResultSent.Store(false)
-	s.rpcPromptPending.Store(true)
 	cmd := map[string]any{
 		"type":              "prompt",
 		"message":           composeRPCPrompt(promptWithFileRefs(prompt, filePaths), imageAtFiles),
 		"streamingBehavior": "steer",
 	}
 	slog.Debug("piSession: sending RPC prompt", "bytes", len(prompt))
-	if err := s.writeRPCCommand(cmd); err != nil {
-		s.rpcPromptPending.Store(false)
-		return err
+	if trimmed := strings.TrimSpace(prompt); len(imageAtFiles) == 0 && len(filePaths) == 0 && (trimmed == "/compact" || strings.HasPrefix(trimmed, "/compact ")) {
+		cmd = map[string]any{"type": "compact"}
+		if instructions := strings.TrimSpace(strings.TrimPrefix(trimmed, "/compact")); instructions != "" {
+			cmd["customInstructions"] = instructions
+		}
 	}
-	return nil
+	return s.sendSettledRPC(cmd)
 }
 
 // promptWithFileRefs appends a plain-text trailer that tells the model
@@ -562,6 +584,9 @@ func composeRPCPrompt(prompt string, atFiles []string) string {
 // ── Event Handling (shared by both modes) ───────────────────
 
 func (s *piSession) handleEvent(raw map[string]any) {
+	if s.rpc && s.handleSettledRPCEvent(raw) {
+		return
+	}
 	eventType, _ := raw["type"].(string)
 
 	switch eventType {
@@ -601,29 +626,6 @@ func (s *piSession) handleEvent(raw map[string]any) {
 			slog.Debug("piSession: state probe stored sessionId", "sessionId", sid)
 			break
 		}
-		if !s.rpc || raw["command"] != "prompt" {
-			break
-		}
-		if success, _ := raw["success"].(bool); !success {
-			errMsg, _ := raw["error"].(string)
-			if errMsg == "" {
-				errMsg = "prompt rejected"
-			}
-			select {
-			case s.events <- core.Event{Type: core.EventError, Error: fmt.Errorf("pi: %s", errMsg)}:
-			case <-s.ctx.Done():
-			}
-			if !s.rpcAgentActive {
-				s.emitRPCCompletion()
-			}
-			break
-		}
-		data, _ := raw["data"].(map[string]any)
-		if data["disposition"] == "handled" && !s.rpcAgentActive {
-			// An extension or input handler consumed the prompt, so Pi will
-			// not emit agent_end for this command. Keep the session available.
-			s.emitRPCCompletion()
-		}
 
 	case "message_update":
 		s.handleMessageUpdate(raw)
@@ -642,7 +644,6 @@ func (s *piSession) handleEvent(raw map[string]any) {
 			// Pi is about to recover from.
 			break
 		}
-		s.rpcAgentActive = false
 		if s.pendingErr != "" {
 			// Turn is really over and the last assistant message failed:
 			// surface the deferred error before closing the turn.
@@ -653,59 +654,18 @@ func (s *piSession) handleEvent(raw map[string]any) {
 			case <-s.ctx.Done():
 			}
 		}
-		if s.rpc {
-			// RPC mode: agent_end marks turn completion; json mode relies
-			// on process exit to emit EventResult.
-			s.emitRPCCompletion()
-		}
 
 	case "compaction_start":
-		// Pi fires this when ctx.compact() begins (slash command or
-		// turn_end threshold). The active extension typically notifies the
-		// user directly, so we don't surface a platform-visible event here
-		// — just stop logging it as "unrecognized event type" in DEBUG.
 		slog.Debug("piSession: compaction started")
 
 	case "compaction_end":
-		// Pi fires this when ctx.compact() finishes. ctx.compact() is
-		// fire-and-forget: it never sends agent_end, because compaction
-		// runs out-of-band with the agent loop. Extensions that drive
-		// ctx.compact() (e.g. cc-connect-compact.ts, trigger-compact.ts)
-		// handle their own user feedback via stdout synth events and the
-		// normal slash-command path returns immediately.
-		//
-		// Two things happen here:
-		//
-		// 1. If pi reports an errorMessage, emit EventError. This covers
-		//    compaction paths that have no extension to surface the error
-		//    to the user (e.g. trigger-compact.ts only calls ctx.ui.notify,
-		//    which cc-connect drops in RPC mode). pi's errorMessage is
-		//    usually self-describing ("Compaction failed: Nothing to compact
-		//    (session too small)"), so we pass it through verbatim — no
-		//    additional prefix — to avoid "Error: compaction failed:
-		//    Compaction failed: ..." in the platform message.
-		//
-		// 2. Always emit EventResult. Without it, two scenarios hang
-		//    forever in processInteractiveEvents:
-		//      (a) trigger-compact: handler returns without await, so no
-		//          synthetic agent_end ever lands on stdout.
-		//      (b) cc-connect-compact: an extension that crashes, races a
-		//          kill, or simply omits the finally-synthesized agent_end
-		//          leaves the turn open.
-		//    JSON mode (json one-shot) is unaffected — process exit is the
-		//    turn-end marker there, and compaction_end has no special meaning.
-		//
-		// If agent_end already closed this turn, emitRPCCompletion suppresses
-		// the duplicate completion.
+		// JSON mode retains process-exit completion. RPC compactions are
+		// handled above and never complete an ordinary prompt on their own.
 		if errMsg, _ := raw["errorMessage"].(string); errMsg != "" {
-			evt := core.Event{Type: core.EventError, Error: fmt.Errorf("%s", errMsg)}
 			select {
-			case s.events <- evt:
+			case s.events <- core.Event{Type: core.EventError, Error: fmt.Errorf("%s", errMsg)}:
 			case <-s.ctx.Done():
 			}
-		}
-		if s.rpc {
-			s.emitRPCCompletion()
 		}
 
 	case "extension_ui_request":
@@ -714,24 +674,9 @@ func (s *piSession) handleEvent(raw map[string]any) {
 		}
 
 	// Informational — no events produced
-	case "agent_start":
-		s.rpcAgentActive = true
-		s.rpcResultSent.Store(false)
-	case "turn_start", "turn_end", "message_start", "extension_error":
+	case "agent_start", "turn_start", "turn_end", "message_start", "extension_error":
 	default:
 		slog.Debug("piSession: unrecognized event type", "type", eventType, "raw_fields", len(raw))
-	}
-}
-
-func (s *piSession) emitRPCCompletion() {
-	if s.rpcResultSent.Swap(true) {
-		return
-	}
-	s.rpcPromptPending.Store(false)
-	evt := core.Event{Type: core.EventResult, SessionID: s.CurrentSessionID(), Done: true}
-	select {
-	case s.events <- evt:
-	case <-s.ctx.Done():
 	}
 }
 
@@ -748,7 +693,10 @@ func (s *piSession) handleExtensionUIRequest(raw map[string]any) {
 		// Extension slash commands often report their result via ctx.ui.notify
 		// without starting an agent turn. Forward that text before the
 		// handled prompt response closes the turn.
-		if message, _ := raw["message"].(string); message != "" && s.rpcPromptPending.Load() {
+		s.rpcLifecycleMu.Lock()
+		pending := s.rpcTurnPending
+		s.rpcLifecycleMu.Unlock()
+		if message, _ := raw["message"].(string); message != "" && pending {
 			select {
 			case s.events <- core.Event{Type: core.EventText, Content: message}:
 			case <-s.ctx.Done():
