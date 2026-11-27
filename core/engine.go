@@ -9147,6 +9147,14 @@ func sendChunksWithStatusFooter(ctx context.Context, p Platform, replyCtx any, b
 			if sfs, ok := p.(StatusFooterSender); ok {
 				if err := sfs.SendWithStatusFooter(ctx, replyCtx, chunk, statusFooter); err == nil {
 					continue
+				} else if errors.Is(err, ErrMaybeDelivered) {
+					// The footer send reported a failure but the message may
+					// already have reached the chat (e.g. Feishu code=2200).
+					// Re-sending the same chunk inline would duplicate it, so
+					// report the failure and let the caller bail.
+					slog.Error("platform send failed (may have been delivered)",
+						"platform", p.Name(), "error", err, "content_len", len(chunk))
+					return false
 				} else {
 					slog.Warn("SendWithStatusFooter failed, falling back to inline footer", "error", err)
 				}
@@ -17450,6 +17458,10 @@ func (e *Engine) relayContextForSourceSessionKey(fromProject, sourceSessionKey s
 // dedicated relay session, sends the message to the agent, and blocks until
 // the complete response is collected (or the relay context times out).
 func (e *Engine) HandleRelay(ctx context.Context, fromProject, sourceSessionKey, message string) (string, error) {
+	return e.handleRelay(ctx, fromProject, sourceSessionKey, message, nil)
+}
+
+func (e *Engine) handleRelay(ctx context.Context, fromProject, sourceSessionKey, message string, onVisibleResponse func(string)) (response string, err error) {
 	agent, sessions, relaySessionKey, err := e.relayContextForSourceSessionKey(fromProject, sourceSessionKey)
 	if err != nil {
 		return "", err
@@ -17518,6 +17530,16 @@ func (e *Engine) HandleRelay(ctx context.Context, fromProject, sourceSessionKey,
 	}
 
 	var textParts []string
+	var visibleResponse string
+	defer func() {
+		if onVisibleResponse != nil {
+			if visibleResponse == "" && len(textParts) > 0 {
+				// Preserve the caller's timeout notice around partial assistant text.
+				visibleResponse = response
+			}
+			onVisibleResponse(visibleResponse)
+		}
+	}()
 	for event := range agentSession.Events() {
 		// With standalone commentary disabled (the default), commentary is
 		// rewritten to EventText so relay answers match the legacy behavior.
@@ -17547,6 +17569,7 @@ func (e *Engine) HandleRelay(ctx context.Context, fromProject, sourceSessionKey,
 				saveRelaySessionID(currentID, true)
 			}
 			resp := event.Content
+			visibleResponse = event.Content
 			if resp == "" && len(textParts) > 0 {
 				resp = strings.Join(textParts, "")
 			}
