@@ -102,6 +102,28 @@ func TestResolveResetOnIdle(t *testing.T) {
 	}
 }
 
+func TestResolveIdleResetNotice(t *testing.T) {
+	boolPtr := func(v bool) *bool { return &v }
+
+	cases := []struct {
+		name       string
+		configured *bool
+		want       bool
+	}{
+		{name: "unset keeps the notices on", configured: nil, want: true},
+		{name: "explicit false turns the notices off", configured: boolPtr(false), want: false},
+		{name: "explicit true keeps the notices on", configured: boolPtr(true), want: true},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := resolveIdleResetNotice(tc.configured); got != tc.want {
+				t.Errorf("resolveIdleResetNotice = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
 func TestApplyProjectStateOverride(t *testing.T) {
 	baseDir := t.TempDir()
 	overrideDir := filepath.Join(t.TempDir(), "override")

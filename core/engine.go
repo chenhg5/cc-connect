@@ -456,6 +456,10 @@ type Engine struct {
 	// processInteractiveEvents.
 	autoCompressAllowHeuristic bool
 	resetOnIdle                time.Duration
+	// idleResetNoticeOff makes an idle rotation skip its chat notices
+	// (graceful-close and auto-reset). The zero value keeps them on. Atomic
+	// because a config reload can flip it while a message is being handled.
+	idleResetNoticeOff atomic.Bool
 
 	// Reply footer composition flags. The footer renders up to two lines:
 	//   line 1 — model · [effort ·] out/in/cw/cr · ctx%   (gated by showContextIndicator)
@@ -1031,6 +1035,14 @@ func (e *Engine) SetResetOnIdle(d time.Duration) {
 		return
 	}
 	e.resetOnIdle = d
+}
+
+// SetIdleResetNotice controls whether an idle rotation (see SetResetOnIdle)
+// tells the chat about it. When false the session still rotates and the
+// rotation is still logged, but neither the graceful-close notice nor the
+// auto-reset notice is posted. Default true.
+func (e *Engine) SetIdleResetNotice(enabled bool) {
+	e.idleResetNoticeOff.Store(!enabled)
 }
 
 // SetAgentSessionIdleTimeout 配置单轮正常结束后的 live agent 空闲关闭时间。
@@ -3549,7 +3561,11 @@ func (e *Engine) maybeAutoResetSessionOnIdle(p Platform, msg *Message, sessions 
 	hasAgent := hasState && state != nil && state.agentSession != nil && state.agentSession.Alive()
 	e.interactiveMu.Unlock()
 
-	if hasAgent {
+	// Read the switch once so both notices follow the same setting even if
+	// the config is reloaded while the old agent is closing.
+	notify := !e.idleResetNoticeOff.Load()
+
+	if hasAgent && notify {
 		// Notify the user before the potentially long close. The close
 		// returns as soon as the process exits (usually seconds), but
 		// Stop hooks can take up to 120s.
@@ -3573,7 +3589,9 @@ func (e *Engine) maybeAutoResetSessionOnIdle(p Platform, msg *Message, sessions 
 	e.cleanupInteractiveState(interactiveKey)
 	session.UnlockWithoutUpdate(lockGen)
 
-	e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgSessionAutoResetIdle, int(e.resetOnIdle/time.Minute)))
+	if notify {
+		e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgSessionAutoResetIdle, int(e.resetOnIdle/time.Minute)))
+	}
 	return newSession, newGen
 }
 
