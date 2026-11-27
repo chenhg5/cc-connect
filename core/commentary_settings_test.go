@@ -73,9 +73,9 @@ func TestManagementCommentary_SaveAndReload(t *testing.T) {
 					return response
 				}
 				request(http.MethodPost, "/api/v1/reload", "")
-				wantGlobal := initial == "true"
+				wantGlobal := initial != "false"
 				wantPresent := initial != "absent"
-				for _, update := range []string{"absent", "true", "absent", "false", "absent"} {
+				for _, update := range []string{"absent", "false", "absent", "true", "absent"} {
 					body := "{}"
 					if update != "absent" {
 						body = `{"commentary_messages":` + update + `}`
@@ -103,7 +103,7 @@ func TestManagementCommentary_SaveAndReload(t *testing.T) {
 						want = project == "true"
 					}
 					if *e.display.CommentaryMessages != want {
-						t.Fatalf("reloaded engine opt-in = %v, want %v", *e.display.CommentaryMessages, want)
+						t.Fatalf("reloaded engine commentary = %v, want %v", *e.display.CommentaryMessages, want)
 					}
 					beforeMessages := len(p.getSent())
 					e.relayCommentary(p, "ctx", "Reloaded progress", "")

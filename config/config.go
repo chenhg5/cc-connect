@@ -206,7 +206,7 @@ const (
 
 // DisplayConfig controls how intermediate messages (thinking, tool output) are shown.
 type DisplayConfig struct {
-	CommentaryMessages   *bool   `toml:"commentary_messages"`    // standalone user-facing progress; default false (opt-in)
+	CommentaryMessages   *bool   `toml:"commentary_messages"`    // user-facing progress messages; default true
 	Mode                 *string `toml:"mode"`                   // "full" (default), "compact", or "quiet"
 	CardMode             *string `toml:"card_mode"`              // "legacy" (default) or "rich" (Card 2.0 Feishu)
 	ThinkingMessages     *bool   `toml:"thinking_messages"`      // whether thinking messages are shown; default true
@@ -904,8 +904,7 @@ func projectQuietEffective(cfg *Config, proj *ProjectConfig) bool {
 	return false
 }
 
-// EffectiveCommentaryMessages resolves standalone user-facing progress independently of quiet mode.
-// Absent config keeps the legacy progress-card / final-answer path; only an explicit true opts in.
+// EffectiveCommentaryMessages resolves user-facing progress independently of quiet mode.
 func EffectiveCommentaryMessages(cfg *Config, proj *ProjectConfig) bool {
 	if proj != nil && proj.Display != nil && proj.Display.CommentaryMessages != nil {
 		return *proj.Display.CommentaryMessages
@@ -913,7 +912,7 @@ func EffectiveCommentaryMessages(cfg *Config, proj *ProjectConfig) bool {
 	if cfg != nil && cfg.Display.CommentaryMessages != nil {
 		return *cfg.Display.CommentaryMessages
 	}
-	return false
+	return true
 }
 
 // EffectiveDisplay resolves the per-project [projects.display] override on top

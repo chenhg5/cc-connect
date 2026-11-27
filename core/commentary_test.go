@@ -121,15 +121,25 @@ func TestProcessCompressEvents_CommentaryOnlyForManualCompression(t *testing.T) 
 }
 
 // A turn whose only output was standalone commentary (for example a tool-only
-// turn where the narration was the last assistant text) delivered content, so
+// turn where the narration was the last assistant text) produced output, so
 // the result must not add the "(empty response)" fallback. With commentary
-// disabled the narration is ordinary text and becomes the final answer.
+// enabled (the default) the narration is delivered once; with explicit opt-out
+// it is suppressed without emitting an empty-response error.
 func TestProcessInteractiveEvents_CommentaryOnlyTurnIsNotEmpty(t *testing.T) {
-	for _, enabled := range []bool{true, false} {
-		t.Run(map[bool]string{true: "enabled", false: "disabled"}[enabled], func(t *testing.T) {
+	yes, no := true, false
+	for _, tc := range []struct {
+		name       string
+		commentary *bool
+		wantCount  int
+	}{
+		{"absent", nil, 1},
+		{"enabled", &yes, 1},
+		{"disabled", &no, 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
 			p := &stubPlatformEngine{n: "test"}
 			e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
-			e.SetDisplayConfig(DisplayCfg{Mode: "full", ToolMessages: true, CommentaryMessages: &enabled})
+			e.SetDisplayConfig(DisplayCfg{Mode: "full", ToolMessages: true, CommentaryMessages: tc.commentary})
 			session := e.sessions.GetOrCreateActive("test:commentary-only")
 			s := newControllableSession("commentary-only")
 			state := &interactiveState{agentSession: s, platform: p, replyCtx: "ctx"}
@@ -150,8 +160,8 @@ func TestProcessInteractiveEvents_CommentaryOnlyTurnIsNotEmpty(t *testing.T) {
 				t.Fatal("turn did not complete")
 			}
 			sent := strings.Join(p.getSent(), "\n")
-			if strings.Count(sent, "Working") != 1 || strings.Contains(sent, e.i18n.T(MsgEmptyResponse)) {
-				t.Fatalf("commentary-only turn sent %q, want the narration once and no empty-response fallback", sent)
+			if strings.Count(sent, "Working") != tc.wantCount || strings.Contains(sent, e.i18n.T(MsgEmptyResponse)) {
+				t.Fatalf("commentary-only turn sent %q, want %d narration(s) and no empty-response fallback", sent, tc.wantCount)
 			}
 		})
 	}

@@ -766,12 +766,10 @@ func TestHandleRelay_CommentaryDoesNotEnterFinalResponse(t *testing.T) {
 		commentary *bool
 		want       string
 	}{
-		// Standalone commentary is progress, not part of the relay answer.
+		// Standalone commentary is progress, never part of the relay final answer.
 		{name: "enabled", commentary: &enabled, want: "Final answer"},
-		// Disabled (the default) keeps the legacy answer: the text the agent
-		// would previously have emitted as EventText is not dropped.
-		{name: "absent", want: "Progress onlyFinal answer"},
-		{name: "disabled", commentary: &disabled, want: "Progress onlyFinal answer"},
+		{name: "absent", want: "Final answer"},
+		{name: "disabled", commentary: &disabled, want: "Final answer"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			e := newTestEngine()

@@ -128,9 +128,10 @@ func TestAntigravityCommentary_ReachesChatBeforeTurnCompletion(t *testing.T) {
 	}
 }
 
-// Use the same non-nil, config-resolved display value as startup/reload. The
-// real adapter and subprocess reader must retain narration when opt-in is off.
-func TestAntigravityCommentary_ProductionConfigPreservesNarration(t *testing.T) {
+// Use the same non-nil, config-resolved display value as startup/reload.
+// Standalone commentary is enabled by default (opt-out) and can be overridden
+// globally or per project; the final answer never duplicates commentary.
+func TestAntigravityCommentary_ProductionConfigResolution(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	for _, mode := range []string{"full", "quiet"} {
 		for _, eof := range []string{"0", "1"} {
@@ -140,11 +141,11 @@ func TestAntigravityCommentary_ProductionConfigPreservesNarration(t *testing.T) 
 				project string
 				enabled bool
 			}{
-				{name: "absent"},
-				{name: "false", global: "false"},
+				{name: "absent", enabled: true},
+				{name: "false", global: "false", enabled: false},
 				{name: "true", global: "true", enabled: true},
-				{name: "project-opt-in", global: "false", project: "true", enabled: true},
-				{name: "project-opt-out", global: "true", project: "false"},
+				{name: "project-enable", global: "false", project: "true", enabled: true},
+				{name: "project-opt-out", global: "true", project: "false", enabled: false},
 			} {
 				t.Run(mode+"/eof="+eof+"/"+tc.name, func(t *testing.T) {
 					workDir := t.TempDir()
@@ -167,7 +168,7 @@ func TestAntigravityCommentary_ProductionConfigPreservesNarration(t *testing.T) 
 					project := &cfg.Projects[0]
 					commentary := config.EffectiveCommentaryMessages(cfg, project)
 					if commentary != tc.enabled {
-						t.Fatalf("resolved opt-in = %v, want %v", commentary, tc.enabled)
+						t.Fatalf("resolved commentary_messages = %v, want %v", commentary, tc.enabled)
 					}
 					resolvedMode, thinking, tools, thinkingLen, toolLen, showContext, footer, hideFooter := config.EffectiveDisplay(cfg, project)
 					release := filepath.Join(workDir, "release")
@@ -189,9 +190,7 @@ func TestAntigravityCommentary_ProductionConfigPreservesNarration(t *testing.T) 
 					e.ReceiveMessage(p, &core.Message{SessionKey: "test:commentary:user", Platform: "test", UserID: "user", Content: "Check the build", ReplyCtx: "ctx"})
 
 					var messages []string
-					// Legacy full mode flushes pre-tool text before its progress card.
-					// Quiet mode retains it in the answer unless explicitly opted in.
-					if commentary || mode == "full" {
+					if commentary {
 						select {
 						case text := <-p.sent:
 							if text != "Checking the build" {
@@ -211,16 +210,18 @@ func TestAntigravityCommentary_ProductionConfigPreservesNarration(t *testing.T) 
 							t.Fatalf("expected final answer, got %q", text)
 						}
 						messages = append(messages, text)
-						wantNarrationInAnswer := mode == "quiet" && !commentary
-						if strings.Contains(text, "Checking the build") != wantNarrationInAnswer {
-							t.Fatalf("final answer did not honor legacy/opt-in display: %q", text)
+						if strings.Contains(text, "Checking the build") {
+							t.Fatalf("final answer must not include commentary: %q", text)
 						}
 					case <-time.After(5 * time.Second):
 						t.Fatal("final answer missing")
 					}
-					wantNarrationCount := 1
+					wantNarrationCount := 0
+					if commentary {
+						wantNarrationCount = 1
+					}
 					if strings.Count(strings.Join(messages, "\n"), "Checking the build") != wantNarrationCount {
-						t.Fatalf("narration lost or duplicated: %q", messages)
+						t.Fatalf("narration count mismatch: %q, want %d", messages, wantNarrationCount)
 					}
 				})
 			}
@@ -230,9 +231,9 @@ func TestAntigravityCommentary_ProductionConfigPreservesNarration(t *testing.T) 
 
 // A tool-only turn whose only assistant text is the pre-tool narration: AGY
 // echoes that narration in the result envelope. Through the real adapter and
-// Engine the user must see it exactly once, with neither the adapter's "no
-// response" error nor the engine's empty-response fallback, both with the
-// default (legacy) setting and with standalone commentary enabled.
+// Engine the user sees it exactly once by default (absent/true), or suppressed
+// when explicitly opted out (false), with neither the adapter's "no response"
+// error nor the engine's empty-response fallback.
 func TestAntigravityCommentary_ToolOnlyTurnDeliversNarrationOnce(t *testing.T) {
 	if os.Getenv("CC_AGY_TOOL_ONLY_HELPER") == "1" {
 		exitOnAgyVersionProbe()
@@ -247,10 +248,11 @@ func TestAntigravityCommentary_ToolOnlyTurnDeliversNarrationOnce(t *testing.T) {
 	for _, tc := range []struct {
 		name       string
 		commentary *bool
+		wantCount  int
 	}{
-		{name: "absent"},
-		{name: "false", commentary: new(bool)},
-		{name: "true", commentary: func() *bool { v := true; return &v }()},
+		{name: "absent", wantCount: 1},
+		{name: "false", commentary: new(bool), wantCount: 0},
+		{name: "true", commentary: func() *bool { v := true; return &v }(), wantCount: 1},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			workDir := t.TempDir()
@@ -271,7 +273,7 @@ func TestAntigravityCommentary_ToolOnlyTurnDeliversNarrationOnce(t *testing.T) {
 		collect:
 			for {
 				wait := time.Second
-				if len(messages) == 0 {
+				if len(messages) == 0 && tc.wantCount > 0 {
 					wait = 5 * time.Second
 				}
 				select {
@@ -285,8 +287,8 @@ func TestAntigravityCommentary_ToolOnlyTurnDeliversNarrationOnce(t *testing.T) {
 			}
 			t.Logf("delivered messages: %q", messages)
 			all := strings.Join(messages, "\n")
-			if strings.Count(all, "Working") != 1 {
-				t.Fatalf("narration delivered %d times, want once: %q", strings.Count(all, "Working"), messages)
+			if strings.Count(all, "Working") != tc.wantCount {
+				t.Fatalf("narration delivered %d times, want %d: %q", strings.Count(all, "Working"), tc.wantCount, messages)
 			}
 			if strings.Contains(all, "without producing a response") || strings.Contains(all, "(empty response)") {
 				t.Fatalf("delivered narration was misreported as no response: %q", messages)

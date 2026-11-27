@@ -6,7 +6,7 @@ import (
 	"time"
 )
 
-func TestProcessInteractiveEvents_CommentaryOptInPreservesLegacyOutput(t *testing.T) {
+func TestProcessInteractiveEvents_QuietCommentaryOptOut(t *testing.T) {
 	yes, no := true, false
 	for _, mode := range []string{"quiet"} {
 		for _, setting := range []struct {
@@ -47,19 +47,15 @@ func TestProcessInteractiveEvents_CommentaryOptInPreservesLegacyOutput(t *testin
 						standalone++
 					}
 				}
-				wantStandalone := 0
-				if setting.value != nil && *setting.value {
-					wantStandalone = 3
+				wantStandalone := 3
+				if setting.value != nil && !*setting.value {
+					wantStandalone = 0
 				}
 				if standalone != wantStandalone {
 					t.Fatalf("standalone updates = %d, want %d; sent = %q", standalone, wantStandalone, sent)
 				}
-				wantAnswer := "Final answer"
-				if wantStandalone == 0 {
-					wantAnswer = strings.Repeat("Progress update. ", 3) + wantAnswer
-				}
-				if answer != wantAnswer {
-					t.Fatalf("history = %q, want %q", answer, wantAnswer)
+				if answer != "Final answer" {
+					t.Fatalf("history = %q, want %q", answer, "Final answer")
 				}
 				if strings.Count(strings.Join(sent, "\n"), "Final answer") != 1 {
 					t.Fatalf("final answer missing or duplicated: %q", sent)
@@ -69,79 +65,93 @@ func TestProcessInteractiveEvents_CommentaryOptInPreservesLegacyOutput(t *testin
 	}
 }
 
-func TestProcessInteractiveEvents_DefaultCommentaryUsesAnswerCard(t *testing.T) {
-	for _, enabled := range []*bool{nil, new(bool)} {
-		p := &recordingStreamCardPlatform{stubPlatformEngine: stubPlatformEngine{n: "test"}, card: &recordingStreamCard{}}
-		e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
-		e.SetDisplayConfig(DisplayCfg{Mode: "quiet", CommentaryMessages: enabled})
-		e.SetReplyFooterEnabled(false)
-		session := e.sessions.GetOrCreateActive("test:commentary-card")
-		s := newControllableSession("commentary-card")
-		state := &interactiveState{agentSession: s, platform: p, replyCtx: "ctx"}
-		s.events <- Event{Type: EventCommentary, Content: "Working. "}
-		s.events <- Event{Type: EventToolUse, ToolName: "shell"}
-		s.events <- Event{Type: EventText, Content: "Done."}
-		s.events <- Event{Type: EventResult, Done: true}
-		e.processInteractiveEvents(state, session, e.sessions, "test:commentary-card", "m", time.Now(), nil, nil, "ctx", 0)
-		if sent := p.getSent(); len(sent) != 0 {
-			t.Fatalf("legacy answer card created standalone messages: %q", sent)
-		}
-		card := p.card.finalContent()
-		if !strings.Contains(card, "Working. ") || !strings.Contains(card, "Done.") {
-			t.Fatalf("legacy answer card lost text: %q", card)
-		}
-		_ = e.Stop()
-	}
-}
-
-func TestUnsolicitedReader_DefaultCommentaryPreservesAnswer(t *testing.T) {
-	for _, enabled := range []*bool{nil, new(bool)} {
-		p := &stubPlatformEngine{n: "test"}
-		s := newControllableSession("default-background-commentary")
-		e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
-		e.SetDisplayConfig(DisplayCfg{CommentaryMessages: enabled})
-		const key = "test:default-background-commentary"
-		session := e.sessions.GetOrCreateActive(key)
-		state := &interactiveState{agentSession: s, platform: p, replyCtx: "ctx"}
-		e.interactiveStates[key] = state
-		e.startUnsolicitedReader(state, session, e.sessions, key, "")
-		s.events <- Event{Type: EventCommentary, Content: "Working. "}
-		s.events <- Event{Type: EventText, Content: "Done."}
-		s.events <- Event{Type: EventResult, Done: true}
-		sent := waitForPlatformSend(p, 1, 2*time.Second)
-		e.stopUnsolicitedReader(state)
-		_ = e.Stop()
-		if len(sent) != 1 || sent[0] != "Working. Done." {
-			t.Fatalf("background legacy response = %q", sent)
-		}
-	}
-}
-
-func TestProcessCompressEvents_DefaultCommentaryPreservesManualAnswer(t *testing.T) {
-	for _, enabled := range []*bool{nil, new(bool)} {
-		for _, auto := range []bool{false, true} {
-			e := newTestEngine()
-			p := &stubPlatformEngine{n: "test"}
-			e.SetDisplayConfig(DisplayCfg{CommentaryMessages: enabled})
-			s := newQueuingSession("default-compress-commentary")
-			state := &interactiveState{agentSession: s, platform: p}
-			session := e.sessions.GetOrCreateActive("test:default-compress-commentary")
-			lockGen, _ := session.TryLock()
+func TestProcessInteractiveEvents_CommentaryAnswerCardPolicy(t *testing.T) {
+	yes, no := true, false
+	for _, tc := range []struct {
+		name           string
+		enabled        *bool
+		wantStandalone bool
+	}{
+		{"absent", nil, true},
+		{"true", &yes, true},
+		{"false", &no, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			p := &recordingStreamCardPlatform{stubPlatformEngine: stubPlatformEngine{n: "test"}, card: &recordingStreamCard{}}
+			e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+			e.SetDisplayConfig(DisplayCfg{Mode: "quiet", CommentaryMessages: tc.enabled})
+			e.SetReplyFooterEnabled(false)
+			session := e.sessions.GetOrCreateActive("test:commentary-card")
+			s := newControllableSession("commentary-card")
+			state := &interactiveState{agentSession: s, platform: p, replyCtx: "ctx"}
 			s.events <- Event{Type: EventCommentary, Content: "Working. "}
+			s.events <- Event{Type: EventToolUse, ToolName: "shell"}
 			s.events <- Event{Type: EventText, Content: "Done."}
 			s.events <- Event{Type: EventResult, Done: true}
-			unlocked := false
-			e.processCompressEvents(state, session, e.sessions, "test:default-compress-commentary", p, nil, &unlocked, auto, lockGen)
-			session.Unlock(lockGen)
-			e.cancel()
+			e.processInteractiveEvents(state, session, e.sessions, "test:commentary-card", "m", time.Now(), nil, nil, "ctx", 0)
 			sent := p.getSent()
-			if auto {
-				if len(sent) != 0 {
-					t.Fatalf("automatic compression sent messages: %q", sent)
+			if tc.wantStandalone {
+				if len(sent) != 1 || sent[0] != "Working." {
+					t.Fatalf("standalone commentary = %q, want [\"Working.\"]", sent)
 				}
-			} else if len(sent) != 1 || sent[0] != "Working. Done." {
-				t.Fatalf("manual compression legacy response = %q", sent)
+			} else if len(sent) != 0 {
+				t.Fatalf("opt-out sent standalone messages: %q", sent)
 			}
+			card := p.card.finalContent()
+			if !strings.Contains(card, "Done.") || strings.Contains(card, "Working.") {
+				t.Fatalf("answer card = %q, want only final answer", card)
+			}
+			_ = e.Stop()
+		})
+	}
+}
+
+func TestUnsolicitedReader_CommentaryOptOutPolicy(t *testing.T) {
+	no := false
+	p := &stubPlatformEngine{n: "test"}
+	s := newControllableSession("optout-background-commentary")
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	e.SetDisplayConfig(DisplayCfg{CommentaryMessages: &no})
+	const key = "test:optout-background-commentary"
+	session := e.sessions.GetOrCreateActive(key)
+	state := &interactiveState{agentSession: s, platform: p, replyCtx: "ctx"}
+	e.interactiveStates[key] = state
+	e.startUnsolicitedReader(state, session, e.sessions, key, "")
+	s.events <- Event{Type: EventCommentary, Content: "Working. "}
+	s.events <- Event{Type: EventText, Content: "Done."}
+	s.events <- Event{Type: EventResult, Done: true}
+	sent := waitForPlatformSend(p, 1, 2*time.Second)
+	e.stopUnsolicitedReader(state)
+	_ = e.Stop()
+	if len(sent) != 1 || sent[0] != "Done." {
+		t.Fatalf("background opt-out response = %q, want [\"Done.\"]", sent)
+	}
+}
+
+func TestProcessCompressEvents_CommentaryOptOutPolicy(t *testing.T) {
+	no := false
+	for _, auto := range []bool{false, true} {
+		e := newTestEngine()
+		p := &stubPlatformEngine{n: "test"}
+		e.SetDisplayConfig(DisplayCfg{CommentaryMessages: &no})
+		s := newQueuingSession("optout-compress-commentary")
+		state := &interactiveState{agentSession: s, platform: p}
+		session := e.sessions.GetOrCreateActive("test:optout-compress-commentary")
+		lockGen, _ := session.TryLock()
+		s.events <- Event{Type: EventCommentary, Content: "Working. "}
+		s.events <- Event{Type: EventText, Content: "Done."}
+		s.events <- Event{Type: EventResult, Done: true}
+		unlocked := false
+		e.processCompressEvents(state, session, e.sessions, "test:optout-compress-commentary", p, nil, &unlocked, auto, lockGen)
+		session.Unlock(lockGen)
+		e.cancel()
+		sent := p.getSent()
+		if auto {
+			if len(sent) != 0 {
+				t.Fatalf("automatic compression sent messages: %q", sent)
+			}
+		} else if len(sent) != 1 || sent[0] != "Done." {
+			t.Fatalf("manual compression opt-out response = %q, want [\"Done.\"]", sent)
 		}
 	}
 }

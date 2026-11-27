@@ -333,7 +333,7 @@ type DisplayCfg struct {
 	Mode               string // "full" (default), "compact", or "quiet" — thinking/tool visibility
 	CardMode           string // "legacy" (default) or "rich" (Card 2.0 Feishu)
 	ThinkingMessages   bool
-	CommentaryMessages *bool // nil defaults to false; true opts into standalone updates
+	CommentaryMessages *bool // nil defaults to true, independently of display mode
 	ThinkingMaxLen     int   // max runes for thinking preview; 0 = no truncation
 	ToolMaxLen         int   // max runes for tool use preview; 0 = no truncation
 	ToolMessages       bool
@@ -5637,7 +5637,7 @@ func (e *Engine) runUnsolicitedReader(ctx context.Context, cancel context.Cancel
 			replyCtx := state.replyCtx
 			state.mu.Unlock()
 
-			switch e.commentaryEventType(event.Type) {
+			switch event.Type {
 			case EventCommentary:
 				e.relayCommentary(p, replyCtx, event.Content, workspaceDir)
 
@@ -6127,7 +6127,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			return richCardSupporter.BuildRichCard(status, title, steps, resolveRichCardMarkdown(markdown, !streaming), streaming, statusFooter)
 		}
 
-		switch e.commentaryEventType(event.Type) {
+		switch event.Type {
 		case EventModelSwitch:
 			e.relayModelSwitch(p, replyCtx, sessionKey, event.ModelSwitch)
 
@@ -11989,7 +11989,7 @@ func (e *Engine) processCompressEvents(state *interactiveState, session *Session
 			idleTimer.Reset(e.eventIdleTimeout)
 		}
 
-		switch e.commentaryEventType(event.Type) {
+		switch event.Type {
 		case EventCommentary:
 			if !auto {
 				e.relayCommentary(p, replyCtx, event.Content, "")
@@ -17541,12 +17541,10 @@ func (e *Engine) handleRelay(ctx context.Context, fromProject, sourceSessionKey,
 		}
 	}()
 	for event := range agentSession.Events() {
-		// With standalone commentary disabled (the default), commentary is
-		// rewritten to EventText so relay answers match the legacy behavior.
-		switch e.commentaryEventType(event.Type) {
+		switch event.Type {
 		case EventCommentary:
-			// Relay returns one final answer to the calling agent; enabled
-			// progress must not be accumulated into that answer or its history.
+			// Relay returns one final answer to the calling agent; progress
+			// must not be accumulated into that answer or its history.
 
 		case EventText:
 			if event.Content != "" {

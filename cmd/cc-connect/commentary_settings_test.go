@@ -86,7 +86,7 @@ func TestManagementCommentary_ProductionSaveReloadDelivery(t *testing.T) {
 				if err != nil || !result.DisplayUpdated {
 					t.Fatalf("reloadConfig: result=%+v err=%v", result, err)
 				}
-				wantStandalone := global == "true"
+				wantStandalone := global != "false"
 				if project != "absent" {
 					wantStandalone = project == "true"
 				}
@@ -104,10 +104,10 @@ func TestManagementCommentary_ProductionSaveReloadDelivery(t *testing.T) {
 						}
 						if wantStandalone {
 							if len(messages) != 2 || messages[0] != "Working." || text != "Done." {
-								t.Fatalf("opt-in messages = %q", messages)
+								t.Fatalf("standalone messages = %q", messages)
 							}
-						} else if len(messages) != 1 || text != "Working. Done." {
-							t.Fatalf("legacy messages = %q", messages)
+						} else if len(messages) != 1 || text != "Done." {
+							t.Fatalf("opt-out messages = %q", messages)
 						}
 						return
 					case <-timer.C:
