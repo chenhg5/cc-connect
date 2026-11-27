@@ -28,6 +28,7 @@ func runRelay(args []string) {
 
 func runRelaySend(args []string) {
 	var from, to, sessionKey, message, dataDir string
+	async, live := false, false
 
 	var positional []string
 	for i := 0; i < len(args); i++ {
@@ -57,6 +58,10 @@ func runRelaySend(args []string) {
 				i++
 				dataDir = args[i]
 			}
+		case "--async":
+			async = true
+		case "--live":
+			live = true
 		case "--help", "-h":
 			printRelaySendUsage()
 			return
@@ -96,14 +101,19 @@ func runRelaySend(args []string) {
 		os.Exit(1)
 	}
 
-	payload, _ := json.Marshal(map[string]string{
+	payload, _ := json.Marshal(map[string]any{
 		"from":        from,
 		"to":          to,
 		"session_key": sessionKey,
 		"message":     message,
+		"live":        live,
 	})
 
-	resp, err := apiPost(sockPath, "/relay/send", payload)
+	endpoint := "/relay/send"
+	if async {
+		endpoint = "/relay/send-async"
+	}
+	resp, err := apiPost(sockPath, endpoint, payload)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		os.Exit(1)
@@ -111,19 +121,26 @@ func runRelaySend(args []string) {
 	defer resp.Body.Close()
 
 	body, _ := io.ReadAll(resp.Body)
-	if resp.StatusCode != http.StatusOK {
+	accepted := resp.StatusCode == http.StatusOK || async && resp.StatusCode == http.StatusAccepted
+	if !accepted {
 		fmt.Fprintf(os.Stderr, "Error: %s\n", strings.TrimSpace(string(body)))
 		os.Exit(1)
 	}
 
 	var result struct {
 		Response string `json:"response"`
+		Status   string `json:"status"`
+		Job      string `json:"job"`
 	}
 	if err := json.Unmarshal(body, &result); err != nil {
 		fmt.Fprintf(os.Stderr, "Error: decode response: %v\n", err)
 		os.Exit(1)
 	}
-	fmt.Print(result.Response)
+	if async {
+		fmt.Printf("queued relay job=%s\n", result.Job)
+	} else {
+		fmt.Print(result.Response)
+	}
 }
 
 func printRelayUsage() {
@@ -145,6 +162,8 @@ Options:
   -t, --to <project>         Target bot project name
   -s, --session-key <key>    Session key (auto-detected from CC_SESSION_KEY env)
   -m, --message <text>       Message to send
+      --async                Queue the relay and return immediately
+      --live                 Show the target agent's progress in the group
       --data-dir <path>      Data directory (default: ~/.cc-connect)
   -h, --help                 Show this help
 
