@@ -99,11 +99,11 @@ func (p *Platform) Start(handler core.MessageHandler) error {
 
 	conn, _, err := websocket.DefaultDialer.Dial(p.wsURL, header)
 	if err != nil {
-		return fmt.Errorf("qq: ws connect failed (%s): %w", p.wsURL, err)
+		return fmt.Errorf("qq: ws connect failed (%s): %s", core.RedactURL(p.wsURL), core.SafeError(err, p.token))
 	}
 	p.conn = conn
 
-	slog.Info("qq: connected to OneBot", "url", p.wsURL)
+	slog.Info("qq: connected to OneBot", "url", core.RedactURL(p.wsURL))
 
 	ctx, cancel := context.WithCancel(context.Background())
 	p.cancel = cancel
@@ -178,7 +178,7 @@ func (p *Platform) reconnect() {
 		}
 		conn, _, err := websocket.DefaultDialer.Dial(p.wsURL, header)
 		if err != nil {
-			slog.Warn("qq: reconnect attempt failed", "attempt", i, "error", err)
+			slog.Warn("qq: reconnect attempt failed", "attempt", i, "error", core.SafeError(err, p.token))
 			continue
 		}
 		p.mu.Lock()

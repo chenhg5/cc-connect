@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -270,6 +271,69 @@ func TestMgmt_StatusIncludesBridgeToken(t *testing.T) {
 	}
 }
 
+func TestMgmt_StatusReportsBridgeNotListening(t *testing.T) {
+	mgmt, ts, _ := testManagementServer(t, "tok")
+	mgmt.SetBridgeServer(NewBridgeServer(9810, "bridge-secret", "/bridge/ws", nil))
+	r := mgmtGet(t, ts.URL+"/api/v1/status", "tok")
+	if !r.OK {
+		t.Fatalf("status failed: %s", r.Error)
+	}
+	var data map[string]json.RawMessage
+	if err := json.Unmarshal(r.Data, &data); err != nil {
+		t.Fatal(err)
+	}
+	var bridge map[string]any
+	if err := json.Unmarshal(data["bridge"], &bridge); err != nil {
+		t.Fatal(err)
+	}
+	if bridge["enabled"] != true || bridge["listening"] != false {
+		t.Fatalf("expected enabled but not listening, got %+v", bridge)
+	}
+	if _, ok := bridge["last_error"]; !ok {
+		t.Fatalf("status omitted last_error: %+v", bridge)
+	}
+}
+
+func TestMgmt_StatusReportsBridgeFailureAndDisabled(t *testing.T) {
+	mgmt, ts, _ := testManagementServer(t, "tok")
+	readBridge := func() map[string]any {
+		t.Helper()
+		r := mgmtGet(t, ts.URL+"/api/v1/status", "tok")
+		if !r.OK {
+			t.Fatalf("status failed: %s", r.Error)
+		}
+		var data map[string]json.RawMessage
+		if err := json.Unmarshal(r.Data, &data); err != nil {
+			t.Fatal(err)
+		}
+		var bridge map[string]any
+		if err := json.Unmarshal(data["bridge"], &bridge); err != nil {
+			t.Fatal(err)
+		}
+		return bridge
+	}
+	if got := readBridge(); got["enabled"] != false || got["listening"] != false {
+		t.Fatalf("expected disabled bridge status, got %+v", got)
+	}
+	occupied, err := net.Listen("tcp", ":0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := occupied.Close(); err != nil {
+			t.Errorf("close occupied listener: %v", err)
+		}
+	})
+	bs := NewBridgeServer(occupied.Addr().(*net.TCPAddr).Port, "bridge-secret", "/bridge/ws", nil)
+	mgmt.SetBridgeServer(bs)
+	if err := bs.Start(); err == nil {
+		t.Fatal("expected bridge bind failure")
+	}
+	if got := readBridge(); got["enabled"] != true || got["listening"] != false || got["last_error"] == "" {
+		t.Fatalf("expected enabled bridge with bind failure, got %+v", got)
+	}
+}
+
 func TestMgmt_Projects(t *testing.T) {
 	_, ts, _ := testManagementServer(t, "tok")
 
@@ -365,6 +429,30 @@ func TestMgmt_SessionDetail(t *testing.T) {
 	}
 	if len(data.History) != 2 {
 		t.Fatalf("expected 2 history entries, got %d", len(data.History))
+	}
+}
+
+func TestMgmt_SessionIdentityAvailableInListAndDetail(t *testing.T) {
+	_, ts, e := testManagementServer(t, "tok")
+	const key = "wecom:group-7:user-9"
+	s := e.sessions.NewSession(key, "default")
+	s.SetAgentSessionID("agent-123", "codex")
+	e.sessions.UpdateUserIdentity(key, UserMeta{UserID: "user-9", UserName: "Ada", ChatID: "group-7", ChatName: "Team", ChatType: "group"})
+
+	for _, path := range []string{
+		"/api/v1/projects/test-project/sessions",
+		"/api/v1/projects/test-project/sessions/" + s.ID,
+	} {
+		r := mgmtGet(t, ts.URL+path, "tok")
+		if !r.OK {
+			t.Fatalf("GET %s: %s", path, r.Error)
+		}
+		if !strings.Contains(string(r.Data), `"user_id":"user-9"`) ||
+			!strings.Contains(string(r.Data), `"chat_id":"group-7"`) ||
+			!strings.Contains(string(r.Data), `"chat_type":"group"`) ||
+			!strings.Contains(string(r.Data), `"agent_session_id":"agent-123"`) {
+			t.Fatalf("GET %s missing session identity: %s", path, r.Data)
+		}
 	}
 }
 
@@ -2977,6 +3065,25 @@ func TestMgmt_CCSwitchProviders_MethodNotAllowed(t *testing.T) {
 	r := mgmtDelete(t, ts.URL+"/api/v1/providers/cc-switch", "tok")
 	if r.OK {
 		t.Fatal("expected DELETE on cc-switch to fail")
+	}
+}
+
+func TestMgmt_SetupWeixinBeginSendsClientVersion(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/ilink/bot/get_bot_qrcode" {
+			t.Errorf("unexpected path %q", r.URL.Path)
+		}
+		if got := r.Header.Get("iLink-App-ClientVersion"); got != "1" {
+			t.Errorf("web setup QR request client version = %q, want 1", got)
+		}
+		_, _ = w.Write([]byte(`{"qrcode":"test-key","qrcode_img_content":"https://example.invalid/qr"}`))
+	}))
+	defer server.Close()
+
+	mgmt := NewManagementServer(0, "tok", nil)
+	result, code := mgmtPostHandler(t, mgmt.handleSetupWeixinBegin, "/api/v1/setup/weixin/begin", map[string]any{"api_url": server.URL})
+	if code != http.StatusOK || !result.OK {
+		t.Fatalf("web setup QR request failed: status=%d error=%q", code, result.Error)
 	}
 }
 

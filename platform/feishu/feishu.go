@@ -24,6 +24,7 @@ import (
 	"time"
 
 	"github.com/chenhg5/cc-connect/core"
+	"github.com/google/uuid"
 
 	lark "github.com/larksuite/oapi-sdk-go/v3"
 	larkcore "github.com/larksuite/oapi-sdk-go/v3/core"
@@ -558,7 +559,7 @@ func newPlatform(name, domain string, opts map[string]any) (core.Platform, error
 	if raw, ok := opts["image_batch_window_ms"]; ok {
 		ms, err := coerceMilliseconds(raw)
 		if err != nil {
-			return nil, fmt.Errorf("%s: invalid image_batch_window_ms %v: %w", name, raw, err)
+			return nil, fmt.Errorf("%s: invalid image_batch_window_ms: %w", name, err)
 		}
 		if ms < 0 {
 			return nil, fmt.Errorf("%s: image_batch_window_ms must be >= 0, got %d", name, ms)
@@ -591,7 +592,7 @@ func newPlatform(name, domain string, opts map[string]any) (core.Platform, error
 	if raw, ok := opts["resource_chunk_size_bytes"]; ok {
 		n, err := coerceMilliseconds(raw)
 		if err != nil {
-			return nil, fmt.Errorf("%s: invalid resource_chunk_size_bytes %v: %w", name, raw, err)
+			return nil, fmt.Errorf("%s: invalid resource_chunk_size_bytes: %w", name, err)
 		}
 		if n > 0 {
 			resourceChunkSize = n
@@ -675,6 +676,10 @@ func (p *Platform) Name() string { return p.platformName }
 func (p *Platform) ProgressStyle() string { return p.progressStyle }
 
 func (p *Platform) SupportsProgressCardPayload() bool { return true }
+
+// ProgressUpdateInterval limits card edits so a burst of tool events does not
+// exhaust Feishu PATCH capacity or turn a transient timeout into fallback spam.
+func (p *Platform) ProgressUpdateInterval() time.Duration { return 1500 * time.Millisecond }
 
 // groupReplyAllForChat reports whether an unmentioned message from chatID
 // should bypass the local @mention gate. A non-empty per-chat list takes
@@ -1818,7 +1823,7 @@ func (p *Platform) groupHistoryScope(msg *larkim.EventMessage, chatID string) st
 		return ""
 	}
 	if p.threadIsolation && msg != nil && stringValue(msg.ChatType) == "group" {
-		if rootID := stringValue(msg.RootId); rootID != "" {
+		if rootID := threadRootID(msg); rootID != "" {
 			return "thread:" + chatID + ":" + rootID
 		}
 	}
@@ -4255,13 +4260,8 @@ func buildReplyContent(content string) (msgType string, body string) {
 		b, _ := json.Marshal(map[string]string{"text": content})
 		return larkim.MsgTypeText, string(b)
 	}
-	// Prefer card for all markdown content — card schema 2.0 has the best
-	// markdown rendering (headings, blockquotes, code blocks, tables, links,
-	// strikethrough, etc.). Only fall back to post md tag when the content
-	// exceeds the card table limit (Feishu API error 11310: max 5 tables).
-	if countMarkdownTables(content) > maxCardTables {
-		return larkim.MsgTypePost, buildPostMdJSON(content)
-	}
+	// Card 2.0 lays out ordinary Markdown tables as rows or native table
+	// components. Post md does not render overflow tables reliably.
 	return larkim.MsgTypeInteractive, buildCardJSON(sanitizeMarkdownURLs(preprocessFeishuMarkdown(content)))
 }
 
@@ -4280,44 +4280,9 @@ func hasComplexMarkdown(s string) bool {
 	return false
 }
 
-// maxCardTables is the Feishu interactive card limit for table components.
-// A single card supports at most 5 tables; exceeding this causes API error 11310.
+// maxCardTables is the Feishu interactive card limit for native table components.
+// Row-based tables do not consume these slots.
 const maxCardTables = 5
-
-// countMarkdownTables counts the number of distinct markdown tables in s.
-// A table is a group of consecutive lines where each line starts and ends with '|'.
-func countMarkdownTables(s string) int {
-	count := 0
-	inTable := false
-	for _, line := range strings.Split(s, "\n") {
-		trimmed := strings.TrimSpace(line)
-		isTableLine := len(trimmed) > 1 && trimmed[0] == '|' && trimmed[len(trimmed)-1] == '|'
-		if isTableLine && !inTable {
-			count++
-			inTable = true
-		} else if !isTableLine {
-			inTable = false
-		}
-	}
-	return count
-}
-
-// buildPostMdJSON builds a Feishu post message using the md tag,
-// which renders markdown at normal chat font size.
-func buildPostMdJSON(content string) string {
-	content = sanitizeMarkdownURLs(content)
-	post := map[string]any{
-		"zh_cn": map[string]any{
-			"content": [][]map[string]any{
-				{
-					{"tag": "md", "text": content},
-				},
-			},
-		},
-	}
-	b, _ := json.Marshal(post)
-	return string(b)
-}
 
 // preprocessFeishuMarkdown ensures code fences have a newline before them,
 // which prevents rendering issues in Feishu card markdown.
@@ -4782,11 +4747,26 @@ func stripMentions(text string, mentions []*larkim.MentionEvent, botOpenID strin
 	return strings.TrimSpace(text)
 }
 
+// threadRootID is the root of the thread msg is in, or "" outside threads.
+// root_id names a thread only alongside thread_id: a plain reply in the main
+// channel carries the root of the chain it quotes, yet the bot answers it in
+// a new thread on the reply itself, and every later message there carries
+// the reply's id as root_id. Taking the quoted root would put the first turn
+// and the rest of that thread in two sessions.
+func threadRootID(msg *larkim.EventMessage) string {
+	if stringValue(msg.ThreadId) == "" {
+		return ""
+	}
+	return stringValue(msg.RootId)
+}
+
 // TODO: Session-key derivation and reply-thread behavior are split across multiple code paths here.
 // Should revisit thread/root handling without changing thread_isolation=false behavior.
 func (p *Platform) makeSessionKey(msg *larkim.EventMessage, chatID, userID string) string {
 	if p.threadIsolation && msg != nil && stringValue(msg.ChatType) == "group" {
-		rootID := stringValue(msg.RootId)
+		// A plain reply in the main channel is answered in a new thread
+		// on the reply itself (reply_in_thread): it roots its own session.
+		rootID := threadRootID(msg)
 		if rootID == "" {
 			rootID = stringValue(msg.MessageId)
 		}
@@ -4907,9 +4887,21 @@ func (p *Platform) sendNewMessageToChat(ctx context.Context, rc replyContext, ms
 }
 
 func (p *Platform) buildReplyMessageReqBody(rc replyContext, msgType, content string) *larkim.ReplyMessageReqBody {
+	return p.buildReplyMessageReqBodyWithUUID(rc, msgType, content, "")
+}
+
+// buildReplyMessageReqBodyWithUUID builds a reply body carrying a Feishu
+// idempotency key when idempotencyKey is non-empty. Feishu accepts the same
+// Uuid at most once per hour, so a transport-level retry after a response we
+// could not read does not post a second message when the first attempt already
+// reached the chat.
+func (p *Platform) buildReplyMessageReqBodyWithUUID(rc replyContext, msgType, content, idempotencyKey string) *larkim.ReplyMessageReqBody {
 	body := larkim.NewReplyMessageReqBodyBuilder().
 		MsgType(msgType).
 		Content(content)
+	if idempotencyKey != "" {
+		body.Uuid(idempotencyKey)
+	}
 	if p.shouldReplyInThread(rc) {
 		body.ReplyInThread(true)
 	}
@@ -4917,9 +4909,14 @@ func (p *Platform) buildReplyMessageReqBody(rc replyContext, msgType, content st
 }
 
 func (p *Platform) replyMessage(ctx context.Context, rc replyContext, msgType, content string) error {
+	// One idempotency key for every attempt of this send. Feishu dedupes on
+	// Uuid, so a transient retry (or a caller re-send that reuses the same
+	// logical send) does not post a duplicate when an earlier attempt already
+	// delivered despite returning code=2200 "internal error".
+	replyUUID := uuid.NewString()
 	req := larkim.NewReplyMessageReqBuilder().
 		MessageId(rc.messageID).
-		Body(p.buildReplyMessageReqBody(rc, msgType, content)).
+		Body(p.buildReplyMessageReqBodyWithUUID(rc, msgType, content, replyUUID)).
 		Build()
 	return p.withTransientRetry(ctx, "reply", func() error {
 		return p.withFreshTenantAccessTokenRetry(ctx, "reply", func(client *lark.Client, options ...larkcore.RequestOptionFunc) error {
@@ -4928,6 +4925,12 @@ func (p *Platform) replyMessage(ctx context.Context, rc replyContext, msgType, c
 				return fmt.Errorf("%s: reply api call: %w", p.tag(), err)
 			}
 			if !resp.Success() {
+				// Code 2200 is Feishu's "internal error" and may be returned
+				// after the message was already delivered. Mark it so callers
+				// do not treat the reply as safely un-sent and re-post it.
+				if resp.Code == 2200 {
+					return fmt.Errorf("%s: reply failed code=%d msg=%s: %w", p.tag(), resp.Code, resp.Msg, core.ErrMaybeDelivered)
+				}
 				return fmt.Errorf("%s: reply failed code=%d msg=%s", p.tag(), resp.Code, resp.Msg)
 			}
 			return nil
@@ -5431,13 +5434,17 @@ type feishuPreviewHandle struct {
 	sequence    int    // cardkit-v1 streaming text monotonic counter (++ before use; first call = 1)
 	status      core.CardStatus
 	lastContent string
+	// progress is what a progress card sent as a card entity shows, so a
+	// refresh updates it in place (progress_card_entity.go); nil otherwise.
+	progressMu sync.Mutex
+	progress   *progressCardModel
 }
 
 // buildCardJSON builds a Feishu interactive card JSON string with a markdown element.
 // Uses schema 2.0 which supports code blocks, tables, and inline formatting.
 // Card font is inherently smaller than Post/Text — this is a Feishu platform limitation.
 func buildCardJSON(content string) string {
-	content = sanitizeCardMarkdownForCard(content)
+	content = prepareCardMarkdown(content)
 	return marshalReplyCard(buildCardBodyElements(content), func(body []map[string]any) []map[string]any {
 		return body
 	}, content)
@@ -5458,7 +5465,7 @@ func marshalReplyCard(body []map[string]any, withTail func([]map[string]any) []m
 	b := marshal(body)
 	transformed := len(body) != 1 || body[0]["tag"] != "markdown"
 	if len(b) > maxRichCardJSONBytes && transformed {
-		b = marshal([]map[string]any{{"tag": "markdown", "content": content}})
+		b = marshal([]map[string]any{{"tag": "markdown", "content": sanitizeCardMarkdownForCard(content)}})
 	}
 	return string(b)
 }
@@ -5470,9 +5477,8 @@ func buildCardJSONWithStatusFooter(content, footer string) string {
 	if strings.TrimSpace(footer) == "" {
 		return buildCardJSON(content)
 	}
-	segments := sanitizeCardMarkdownSegmentsForCard([]string{content, footer})
-	content = segments[0]
-	footer = segments[1]
+	content = prepareCardMarkdown(content)
+	footer = sanitizeCardMarkdownForCard(footer)
 	return marshalReplyCard(buildCardBodyElements(content), func(body []map[string]any) []map[string]any {
 		return append(body,
 			map[string]any{"tag": "hr"},
@@ -5831,24 +5837,6 @@ func progressPanelTitle(label string, count int, lang string) string {
 	return label
 }
 
-// Panels always start collapsed. Every card update re-sends the whole card, so
-// an expanded flag would re-open the panels on each refresh and make the text
-// below them jump while the turn is running.
-func buildProgressPanel(title string, elements []map[string]any) map[string]any {
-	return map[string]any{
-		"tag":              "collapsible_panel",
-		"expanded":         false,
-		"background_color": "grey",
-		"header": map[string]any{
-			"title": map[string]any{"tag": "plain_text", "content": title},
-		},
-		"border":           map[string]any{"color": "grey"},
-		"vertical_spacing": "8px",
-		"padding":          "4px 8px",
-		"elements":         elements,
-	}
-}
-
 func buildProgressPanelElements(items []core.ProgressCardEntry, lang string) []map[string]any {
 	elements := make([]map[string]any, 0, len(items))
 	for _, item := range items {
@@ -5857,88 +5845,12 @@ func buildProgressPanelElements(items []core.ProgressCardEntry, lang string) []m
 	return elements
 }
 
-func appendProgressGroupedElements(elements []map[string]any, items []core.ProgressCardEntry, lang string) []map[string]any {
-	reasoning, tools, others := splitProgressItemsByLane(items)
-	if len(reasoning) > 0 {
-		elements = append(elements, buildProgressPanel(
-			progressPanelTitle("Reasoning", len(reasoning), lang),
-			buildProgressPanelElements(reasoning, lang),
-		))
-	}
-	if len(tools) > 0 {
-		elements = append(elements, buildProgressPanel(
-			progressPanelTitle("Tools", len(tools), lang),
-			buildProgressPanelElements(tools, lang),
-		))
-	}
-	if len(others) > 0 {
-		elements = append(elements, buildProgressPanel(
-			progressPanelTitle("Updates", len(others), lang),
-			buildProgressPanelElements(others, lang),
-		))
-	}
-	return elements
-}
-
 func buildProgressCardJSONFromPayload(payload *core.ProgressCardPayload) string {
-	items := normalizeProgressItems(payload)
-	if len(items) == 0 {
+	if len(normalizeProgressItems(payload)) == 0 {
 		return buildCardJSON(" ")
 	}
-
-	agent := progressAgentLabel(payload.Agent)
-	title, template, footer := progressStateMeta(payload.State, payload.Lang, agent)
-
-	elements := make([]map[string]any, 0, len(items)+3)
-	if payload.Truncated {
-		truncatedText := "Showing latest updates only."
-		if isZhLikeProgressLang(payload.Lang) {
-			truncatedText = "仅显示最近更新。"
-		}
-		elements = append(elements, map[string]any{
-			"tag": "div",
-			"text": map[string]any{
-				"tag":        "plain_text",
-				"content":    truncatedText,
-				"text_size":  "notation",
-				"text_color": "grey",
-			},
-		})
-		elements = append(elements, map[string]any{"tag": "hr"})
-	}
-
-	elements = appendProgressGroupedElements(elements, items, payload.Lang)
-	if footer != "" {
-		elements = append(elements, map[string]any{"tag": "hr"})
-		elements = append(elements, map[string]any{
-			"tag": "div",
-			"text": map[string]any{
-				"tag":        "plain_text",
-				"content":    footer,
-				"text_size":  "notation",
-				"text_color": "grey",
-			},
-		})
-	}
-
-	card := map[string]any{
-		"schema": "2.0",
-		"config": map[string]any{
-			"wide_screen_mode": true,
-		},
-		"header": map[string]any{
-			"title": map[string]any{
-				"tag":     "plain_text",
-				"content": title,
-			},
-			"template": template,
-		},
-		"body": map[string]any{
-			"elements": elements,
-		},
-	}
-	b, _ := json.Marshal(card)
-	return string(b)
+	_, cardJSON := newProgressCard(payload)
+	return cardJSON
 }
 
 func buildPreviewCardJSON(content string) string {
@@ -5984,6 +5896,7 @@ func (p *Platform) SendPreviewStart(ctx context.Context, rctx any, content strin
 	var cardJSON string
 	var sendContent string // what goes into the Im.Message.Create / Reply content field
 	var cardID string      // cardkit-v1 entity id (empty = no streaming text path)
+	var progress *progressCardModel
 	if isCardJSON(content) {
 		cardJSON = content
 		// Try cardkit-v1 two-step flow regardless of Reply vs Create. Both
@@ -5996,6 +5909,19 @@ func (p *Platform) SendPreviewStart(ctx context.Context, rctx any, content strin
 		} else {
 			slog.Info(p.tag()+": create card entity failed, falling back to inline card JSON",
 				"error", err)
+			sendContent = cardJSON
+		}
+	} else if payload, ok := core.ParseProgressCardPayload(content); ok && len(normalizeProgressItems(payload)) > 0 {
+		// Sent as a card entity so refreshes update it in place and keep the
+		// panels the reader opened (progress_card_entity.go).
+		progress, cardJSON = newProgressCard(payload)
+		if id, err := p.createCardEntity(ctx, cardJSON); err == nil {
+			cardID = id
+			sendContent = fmt.Sprintf(`{"type":"card","data":{"card_id":"%s"}}`, id)
+		} else {
+			slog.Info(p.tag()+": create progress card entity failed, falling back to inline card JSON",
+				"error", err)
+			progress = nil
 			sendContent = cardJSON
 		}
 	} else {
@@ -6062,7 +5988,7 @@ func (p *Platform) SendPreviewStart(ctx context.Context, rctx any, content strin
 		return nil, fmt.Errorf("%s: send preview: no message ID returned", p.tag())
 	}
 
-	return &feishuPreviewHandle{messageID: msgID, chatID: chatID, cardID: cardID}, nil
+	return &feishuPreviewHandle{messageID: msgID, chatID: chatID, cardID: cardID, progress: progress}, nil
 }
 
 // createCardEntity calls the cardkit-v1 Create Card Entity API
@@ -6181,6 +6107,19 @@ func (p *Platform) UpdateMessage(ctx context.Context, previewHandle any, content
 		return fmt.Errorf("%s: invalid preview handle type %T", p.tag(), previewHandle)
 	}
 
+	payload, isProgress := core.ParseProgressCardPayload(content)
+	if isProgress && !isCardJSON(content) {
+		if handled, err := p.updateProgressCardEntity(ctx, h, payload); handled {
+			return err
+		}
+	} else {
+		// Anything else replaces the whole card, so it is no longer the
+		// progress card the in-place updates know.
+		h.progressMu.Lock()
+		h.progress = nil
+		h.progressMu.Unlock()
+	}
+
 	cardJSON := ""
 	if isCardJSON(content) {
 		// Card 2.0: engine passes full card JSON directly, skip all processing.
@@ -6188,7 +6127,7 @@ func (p *Platform) UpdateMessage(ctx context.Context, previewHandle any, content
 		h.mu.Lock()
 		h.lastContent = content
 		h.mu.Unlock()
-	} else if payload, ok := core.ParseProgressCardPayload(content); ok {
+	} else if isProgress {
 		cardJSON = buildProgressCardJSONFromPayload(payload)
 	} else {
 		processed := content
@@ -6547,7 +6486,7 @@ func (p *Platform) parsePostBody(raw string) *postLang {
 	}
 	var langMap map[string]postLang
 	if err := json.Unmarshal([]byte(raw), &langMap); err != nil || len(langMap) == 0 {
-		slog.Error(p.tag()+": failed to parse post content", "raw", raw)
+		slog.Error(p.tag()+": failed to parse post content", "raw_bytes", len(raw))
 		return nil
 	}
 	keys := make([]string, 0, len(langMap))
@@ -7418,8 +7357,6 @@ func pickThinkingVerb() string {
 	return thinkingVerbs[idx] + "..."
 }
 
-var markdownTablePattern = regexp.MustCompile(`(?m)^\|.+\|\s*\n\|[\s:|-]+\|\s*\n(?:\|.+\|\s*\n?)+`)
-
 type markdownTextMatch struct {
 	start int
 	end   int
@@ -7905,13 +7842,17 @@ func optimizeFeishuCardMarkdown(text string) string {
 	return restoreFencedCodeBlocks(protected, blocks)
 }
 
+func prepareCardMarkdown(text string) string {
+	prepared := sanitizeMarkdownURLs(preprocessFeishuMarkdown(text))
+	prepared = stripInvalidFeishuCardImages(prepared)
+	return optimizeFeishuCardMarkdown(prepared)
+}
+
 func sanitizeCardMarkdownSegmentsForCard(texts []string) []string {
 	out := make([]string, len(texts))
 	remainingBudget := feishuCardTableLimit
 	for i, text := range texts {
-		prepared := sanitizeMarkdownURLs(preprocessFeishuMarkdown(text))
-		prepared = stripInvalidFeishuCardImages(prepared)
-		prepared = optimizeFeishuCardMarkdown(prepared)
+		prepared := prepareCardMarkdown(text)
 		prepared, remainingBudget = sanitizeCardMarkdownTables(prepared, remainingBudget)
 		out[i] = prepared
 	}
@@ -8315,25 +8256,18 @@ func splitMarkdownByTables(md string, maxTables int) []string {
 	if maxTables <= 0 {
 		return []string{md}
 	}
-	matches := markdownTablePattern.FindAllStringIndex(md, -1)
+	matches := findMarkdownTablesOutsideCodeBlocks(md)
 	if len(matches) <= maxTables {
 		return []string{md}
 	}
-	parts := make([]string, 0, len(matches)-maxTables+1)
-	firstEnd := len(md)
-	if len(matches) > maxTables {
-		firstEnd = matches[maxTables][0]
+	parts := make([]string, 0, (len(matches)+maxTables-1)/maxTables)
+	start := 0
+	for i := maxTables; i < len(matches); i += maxTables {
+		end := matches[i-1].end
+		parts = append(parts, strings.TrimSpace(md[start:end]))
+		start = end
 	}
-	first := strings.TrimSpace(md[:firstEnd])
-	if first != "" {
-		parts = append(parts, first)
-	}
-	for _, match := range matches[maxTables:] {
-		block := strings.TrimSpace(md[match[0]:match[1]])
-		if block != "" {
-			parts = append(parts, block)
-		}
-	}
+	parts = append(parts, strings.TrimSpace(md[start:]))
 	return parts
 }
 
@@ -8345,8 +8279,8 @@ func (p *Platform) BuildRichCard(status core.CardStatus, title string, steps []c
 }
 
 // SplitMarkdownByTables implements core.MarkdownTableSplitter.
-func (p *Platform) SplitMarkdownByTables(md string, maxTables int) []string {
-	return splitMarkdownByTables(md, maxTables)
+func (p *Platform) SplitMarkdownByTables(md string) []string {
+	return splitMarkdownByTables(md, feishuCardTableLimit)
 }
 
 // SetPreviewStatus updates the card header color to reflect the agent's current state.

@@ -56,6 +56,12 @@ func TestPiRPCSteeringHelperProcess(t *testing.T) {
 			response["data"] = map[string]any{"sessionId": "rpc-steering-session", "isStreaming": busy}
 			emit(response)
 		case "prompt", "steer":
+			if command.Message == "/mem0-search query" {
+				emit(map[string]any{"type": "extension_ui_request", "id": "notice-search", "method": "notify", "message": "memory found", "notifyType": "info"})
+				response["data"] = map[string]any{"disposition": "handled"}
+				emit(response)
+				continue
+			}
 			if command.Message == "include unit tests" {
 				// The engine serializes replies behind final platform delivery.
 				// A marker lets the parent release that delivery only once this
@@ -155,6 +161,22 @@ func TestPiRPCSend_StartsIdlePrompt(t *testing.T) {
 	}
 	if got := awaitRPCSteeringEvent(t, session, core.EventResult); got != "processed: first task" {
 		t.Fatalf("reply = %q", got)
+	}
+}
+
+func TestPiRPCSend_ExtensionCommandDoesNotBlockNextMessage(t *testing.T) {
+	session := newRPCSteeringSession(t)
+	if err := session.Send("/mem0-search query", "", nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	if got := awaitRPCSteeringEvent(t, session, core.EventResult); got != "memory found" {
+		t.Fatalf("extension result = %q", got)
+	}
+	if err := session.Send("next task", "", nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	if got := awaitRPCSteeringEvent(t, session, core.EventResult); got != "processed: next task" {
+		t.Fatalf("next reply = %q", got)
 	}
 }
 
