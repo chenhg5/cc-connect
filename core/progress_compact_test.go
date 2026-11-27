@@ -3,6 +3,7 @@ package core
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -425,5 +426,174 @@ func TestCompactProgressWriter_CancellationStopsRecovery(t *testing.T) {
 	}
 	if w.Finalize(ProgressCardStateCompleted) {
 		t.Fatal("cancelled final update should report failure")
+	}
+}
+
+// Creation failures must remain buffered just like failures editing an existing card.
+type recoveringCreateProgressPlatform struct {
+	previewCapturePlatform
+	createErr error
+	nilHandle bool
+}
+
+func (p *recoveringCreateProgressPlatform) SendPreviewStart(ctx context.Context, _ any, content string) (any, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	p.started = append(p.started, content)
+	if p.createErr != nil {
+		return nil, p.createErr
+	}
+	if p.nilHandle {
+		return nil, nil
+	}
+	return "preview-1", nil
+}
+
+func TestCompactProgressWriter_RecoversAfterCreateFailure(t *testing.T) {
+	for _, style := range []string{progressStyleCompact, progressStyleCard} {
+		for _, nilHandle := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/nil_handle_%t", style, nilHandle), func(t *testing.T) {
+				p := &recoveringCreateProgressPlatform{nilHandle: nilHandle}
+				if !nilHandle {
+					p.createErr = errors.New("temporary create failure")
+				}
+				w := newCompactProgressWriter(context.Background(), p, progressHintReplyCtx{style: style, payload: true}, "codex", LangEnglish, nil)
+				if !w.Append("initial") || !w.Append("buffered during outage") {
+					t.Fatal("creation failure must not trigger standalone fallback")
+				}
+				if len(p.started) != 1 {
+					t.Fatal("creation retries must respect cooldown")
+				}
+				p.createErr, p.nilHandle = nil, false
+				w.retryAfter = time.Now().Add(-time.Second)
+				if !w.Append("recovered") || len(p.started) != 2 {
+					t.Fatal("next event should retry creation")
+				}
+				for _, text := range []string{"initial", "buffered during outage", "recovered"} {
+					if !strings.Contains(p.started[1], text) {
+						t.Errorf("recovered card lost %q", text)
+					}
+				}
+				if !w.Append("next update") || len(p.started) != 2 || len(p.updated) != 1 {
+					t.Fatal("recovery must continue editing the created message")
+				}
+			})
+		}
+	}
+}
+
+func TestCompactProgressWriter_FinalizeRecoversAfterCreateFailure(t *testing.T) {
+	for _, style := range []string{progressStyleCompact, progressStyleCard} {
+		for _, state := range []ProgressCardState{ProgressCardStateCompleted, ProgressCardStateFailed} {
+			t.Run(style+"/"+string(state), func(t *testing.T) {
+				p := &recoveringCreateProgressPlatform{createErr: errors.New("temporary create failure")}
+				w := newCompactProgressWriter(context.Background(), p, progressHintReplyCtx{style: style, payload: true}, "codex", LangEnglish, nil)
+				w.Append("pending progress")
+				p.createErr = nil
+				if !w.Finalize(state) || len(p.started) != 2 {
+					t.Fatal("finalization must retry creation despite cooldown")
+				}
+				if !strings.Contains(p.started[1], "pending progress") {
+					t.Fatal("completion lost buffered progress")
+				}
+				if style == progressStyleCard {
+					payload, ok := ParseProgressCardPayload(p.started[1])
+					if !ok || payload.State != state {
+						t.Fatalf("terminal payload = %#v", payload)
+					}
+				}
+				if !w.Finalize(state) || len(p.started) != 2 || len(p.updated) != 0 {
+					t.Fatal("successful finalization must not send duplicates")
+				}
+			})
+		}
+	}
+}
+
+func TestCompactProgressWriter_PersistentCreateFailureDoesNotSpam(t *testing.T) {
+	p := &recoveringCreateProgressPlatform{createErr: errors.New("still unavailable")}
+	w := newCompactProgressWriter(context.Background(), p, progressHintReplyCtx{style: progressStyleCard, payload: true}, "codex", LangEnglish, nil)
+	for range 100 {
+		if !w.Append("progress") {
+			t.Fatal("outage must not trigger fallback")
+		}
+	}
+	if len(p.started) != 1 || len(w.items) != w.maxEntries {
+		t.Fatal("retry frequency and buffered entries must stay bounded")
+	}
+	if w.Finalize(ProgressCardStateCompleted) || len(p.started) != 2 {
+		t.Fatal("persistent failure should make one terminal attempt and report failure")
+	}
+	p.createErr = nil
+	if !w.Finalize(ProgressCardStateCompleted) || len(p.started) != 3 {
+		t.Fatal("failed completion must remain retryable")
+	}
+}
+
+func TestCompactProgressWriter_CancellationStopsCreateRecovery(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	p := &recoveringCreateProgressPlatform{createErr: errors.New("temporary create failure")}
+	w := newCompactProgressWriter(ctx, p, progressHintReplyCtx{style: progressStyleCard, payload: true}, "codex", LangEnglish, nil)
+	w.Append("initial")
+	cancel()
+	p.createErr = nil
+	w.retryAfter = time.Now().Add(-time.Second)
+	if !w.Append("cancelled progress") || w.Finalize(ProgressCardStateCompleted) || len(p.started) != 1 {
+		t.Fatal("cancelled context must stop creation without triggering fallback")
+	}
+}
+
+func TestCompactProgressWriter_FinalizeWithoutProgressDoesNotCreateCard(t *testing.T) {
+	p := &recoveringCreateProgressPlatform{}
+	w := newCompactProgressWriter(context.Background(), p, progressHintReplyCtx{style: progressStyleCard, payload: true}, "codex", LangEnglish, nil)
+	if w.Finalize(ProgressCardStateCompleted) || len(p.started) != 0 {
+		t.Fatal("empty turns must not create progress cards")
+	}
+}
+
+// Some editable platforms use Send with replyCtx as the handle rather than PreviewStarter.
+type recoveringInitialSendPlatform struct {
+	stubPlatformNoProgress
+	sends   int
+	sendErr error
+	updates int
+}
+
+func (p *recoveringInitialSendPlatform) Send(ctx context.Context, _ any, _ string) error {
+	p.sends++
+	return p.sendErr
+}
+func (p *recoveringInitialSendPlatform) UpdateMessage(context.Context, any, string) error {
+	p.updates++
+	return nil
+}
+
+func TestCompactProgressWriter_RecoversAfterInitialSendFailure(t *testing.T) {
+	p := &recoveringInitialSendPlatform{sendErr: errors.New("temporary send failure")}
+	w := newCompactProgressWriter(context.Background(), p, progressHintReplyCtx{style: progressStyleCompact}, "codex", LangEnglish, nil)
+	if !w.Append("initial") || !w.Append("buffered") || p.sends != 1 {
+		t.Fatal("initial Send failure must be buffered and throttled")
+	}
+	p.sendErr = nil
+	w.retryAfter = time.Now().Add(-time.Second)
+	if !w.Append("recovered") || p.sends != 2 {
+		t.Fatal("initial Send must be retried")
+	}
+	if !w.Append("update") || p.updates != 1 {
+		t.Fatal("recovered Send should become editable")
+	}
+}
+
+func TestCompactProgressWriter_APITimeoutCapsLongerParentDeadline(t *testing.T) {
+	parent, cancelParent := context.WithTimeout(context.Background(), time.Minute)
+	defer cancelParent()
+	w := newCompactProgressWriter(parent, &previewCapturePlatform{}, progressHintReplyCtx{style: progressStyleCard, payload: true}, "codex", LangEnglish, nil)
+	ctx, cancel := w.withAPITimeout()
+	defer cancel()
+	deadline, ok := ctx.Deadline()
+	if !ok || time.Until(deadline) > compactProgressAPITimeout {
+		t.Fatal("progress API timeout must cap a longer parent deadline")
 	}
 }
