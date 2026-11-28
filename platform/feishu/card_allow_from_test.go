@@ -287,7 +287,9 @@ func TestOnCardAction_AllowFromMultiListRespectsExactMember(t *testing.T) {
 // engine must not echo it as a second chat message.
 func TestOnCardAction_AskqMarksAnswerRendered(t *testing.T) {
 	ip, msgCh := newAllowFromTestPlatform(t, "*")
-	_, err := ip.onCardAction(cardActionEvent("ou_owner", "askq:0:1"))
+	ev := cardActionEvent("ou_owner", "askq:0:1")
+	ev.Event.Action.Value["askq_token"] = mintAskq(ip, "feishu:oc_test_chat:ou_owner", "oc_test_chat", 0)
+	_, err := ip.onCardAction(ev)
 	if err != nil {
 		t.Fatalf("onCardAction() error = %v", err)
 	}

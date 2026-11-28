@@ -321,6 +321,45 @@ type CardSender interface {
 	ReplyCard(ctx context.Context, replyCtx any, card *Card) error
 }
 
+// AskQuestionCardTexts carries the pre-rendered, localized strings for a rich
+// ask-question card, so platforms never hardcode user-facing text.
+type AskQuestionCardTexts struct {
+	Title            string
+	Body             string
+	Note             string
+	InputPlaceholder string // free-form input placeholder
+	InputLabel       string // free-form input label
+	SubmitLabel      string // form submit button label
+	ExpiredNotice    string // shown when a callback hits a stale or already-used card
+	TooLongNotice    string // shown when a free-form answer exceeds the length limit
+}
+
+// AskQuestionClaimIssuer is an optional interface for platforms that bind an
+// AskUserQuestion answer to a one-time claim. The engine asks for a claim once
+// per question — before choosing which card to render — and hands the same
+// token to both the native card and the generic fallback card, so whichever
+// one reaches the user stays answerable.
+type AskQuestionClaimIssuer interface {
+	IssueAskQuestionClaim(ctx context.Context, replyCtx any, qIdx int, question string, texts AskQuestionCardTexts) (string, error)
+}
+
+// AskQuestionCardSender is an optional interface for platforms that can render
+// an AskUserQuestion prompt as a native rich card combining option buttons
+// with a free-form text input (e.g. Feishu card schema 2.0 with an input +
+// form_submit pair). texts carries the localized strings; q carries the
+// structured options; qIdx identifies the question batch; token is the claim
+// issued by the engine (AskQuestionClaimIssuer) and must be embedded in every
+// interactive element. Implementations must bind every interactive element
+// (option buttons and the form submit) to the exact originating session so
+// the answer cannot be routed elsewhere, and must consume callbacks exactly
+// once — stale, replayed or superseded cards are rejected explicitly rather
+// than dispatched. Implementations should return an error (e.g. for
+// MultiSelect, where buttons would resolve on first click, or when token is
+// empty) so the engine falls back to the generic card path.
+type AskQuestionCardSender interface {
+	SendAskQuestionCard(ctx context.Context, replyCtx any, texts AskQuestionCardTexts, q UserQuestion, qIdx int, token string) error
+}
+
 // CardNavigationHandler is called by platforms to render a card for in-place
 // card updates (e.g. Feishu card.action.trigger callback). The action string
 // uses prefixes like "nav:/model" or "act:/model 3". This legacy API does not

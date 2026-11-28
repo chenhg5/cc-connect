@@ -260,7 +260,13 @@ func waitCardActionHandled(t *testing.T, p *Platform, got chan *core.Message, se
 func TestInboundCoalesce_AskQuestionClickIsNotMergedWithFollowingText(t *testing.T) {
 	ip, got := newCardCoalesceTestPlatform(t)
 	text := cardChatMessage(ip.Platform, "text", "and one more thing")
-	if _, err := ip.onCardAction(cardActionEvent("ou_user", "askq:0:1")); err != nil {
+	// The ask-question contract on this branch binds every click to a
+	// one-time claim minted when the card was sent; a click without one is
+	// rejected as stale, so mint a pending claim for the session first.
+	token := ip.askq.mint(text.SessionKey, "oc_test_chat", 0, "Pick one", "", "expired", "too-long")
+	ev := cardActionEvent("ou_user", "askq:0:1")
+	ev.Event.Action.Value["askq_token"] = token
+	if _, err := ip.onCardAction(ev); err != nil {
 		t.Fatal(err)
 	}
 	waitCardActionHandled(t, ip.Platform, got, text.SessionKey)
@@ -280,7 +286,10 @@ func TestInboundCoalesce_AskQuestionClickIsNotMergedWithFollowingText(t *testing
 func TestInboundCoalesce_CardCallbackFlushesPendingTextFirst(t *testing.T) {
 	ip, got := newCardCoalesceTestPlatform(t)
 	ip.dispatchCoreMessage(cardChatMessage(ip.Platform, "text", "pending"))
-	if _, err := ip.onCardAction(cardActionEvent("ou_user", "askq:0:1")); err != nil {
+	token := ip.askq.mint(ip.sessionKeyFromCardAction("oc_test_chat", "ou_user", nil), "oc_test_chat", 0, "Pick one", "", "expired", "too-long")
+	ev := cardActionEvent("ou_user", "askq:0:1")
+	ev.Event.Action.Value["askq_token"] = token
+	if _, err := ip.onCardAction(ev); err != nil {
 		t.Fatal(err)
 	}
 	first := waitAnyMessage(t, got, 2*time.Second, "pending text flushed by the click")
