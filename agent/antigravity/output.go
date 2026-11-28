@@ -2,22 +2,26 @@ package antigravity
 
 import (
 	"encoding/json"
+	"fmt"
+	"log/slog"
 	"strings"
 
 	"github.com/chenhg5/cc-connect/core"
 )
 
 type agyOutputParser struct {
-	sessionID string
-	hasText   bool
-	toolSteps map[int]bool
+	resultReceived    bool
+	resultHasResponse bool
+	sessionID         string
+	hasText           bool
+	toolSteps         map[int]bool
 }
 
 type agyOutputEnvelope struct {
-	Event          string          `json:"event"`
-	ConversationID string          `json:"conversation_id"`
-	StepUpdate     agyStepUpdate   `json:"step_update"`
-	Result         agyStreamResult `json:"result"`
+	Event          string           `json:"event"`
+	ConversationID string           `json:"conversation_id"`
+	StepUpdate     agyStepUpdate    `json:"step_update"`
+	Result         *agyStreamResult `json:"result"`
 }
 
 type agyStepUpdate struct {
@@ -68,11 +72,16 @@ func (p *agyOutputParser) parseLine(line []byte) (recognized bool, events []core
 		return true, nil
 	}
 
+	// The first terminal result is authoritative; ignore duplicate or late events.
+	if p.resultReceived {
+		return true, nil
+	}
+
 	sessionID := envelope.ConversationID
 	if sessionID == "" {
 		sessionID = envelope.StepUpdate.ConversationID
 	}
-	if sessionID == "" {
+	if sessionID == "" && envelope.Result != nil {
 		sessionID = envelope.Result.ConversationID
 	}
 	if sessionID != "" && sessionID != p.sessionID {
@@ -86,7 +95,10 @@ func (p *agyOutputParser) parseLine(line []byte) (recognized bool, events []core
 		switch step.StepType {
 		case "agent_response":
 			if step.TextDelta != "" {
-				p.hasText = true
+				// Whitespace belongs in the stream but does not replace a terminal response.
+				if strings.TrimSpace(step.TextDelta) != "" {
+					p.hasText = true
+				}
 				events = append(events, core.Event{Type: core.EventText, Content: step.TextDelta})
 			}
 		case "tool":
@@ -134,9 +146,26 @@ func (p *agyOutputParser) parseLine(line []byte) (recognized bool, events []core
 			}
 		}
 	case "result":
-		if !p.hasText && envelope.Result.Response != "" {
-			p.hasText = true
-			events = append(events, core.Event{Type: core.EventText, Content: envelope.Result.Response})
+		result := envelope.Result
+		if result == nil {
+			break
+		}
+		p.resultReceived = true
+		if strings.TrimSpace(result.Response) != "" {
+			p.resultHasResponse = true
+			if !p.hasText {
+				p.hasText = true
+				events = append(events, core.Event{Type: core.EventText, Content: result.Response})
+			}
+			if result.Error != "" || strings.EqualFold(result.Status, "ERROR") {
+				slog.Warn("antigravitySession: suppressed error accompanying a non-empty result response", "status", result.Status)
+			}
+		} else if result.Error != "" || strings.EqualFold(result.Status, "ERROR") {
+			message := strings.TrimSpace(result.Error)
+			if message == "" {
+				message = "agy reported status " + result.Status
+			}
+			events = append(events, core.Event{Type: core.EventError, Error: fmt.Errorf("agy: %s", message)})
 		}
 	}
 	return true, events

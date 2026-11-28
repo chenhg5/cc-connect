@@ -229,6 +229,8 @@ func (as *antigravitySession) buildAntigravityArgs(chatID string, isResume bool,
 func (as *antigravitySession) readLoop(ctx context.Context, cmd *exec.Cmd, stdout io.ReadCloser, stderrBuf *bytes.Buffer, tempFiles []string, preEntries map[string]bool, sendStartedAt time.Time) {
 	defer as.wg.Done()
 	hasResponse := false
+	reportedError := false
+	parser := newAgyOutputParser()
 	defer func() {
 		for _, f := range tempFiles {
 			_ = os.Remove(f)
@@ -262,13 +264,14 @@ func (as *antigravitySession) readLoop(ctx context.Context, cmd *exec.Cmd, stdou
 		sid := as.CurrentSessionID()
 		stderrMsg := redactAgyStderr(stderrBuf.String(), cmd.Env)
 		var processErr error
-		if err != nil {
+		// Only a nonblank terminal response can override a late process error.
+		if err != nil && !reportedError && !parser.resultHasResponse {
 			if stderrMsg != "" {
 				processErr = fmt.Errorf("agy process failed (%w): %s", err, stderrMsg)
 			} else {
 				processErr = fmt.Errorf("agy process failed: %w", err)
 			}
-		} else if !hasResponse {
+		} else if !hasResponse && !reportedError && as.ctx.Err() == nil && (parser.resultReceived || ctx.Err() == nil) {
 			if stderrMsg != "" {
 				processErr = fmt.Errorf("agy returned no response: %s", stderrMsg)
 			} else {
@@ -297,7 +300,6 @@ func (as *antigravitySession) readLoop(ctx context.Context, cmd *exec.Cmd, stdou
 
 	scanner := bufio.NewScanner(stdout)
 	scanner.Buffer(make([]byte, 64*1024), 32*1024*1024)
-	parser := newAgyOutputParser()
 	streamFormatDetected := false
 	for scanner.Scan() {
 		line := scanner.Bytes()
@@ -312,6 +314,12 @@ func (as *antigravitySession) readLoop(ctx context.Context, cmd *exec.Cmd, stdou
 			continue
 		}
 		for _, event := range events {
+			if event.SessionID != "" {
+				as.chatID.Store(event.SessionID)
+			}
+			if event.Type == core.EventError {
+				reportedError = true
+			}
 			if event.Type == core.EventText && strings.TrimSpace(event.Content) != "" {
 				hasResponse = true
 			}
@@ -322,7 +330,8 @@ func (as *antigravitySession) readLoop(ctx context.Context, cmd *exec.Cmd, stdou
 			}
 		}
 	}
-	if err := scanner.Err(); err != nil && !strings.Contains(err.Error(), "file already closed") {
+	if err := scanner.Err(); err != nil && !strings.Contains(err.Error(), "file already closed") && !parser.resultReceived {
+		reportedError = true
 		slog.Error("antigravitySession: read error", "error", err)
 		select {
 		case as.events <- core.Event{Type: core.EventError, Error: fmt.Errorf("read stdout: %w", err)}:
