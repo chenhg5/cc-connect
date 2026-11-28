@@ -3052,8 +3052,9 @@ func TestStreamingConfigPartialOverride(t *testing.T) {
 }
 
 func TestRichCardTypewriterPreservesWorkingPanels(t *testing.T) {
-	p := &Platform{streamingConfig: map[string]any{"print_step": map[string]any{"default": 2}}}
-	baseline := &Platform{}
+	// cardAnimation is false in a bare struct literal; the platform default is on.
+	p := &Platform{streamingConfig: map[string]any{"print_step": map[string]any{"default": 2}}, cardAnimation: true}
+	baseline := &Platform{cardAnimation: true}
 	for _, working := range []bool{true, false} {
 		status := core.CardStatusWorking
 		if !working {
@@ -3086,7 +3087,8 @@ func TestRichCardTypewriterPreservesWorkingPanels(t *testing.T) {
 }
 
 func TestRichCardTypewriterSurvivesCardSizeCompaction(t *testing.T) {
-	p := &Platform{}
+	// cardAnimation is false in a bare struct literal; the platform default is on.
+	p := &Platform{cardAnimation: true}
 	var steps []core.ToolStep
 	for i := 0; i < 80; i++ {
 		steps = append(steps, core.ToolStep{Kind: core.ToolStepKindTool, Name: "Bash", Result: strings.Repeat("LONG OUTPUT ", 100)})
