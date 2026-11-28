@@ -16,6 +16,7 @@ import (
 
 	"github.com/chenhg5/cc-connect/config"
 	"github.com/chenhg5/cc-connect/core"
+	"github.com/chenhg5/cc-connect/internal/localapi"
 )
 
 func runSend(args []string) {
@@ -42,13 +43,7 @@ func runSend(args []string) {
 		os.Exit(1)
 	}
 
-	client := &http.Client{
-		Transport: &http.Transport{
-			DialContext: func(_ context.Context, _, _ string) (net.Conn, error) {
-				return net.Dial("unix", sockPath)
-			},
-		},
-	}
+	client := newLocalAPIClient(sockPath)
 
 	resp, err := client.Post("http://unix/send", "application/json", bytes.NewReader(payload))
 	if err != nil {
@@ -343,18 +338,26 @@ func decodeSendPayload(data []byte, req *core.SendRequest) error {
 	return json.Unmarshal(data, req)
 }
 
+func newLocalAPIClient(endpointPath string) *http.Client {
+	return &http.Client{Transport: &http.Transport{
+		DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
+			return localapi.DialContext(ctx, endpointPath)
+		},
+	}}
+}
+
 func resolveSocketPath(dataDir string) string {
 	if dataDir != "" {
-		return filepath.Join(dataDir, "run", "api.sock")
+		return localapi.Path(dataDir)
 	}
 	// Check CC_DATA_DIR env var for custom data_dir configuration
 	if envDataDir := strings.TrimSpace(os.Getenv("CC_DATA_DIR")); envDataDir != "" {
-		return filepath.Join(envDataDir, "run", "api.sock")
+		return localapi.Path(envDataDir)
 	}
 	if home, err := os.UserHomeDir(); err == nil {
-		return filepath.Join(home, ".cc-connect", "run", "api.sock")
+		return localapi.Path(filepath.Join(home, ".cc-connect"))
 	}
-	return filepath.Join(".cc-connect", "run", "api.sock")
+	return localapi.Path(".cc-connect")
 }
 
 func printSendUsage() {

@@ -2,11 +2,9 @@ package main
 
 import (
 	"bytes"
-	"context"
 	"encoding/json"
 	"fmt"
 	"io"
-	"net"
 	"net/http"
 	"os"
 	"strconv"
@@ -225,13 +223,7 @@ func runTimerList(args []string) {
 		url += "?project=" + project
 	}
 
-	client := &http.Client{
-		Transport: &http.Transport{
-			DialContext: func(_ context.Context, _, _ string) (net.Conn, error) {
-				return net.Dial("unix", sockPath)
-			},
-		},
-	}
+	client := newLocalAPIClient(sockPath)
 
 	resp, err := client.Get("http://unix" + url)
 	if err != nil {
@@ -354,13 +346,7 @@ func runTimerInfo(args []string) {
 		os.Exit(1)
 	}
 
-	client := &http.Client{
-		Transport: &http.Transport{
-			DialContext: func(_ context.Context, _, _ string) (net.Conn, error) {
-				return net.Dial("unix", sockPath)
-			},
-		},
-	}
+	client := newLocalAPIClient(sockPath)
 
 	resp, err := client.Get("http://unix/timer/info?id=" + id)
 	if err != nil {

@@ -57,6 +57,7 @@ func TestSkillDirs_FallsBackToHomeClaudeDir(t *testing.T) {
 		t.Fatalf("mkdir workdir: %v", err)
 	}
 	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
 	t.Setenv("CLAUDE_CONFIG_DIR", "")
 
 	a := &Agent{workDir: workDir}

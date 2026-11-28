@@ -2,11 +2,9 @@ package main
 
 import (
 	"bytes"
-	"context"
 	"encoding/json"
 	"fmt"
 	"io"
-	"net"
 	"net/http"
 	"os"
 	"strconv"
@@ -236,13 +234,7 @@ func runCronList(args []string) {
 		url += "?project=" + project
 	}
 
-	client := &http.Client{
-		Transport: &http.Transport{
-			DialContext: func(_ context.Context, _, _ string) (net.Conn, error) {
-				return net.Dial("unix", sockPath)
-			},
-		},
-	}
+	client := newLocalAPIClient(sockPath)
 
 	resp, err := client.Get("http://unix" + url)
 	if err != nil {
@@ -418,13 +410,7 @@ func runCronInfo(args []string) {
 		os.Exit(1)
 	}
 
-	client := &http.Client{
-		Transport: &http.Transport{
-			DialContext: func(_ context.Context, _, _ string) (net.Conn, error) {
-				return net.Dial("unix", sockPath)
-			},
-		},
-	}
+	client := newLocalAPIClient(sockPath)
 
 	resp, err := client.Get("http://unix/cron/info?id=" + id)
 	if err != nil {
@@ -589,13 +575,7 @@ func parseCronEditValue(field, valueStr string) (any, error) {
 }
 
 func apiPost(sockPath, path string, payload []byte) (*http.Response, error) {
-	client := &http.Client{
-		Transport: &http.Transport{
-			DialContext: func(_ context.Context, _, _ string) (net.Conn, error) {
-				return net.Dial("unix", sockPath)
-			},
-		},
-	}
+	client := newLocalAPIClient(sockPath)
 	return client.Post("http://unix"+path, "application/json", bytes.NewReader(payload))
 }
 

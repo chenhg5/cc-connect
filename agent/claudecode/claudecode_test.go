@@ -1079,6 +1079,7 @@ func TestGetSessionHistory_TimestampsAreLocal(t *testing.T) {
 	// so we don't need a manual restore (which would need errcheck handling).
 	homeDir := t.TempDir()
 	t.Setenv("HOME", homeDir)
+	t.Setenv("USERPROFILE", homeDir)
 
 	workDir := t.TempDir()
 	// This test exercises the agent-level fallback path (no per-project
@@ -1287,6 +1288,7 @@ func TestConfigHomeFromEnv_HonorsPerProjectConfigDir(t *testing.T) {
 	// Without the variable it must fall back to ~/.claude (HOME-based).
 	home := t.TempDir()
 	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
 	if got, want := configHomeFromEnv(nil), filepath.Join(home, ".claude"); got != want {
 		t.Errorf("configHomeFromEnv(nil) = %q, want %q", got, want)
 	}
