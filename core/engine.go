@@ -8949,16 +8949,7 @@ func (e *Engine) cmdSwitch(p Platform, msg *Message, args []string) {
 	// /switch round-trip. When SwitchToAgentSession creates a fresh Session
 	// (no prior match), History is already nil, so preserving is a no-op.
 	switched := sessions.SwitchToAgentSession(msg.SessionKey, matched.ID, agent.Name(), matched.Summary)
-	if switched != nil && switched.HistoryLen() == 0 && matched.MessageCount > 0 {
-		if hp, ok := agent.(HistoryProvider); ok {
-			entries, err := hp.GetSessionHistory(e.ctx, matched.ID, 0)
-			if err != nil {
-				slog.Warn("switch: agent transcript read failed", "session_id", matched.ID, "error", err)
-			} else if switched.SeedHistoryIfEmpty(entries) {
-				sessions.Save()
-			}
-		}
-	}
+	e.seedSwitchedSessionHistory(agent, sessions, switched, matched)
 	e.clearListSelection(msg.SessionKey)
 
 	shortID := matched.ID
@@ -9070,7 +9061,8 @@ func (e *Engine) handleListSelectionInput(p Platform, msg *Message, content stri
 func (e *Engine) switchToListEntry(p Platform, msg *Message, agent Agent, sessions *SessionManager, interactiveKey string, entry listSessionEntry) {
 	e.cleanupInteractiveState(interactiveKey)
 	// Keep the stored history of the session being switched to; see the NOTE in cmdSwitch.
-	_ = sessions.SwitchToAgentSession(msg.SessionKey, entry.Info.ID, agent.Name(), entry.Info.Summary)
+	switched := sessions.SwitchToAgentSession(msg.SessionKey, entry.Info.ID, agent.Name(), entry.Info.Summary)
+	e.seedSwitchedSessionHistory(agent, sessions, switched, &entry.Info)
 	e.clearListSelection(msg.SessionKey)
 
 	shortID := entry.Info.ID
@@ -9083,6 +9075,27 @@ func (e *Engine) switchToListEntry(p Platform, msg *Message, agent Agent, sessio
 	}
 	e.reply(p, msg.ReplyCtx,
 		e.i18n.Tf(MsgSwitchSuccess, displayName, shortID, entry.Info.MessageCount))
+}
+
+// seedSwitchedSessionHistory fills an empty local history from the agent's
+// transcript after a switch, so /history is not blank for a session that was
+// never used through cc-connect before. Shared by /switch and list selection.
+func (e *Engine) seedSwitchedSessionHistory(agent Agent, sessions *SessionManager, switched *Session, info *AgentSessionInfo) {
+	if switched == nil || info == nil || switched.HistoryLen() != 0 || info.MessageCount <= 0 {
+		return
+	}
+	hp, ok := agent.(HistoryProvider)
+	if !ok {
+		return
+	}
+	entries, err := hp.GetSessionHistory(e.ctx, info.ID, 0)
+	if err != nil {
+		slog.Warn("switch: agent transcript read failed", "session_id", info.ID, "error", err)
+		return
+	}
+	if switched.SeedHistoryIfEmpty(entries) {
+		sessions.Save()
+	}
 }
 
 // matchSession resolves a user query to an agent session. Priority:
