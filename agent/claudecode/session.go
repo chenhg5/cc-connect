@@ -1173,7 +1173,8 @@ func (cs *claudeSession) handleAssistant(raw map[string]any) {
 				continue
 			}
 			inputSummary := summarizeInput(toolName, item["input"])
-			evt := core.Event{Type: core.EventToolUse, ToolName: toolName, ToolInput: inputSummary}
+			id, _ := item["id"].(string)
+			evt := core.Event{Type: core.EventToolUse, ToolCallID: id, ToolName: toolName, ToolInput: inputSummary}
 			select {
 			case cs.events <- evt:
 			case <-cs.ctx.Done():
@@ -1252,16 +1253,19 @@ func (cs *claudeSession) handleUser(raw map[string]any) {
 			if isError {
 				slog.Debug("claudeSession: tool error", "content_bytes", len(result))
 			}
+			result = core.RedactToolText(strings.TrimSpace(result))
 			success := !isError
 			code := 0
 			if isError {
 				code = 1
 			}
+			toolID, _ := item["tool_use_id"].(string)
 			evt := core.Event{
 				Type:         core.EventToolResult,
 				ToolResult:   truncateToolResult(strings.TrimSpace(result), cs.toolResultMaxLen),
 				ToolExitCode: &code,
 				ToolSuccess:  &success,
+				ToolCallID:   toolID,
 			}
 			select {
 			case cs.events <- evt:

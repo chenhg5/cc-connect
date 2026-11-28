@@ -1034,6 +1034,11 @@ checkPayload:
 				hasToolUse = true
 			}
 		case core.ProgressEntryToolResult:
+			// The card folds a result into its call's entry and keeps the
+			// call's input there, so the tool use is not a separate item.
+			if item.Tool == "run_command" && item.Input == "wc -l data.txt" {
+				hasToolUse = true
+			}
 			if item.Tool == "run_command" && item.Text == "3 data.txt" && item.ExitCode != nil && *item.ExitCode == 0 && item.Success != nil && *item.Success && !strings.Contains(item.Text, `"type"`) {
 				hasToolResult = true
 			}

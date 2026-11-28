@@ -6246,12 +6246,14 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 		case EventToolUse:
 			toolCount++
 			if hasRichCard {
+				event.ToolInput = toolInputPreview(formatToolInput(event.ToolName, event.ToolInput), e.display.ToolMaxLen)
 				// When tool messages are suppressed, skip card updates on tool events.
 				if !e.display.ToolMessages {
 					break
 				}
 				toolSteps = appendToolStep(toolSteps, event.ToolName, truncateIf(formatToolInput(event.ToolName, event.ToolInput), e.display.ToolMaxLen))
 				if cardMessageID == nil {
+					setRichProgressStepID(toolSteps, event)
 					card := buildResolvedRichCard(CardStatusWorking, "", toolSteps, richCardText(), true, e.composeRichStatusFooter(true, turnStart, e.agent, state.agentSession, state.workspaceDir))
 					if starter, ok := p.(PreviewStarter); ok {
 						handle, err := starter.SendPreviewStart(e.ctx, replyCtx, card)
@@ -6262,11 +6264,13 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 						}
 					}
 				} else if updater, ok := p.(MessageUpdater); ok {
+					setRichProgressStepID(toolSteps, event)
 					card := buildResolvedRichCard(CardStatusWorking, "", toolSteps, richCardText(), true, e.composeRichStatusFooter(true, turnStart, e.agent, state.agentSession, state.workspaceDir))
 					if err := updater.UpdateMessage(e.ctx, cardMessageID, card); err != nil {
 						slog.Debug("rich card: failed to update tool card", "platform", p.Name(), "error", err)
 					}
 				}
+				setRichProgressStepID(toolSteps, event)
 				break
 			}
 			// When tool messages are hidden, behavior depends on display mode:
@@ -6371,8 +6375,8 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				// Truncate the tool input that goes into the progress card payload so
 				// tool_max_len applies uniformly to progress_style=card, matching
 				// the rich-card path. event.ToolInput itself is left untouched.
-				cardToolInput := truncateIf(toolInput, e.display.ToolMaxLen)
-				if !cp.AppendEvent(ProgressEntryToolUse, cardToolInput, event.ToolName, toolMsg) {
+				cardToolInput := toolInputPreview(toolInput, e.display.ToolMaxLen)
+				if !cp.AppendStructured(ProgressCardEntry{Kind: ProgressEntryToolUse, Text: cardToolInput, Tool: event.ToolName, ToolCallID: toolCallID(event)}, toolMsg) {
 					// Compact/card progress is best-effort. If its editable card
 					// fails, do not turn every subsequent tool event into a new
 					// chat message; the final answer remains authoritative.
@@ -6391,7 +6395,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 					result = strings.TrimSpace(event.Content)
 				}
 				if result != "" {
-					result = truncateIf(result, e.display.ToolMaxLen)
+					result = TruncateToolOutput(result, e.display.ToolMaxLen)
 				}
 				if result != "" || event.ToolStatus != "" || event.ToolExitCode != nil || event.ToolSuccess != nil {
 					if hasRichCard {
@@ -6416,12 +6420,14 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 					}
 					resultMsg := e.formatToolResultEventFallback(event.ToolName, result, event.ToolStatus, event.ToolExitCode, event.ToolSuccess)
 					entry := ProgressCardEntry{
-						Kind:     ProgressEntryToolResult,
-						Tool:     event.ToolName,
-						Text:     result,
-						Status:   event.ToolStatus,
-						ExitCode: event.ToolExitCode,
-						Success:  event.ToolSuccess,
+						ToolCallID: toolCallID(event),
+						Input:      toolInputPreview(event.ToolInput, e.display.ToolMaxLen),
+						Kind:       ProgressEntryToolResult,
+						Tool:       event.ToolName,
+						Text:       result,
+						Status:     event.ToolStatus,
+						ExitCode:   event.ToolExitCode,
+						Success:    event.ToolSuccess,
 					}
 					if !cp.AppendStructured(entry, resultMsg) {
 						if progressStyleForTarget(p, replyCtx) == progressStyleLegacy && !SuppressStandaloneToolResultEvent(p) {
@@ -7468,24 +7474,39 @@ func mergeRichToolResult(steps []ToolStep, event Event, result string, maxLen in
 	}
 
 	idx := -1
+	callID := toolCallID(event)
 	for i := len(steps) - 1; i >= 0; i-- {
 		if steps[i].Kind == ToolStepKindThinking {
 			continue
 		}
+		if callID != "" {
+			if steps[i].ToolCallID == callID {
+				idx = i
+				break
+			}
+			continue
+		}
+		if steps[i].Done {
+			continue
+		}
 		if strings.TrimSpace(steps[i].Name) == "" || strings.TrimSpace(steps[i].Name) == toolName {
+			if idx >= 0 {
+				idx = -1
+				break
+			}
 			idx = i
-			break
 		}
 	}
 	if idx == -1 {
 		summary := strings.TrimSpace(formatToolInput(toolName, event.ToolInput))
 		if summary != "" {
-			summary = truncateIf(summary, maxLen)
+			summary = toolInputPreview(summary, maxLen)
 		}
 		steps = append(steps, ToolStep{
-			Kind:    ToolStepKindTool,
-			Name:    toolName,
-			Summary: summary,
+			ToolCallID: callID,
+			Kind:       ToolStepKindTool,
+			Name:       toolName,
+			Summary:    summary,
 		})
 		idx = len(steps) - 1
 	}
@@ -7496,6 +7517,7 @@ func mergeRichToolResult(steps []ToolStep, event Event, result string, maxLen in
 	if steps[idx].Kind == "" {
 		steps[idx].Kind = ToolStepKindTool
 	}
+	needsRichPreview := strings.TrimSpace(steps[idx].Summary) == "" && strings.TrimSpace(event.ToolInput) != ""
 	if strings.TrimSpace(steps[idx].Summary) == "" && strings.TrimSpace(event.ToolInput) != "" {
 		steps[idx].Summary = truncateIf(strings.TrimSpace(formatToolInput(toolName, event.ToolInput)), maxLen)
 	}
@@ -7504,6 +7526,9 @@ func mergeRichToolResult(steps []ToolStep, event Event, result string, maxLen in
 	steps[idx].ExitCode = event.ToolExitCode
 	steps[idx].Success = event.ToolSuccess
 	steps[idx].Done = true
+	if needsRichPreview {
+		steps[idx].Summary = toolInputPreview(strings.TrimSpace(formatToolInput(toolName, event.ToolInput)), maxLen)
+	}
 	return steps
 }
 
@@ -11971,7 +11996,9 @@ func (e *Engine) processCompressEvents(state *interactiveState, session *Session
 		)
 	}
 
-	var textParts []string
+	var output strings.Builder
+	var budget compressOutputBudget
+	toolResults := 0
 	events := state.agentSession.Events()
 	stopCh := state.stopSignal()
 
@@ -11996,10 +12023,10 @@ func (e *Engine) processCompressEvents(state *interactiveState, session *Session
 				logCompletion("eof")
 				e.cleanupInteractiveState(sessionKey, state)
 				if !auto {
-					if len(textParts) > 0 {
-						e.send(p, replyCtx, strings.Join(textParts, ""))
+					if output.Len() > 0 {
+						e.sendCompressOutput(p, replyCtx, output.String(), false)
 					} else {
-						e.reply(p, replyCtx, e.i18n.T(MsgCompressDone))
+						e.sendCompressOutput(p, replyCtx, e.i18n.T(MsgCompressDone), true)
 					}
 				}
 				e.notifyDroppedQueuedMessages(state, fmt.Errorf("agent process exited during compress"))
@@ -12008,7 +12035,7 @@ func (e *Engine) processCompressEvents(state *interactiveState, session *Session
 		case <-idleCh:
 			logCompletion("idle_timeout")
 			if !auto {
-				e.send(p, replyCtx, fmt.Sprintf(e.i18n.T(MsgError), "compress timed out"))
+				e.sendCompressOutput(p, replyCtx, fmt.Sprintf(e.i18n.T(MsgError), "compress timed out"), false)
 			}
 			e.cleanupInteractiveState(sessionKey, state)
 			e.notifyDroppedQueuedMessages(state, fmt.Errorf("compress timed out"))
@@ -12035,36 +12062,39 @@ func (e *Engine) processCompressEvents(state *interactiveState, session *Session
 
 		switch event.Type {
 		case EventText:
-			if !auto && event.Content != "" {
-				textParts = append(textParts, event.Content)
+			if !auto && !budget.omitted && event.Content != "" {
+				output.WriteString(budget.take(boundedCompressText(event.Content)))
 			}
 		case EventToolResult:
-			if !auto {
-				out := strings.TrimSpace(event.Content)
+			if !auto && !budget.omitted && toolResults < maxCompressToolResults {
+				toolResults++
+				out := boundedCompressText(event.Content)
 				if out == "" {
-					out = strings.TrimSpace(event.ToolResult)
+					out = boundedCompressText(event.ToolResult)
 				}
 				if out == "" {
 					break
 				}
-				tn := strings.TrimSpace(event.ToolName)
+				out = TruncateToolOutput(out, e.display.ToolMaxLen)
+				tn := TruncateToolOutput(boundedCompressText(event.ToolName), 128)
 				if tn == "" {
 					tn = "tool"
 				}
-				textParts = append(textParts, fmt.Sprintf(e.i18n.T(MsgToolResult), tn, out)+"\n")
+				output.WriteString(budget.take(fmt.Sprintf(e.i18n.T(MsgToolResult), tn, out) + "\n"))
 			}
 		case EventResult:
 			// Finish compression before draining queued turns, which may run for minutes.
 			logCompletion("result")
-			result := event.Content
-			if result == "" && len(textParts) > 0 {
-				result = strings.Join(textParts, "")
+			// A final answer has its own budget: tool chatter cannot crowd it out.
+			result := boundedCompressText(event.Content)
+			if result == "" && output.Len() > 0 {
+				result = output.String()
 			}
 			if !auto {
 				if result != "" {
-					e.send(p, replyCtx, result)
+					e.sendCompressOutput(p, replyCtx, result, false)
 				} else {
-					e.reply(p, replyCtx, e.i18n.T(MsgCompressDone))
+					e.sendCompressOutput(p, replyCtx, e.i18n.T(MsgCompressDone), true)
 				}
 			}
 
@@ -12074,7 +12104,7 @@ func (e *Engine) processCompressEvents(state *interactiveState, session *Session
 		case EventError:
 			logCompletion("error")
 			if !auto && event.Error != nil {
-				e.reply(p, replyCtx, fmt.Sprintf(e.i18n.T(MsgError), event.Error))
+				e.sendCompressOutput(p, replyCtx, fmt.Sprintf(e.i18n.T(MsgError), boundedCompressText(event.Error.Error())), true)
 			}
 			// Only drop queued messages if the agent is dead; some agents
 			// emit per-turn EventError while staying alive.
@@ -12293,7 +12323,7 @@ func (e *Engine) cmdProviderAdd(p Platform, msg *Message, switcher ProviderSwitc
 	raw = strings.TrimSpace(raw)
 
 	if strings.HasPrefix(raw, "{") {
-		// JSON format: /provider add {"name":"relay","api_key":"sk-xxx",...}
+		// JSON format: /provider add {"name":"relay",...} with the api_key field supplied separately in the object.
 		var jp struct {
 			Name    string            `json:"name"`
 			APIKey  string            `json:"api_key"`

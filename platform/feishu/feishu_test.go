@@ -3079,7 +3079,9 @@ func TestRichCardTypewriterPreservesWorkingPanels(t *testing.T) {
 		if elements[0].(map[string]any)["expanded"] != baselineElements[0].(map[string]any)["expanded"] {
 			t.Fatalf("typewriter settings changed tool panel state: %s", data)
 		}
-		if !strings.Contains(data, "BODY INCREMENT") || !strings.Contains(data, "TOOL OUTPUT") || !strings.Contains(data, "FOOTER") {
+		// A running tool shows its call, not its output; the output appears
+		// once the step is done.
+		if !strings.Contains(data, "BODY INCREMENT") || (!working && !strings.Contains(data, "TOOL OUTPUT")) || !strings.Contains(data, "FOOTER") {
 			t.Fatal("card lost content")
 		}
 	}
