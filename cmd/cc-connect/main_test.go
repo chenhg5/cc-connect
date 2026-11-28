@@ -5,7 +5,9 @@ import (
 	"context"
 	"flag"
 	"io"
+	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"reflect"
 	"strings"
@@ -50,6 +52,144 @@ func (s *stubMainAgentSession) Events() <-chan core.Event                       
 func (s *stubMainAgentSession) Close() error                                          { return nil }
 func (s *stubMainAgentSession) CurrentSessionID() string                              { return "" }
 func (s *stubMainAgentSession) Alive() bool                                           { return true }
+
+type versionProbeTransport func(*http.Request) (*http.Response, error)
+
+func (f versionProbeTransport) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
+
+// Run the real entry point in a child so os.Exit and logging cannot affect
+// other tests. Any accidental update request stays inside this fake transport.
+func TestVersionProbeHelperProcess(t *testing.T) {
+	if os.Getenv("CC_CONNECT_VERSION_PROBE_TEST") != "1" {
+		return
+	}
+	separator := 0
+	for i, arg := range os.Args {
+		if arg == "--" {
+			separator = i
+			break
+		}
+	}
+	if separator == 0 {
+		t.Fatal("missing helper argument separator")
+	}
+	os.Args = append([]string{"cc-connect"}, os.Args[separator+1:]...)
+	version, commit, buildTime = "v0.0.0-test", "test-commit", "test-build"
+	requests := make(chan struct{}, 1)
+	http.DefaultTransport = versionProbeTransport(func(*http.Request) (*http.Response, error) {
+		select {
+		case requests <- struct{}{}:
+		default:
+		}
+		return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(`{"tag_name":"v0.0.0-test"}`))}, nil
+	})
+	main()
+	select {
+	case <-requests:
+		t.Fatal("version query started a background update request")
+	case <-time.After(50 * time.Millisecond):
+	}
+	os.Exit(0)
+}
+
+func runVersionProbe(t *testing.T, dir, logFile string, args ...string) (string, string, error) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, os.Args[0], append([]string{"-test.run=^TestVersionProbeHelperProcess$", "--"}, args...)...)
+	cmd.Dir = dir
+	cmd.Env = core.MergeEnv(os.Environ(), []string{
+		"CC_CONNECT_VERSION_PROBE_TEST=1", "CC_LOG_FILE=" + logFile,
+		"CC_LOG_MAX_SIZE=1", "CC_LOG_MAX_BACKUPS=1", "GORACE=atexit_sleep_ms=0",
+	})
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout, cmd.Stderr = &stdout, &stderr
+	err := cmd.Run()
+	return stdout.String(), stderr.String(), err
+}
+
+func TestVersionProbeHasNoDaemonSideEffects(t *testing.T) {
+	for _, logState := range []string{"new", "existing", "invalid_parent"} {
+		for _, variant := range []string{"long", "short", "explicit_true", "config", "invalid_log_size"} {
+			t.Run(logState+"/"+variant, func(t *testing.T) {
+				dir := t.TempDir()
+				logFile := filepath.Join(dir, "new-directory", "daemon.log")
+				switch logState {
+				case "existing":
+					logFile = filepath.Join(dir, "daemon.log")
+					for _, file := range []string{logFile, logFile + ".1"} {
+						if err := os.WriteFile(file, []byte("existing log contents\n"), 0600); err != nil {
+							t.Fatal(err)
+						}
+					}
+				case "invalid_parent":
+					parent := filepath.Join(dir, "regular-file")
+					if err := os.WriteFile(parent, []byte("not a directory"), 0600); err != nil {
+						t.Fatal(err)
+					}
+					logFile = filepath.Join(parent, "daemon.log")
+				}
+				args := []string{"--version"}
+				switch variant {
+				case "short":
+					args = []string{"-version"}
+				case "explicit_true":
+					args = []string{"--version=true"}
+				case "config":
+					args = []string{"--config", filepath.Join(dir, "missing.toml"), "--version"}
+				case "invalid_log_size":
+					args = []string{"--log-max-size", "invalid", "--version"}
+				}
+				stdout, stderr, err := runVersionProbe(t, dir, logFile, args...)
+				if err != nil {
+					t.Fatalf("version query: %v; stderr=%s", err, stderr)
+				}
+				if stdout != "cc-connect v0.0.0-test\ncommit:  test-commit\nbuilt:   test-build\n" || stderr != "" {
+					t.Fatalf("unexpected output: stdout=%q stderr=%q", stdout, stderr)
+				}
+				switch logState {
+				case "existing":
+					for _, file := range []string{logFile, logFile + ".1"} {
+						data, err := os.ReadFile(file)
+						if err != nil || string(data) != "existing log contents\n" {
+							t.Fatalf("version query changed log %s: %q, %v", file, data, err)
+						}
+					}
+				case "new":
+					if _, err := os.Stat(filepath.Dir(logFile)); !os.IsNotExist(err) {
+						t.Fatalf("version query created the log directory: %v", err)
+					}
+				}
+			})
+		}
+	}
+}
+
+func TestVersionFalseRetainsNormalStartup(t *testing.T) {
+	dir := t.TempDir()
+	parent := filepath.Join(dir, "regular-file")
+	if err := os.WriteFile(parent, []byte("not a directory"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	stdout, stderr, err := runVersionProbe(t, dir, filepath.Join(parent, "daemon.log"), "--version=true", "--version=false")
+	if err == nil || !strings.Contains(stderr, "failed to open log file") || stdout != "" {
+		t.Fatalf("--version=false bypassed normal startup: err=%v stdout=%q stderr=%q", err, stdout, stderr)
+	}
+}
+
+func TestParseRootCLIOptionsVersionSemantics(t *testing.T) {
+	for _, args := range [][]string{
+		{"--version=false"},
+		{"--version=true", "--version=false"},
+		{"--config", "--version"},
+		{"send", "--version"},
+	} {
+		opts, err := parseRootCLIOptions(args)
+		if err != nil || opts.showVersion {
+			t.Fatalf("args %q: showVersion=%v, error=%v", args, opts.showVersion, err)
+		}
+	}
+}
 
 func TestProjectStatePath(t *testing.T) {
 	dataDir := t.TempDir()
