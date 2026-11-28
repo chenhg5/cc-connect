@@ -1765,6 +1765,23 @@ func TestBuildToolDisplay_ShowsPatchText(t *testing.T) {
 	}
 }
 
+func TestBuildToolDisplay_TruncatedPatchKeepsContent(t *testing.T) {
+	patch := "*** Begin Patch\n*** Update File: /tmp/a.go\n" + strings.Repeat("+line\n", 100)
+	raw, err := json.Marshal(map[string]any{"patchText": patch})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	truncated := string([]rune(string(raw))[:500]) + "..."
+
+	got := buildToolDisplay("apply_patch", truncated)
+	if got.Detail == "patchText" {
+		t.Fatalf("truncated patch collapsed to the field name")
+	}
+	if !strings.Contains(got.Detail, "*** Begin Patch") {
+		t.Errorf("detail %q does not contain the patch body", got.Detail)
+	}
+}
+
 func TestAllowChat_FiltersGroupMessages(t *testing.T) {
 	tests := []struct {
 		name      string

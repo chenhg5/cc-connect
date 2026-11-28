@@ -6243,7 +6243,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				if !e.display.ToolMessages {
 					break
 				}
-				toolSteps = appendToolStep(toolSteps, event.ToolName, truncateIf(formatToolInput(event.ToolName, event.ToolInput), e.display.ToolMaxLen))
+				toolSteps = appendToolStep(toolSteps, event.ToolName, truncateToolInput(formatToolInput(event.ToolName, event.ToolInput), e.display.ToolMaxLen))
 				if cardMessageID == nil {
 					card := buildResolvedRichCard(CardStatusWorking, "", toolSteps, richCardText(), true, e.composeRichStatusFooter(true, turnStart, e.agent, state.agentSession, state.workspaceDir))
 					if starter, ok := p.(PreviewStarter); ok {
@@ -6364,7 +6364,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				// Truncate the tool input that goes into the progress card payload so
 				// tool_max_len applies uniformly to progress_style=card, matching
 				// the rich-card path. event.ToolInput itself is left untouched.
-				cardToolInput := truncateIf(toolInput, e.display.ToolMaxLen)
+				cardToolInput := truncateToolInput(toolInput, e.display.ToolMaxLen)
 				if !cp.AppendEvent(ProgressEntryToolUse, cardToolInput, event.ToolName, toolMsg) {
 					// Compact/card progress is best-effort. If its editable card
 					// fails, do not turn every subsequent tool event into a new
@@ -7473,7 +7473,7 @@ func mergeRichToolResult(steps []ToolStep, event Event, result string, maxLen in
 	if idx == -1 {
 		summary := strings.TrimSpace(formatToolInput(toolName, event.ToolInput))
 		if summary != "" {
-			summary = truncateIf(summary, maxLen)
+			summary = truncateToolInput(summary, maxLen)
 		}
 		steps = append(steps, ToolStep{
 			Kind:    ToolStepKindTool,
@@ -7490,7 +7490,7 @@ func mergeRichToolResult(steps []ToolStep, event Event, result string, maxLen in
 		steps[idx].Kind = ToolStepKindTool
 	}
 	if strings.TrimSpace(steps[idx].Summary) == "" && strings.TrimSpace(event.ToolInput) != "" {
-		steps[idx].Summary = truncateIf(strings.TrimSpace(formatToolInput(toolName, event.ToolInput)), maxLen)
+		steps[idx].Summary = truncateToolInput(strings.TrimSpace(formatToolInput(toolName, event.ToolInput)), maxLen)
 	}
 	steps[idx].Result = result
 	steps[idx].Status = strings.TrimSpace(event.ToolStatus)
@@ -17395,6 +17395,89 @@ func truncateIf(s string, maxLen int) string {
 		return s
 	}
 	return string([]rune(s)[:maxLen]) + "..."
+}
+
+// truncatedJSONMarker marks string values shortened by truncateToolInput.
+const truncatedJSONMarker = "...(truncated)"
+
+// truncateToolInput caps a tool-input payload while keeping JSON objects
+// parseable. Platform renderers decode this payload to show structured fields;
+// cutting the raw JSON mid-string makes the decode fail, and they then fall
+// back to the first quoted token in the broken JSON — a bare key name such as
+// "patchText" instead of the patch itself.
+func truncateToolInput(s string, maxLen int) string {
+	if maxLen <= 0 || utf8.RuneCountInString(s) <= maxLen {
+		return s
+	}
+	dec := json.NewDecoder(strings.NewReader(s))
+	dec.UseNumber()
+	var payload map[string]any
+	if err := dec.Decode(&payload); err != nil {
+		return truncateIf(s, maxLen)
+	}
+	markerLen := utf8.RuneCountInString(truncatedJSONMarker)
+	for {
+		b, err := marshalNoEscapeHTML(payload)
+		if err != nil {
+			return truncateIf(s, maxLen)
+		}
+		over := utf8.RuneCount(b) - maxLen
+		if over <= 0 {
+			return string(b)
+		}
+		key := longestJSONStringValue(payload)
+		if key == "" {
+			return string(b)
+		}
+		runes := []rune(payload[key].(string))
+		target := len(runes) - over
+		if target < markerLen {
+			target = markerLen
+		}
+		if target > len(runes) {
+			target = len(runes)
+		}
+		keep := target - markerLen
+		if keep < 0 {
+			keep = 0
+		}
+		payload[key] = string(runes[:keep]) + truncatedJSONMarker
+	}
+}
+
+// marshalNoEscapeHTML encodes payload without HTML escaping so the measured
+// rune length matches the emitted JSON. json.Marshal escapes <, > and & into
+// six-rune sequences, which would otherwise be charged against the value
+// budget and blank angle-bracket-heavy payloads such as patches.
+func marshalNoEscapeHTML(payload map[string]any) ([]byte, error) {
+	var buf bytes.Buffer
+	enc := json.NewEncoder(&buf)
+	enc.SetEscapeHTML(false)
+	if err := enc.Encode(payload); err != nil {
+		return nil, err
+	}
+	return bytes.TrimRight(buf.Bytes(), "\n"), nil
+}
+
+// longestJSONStringValue returns the longest top-level string value that has
+// not been truncated yet, breaking ties by key so the result is deterministic.
+func longestJSONStringValue(payload map[string]any) string {
+	key := ""
+	longest := 0
+	for k, v := range payload {
+		s, ok := v.(string)
+		if !ok || strings.HasSuffix(s, truncatedJSONMarker) {
+			continue
+		}
+		n := utf8.RuneCountInString(s)
+		if n == 0 {
+			continue
+		}
+		if n > longest || (n == longest && (key == "" || k < key)) {
+			key, longest = k, n
+		}
+	}
+	return key
 }
 
 func splitMessage(text string, maxLen int) []string {
