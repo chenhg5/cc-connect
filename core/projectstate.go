@@ -47,7 +47,13 @@ func (ps *ProjectStateStore) WorkspaceDirOverride(workspace string) string {
 	if ps.state.WorkspaceDirOverrides == nil {
 		return ""
 	}
-	return ps.state.WorkspaceDirOverrides[workspace]
+	if dir := ps.state.WorkspaceDirOverrides[workspace]; dir != "" {
+		return dir
+	}
+	if legacy := legacyWorkspaceLookup(workspace); legacy != "" {
+		return ps.state.WorkspaceDirOverrides[legacy]
+	}
+	return ""
 }
 
 func (ps *ProjectStateStore) SetWorkspaceDirOverride(workspace, dir string) {
@@ -66,6 +72,11 @@ func (ps *ProjectStateStore) ClearWorkspaceDirOverride(workspace string) {
 		return
 	}
 	delete(ps.state.WorkspaceDirOverrides, workspace)
+	// Drop the pre-upgrade entry too, otherwise the next lookup would resurrect
+	// the override the caller just cleared.
+	if legacy := legacyWorkspaceLookup(workspace); legacy != "" {
+		delete(ps.state.WorkspaceDirOverrides, legacy)
+	}
 	if len(ps.state.WorkspaceDirOverrides) == 0 {
 		ps.state.WorkspaceDirOverrides = nil
 	}
@@ -77,7 +88,13 @@ func (ps *ProjectStateStore) WorkspaceModelOverride(workspace string) string {
 	if ps.state.WorkspaceModelOverrides == nil {
 		return ""
 	}
-	return ps.state.WorkspaceModelOverrides[workspace]
+	if model := ps.state.WorkspaceModelOverrides[workspace]; model != "" {
+		return model
+	}
+	if legacy := legacyWorkspaceLookup(workspace); legacy != "" {
+		return ps.state.WorkspaceModelOverrides[legacy]
+	}
+	return ""
 }
 
 func (ps *ProjectStateStore) SetWorkspaceModelOverride(workspace, model string) {
@@ -100,6 +117,9 @@ func (ps *ProjectStateStore) ClearWorkspaceModelOverride(workspace string) {
 		return
 	}
 	delete(ps.state.WorkspaceModelOverrides, workspace)
+	if legacy := legacyWorkspaceLookup(workspace); legacy != "" {
+		delete(ps.state.WorkspaceModelOverrides, legacy)
+	}
 	if len(ps.state.WorkspaceModelOverrides) == 0 {
 		ps.state.WorkspaceModelOverrides = nil
 	}
