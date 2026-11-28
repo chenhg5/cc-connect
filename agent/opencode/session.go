@@ -596,6 +596,14 @@ func (s *opencodeSession) Alive() bool {
 }
 
 func (s *opencodeSession) Close() error {
+	s.closeInternal(true)
+	return nil
+}
+
+// closeInternal cancels the session and waits for its workers. Server transport
+// closes the shared event channel only after its own stream worker has stopped;
+// closing it here would race a server-side event sender that outlives this wait.
+func (s *opencodeSession) closeInternal(closeEvents bool) bool {
 	s.alive.Store(false)
 	s.cancel()
 	done := make(chan struct{})
@@ -605,11 +613,14 @@ func (s *opencodeSession) Close() error {
 	}()
 	select {
 	case <-done:
-		close(s.events)
+		if closeEvents {
+			close(s.events)
+		}
+		return true
 	case <-time.After(8 * time.Second):
 		slog.Warn("opencodeSession: close timed out, abandoning wg.Wait")
+		return false
 	}
-	return nil
 }
 
 func truncate(s string, maxRunes int) string {
@@ -617,4 +628,25 @@ func truncate(s string, maxRunes int) string {
 		return s
 	}
 	return string([]rune(s)[:maxRunes]) + "..."
+}
+
+// toolRejectionNotice renders a bounded, user-facing notice for a rejected
+// tool call. opencode embeds its entire permission ruleset in the error
+// message (tens of KB); forwarding that verbatim flooded the chat with huge
+// split messages and polluted the model's context, so keep only the leading
+// explanation and cap the length. The full error is still logged by the
+// callers.
+func toolRejectionNotice(toolName, errMsg string) string {
+	const rulesMarker = " Here are"
+	if i := strings.Index(errMsg, rulesMarker); i > 0 {
+		errMsg = errMsg[:i]
+	}
+	errMsg = strings.TrimSpace(errMsg)
+	if errMsg == "" {
+		errMsg = "tool call rejected by the permission policy"
+	}
+	if toolName != "" {
+		errMsg = "tool " + toolName + ": " + errMsg
+	}
+	return truncate(errMsg, 300)
 }
