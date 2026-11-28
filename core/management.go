@@ -843,6 +843,8 @@ func (m *ManagementServer) handleProjectDetail(w http.ResponseWriter, r *http.Re
 				e.i18n.SetLang(LangJapanese)
 			case "es":
 				e.i18n.SetLang(LangSpanish)
+			case "ru":
+				e.i18n.SetLang(LangRussian)
 			}
 		}
 		if body.AdminFrom != nil {
