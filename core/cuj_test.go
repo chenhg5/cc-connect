@@ -2351,8 +2351,13 @@ func TestCUJ_H2_TwoPlatformsConcurrentNoBleed(t *testing.T) {
 	}
 	wg.Wait()
 
-	// Wait for all ten independent turns to finish before inspecting history.
-	deadline := time.After(30 * time.Second)
+	// Wait for all turns to finish. Generous deadline so this stays green
+	// when the whole core package is run with `-race -parallel=N` on
+	// constrained CI hosts; the in-isolation run finishes < 2s. The budget is
+	// widened by timingTestBudget because the turns are serialized per session
+	// and an oversubscribed runner can starve the drain loop for tens of
+	// seconds.
+	deadline := time.After(timingTestBudget(30 * time.Second))
 	for {
 		complete := 0
 		for i := 0; i < 5; i++ {
