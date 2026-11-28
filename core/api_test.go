@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -150,6 +151,249 @@ func TestHandleSend_EmptyProjectFallsBackToSingleEngine(t *testing.T) {
 
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestHandleBindAgentSession_AttachesExistingNativeSession(t *testing.T) {
+	engine := NewEngine("projectA", &stubAgent{}, nil, "", LangEnglish)
+	api := &APIServer{engines: map[string]*Engine{"projectA": engine}}
+	body, err := json.Marshal(BindAgentSessionRequest{
+		Project:     "projectA",
+		SessionKey:  "test:channel:user",
+		SessionID:   "native-session-id",
+		SessionName: "local session",
+	})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/sessions/bind-agent", bytes.NewReader(body))
+	rec := httptest.NewRecorder()
+	api.handleBindAgentSession(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	session := engine.sessions.GetOrCreateActive("test:channel:user")
+	if got := session.GetAgentSessionID(); got != "native-session-id" {
+		t.Fatalf("agent session id = %q, want native-session-id", got)
+	}
+	if got := session.GetName(); got != "local session" {
+		t.Fatalf("session name = %q, want local session", got)
+	}
+
+	secondReq := httptest.NewRequest(http.MethodPost, "/sessions/bind-agent", bytes.NewReader(body))
+	secondRec := httptest.NewRecorder()
+	api.handleBindAgentSession(secondRec, secondReq)
+	if secondRec.Code != http.StatusOK {
+		t.Fatalf("repeated attach status = %d, want 200; body=%s", secondRec.Code, secondRec.Body.String())
+	}
+	if got := engine.sessions.ListSessions("test:channel:user"); len(got) != 1 {
+		t.Fatalf("repeated attach created %d sessions, want 1", len(got))
+	}
+}
+
+func TestHandleBindAgentSession_RejectsInvalidNativeSession(t *testing.T) {
+	agent := &validatingAgent{
+		controllableAgent: controllableAgent{},
+		validateFunc: func(_ context.Context, _ string) bool {
+			return false
+		},
+	}
+	engine := NewEngine("projectA", agent, nil, "", LangEnglish)
+	api := &APIServer{engines: map[string]*Engine{"projectA": engine}}
+	body, err := json.Marshal(BindAgentSessionRequest{
+		Project: "projectA", SessionKey: "test:channel:user", SessionID: "foreign-session",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/sessions/bind-agent", bytes.NewReader(body))
+	rec := httptest.NewRecorder()
+	api.handleBindAgentSession(rec, req)
+
+	if rec.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("status = %d, want 422; body=%s", rec.Code, rec.Body.String())
+	}
+	if got := engine.sessions.ListSessions("test:channel:user"); len(got) != 0 {
+		t.Fatalf("rejected attach mutated sessions: %#v", got)
+	}
+}
+
+func TestHandleBindAgentSession_BindsMultiWorkspace(t *testing.T) {
+	baseDir := t.TempDir()
+	workDir := filepath.Join(baseDir, "repo")
+	if err := os.Mkdir(workDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	engine := newTestEngineWithMultiWorkspaceAgent(t, baseDir)
+	engine.sessions = NewSessionManager(filepath.Join(t.TempDir(), "sessions.json"))
+	api := &APIServer{engines: map[string]*Engine{"test": engine}}
+	body, err := json.Marshal(BindAgentSessionRequest{
+		Project:     "test",
+		SessionKey:  "test:channel:user",
+		SessionID:   "native-session-id",
+		SessionName: "local session",
+		WorkDir:     workDir,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/sessions/bind-agent", bytes.NewReader(body))
+	rec := httptest.NewRecorder()
+	api.handleBindAgentSession(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	binding := engine.workspaceBindings.Lookup("project:test", "test:channel")
+	if binding == nil || binding.Workspace != normalizeWorkspacePath(workDir) {
+		t.Fatalf("workspace binding = %#v, want %q", binding, normalizeWorkspacePath(workDir))
+	}
+	_, sessions, err := engine.getOrCreateWorkspaceAgent(normalizeWorkspacePath(workDir))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := sessions.GetOrCreateActive("test:channel:user").GetAgentSessionID(); got != "native-session-id" {
+		t.Fatalf("workspace agent session id = %q, want native-session-id", got)
+	}
+}
+
+func TestHandleBindAgentSession_ResolvesPlatformScopedWorkspace(t *testing.T) {
+	engine, _, platform, shared := newScopedEngine(t)
+	other := filepath.Join(filepath.Dir(shared), "repo-other")
+	requests := []BindAgentSessionRequest{
+		{Project: "test", SessionKey: topicKeyA, SessionID: "native-a", WorkDir: shared},
+		{Project: "test", SessionKey: topicKeyB, SessionID: "native-b", WorkDir: other},
+	}
+	api := &APIServer{engines: map[string]*Engine{"test": engine}}
+	for _, request := range requests {
+		body, err := json.Marshal(request)
+		if err != nil {
+			t.Fatal(err)
+		}
+		// Replay the same attach to exercise idempotence at topic scope.
+		for range 2 {
+			rec := httptest.NewRecorder()
+			api.handleBindAgentSession(rec, httptest.NewRequest(http.MethodPost, "/sessions/bind-agent", bytes.NewReader(body)))
+			if rec.Code != http.StatusOK {
+				t.Fatalf("attach %q status = %d; body=%s", request.SessionKey, rec.Code, rec.Body.String())
+			}
+		}
+	}
+
+	assertResolved := func(t *testing.T, engine *Engine) {
+		t.Helper()
+		if binding := engine.workspaceBindings.Lookup("project:test", "feishu:oc_chat"); binding != nil {
+			t.Fatalf("topic attach created a chat-level binding: %#v", binding)
+		}
+		for _, request := range requests {
+			binding := engine.workspaceBindings.Lookup("project:test", engine.extractWorkspaceChannelKey(request.SessionKey))
+			wantDir, err := filepath.EvalSymlinks(request.WorkDir)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if binding == nil || binding.Workspace != wantDir {
+				t.Fatalf("%q binding = %#v, want workspace %q", request.SessionKey, binding, wantDir)
+			}
+			agent, sessions := engine.sessionContextForKey(request.SessionKey)
+			workDirAgent, ok := agent.(interface{ GetWorkDir() string })
+			if !ok || workDirAgent.GetWorkDir() != wantDir {
+				t.Fatalf("%q resolved agent = %#v, want work dir %q", request.SessionKey, agent, wantDir)
+			}
+			if got := sessions.ListSessions(request.SessionKey); len(got) != 1 {
+				t.Fatalf("%q has %d sessions after replay, want 1", request.SessionKey, len(got))
+			}
+			if got := sessions.GetOrCreateActive(request.SessionKey).GetAgentSessionID(); got != request.SessionID {
+				t.Fatalf("%q native session = %q, want %q", request.SessionKey, got, request.SessionID)
+			}
+		}
+		if agent, _ := engine.sessionContextForKey("feishu:oc_chat:other-user"); agent != engine.agent {
+			t.Fatal("topic attach changed the shared-chat agent")
+		}
+	}
+	t.Run("after attach and replay", func(t *testing.T) { assertResolved(t, engine) })
+
+	// A fresh engine must resolve from persisted bindings and workspace sessions.
+	restarted := NewEngine(engine.name, engine.agent, []Platform{platform}, engine.sessions.StorePath(), LangEnglish)
+	restarted.SetMultiWorkspace(engine.baseDir, engine.workspaceBindings.storePath)
+	t.Run("after restart", func(t *testing.T) { assertResolved(t, restarted) })
+}
+
+func TestHandleBindAgentSession_WorkspaceKeyFallback(t *testing.T) {
+	for _, sessionKey := range []string{"feishu:oc_chat:other-user", "test:channel:user"} {
+		t.Run(sessionKey, func(t *testing.T) {
+			engine, _, _, workDir := newScopedEngine(t)
+			api := &APIServer{engines: map[string]*Engine{"test": engine}}
+			body, err := json.Marshal(BindAgentSessionRequest{
+				Project: "test", SessionKey: sessionKey, SessionID: "native-session", WorkDir: workDir,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			rec := httptest.NewRecorder()
+			api.handleBindAgentSession(rec, httptest.NewRequest(http.MethodPost, "/sessions/bind-agent", bytes.NewReader(body)))
+			if rec.Code != http.StatusOK {
+				t.Fatalf("status = %d; body=%s", rec.Code, rec.Body.String())
+			}
+			if binding := engine.workspaceBindings.Lookup("project:test", extractWorkspaceChannelKey(sessionKey)); binding == nil {
+				t.Fatal("missing fallback channel binding")
+			}
+			agent, sessions := engine.sessionContextForKey(sessionKey)
+			if agent == engine.agent {
+				t.Fatal("fallback key resolved to global agent")
+			}
+			if got := sessions.GetOrCreateActive(sessionKey).GetAgentSessionID(); got != "native-session" {
+				t.Fatalf("native session = %q, want native-session", got)
+			}
+		})
+	}
+}
+
+func TestHandleBindAgentSession_RejectsWorkspaceOutsideBaseDir(t *testing.T) {
+	baseDir := t.TempDir()
+	outsideDir := t.TempDir()
+	engine := newTestEngineWithMultiWorkspaceAgent(t, baseDir)
+	api := &APIServer{engines: map[string]*Engine{"test": engine}}
+	body, err := json.Marshal(BindAgentSessionRequest{
+		Project: "test", SessionKey: "test:channel:user",
+		SessionID: "native-session-id", WorkDir: outsideDir,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/sessions/bind-agent", bytes.NewReader(body))
+	rec := httptest.NewRecorder()
+	api.handleBindAgentSession(rec, req)
+
+	if rec.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("status = %d, want 422; body=%s", rec.Code, rec.Body.String())
+	}
+	if binding := engine.workspaceBindings.Lookup("project:test", "test:channel"); binding != nil {
+		t.Fatalf("rejected attach created workspace binding: %#v", binding)
+	}
+}
+
+func TestHandleBindAgentSession_WorkDirRequiresMultiWorkspace(t *testing.T) {
+	engine := NewEngine("projectA", &stubAgent{}, nil, "", LangEnglish)
+	api := &APIServer{engines: map[string]*Engine{"projectA": engine}}
+	body, err := json.Marshal(BindAgentSessionRequest{
+		Project: "projectA", SessionKey: "test:channel:user",
+		SessionID: "native-session-id", WorkDir: t.TempDir(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/sessions/bind-agent", bytes.NewReader(body))
+	rec := httptest.NewRecorder()
+	api.handleBindAgentSession(rec, req)
+
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("status = %d, want 409; body=%s", rec.Code, rec.Body.String())
 	}
 }
 
