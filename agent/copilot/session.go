@@ -55,6 +55,10 @@ type copilotSession struct {
 	// which carries only the toolCallId, can be surfaced with a readable name.
 	toolCallMu    sync.Mutex
 	toolCallNames map[string]string
+
+	turnMu        sync.Mutex
+	turnHasText   bool
+	turnCompleted bool
 }
 
 type copilotWireProviderConfig struct {
@@ -416,6 +420,11 @@ func (cs *copilotSession) handleSessionEvent(params json.RawMessage) {
 	case "assistant.message_delta":
 		content := copilotEventText(evt.Event.Data)
 		if content != "" {
+			cs.turnMu.Lock()
+			if !cs.turnCompleted {
+				cs.turnHasText = true
+			}
+			cs.turnMu.Unlock()
 			e := core.Event{Type: core.EventText, Content: content}
 			select {
 			case cs.events <- e:
@@ -425,19 +434,34 @@ func (cs *copilotSession) handleSessionEvent(params json.RawMessage) {
 
 	case "assistant.message":
 		usage := copilotEventUsage(evt.Event.Data)
-		if len(evt.Event.Data) > 0 {
-			cs.addContextUsage(usage.inputTokens, usage.outputTokens)
+		cs.addContextUsage(usage.inputTokens, usage.outputTokens)
 
-			e := core.Event{
-				Type:         core.EventResult,
-				SessionID:    cs.CurrentSessionID(),
-				Done:         true,
-				OutputTokens: usage.outputTokens,
-			}
-			select {
-			case cs.events <- e:
-			case <-cs.ctx.Done():
-			}
+		// Copilot can emit an assistant.message without text while a turn is
+		// still running (for example around tool calls). Treating that event as
+		// terminal makes cc-connect send its `(empty response)` fallback.
+		content := copilotEventText(evt.Event.Data)
+		if content == "" {
+			slog.Debug("copilotSession: ignoring empty assistant.message")
+			return
+		}
+		cs.turnMu.Lock()
+		if cs.turnCompleted {
+			cs.turnMu.Unlock()
+			return
+		}
+		cs.turnHasText = false
+		cs.turnCompleted = true
+		cs.turnMu.Unlock()
+		e := core.Event{
+			Type:         core.EventResult,
+			Content:      content,
+			SessionID:    cs.CurrentSessionID(),
+			Done:         true,
+			OutputTokens: usage.outputTokens,
+		}
+		select {
+		case cs.events <- e:
+		case <-cs.ctx.Done():
 		}
 
 	case "assistant.usage":
@@ -457,9 +481,26 @@ func (cs *copilotSession) handleSessionEvent(params json.RawMessage) {
 		cs.emitToolExecutionComplete(evt.Event)
 
 	case "assistant.turn_start":
+		cs.turnMu.Lock()
+		cs.turnHasText = false
+		cs.turnCompleted = false
+		cs.turnMu.Unlock()
 		slog.Debug("copilotSession: turn started")
 
 	case "assistant.turn_end":
+		cs.turnMu.Lock()
+		hasText := cs.turnHasText
+		if hasText && !cs.turnCompleted {
+			cs.turnCompleted = true
+		}
+		cs.turnHasText = false
+		cs.turnMu.Unlock()
+		if hasText {
+			select {
+			case cs.events <- core.Event{Type: core.EventResult, SessionID: cs.CurrentSessionID(), Done: true}:
+			case <-cs.ctx.Done():
+			}
+		}
 		slog.Debug("copilotSession: turn ended")
 
 	case "session.idle":
