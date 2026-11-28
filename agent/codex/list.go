@@ -318,8 +318,9 @@ func parseCodexSessionFileDetail(path, filterCwd string, customPrefixes []string
 		return nil, ""
 	}
 
-	// Filter by cwd
-	if filterCwd != "" && sessionCwd != "" && sessionCwd != filterCwd {
+	// Filter by cwd. Codex versions differ on Windows path formatting
+	// (for example, D:/repo vs D:\repo), so compare normalized paths.
+	if filterCwd != "" && sessionCwd != "" && !sameCodexPath(sessionCwd, filterCwd) {
 		return nil, ""
 	}
 

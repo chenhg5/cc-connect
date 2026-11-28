@@ -31,3 +31,21 @@ func TestSwitchHydratesAgentHistoryForCurrent(t *testing.T) {
 		t.Fatalf("history after repeated /switch = %d, want 2 without duplicates", got)
 	}
 }
+
+func TestSwitchToListEntryHydratesAgentHistory(t *testing.T) {
+	p := &stubPlatformEngine{n: "test"}
+	agent := &switchHistoryAgent{}
+	e := NewEngine("test", agent, []Platform{p}, filepath.Join(t.TempDir(), "sessions.json"), LangEnglish)
+	t.Cleanup(func() { _ = e.Stop() })
+	msg := &Message{SessionKey: "test:user", Platform: "test", UserID: "user", ReplyCtx: "ctx"}
+	entry := listSessionEntry{Info: AgentSessionInfo{ID: "gemini-session", Summary: "previous chat", MessageCount: 2}}
+	e.switchToListEntry(p, msg, agent, e.sessions, msg.SessionKey, entry)
+	s := e.sessions.GetOrCreateActive(msg.SessionKey)
+	if got := s.HistoryLen(); got != 2 {
+		t.Fatalf("history after list selection switch = %d, want 2", got)
+	}
+	e.switchToListEntry(p, msg, agent, e.sessions, msg.SessionKey, entry)
+	if got := s.HistoryLen(); got != 2 {
+		t.Fatalf("history after repeated list selection switch = %d, want 2 without duplicates", got)
+	}
+}

@@ -61,3 +61,30 @@ func TestRenderListCardIncludesLocalSessionWithoutTranscript(t *testing.T) {
 		t.Fatalf("card switch actions = %d, want 1", got)
 	}
 }
+
+func TestListNumberReplySwitchesToLocalSession(t *testing.T) {
+	agent := &stubListAgent{}
+	p := &stubPlatformEngine{n: "plain"}
+	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+	key := "weixin:user-1"
+	first := e.sessions.NewSession(key, "test")
+	second := e.sessions.NewSession(key, "test2")
+
+	for _, tc := range []struct {
+		reply string
+		want  string
+	}{{"1", first.ID}, {"2", second.ID}} {
+		// The card /list (and grouped text /list) arms numeric replies.
+		e.setListSelection(key, &listSelectionState{mode: listSelectionGroups})
+		p.sent = nil
+		if !e.handleListSelectionInput(p, &Message{SessionKey: key, ReplyCtx: "ctx", Content: tc.reply}, tc.reply) {
+			t.Fatalf("reply %q after /list was not handled", tc.reply)
+		}
+		if got := e.sessions.ActiveSessionID(key); got != tc.want {
+			t.Fatalf("reply %q activated %q; want %q, sent=%#v", tc.reply, got, tc.want, p.sent)
+		}
+		if s := e.sessions.GetOrCreateActive(key); strings.HasPrefix(s.AgentSessionID, localSessionPrefix) {
+			t.Fatalf("reply %q stored bogus agent session id %q", tc.reply, s.AgentSessionID)
+		}
+	}
+}
