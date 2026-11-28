@@ -398,7 +398,7 @@ sudo mv cc-connect /usr/local/bin/
 
 ```
 
-**从源码编译（需要 Go 1.22+）：**
+**从源码编译（需要 Go 1.26+）：**
 
 ```bash
 git clone https://github.com/chenhg5/cc-connect.git

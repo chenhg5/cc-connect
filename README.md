@@ -399,7 +399,7 @@ sudo mv cc-connect /usr/local/bin/
 
 ```
 
-**Build from source (requires Go 1.22+):**
+**Build from source (requires Go 1.26+):**
 
 ```bash
 git clone https://github.com/chenhg5/cc-connect.git
