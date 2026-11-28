@@ -330,14 +330,15 @@ var RestartCh = make(chan RestartRequest, 1)
 // DisplayCfg controls how intermediate messages are surfaced.
 // A value of -1 means "use default", 0 means "no truncation".
 type DisplayCfg struct {
-	Mode             string // "full" (default), "compact", or "quiet" — thinking/tool visibility
-	CardMode         string // "legacy" (default) or "rich" (Card 2.0 Feishu)
-	ThinkingMessages bool
-	ThinkingMaxLen   int // max runes for thinking preview; 0 = no truncation
-	ToolMaxLen       int // max runes for tool use preview; 0 = no truncation
-	ToolMessages     bool
-	HistoryMaxLen    *int // max runes for /history entries; nil = default, 0 = no truncation
-	HideAgentFooter  bool // strip model/token footer lines emitted as agent text
+	Mode               string // "full" (default), "compact", or "quiet" — thinking/tool visibility
+	CardMode           string // "legacy" (default) or "rich" (Card 2.0 Feishu)
+	ThinkingMessages   bool
+	ThinkingMaxLen     int // max runes for thinking preview; 0 = no truncation
+	ToolMaxLen         int // max runes for tool use preview; 0 = no truncation
+	ToolMessages       bool
+	HistoryMaxLen      *int // max runes for /history entries; nil = default, 0 = no truncation
+	HideAgentFooter    bool // strip model/token footer lines emitted as agent text
+	PrependPreToolText bool // quiet mode: retain text emitted before tool calls
 }
 
 // InstantReplyCfg controls the immediate confirmation reply sent when a message
@@ -5877,8 +5878,9 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 	}
 
 	var textParts []string
-	var segmentStart int // index into textParts: text before this has been sent/displayed
-	silentHold := false  // true while accumulated segment text could still resolve to a bare NO_REPLY marker
+	var segmentStart int      // index into textParts: text before this has been sent/displayed
+	var postLastToolStart int // first text part after the most recent tool call
+	silentHold := false       // true while accumulated segment text could still resolve to a bare NO_REPLY marker
 	toolCount := 0
 	waitStart := time.Now()
 	firstEventLogged := false
@@ -6136,6 +6138,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			// final aggregation cannot concatenate the invalid draft.
 			textParts = nil
 			segmentStart = 0
+			postLastToolStart = 0
 			silentHold = false
 			partialText = ""
 			cardAnswerText.Reset()
@@ -6286,6 +6289,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				}
 				silentHold = false
 			}
+			postLastToolStart = len(textParts)
 			if e.display.ToolMessages {
 				// --- StreamingCard path ---
 				if streamCard != nil && !streamCard.Failed() {
@@ -6738,7 +6742,11 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			// contains ALL text across tool boundaries. Prefer the full accumulated
 			// text over event.Content which only contains the last assistant segment.
 			if len(textParts) > 0 && segmentStart == 0 && !e.display.ToolMessages {
-				fullResponse = strings.Join(textParts, "")
+				parts := textParts
+				if e.display.Mode == "quiet" && !e.display.PrependPreToolText {
+					parts = parts[postLastToolStart:]
+				}
+				fullResponse = strings.Join(parts, "")
 			} else if fullResponse == "" && len(textParts) > 0 {
 				fullResponse = strings.Join(textParts, "")
 			}

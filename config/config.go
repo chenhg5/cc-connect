@@ -201,11 +201,12 @@ type ManagementConfig struct {
 const (
 	DisplayModeFull    = "full"    // show thinking + tool messages as separate messages (default)
 	DisplayModeCompact = "compact" // hide thinking/tool, each text segment is a separate card
-	DisplayModeQuiet   = "quiet"   // hide thinking/tool, all text appends to one card
+	DisplayModeQuiet   = "quiet"   // hide thinking/tool, deliver the final post-tool text
 )
 
 // DisplayConfig controls how intermediate messages (thinking, tool output) are shown.
 type DisplayConfig struct {
+	PrependPreToolText   *bool   `toml:"prepend_pre_tool_text"`  // quiet mode: retain text before tool calls
 	Mode                 *string `toml:"mode"`                   // "full" (default), "compact", or "quiet"
 	CardMode             *string `toml:"card_mode"`              // "legacy" (default) or "rich" (Card 2.0 Feishu)
 	ThinkingMessages     *bool   `toml:"thinking_messages"`      // whether thinking messages are shown; default true
@@ -901,6 +902,14 @@ func projectQuietEffective(cfg *Config, proj *ProjectConfig) bool {
 		return *cfg.Quiet
 	}
 	return false
+}
+
+// EffectivePrependPreToolText resolves the quiet-mode legacy text option.
+func EffectivePrependPreToolText(cfg *Config, proj *ProjectConfig) bool {
+	if proj != nil && proj.Display != nil && proj.Display.PrependPreToolText != nil {
+		return *proj.Display.PrependPreToolText
+	}
+	return cfg.Display.PrependPreToolText != nil && *cfg.Display.PrependPreToolText
 }
 
 // EffectiveDisplay resolves the per-project [projects.display] override on top

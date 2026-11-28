@@ -131,8 +131,8 @@ level = "info" # debug, info, warn, error
 #                           #       显示思考和工具消息，每条单独发送
 #                           # compact: hide thinking/tool, each text segment sent separately
 #                           #          隐藏思考和工具消息，每段文本独立发送
-#                           # quiet: hide thinking/tool, all text in one card, done emoji at end
-#                           #        隐藏思考和工具消息，所有文本合并到同一张卡片，完成后发送 done emoji
+#                           # quiet: hide thinking/tool, deliver only text after the last tool call
+#                           #        隐藏思考和工具消息，只发送最后一次工具调用后的正文
 # thinking_messages = true  # Show/hide thinking messages (default: true) / 是否显示思考消息（默认 true）
 # thinking_max_len = 300    # Max chars for thinking messages (default: 300) / 思考消息最大字符数（默认 300）
 # tool_max_len = 500        # Max chars for tool use messages (default: 500) / 工具调用消息最大字符数（默认 500）
@@ -144,6 +144,8 @@ level = "info" # debug, info, warn, error
 #                                # 在助手回复底部显示类似 Codex 的状态行（默认 true 显示）
 # hide_agent_footer = false      # Strip standalone model/token footer lines emitted by agents (default: false)
 #                                # 过滤 agent 自己混入正文的模型/token 统计 footer 行（默认 false 不过滤）
+# prepend_pre_tool_text = false  # In quiet mode, retain text before tool calls (legacy behavior)
+#                                # 静默模式下保留工具调用前的文字（旧行为）
 
 # Per-project override: each [[projects]] entry may have its own [projects.display]
 # block that overrides individual fields of the global [display] block above.
