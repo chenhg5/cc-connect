@@ -1629,6 +1629,8 @@ app_secret = "your-feishu-app-secret"
 # mode = "websocket"
 # bot_id = "your-bot-id"
 # bot_secret = "your-bot-secret"
+# streaming = true  # Update one reply while the agent generates text (WebSocket only); false restores ordinary messages.
+#                   # 长连接原位流式回复，默认开启；false 恢复普通消息。主动推送仍使用 Markdown。
 # ws_url = "wss://your-wecom-host:port/im_openws?bizid=10001"  # optional / 可选：私有化部署 WebSocket 地址，留空默认公有云 wss://openws.work.weixin.qq.com
 # allow_from = "*"  # Allowed user IDs / 允许的用户 ID
 
@@ -1821,8 +1823,8 @@ app_secret = "your-feishu-app-secret"
 # [projects.agent.options]
 # work_dir = "/path/to/project"
 # mode = "suggest"  # "suggest" | "auto-edit" | "full-auto" | "yolo"
-# Optional: app_server supports interactive approvals and named permissions.
-# 可选：app_server 支持交互审批及命名权限配置。
+# Optional: app_server supports interactive approvals, named permissions, and incremental final-answer text.
+# 可选：app_server 支持交互审批、命名权限配置及最终答复正文增量输出。
 # backend = "app_server"
 # permission_profile = "chat-workspace" # Defined in Codex config; replaces the legacy sandbox, not the approval policy.
 #                                      # 在 Codex 配置中定义；替代旧式沙箱选项，不改变审批策略。

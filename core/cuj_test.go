@@ -2870,3 +2870,70 @@ type reasoningJourneyPlatform struct {
 func (p *reasoningJourneyPlatform) SetCardNavigationHandler(h CardNavigationHandler) {
 	p.navigation = h
 }
+
+// CUJ-I: first observe a response growing before completion, then encounter an
+// agent error, then retry. Every reply must terminate independently, including
+// the partial reply from the failed turn, without a duplicate final message.
+func TestCUJ_I_StreamingTurnFinishesOnErrorAndRetry(t *testing.T) {
+	p := &lifecycleStreamPlatform{stubPlatformEngine: stubPlatformEngine{n: "test"}}
+	a := &cujAgent{}
+	a.setNextSessionEvents([]Event{{Type: EventText, Content: "first"}}, 0)
+	e := NewEngine("stream-lifecycle", a, []Platform{p}, t.TempDir()+"/sessions.json", LangEnglish)
+	t.Cleanup(func() {
+		if err := e.Stop(); err != nil {
+			t.Error(err)
+		}
+	})
+	env := &cujEnv{t: t, engine: e, plat: &p.stubPlatformEngine, agent: a}
+	send := func(prompt string) {
+		e.ReceiveMessage(p, &Message{SessionKey: "test:user", Platform: "test", UserID: "user", Content: prompt, ReplyCtx: prompt})
+	}
+	finished := func(id int, text string) bool {
+		for _, f := range p.snapshot() {
+			if f.id == id && f.finished && f.text == text {
+				return true
+			}
+		}
+		return false
+	}
+	// Action 1: see partial text before allowing the first response to finish.
+	send("first task")
+	env.waitFor("first snapshot before completion", 2*time.Second, func() bool { return len(p.snapshot()) == 1 })
+	if f := p.snapshot()[0]; f.finished || f.text != "first" {
+		t.Fatalf("premature final frame: %+v", f)
+	}
+	a.mu.Lock()
+	s := a.sessions[0]
+	a.mu.Unlock()
+	s.events <- Event{Type: EventText, Content: " answer"}
+	s.events <- Event{Type: EventResult, Content: "first answer", Done: true}
+	env.waitFor("first final frame", 2*time.Second, func() bool { return finished(1, "first answer") })
+	// Action 2: a later request fails after producing a partial response.
+	s.mu.Lock()
+	s.pendingEvents = []Event{{Type: EventText, Content: "partial failure"}, {Type: EventError, Error: errors.New("stream failure")}}
+	s.mu.Unlock()
+	send("second task")
+	env.waitFor("failed reply closes", 2*time.Second, func() bool { return finished(2, "partial failure") })
+	// Action 3: retry on the live session; its new stream has a separate identity.
+	s.mu.Lock()
+	s.pendingEvents = []Event{{Type: EventText, Content: "recovered"}, {Type: EventResult, Content: "recovered", Done: true}}
+	s.mu.Unlock()
+	send("retry task")
+	env.waitFor("retry final frame", 2*time.Second, func() bool { return finished(3, "recovered") })
+	counts := map[int]int{}
+	for _, f := range p.snapshot() {
+		if f.finished {
+			counts[f.id]++
+		}
+	}
+	for id := 1; id <= 3; id++ {
+		if counts[id] != 1 {
+			t.Fatalf("stream %d finished %d times", id, counts[id])
+		}
+	}
+	for _, text := range p.getSent() {
+		if text == "first answer" || text == "recovered" {
+			t.Fatalf("duplicate ordinary answer: %q", text)
+		}
+	}
+}

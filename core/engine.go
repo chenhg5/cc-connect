@@ -5931,6 +5931,18 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 
 	// Streaming card: aggregate entire turn into a single updatable card.
 	var streamCard StreamingCard
+	// The optional closer owns protocol cleanup on every exit path. Successful
+	// Finalize makes Close a no-op; other platforms retain their existing behavior.
+	closeStreamCard := func() {
+		if closer, ok := streamCard.(StreamingCardCloser); ok {
+			ctx, cancel := context.WithTimeout(context.WithoutCancel(e.ctx), 5*time.Second)
+			defer cancel()
+			if err := closer.Close(ctx); err != nil {
+				slog.Warn("streaming card cleanup failed", "error", err)
+			}
+		}
+	}
+	defer closeStreamCard()
 	var cardToolCalls []cardToolEntry  // track tool calls for card content
 	var cardThinkingText string        // latest thinking text
 	var cardAnswerText strings.Builder // accumulated answer text
@@ -7286,6 +7298,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				cp = newCompactProgressWriter(e.ctx, queued.platform, queued.replyCtx, e.agent.Name(), e.i18n.CurrentLang(), queuedRenderer)
 
 				// Reset streaming card state for the next turn
+				closeStreamCard()
 				streamCard = nil
 				cardToolCalls = nil
 				cardThinkingText = ""

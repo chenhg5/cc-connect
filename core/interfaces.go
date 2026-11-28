@@ -740,6 +740,12 @@ type StreamingCardPlatform interface {
 	CreateStreamingCard(ctx context.Context, replyCtx any) (StreamingCard, error)
 }
 
+// StreamingCardCloser optionally ends an unfinished protocol stream when the
+// turn exits without Finalize (cancellation, agent error, or process exit).
+type StreamingCardCloser interface {
+	Close(ctx context.Context) error
+}
+
 // CardStatus represents the visual status of a card header.
 type CardStatus string
 
