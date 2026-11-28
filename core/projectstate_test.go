@@ -95,3 +95,23 @@ func TestWorkspaceModelOverride(t *testing.T) {
 		t.Fatalf("WorkspaceModelOverride(%q) after clearing other workspace = %q, want %q", workspaceB, got, "sonnet")
 	}
 }
+
+func TestWorkspaceReasoningOverride(t *testing.T) {
+	statePath := filepath.Join(t.TempDir(), "projects", "demo.state.json")
+	workspace := "/tmp/workspace-a"
+
+	store := NewProjectStateStore(statePath)
+	store.SetWorkspaceReasoningOverride(workspace, "high")
+	store.Save()
+
+	reloaded := NewProjectStateStore(statePath)
+	if got := reloaded.WorkspaceReasoningOverride(workspace); got != "high" {
+		t.Fatalf("WorkspaceReasoningOverride(%q) = %q, want high", workspace, got)
+	}
+
+	reloaded.ClearWorkspaceReasoningOverride(workspace)
+	reloaded.Save()
+	if got := NewProjectStateStore(statePath).WorkspaceReasoningOverride(workspace); got != "" {
+		t.Fatalf("WorkspaceReasoningOverride(%q) after clear = %q, want empty", workspace, got)
+	}
+}

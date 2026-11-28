@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"sort"
 	"strings"
 	"testing"
@@ -14,6 +15,31 @@ import (
 
 	"github.com/chenhg5/cc-connect/core"
 )
+
+func TestOpenCodeReasoningEffortSwitcher(t *testing.T) {
+	agent, err := New(map[string]any{"cmd": writeFakeModelsBin(t, nil, 0), "reasoning_effort": "HIGH"})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	switcher, ok := agent.(core.ReasoningEffortSwitcher)
+	if !ok {
+		t.Fatalf("New() agent does not implement core.ReasoningEffortSwitcher")
+	}
+	if got := switcher.GetReasoningEffort(); got != "high" {
+		t.Fatalf("initial reasoning effort = %q, want high", got)
+	}
+	// No model is configured, so OpenCode picks its own default and there is
+	// no model to attach a variant to.
+	if got := switcher.AvailableReasoningEfforts(); got != nil {
+		t.Fatalf("available reasoning efforts = %v, want nil without a configured model", got)
+	}
+
+	agent.(*Agent).SetModel("aiapi/deepseek-v4.1-flash")
+	want := []string{"none", "minimal", "low", "medium", "high", "xhigh"}
+	if got := switcher.AvailableReasoningEfforts(); !reflect.DeepEqual(got, want) {
+		t.Fatalf("available reasoning efforts = %v, want %v", got, want)
+	}
+}
 
 type errWriter struct{}
 

@@ -48,7 +48,7 @@ func TestOpencodeSessionUnexpectedExitReportsError(t *testing.T) {
 
 	for _, mode := range []string{"clean", "nonzero"} {
 		t.Run(mode, func(t *testing.T) {
-			s, err := newOpencodeSession(context.Background(), os.Args[0], []string{"-test.run=^TestOpencodeSessionUnexpectedExitReportsError$", "--"}, t.TempDir(), "", "", "", "", []string{"GO_WANT_OPENCODE_EXIT_HELPER=" + mode})
+			s, err := newOpencodeSession(context.Background(), os.Args[0], []string{"-test.run=^TestOpencodeSessionUnexpectedExitReportsError$", "--"}, t.TempDir(), "", "", "", "", "", []string{"GO_WANT_OPENCODE_EXIT_HELPER=" + mode})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -72,7 +72,7 @@ func TestOpencodeSessionUnexpectedExitReportsError(t *testing.T) {
 }
 
 func TestOpencodeSessionStopWithoutTextReportsError(t *testing.T) {
-	s, err := newOpencodeSession(context.Background(), os.Args[0], []string{"-test.run=^TestOpencodeSessionUnexpectedExitReportsError$", "--"}, t.TempDir(), "", "", "", "", []string{"GO_WANT_OPENCODE_EXIT_HELPER=empty-stop"})
+	s, err := newOpencodeSession(context.Background(), os.Args[0], []string{"-test.run=^TestOpencodeSessionUnexpectedExitReportsError$", "--"}, t.TempDir(), "", "", "", "", "", []string{"GO_WANT_OPENCODE_EXIT_HELPER=empty-stop"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -93,7 +93,7 @@ func TestOpencodeSessionStopWithoutTextReportsError(t *testing.T) {
 func TestOpencodeSessionNormalExitAfterTextReportsResult(t *testing.T) {
 	for _, reason := range []string{"end_turn", "length", "missing", "tool-calls", "unknown", "stderr"} {
 		t.Run(reason, func(t *testing.T) {
-			s, err := newOpencodeSession(context.Background(), os.Args[0], []string{"-test.run=^TestOpencodeSessionUnexpectedExitReportsError$", "--"}, t.TempDir(), "", "", "", "", []string{"GO_WANT_OPENCODE_EXIT_HELPER=text-" + reason})
+			s, err := newOpencodeSession(context.Background(), os.Args[0], []string{"-test.run=^TestOpencodeSessionUnexpectedExitReportsError$", "--"}, t.TempDir(), "", "", "", "", "", []string{"GO_WANT_OPENCODE_EXIT_HELPER=text-" + reason})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -127,7 +127,7 @@ func TestOpencodeSessionNormalExitAfterTextReportsResult(t *testing.T) {
 }
 
 func TestOpencodeSessionNonzeroExitAfterTextReportsError(t *testing.T) {
-	s, err := newOpencodeSession(context.Background(), os.Args[0], []string{"-test.run=^TestOpencodeSessionUnexpectedExitReportsError$", "--"}, t.TempDir(), "", "", "", "", []string{"GO_WANT_OPENCODE_EXIT_HELPER=text-nonzero"})
+	s, err := newOpencodeSession(context.Background(), os.Args[0], []string{"-test.run=^TestOpencodeSessionUnexpectedExitReportsError$", "--"}, t.TempDir(), "", "", "", "", "", []string{"GO_WANT_OPENCODE_EXIT_HELPER=text-nonzero"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -147,7 +147,7 @@ func TestOpencodeSessionNonzeroExitAfterTextReportsError(t *testing.T) {
 }
 
 func TestOpencodeSessionExplicitErrorDoesNotDuplicate(t *testing.T) {
-	s, err := newOpencodeSession(context.Background(), os.Args[0], []string{"-test.run=^TestOpencodeSessionUnexpectedExitReportsError$", "--"}, t.TempDir(), "", "", "", "", []string{"GO_WANT_OPENCODE_EXIT_HELPER=explicit"})
+	s, err := newOpencodeSession(context.Background(), os.Args[0], []string{"-test.run=^TestOpencodeSessionUnexpectedExitReportsError$", "--"}, t.TempDir(), "", "", "", "", "", []string{"GO_WANT_OPENCODE_EXIT_HELPER=explicit"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -175,7 +175,7 @@ func TestOpencodeSessionCloseDoesNotReportExitError(t *testing.T) {
 	}
 
 	ready := filepath.Join(t.TempDir(), "ready")
-	s, err := newOpencodeSession(context.Background(), os.Args[0], []string{"-test.run=^TestOpencodeSessionCloseDoesNotReportExitError$", "--"}, t.TempDir(), "", "", "", "", []string{"GO_WANT_OPENCODE_CLOSE_HELPER=1", "OPENCODE_CLOSE_READY=" + ready})
+	s, err := newOpencodeSession(context.Background(), os.Args[0], []string{"-test.run=^TestOpencodeSessionCloseDoesNotReportExitError$", "--"}, t.TempDir(), "", "", "", "", "", []string{"GO_WANT_OPENCODE_CLOSE_HELPER=1", "OPENCODE_CLOSE_READY=" + ready})
 	if err != nil {
 		t.Fatal(err)
 	}
