@@ -8,7 +8,10 @@
     "cron": "Расписание",
     "bridge": "Мост",
     "skills": "Навыки",
-    "system": "Система"
+    "system": "Система",
+    "openMenu": "Открыть меню",
+    "closeMenu": "Закрыть меню",
+    "navigation": "Навигация"
   },
   "dashboard": {
     "title": "Панель",

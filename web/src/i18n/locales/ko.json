@@ -8,7 +8,10 @@
     "cron": "예약 작업",
     "bridge": "브리지",
     "skills": "스킬",
-    "system": "시스템"
+    "system": "시스템",
+    "openMenu": "메뉴 열기",
+    "closeMenu": "메뉴 닫기",
+    "navigation": "내비게이션"
   },
   "dashboard": {
     "title": "대시보드",

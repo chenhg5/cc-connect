@@ -8,7 +8,10 @@
     "cron": "Cron",
     "bridge": "Bridge",
     "skills": "Skills",
-    "system": "System"
+    "system": "System",
+    "openMenu": "Open menu",
+    "closeMenu": "Close menu",
+    "navigation": "Navigation"
   },
   "dashboard": {
     "title": "Dashboard",
