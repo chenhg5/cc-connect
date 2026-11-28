@@ -109,6 +109,7 @@ app_id = "cli_axxxxxxxxxxxx"
 app_secret = "QhkMpxxxxxxxxxxxxxxxxxxxx"
 # domain = "https://open.feishu.cn" # 可选：覆盖运行时 API/WebSocket 域名
 # enable_feishu_card = true  # 可选：关闭后统一回退纯文本回复
+# enable_image_gallery = false # 可选：多图回传时每 5 张合成一条图集卡片，需要开启卡片
 # thread_isolation = true    # 可选：按飞书 thread/root 隔离群聊会话
 # group_reply_all_chats = ["oc_group_a", "oc_group_b"] # 可选：仅指定群无需 @机器人
 # group_chat_history_share = false  # 可选：共享未 @ 机器人的群消息作为下一次触发的上下文；消息本身不会触发回复
@@ -137,6 +138,26 @@ app_secret = "QhkMpxxxxxxxxxxxxxxxxxxxx"
 > `done_emoji` 设置后，agent 每次完成回复时会在用户消息上添加指定表情（如 `"Done"` → ✅）。先清理临时处理表情（与接收确认相同的表情会保留），再添加 done 表情。在 quiet 模式下特别有用，因为飞书卡片原地更新不触发推送，done 表情可以通知用户 agent 已完成。设为 `"none"` 或不配置则禁用。
 > `image_batch_window_ms` 控制连续多张图片合并成一条 agent 消息的等待窗口（默认 500ms）。飞书手机端一次连发多张图时，每张图是独立事件；cc-connect 会在窗口内将它们合并成一条多图消息再分发给 agent。如果你的网络/设备发送间隔超过 500ms 且仍被拆成多轮回复（每张图独立处理），可调高到 800–1200ms；如果以单图为主、希望响应更快，可适当调低。设为 `0` 时回退到默认 500ms。
 > `attachment_wait` 只在 `thread_isolation = true` 的群聊话题里生效。默认 `"off"`：已经 @ 过机器人的话题里，未 @ 的图片、文件、视频会立即单独触发一轮（与之前一致）。飞书话题里文件不能和文字放在同一条消息，常见用法是先传文件、过一两分钟再 @机器人 说要做什么；设为 `"mention"` 后，这类附件会按「话题 + 发送人」暂存，等**同一发送人**在该话题**下一次 @机器人** 的文字或富文本消息一起分发。其他人的 @、同一人未 @ 的文字都不会放行；`@机器人 /new` 会清空暂存，其他命令不消费暂存。超过 `attachment_wait_secs`（默认 1800 秒，范围 1–86400）没有等到就直接丢弃，不会单独发出；同一时长也作为话题的活跃期限，超过这么久没有 @机器人 的话题，未 @ 的附件按普通未 @ 消息忽略。语音消息不暂存，保持立即分发。暂存只在内存中，进程重启后丢失。
+
+---
+
+### 可选：多图回传图集 / Outgoing image galleries
+
+在飞书或 Lark 的 `[projects.platforms.options]` 中设置 `enable_image_gallery = true`，并保持 `enable_feishu_card = true`，即可将同一次 `cc-connect send` / `/send` 请求中的多张图片按顺序分组发送，每条图集卡片最多 5 张，10 张图片会发送为两条卡片。CLI 可重复使用 `--image`：
+
+```bash
+cc-connect send --session "$CC_SESSION_KEY" --image /path/to/first.png --image /path/to/second.png
+```
+
+默认不开启；未设置、设为 `false` 或关闭卡片时，仍逐张发送。单张图片请求始终使用原生图片消息。原始图片字节逐一上传，不拼接、不缩放；卡片使用飞书原生 `img_combination` 的双列方形缩略图，缩略图显示由客户端处理。每批沿用本次请求的目标会话；开启 `thread_isolation` 的话题在 `reply_to_trigger = false` 时也会保留在原话题内。`image_batch_window_ms` 控制收到图片后的合批，与此回传开关独立。
+
+每批全部上传成功后才发送卡片。同批在网络或令牌刷新重试中复用同一 UUID；不同批次以及重新执行的发送请求使用新 UUID。任一批失败即停止后续图片和文件，并报告已确认的图片数（例如 11 张中的第二批失败，报告已确认 5/11）。响应丢失时，失败批次也可能已经送达；重试前先检查聊天记录，避免重复已送达的图片。跨请求或进程重启不提供自动续传或持久去重。
+
+**English:** Set `enable_image_gallery = true` with `enable_feishu_card = true` to group multiple outgoing images from one send request into cards of at most five, preserving input order and the target conversation. Ten images produce two cards. The default, cards-disabled mode, and single-image requests retain native individual image messages. Original bytes are uploaded unchanged; Feishu renders square thumbnails in the native two-column gallery. Thread-isolated targets remain in their topic even when quoted replies are disabled. This setting is independent of incoming-image batching.
+
+Each group is uploaded completely before publication. Internal network/token-refresh retries reuse its UUID; other groups and new send requests receive new IDs. A failed group stops subsequent images and files. The error counts only confirmed images; inspect the failed group in the chat before retrying because a lost response can leave delivery uncertain. There is no persistent resume/deduplication across calls or restarts.
+
+协议参考：[多图混排组件](https://open.feishu.cn/document/feishu-cards/card-json-v2-components/content-components/multi-image-laylout)、[发送消息](https://open.feishu.cn/document/server-docs/im-v1/message/create)、[回复消息](https://open.feishu.cn/document/server-docs/im-v1/message/reply)。飞书对同一 UUID 的去重窗口为一小时。
 
 ---
 
