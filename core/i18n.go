@@ -366,6 +366,18 @@ const (
 	MsgUsageNotSupported  MsgKey = "usage_not_supported"
 	MsgUsageFetchFailed   MsgKey = "usage_fetch_failed"
 
+	MsgMemoryAutoNotSupported MsgKey = "memory_auto_not_supported"
+	MsgMemoryAutoEmpty        MsgKey = "memory_auto_empty"
+	MsgMemoryAutoHeader       MsgKey = "memory_auto_header"
+	MsgMemoryAutoShowFile     MsgKey = "memory_auto_show_file"
+	MsgMemoryAutoFileNotFound MsgKey = "memory_auto_file_not_found"
+	MsgMemoryAutoInvalidFile  MsgKey = "memory_auto_invalid_file"
+	MsgMemoryAutoReadFailed   MsgKey = "memory_auto_read_failed"
+	MsgMemoryAutoUsage        MsgKey = "memory_auto_usage"
+	MsgMemoryAutoHint         MsgKey = "memory_auto_hint"
+	MsgMemoryAutoMoreFiles    MsgKey = "memory_auto_more_files"
+	MsgMemoryAutoLineCount    MsgKey = "memory_auto_line_count"
+
 	// Inline strings previously hardcoded in engine.go
 	MsgStatusMode             MsgKey = "status_mode"
 	MsgStatusSession          MsgKey = "status_session"
@@ -1082,7 +1094,7 @@ var messages = map[MsgKey]map[Language]string{
 			"/current\n  Show current active session\n\n" +
 			"/history [n]\n  Show last n messages (default 10)\n\n" +
 			"/provider [list|add|remove|switch|clear]\n  Manage API providers\n\n" +
-			"/memory [add|global|global add]\n  View/edit agent memory files\n\n" +
+			"/memory [add|global|global add|auto]\n  View/edit agent memory files\n\n" +
 			"/allow <tool>\n  Pre-allow a tool (next session)\n\n" +
 			"/model [switch <name>]\n  View/switch model\n\n" +
 			"/reasoning [level]\n  View/switch reasoning effort\n\n" +
@@ -1126,7 +1138,7 @@ var messages = map[MsgKey]map[Language]string{
 			"/current\n  查看当前活跃会话\n\n" +
 			"/history [n]\n  查看最近 n 条消息（默认 10）\n\n" +
 			"/provider [list|add|remove|switch|clear]\n  管理 API Provider\n\n" +
-			"/memory [add|global|global add]\n  查看/编辑 Agent 记忆文件\n\n" +
+			"/memory [add|global|global add|auto]\n  查看/编辑 Agent 记忆文件\n\n" +
 			"/allow <工具名>\n  预授权工具（下次会话生效）\n\n" +
 			"/model [switch <名称>]\n  查看/切换模型\n\n" +
 			"/reasoning [级别]\n  查看/切换推理强度\n\n" +
@@ -1170,7 +1182,7 @@ var messages = map[MsgKey]map[Language]string{
 			"/current\n  查看當前活躍會話\n\n" +
 			"/history [n]\n  查看最近 n 條訊息（預設 10）\n\n" +
 			"/provider [list|add|remove|switch|clear]\n  管理 API Provider\n\n" +
-			"/memory [add|global|global add]\n  查看/編輯 Agent 記憶檔案\n\n" +
+			"/memory [add|global|global add|auto]\n  查看/編輯 Agent 記憶檔案\n\n" +
 			"/allow <工具名>\n  預授權工具（下次會話生效）\n\n" +
 			"/model [switch <名稱>]\n  查看/切換模型\n\n" +
 			"/reasoning [級別]\n  查看/切換推理強度\n\n" +
@@ -1212,7 +1224,7 @@ var messages = map[MsgKey]map[Language]string{
 			"/current\n  現在のアクティブセッションを表示\n\n" +
 			"/history [n]\n  直近 n 件のメッセージを表示（デフォルト 10）\n\n" +
 			"/provider [list|add|remove|switch|clear]\n  API プロバイダ管理\n\n" +
-			"/memory [add|global|global add]\n  エージェントメモリの表示/編集\n\n" +
+			"/memory [add|global|global add|auto]\n  エージェントメモリの表示/編集\n\n" +
 			"/allow <ツール名>\n  ツールを事前許可（次のセッションで有効）\n\n" +
 			"/model [switch <名前>]\n  モデルの表示/切り替え\n\n" +
 			"/reasoning [レベル]\n  推論レベルの表示/切り替え\n\n" +
@@ -1254,7 +1266,7 @@ var messages = map[MsgKey]map[Language]string{
 			"/current\n  Mostrar sesión activa actual\n\n" +
 			"/history [n]\n  Mostrar últimos n mensajes (por defecto 10)\n\n" +
 			"/provider [list|add|remove|switch|clear]\n  Gestionar proveedores API\n\n" +
-			"/memory [add|global|global add]\n  Ver/editar archivos de memoria del agente\n\n" +
+			"/memory [add|global|global add|auto]\n  Ver/editar archivos de memoria del agente\n\n" +
 			"/allow <herramienta>\n  Pre-autorizar herramienta (próxima sesión)\n\n" +
 			"/model [switch <nombre>]\n  Ver/cambiar modelo\n\n" +
 			"/reasoning [nivel]\n  Ver/cambiar nivel de razonamiento\n\n" +
@@ -2451,6 +2463,76 @@ var messages = map[MsgKey]map[Language]string{
 		LangJapanese:           "usage の取得に失敗しました: %v",
 		LangSpanish:            "No se pudo obtener usage: %v",
 	},
+	MsgMemoryAutoNotSupported: {
+		LangEnglish:            "This agent does not support Auto Memory in this workspace.",
+		LangChinese:            "当前 Agent 在此工作区不支持自动记忆。",
+		LangTraditionalChinese: "目前的 Agent 在此工作區不支援自動記憶。",
+		LangJapanese:           "このワークスペースでは、このエージェントの自動メモリは利用できません。",
+		LangSpanish:            "Este agente no admite memoria automática en este espacio de trabajo.",
+	},
+	MsgMemoryAutoEmpty: {
+		LangEnglish:            "No Auto Memory files yet.",
+		LangChinese:            "暂无自动记忆文件。",
+		LangTraditionalChinese: "目前沒有自動記憶檔案。",
+		LangJapanese:           "自動メモリのファイルはまだありません。",
+		LangSpanish:            "Aún no hay archivos de memoria automática.",
+	},
+	MsgMemoryAutoHeader: {
+		LangEnglish:            "🧠 **Auto Memory**",
+		LangChinese:            "🧠 **自动记忆**",
+		LangTraditionalChinese: "🧠 **自動記憶**",
+		LangJapanese:           "🧠 **自動メモリ**",
+		LangSpanish:            "🧠 **Memoria automática**",
+	},
+	MsgMemoryAutoShowFile: {
+		LangEnglish:            "🧠 **Auto Memory** (`%s`)\n\n%s",
+		LangChinese:            "🧠 **自动记忆** (`%s`)\n\n%s",
+		LangTraditionalChinese: "🧠 **自動記憶** (`%s`)\n\n%s",
+		LangJapanese:           "🧠 **自動メモリ** (`%s`)\n\n%s",
+		LangSpanish:            "🧠 **Memoria automática** (`%s`)\n\n%s",
+	},
+	MsgMemoryAutoFileNotFound: {
+		LangEnglish:            "Auto Memory file `%s` was not found.",
+		LangChinese:            "找不到自动记忆文件 `%s`。",
+		LangTraditionalChinese: "找不到自動記憶檔案 `%s`。",
+		LangJapanese:           "自動メモリのファイル `%s` が見つかりません。",
+		LangSpanish:            "No se encontró el archivo de memoria automática `%s`.",
+	},
+	MsgMemoryAutoInvalidFile: {
+		LangEnglish:            "Invalid Auto Memory filename. Choose a Markdown file from `/memory auto`.",
+		LangChinese:            "自动记忆文件名无效。请从 `/memory auto` 中选择 Markdown 文件。",
+		LangTraditionalChinese: "自動記憶檔名無效。請從 `/memory auto` 選擇 Markdown 檔案。",
+		LangJapanese:           "自動メモリのファイル名が無効です。`/memory auto` の一覧から Markdown ファイルを選んでください。",
+		LangSpanish:            "Nombre de archivo no válido. Elige un archivo Markdown de `/memory auto`.",
+	},
+	MsgMemoryAutoReadFailed: {
+		LangEnglish:            "Failed to read Auto Memory: %v",
+		LangChinese:            "读取自动记忆失败：%v",
+		LangTraditionalChinese: "讀取自動記憶失敗：%v",
+		LangJapanese:           "自動メモリの読み取りに失敗しました: %v",
+		LangSpanish:            "No se pudo leer la memoria automática: %v",
+	},
+	MsgMemoryAutoHint: {
+		LangEnglish:            "Use `/memory auto <file>` to read a file.",
+		LangChinese:            "使用 `/memory auto <文件名>` 查看文件。",
+		LangTraditionalChinese: "使用 `/memory auto <檔名>` 查看檔案。",
+		LangJapanese:           "`/memory auto <ファイル名>` でファイルを表示できます。",
+		LangSpanish:            "Usa `/memory auto <archivo>` para leer un archivo.",
+	},
+	MsgMemoryAutoMoreFiles: {
+		LangEnglish:            "… and %d more",
+		LangChinese:            "… 另有 %d 个文件",
+		LangTraditionalChinese: "… 另有 %d 個檔案",
+		LangJapanese:           "… ほか %d 件",
+		LangSpanish:            "… y %d más",
+	},
+	MsgMemoryAutoLineCount: {
+		LangEnglish:            "%s lines",
+		LangChinese:            "%s 行",
+		LangTraditionalChinese: "%s 行",
+		LangJapanese:           "%s 行",
+		LangSpanish:            "%s líneas",
+	},
 	MsgMemoryAddUsage: {
 		LangEnglish: "Usage:\n" +
 			"`/memory` — show project memory\n" +
@@ -2477,6 +2559,18 @@ var messages = map[MsgKey]map[Language]string{
 			"`/memory add <texto>` — agregar a memoria del proyecto\n" +
 			"`/memory global` — ver memoria global\n" +
 			"`/memory global add <texto>` — agregar a memoria global",
+	},
+	MsgMemoryAutoUsage: {
+		LangEnglish: "`/memory auto` — list Auto Memory files\n" +
+			"`/memory auto <file>` — read an Auto Memory file",
+		LangChinese: "`/memory auto` — 查看自动记忆文件列表\n" +
+			"`/memory auto <文件名>` — 查看指定的自动记忆文件",
+		LangTraditionalChinese: "`/memory auto` — 查看自動記憶檔案清單\n" +
+			"`/memory auto <檔名>` — 查看指定的自動記憶檔案",
+		LangJapanese: "`/memory auto` — 自動メモリのファイル一覧を表示\n" +
+			"`/memory auto <ファイル名>` — 自動メモリのファイルを表示",
+		LangSpanish: "`/memory auto` — listar archivos de memoria automática\n" +
+			"`/memory auto <archivo>` — leer un archivo de memoria automática",
 	},
 	MsgCompressNotSupported: {
 		LangEnglish:            "This agent does not support context compression.",

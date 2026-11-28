@@ -15542,84 +15542,134 @@ func (e *Engine) renderUpgradeCard() *Card {
 // ──────────────────────────────────────────────────────────────
 
 func (e *Engine) cmdMemory(p Platform, msg *Message, args []string) {
-	agent, _, _, err := e.commandContext(p, msg)
+	var agent Agent
+	var err error
+	if forcedWorkDir := e.sendWorkDirForSession(msg.SessionKey); forcedWorkDir != "" {
+		agent, _, err = e.getOrCreateWorkspaceAgent(forcedWorkDir)
+	} else {
+		agent, _, _, err = e.commandContext(p, msg)
+	}
 	if err != nil {
 		e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgWsResolutionError, err))
 		return
 	}
 
-	mp, ok := agent.(MemoryFileProvider)
-	if !ok {
-		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgMemoryNotSupported))
+	mp, hasMem := agent.(MemoryFileProvider)
+	amp, hasAuto := agent.(AutoMemoryProvider)
+
+	sub := "show"
+	if len(args) > 0 {
+		if strings.EqualFold(args[0], "a") {
+			sub = "add"
+		} else {
+			sub = matchSubCommand(strings.ToLower(args[0]), []string{"add", "global", "show", "auto", "help"})
+		}
+	}
+	if !hasMem && !hasAuto {
+		if sub == "auto" {
+			e.reply(p, msg.ReplyCtx, e.i18n.T(MsgMemoryAutoNotSupported))
+		} else {
+			e.reply(p, msg.ReplyCtx, e.i18n.T(MsgMemoryNotSupported))
+		}
 		return
 	}
 
-	if len(args) == 0 {
-		// /memory — show project memory
-		e.showMemoryFile(p, msg, mp.ProjectMemoryFile(), false)
-		return
+	var autoDir string
+	if hasAuto && (sub == "auto" || sub == "show") {
+		autoDir = strings.TrimSpace(amp.AutoMemoryDir())
 	}
-
-	sub := matchSubCommand(strings.ToLower(args[0]), []string{"add", "global", "show", "help"})
 	switch sub {
 	case "add":
+		if !hasMem {
+			e.reply(p, msg.ReplyCtx, e.i18n.T(MsgMemoryNotSupported))
+			return
+		}
 		text := strings.TrimSpace(strings.Join(args[1:], " "))
 		if text == "" {
-			e.reply(p, msg.ReplyCtx, e.i18n.T(MsgMemoryAddUsage))
+			e.reply(p, msg.ReplyCtx, e.memoryUsage(hasMem, hasAuto))
 			return
 		}
 		e.appendMemoryFile(p, msg, mp.ProjectMemoryFile(), text)
 
 	case "global":
+		if !hasMem {
+			e.reply(p, msg.ReplyCtx, e.i18n.T(MsgMemoryNotSupported))
+			return
+		}
 		if len(args) == 1 {
 			// /memory global — show global memory
 			e.showMemoryFile(p, msg, mp.GlobalMemoryFile(), true)
 			return
 		}
-		if strings.ToLower(args[1]) == "add" {
+		if strings.EqualFold(args[1], "add") {
 			text := strings.TrimSpace(strings.Join(args[2:], " "))
 			if text == "" {
-				e.reply(p, msg.ReplyCtx, e.i18n.T(MsgMemoryAddUsage))
+				e.reply(p, msg.ReplyCtx, e.memoryUsage(hasMem, hasAuto))
 				return
 			}
 			e.appendMemoryFile(p, msg, mp.GlobalMemoryFile(), text)
 		} else {
-			e.reply(p, msg.ReplyCtx, e.i18n.T(MsgMemoryAddUsage))
+			e.reply(p, msg.ReplyCtx, e.memoryUsage(hasMem, hasAuto))
 		}
 
 	case "show":
-		e.showMemoryFile(p, msg, mp.ProjectMemoryFile(), false)
+		if hasMem && mp.ProjectMemoryFile() != "" {
+			out := e.formatMemoryFile(mp.ProjectMemoryFile(), false)
+			if autoDir != "" {
+				listing, err := listAutoMemoryFiles(autoDir, false)
+				if err != nil {
+					slog.Warn("memory: failed to list auto memory", "error", err)
+				} else if len(listing.Entries) > 0 {
+					out += "\n\n---\n\n" + e.formatAutoMemoryList(listing) + "\n\n" + e.i18n.T(MsgMemoryAutoHint)
+				}
+			}
+			e.reply(p, msg.ReplyCtx, out)
+			return
+		}
+		if autoDir != "" {
+			e.showAutoMemoryOverview(p, msg, autoDir)
+		} else {
+			e.reply(p, msg.ReplyCtx, e.i18n.T(MsgMemoryNotSupported))
+		}
 
-	case "help", "--help", "-h":
-		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgMemoryAddUsage))
+	case "auto":
+		if autoDir == "" {
+			e.reply(p, msg.ReplyCtx, e.i18n.T(MsgMemoryAutoNotSupported))
+			return
+		}
+		if len(args) > 1 {
+			e.showAutoMemoryFile(p, msg, autoDir, strings.Join(args[1:], " "))
+			return
+		}
+		e.showAutoMemoryOverview(p, msg, autoDir)
 
 	default:
-		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgMemoryAddUsage))
+		e.reply(p, msg.ReplyCtx, e.memoryUsage(hasMem, hasAuto))
 	}
 }
 
 func (e *Engine) showMemoryFile(p Platform, msg *Message, filePath string, isGlobal bool) {
+	e.reply(p, msg.ReplyCtx, e.formatMemoryFile(filePath, isGlobal))
+}
+
+func (e *Engine) formatMemoryFile(filePath string, isGlobal bool) string {
 	if filePath == "" {
-		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgMemoryNotSupported))
-		return
+		return e.i18n.T(MsgMemoryNotSupported)
 	}
 
-	data, err := os.ReadFile(filePath)
-	if err != nil || len(strings.TrimSpace(string(data))) == 0 {
-		e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgMemoryEmpty), filePath))
-		return
+	data, _, err := readBoundedFile(filePath, autoMemoryMaxReadBytes)
+	if err != nil && !os.IsNotExist(err) {
+		return e.i18n.Tf(MsgError, safeAutoMemoryError(err))
+	}
+	if os.IsNotExist(err) || strings.TrimSpace(data) == "" {
+		return e.i18n.Tf(MsgMemoryEmpty, filePath)
 	}
 
-	content := string(data)
-	if len([]rune(content)) > 2000 {
-		content = string([]rune(content)[:2000]) + "\n\n... (truncated)"
-	}
-
+	key := MsgMemoryShowProject
 	if isGlobal {
-		e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgMemoryShowGlobal), filePath, content))
-	} else {
-		e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgMemoryShowProject), filePath, content))
+		key = MsgMemoryShowGlobal
 	}
+	return e.i18n.Tf(key, filePath, truncateMemoryRunes(data, memoryContentMaxRunes))
 }
 
 func (e *Engine) appendMemoryFile(p Platform, msg *Message, filePath, text string) {
