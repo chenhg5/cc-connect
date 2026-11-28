@@ -18,6 +18,7 @@ const AGENT_OPTIONS = [
   { key: 'copilot', label: 'Copilot (GitHub)' },
   { key: 'acp', label: 'ACP (Generic)' },
   { key: 'acp:openclaw', label: 'OpenClaw (ACP)' },
+  { key: 'piweb', label: 'pi-web (ACP)' },
   { key: 'opencode', label: 'OpenCode' },
   { key: 'qoder', label: 'Qoder' },
 ];

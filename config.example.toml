@@ -2323,6 +2323,26 @@ app_secret = "your-feishu-app-secret"
 # display_name = "Copilot ACP"
 # # cmd = "/absolute/path/to/copilot"   # if not on PATH (see COPILOT_CLI_PATH in GitHub docs)
 
+# --- Example: pi-web 会话（ACP over Unix socket 直连，无需任何子进程） ---
+# Requires: npm install -g @aiti-ai/pi-web  (https://www.npmjs.com/package/@aiti-ai/pi-web)
+# 需要安装并运行：npm install -g @aiti-ai/pi-web —— pi coding agent 的 Web UI，
+# 本 agent 专属对接它（type=piweb 只适用于 pi-web，别的服务用 type=acp + connector）。
+# pi-web 侧由 aiti-channels 扩展在进程内常驻 ACP server 并监听 Unix socket；
+# cc-connect 直接 dial 该 socket 复用完整 ACP 会话逻辑（type=acp + 连接器是
+# 等价的兜底路径；type=piweb 无连接器进程，链路更短）。
+# socket 位于 ~/.pi/web/data/aiti-channels/config/acp/<instance>.sock（instance 默认 default）。
+#
+# [[projects]]
+# name = "piweb-demo"
+#
+# [projects.agent]
+# type = "piweb"
+#
+# [projects.agent.options]
+# work_dir = "/path/to/project"
+# socket = "~/.pi/web/data/aiti-channels/config/acp/default.sock"   # pi-web ACP socket
+# display_name = "pi-web 会话"
+
 # [[projects.platforms]]
 # type = "telegram"
 #

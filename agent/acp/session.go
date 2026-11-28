@@ -32,6 +32,10 @@ type acpSession struct {
 
 	cmd *exec.Cmd
 	tr  *transport
+	// conn is set for pre-connected sessions (NewSession over an existing
+	// net.Conn, e.g. agent/piweb dialing a Unix-socket ACP server). Close
+	// closes it to unblock the read loop; nil on the spawned-process path.
+	conn io.ReadWriteCloser
 
 	acpSessMu sync.RWMutex
 	acpSessID string
@@ -96,7 +100,66 @@ type acpSessionConfig struct {
 	callbacks           sessionCallbacks // may be nil
 }
 
-func newACPSession(ctx context.Context, cfg acpSessionConfig) (*acpSession, error) {
+// SessionConfig carries the knobs for NewSession, the pre-connected
+// transport entry point. Spawn-specific fields (command, args, env) are
+// intentionally absent — sibling packages using NewSession never spawn a
+// subprocess.
+type SessionConfig struct {
+	WorkDir         string
+	ResumeSessionID string
+	InitialMode     string
+}
+
+// NewSession builds an ACP session over an already-established transport
+// connection instead of spawning a subprocess. It exists so sibling agent
+// packages (agent/piweb: ACP over a Unix socket to pi-web) can reuse the
+// full session machinery here — handshake, session/update translation,
+// permission handling — without a connector process.
+//
+// conn must be the two-way JSON-RPC channel to the ACP server; closing it
+// ends the session (Close also closes it).
+func NewSession(ctx context.Context, conn io.ReadWriteCloser, cfg SessionConfig) (core.AgentSession, error) {
+	s, err := newSessionBase(ctx, acpSessionConfig{
+		workDir:         cfg.WorkDir,
+		resumeSessionID: cfg.ResumeSessionID,
+		initialMode:     cfg.InitialMode,
+	})
+	if err != nil {
+		return nil, err
+	}
+	s.conn = conn
+	s.tr = newTransport(conn, conn, s.onNotification, s.onServerRequest)
+
+	// Mirror the spawned path's CommandContext auto-kill: if the parent ctx
+	// is canceled without anyone calling Close, the read loop would stay
+	// blocked in readLine forever — close the conn to break it.
+	s.wg.Add(1)
+	go func() {
+		defer s.wg.Done()
+		<-s.ctx.Done()
+		_ = conn.Close()
+	}()
+
+	s.wg.Add(1)
+	go func() {
+		defer s.wg.Done()
+		s.tr.readLoop(s.ctx)
+		s.alive.Store(false)
+	}()
+
+	if err := s.applyHandshake(acpSessionConfig{
+		resumeSessionID: cfg.ResumeSessionID,
+		initialMode:     cfg.InitialMode,
+	}); err != nil {
+		_ = s.Close()
+		return nil, err
+	}
+	return s, nil
+}
+
+// newSessionBase allocates the session struct shared by both entry points
+// (spawned process and pre-connected transport).
+func newSessionBase(ctx context.Context, cfg acpSessionConfig) (*acpSession, error) {
 	absWorkDir, err := filepath.Abs(cfg.workDir)
 	if err != nil {
 		absWorkDir = cfg.workDir
@@ -114,19 +177,27 @@ func newACPSession(ctx context.Context, cfg acpSessionConfig) (*acpSession, erro
 		callbacks:     cfg.callbacks,
 	}
 	s.alive.Store(true)
+	return s, nil
+}
 
-	cmd := exec.CommandContext(sessionCtx, cfg.command, cfg.args...)
-	cmd.Dir = absWorkDir
+func newACPSession(ctx context.Context, cfg acpSessionConfig) (*acpSession, error) {
+	s, err := newSessionBase(ctx, cfg)
+	if err != nil {
+		return nil, err
+	}
+
+	cmd := exec.CommandContext(s.ctx, cfg.command, cfg.args...)
+	cmd.Dir = s.workDir
 	cmd.Env = core.MergeEnv(os.Environ(), cfg.extraEnv)
 
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
-		cancel()
+		s.cancel()
 		return nil, fmt.Errorf("acp: stdin pipe: %w", err)
 	}
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
-		cancel()
+		s.cancel()
 		return nil, fmt.Errorf("acp: stdout pipe: %w", err)
 	}
 	var stderrBuf bytes.Buffer
@@ -136,14 +207,14 @@ func newACPSession(ctx context.Context, cfg acpSessionConfig) (*acpSession, erro
 	s.tr = newTransport(stdout, stdin, s.onNotification, s.onServerRequest)
 
 	if err := cmd.Start(); err != nil {
-		cancel()
+		s.cancel()
 		return nil, fmt.Errorf("acp: start %s: %w", cfg.command, err)
 	}
 
 	s.wg.Add(1)
 	go func() {
 		defer s.wg.Done()
-		s.tr.readLoop(sessionCtx)
+		s.tr.readLoop(s.ctx)
 		waitErr := cmd.Wait()
 		if waitErr != nil {
 			msg := stderrBuf.String()
@@ -157,16 +228,26 @@ func newACPSession(ctx context.Context, cfg acpSessionConfig) (*acpSession, erro
 		s.alive.Store(false)
 	}()
 
-	if err := s.handshake(cfg.resumeSessionID, cfg.authMethod); err != nil {
+	if err := s.applyHandshake(cfg); err != nil {
 		_ = s.Close()
 		return nil, err
 	}
 
-	// Apply the agent-level mode preference now that we have a session
-	// id. If set_mode fails (e.g. modeId unknown to this backend) we
-	// log and carry on with whatever mode the server defaulted to —
-	// the alternative would be to reject the session entirely, which
-	// is worse UX for a non-critical control.
+	return s, nil
+}
+
+// applyHandshake runs initialize → [authenticate] → session/load|new and
+// then applies the agent-level mode preference. Both entry points converge
+// here after their transport-specific setup.
+func (s *acpSession) applyHandshake(cfg acpSessionConfig) error {
+	if err := s.handshake(cfg.resumeSessionID, cfg.authMethod); err != nil {
+		return err
+	}
+
+	// If set_mode fails (e.g. modeId unknown to this backend) we log and
+	// carry on with whatever mode the server defaulted to — the
+	// alternative would be to reject the session entirely, which is
+	// worse UX for a non-critical control.
 	if strings.TrimSpace(cfg.initialMode) != "" {
 		if ok := s.SetLiveMode(cfg.initialMode); !ok {
 			slog.Warn("acp: initial mode could not be applied",
@@ -202,7 +283,7 @@ func newACPSession(ctx context.Context, cfg acpSessionConfig) (*acpSession, erro
 		s.callbacks.reportActiveSession(s)
 	}
 
-	return s, nil
+	return nil
 }
 
 // handshake runs initialize → optional authenticate → session/load or
@@ -1100,6 +1181,11 @@ func (s *acpSession) Close() error {
 	s.cancel()
 	if s.cmd != nil && s.cmd.Process != nil {
 		_ = s.cmd.Process.Kill()
+	}
+	// Pre-connected transport: close the conn so a readLine blocked inside
+	// the read loop errors out immediately instead of waiting on ctx.
+	if s.conn != nil {
+		_ = s.conn.Close()
 	}
 	done := make(chan struct{})
 	go func() {

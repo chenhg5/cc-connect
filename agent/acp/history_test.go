@@ -99,4 +99,3 @@ func TestAgent_GetSessionHistory_ForwardsAgentStorageEnv(t *testing.T) {
 		t.Fatalf("entries = %+v, want [from custom env]", entries)
 	}
 }
-
