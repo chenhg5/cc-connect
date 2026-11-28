@@ -615,6 +615,28 @@ func (p *Platform) uploadAttachment(ctx context.Context, kind string, data []byt
 	// and would abort large CDN uploads before the context expires.
 	uploadCtx, cancel := context.WithTimeout(ctx, attachmentUploadTO)
 	defer cancel()
+	apiURL, err := url.Parse(p.apiBase)
+	if err != nil {
+		return "", fmt.Errorf("parse api_base: %w", err)
+	}
+	// Both the API request and the subsequent CDN upload can redirect. Go's
+	// default redirect handling forwards Authorization to the same host at a
+	// different port, so scope every hop to the configured API origin.
+	client := *p.uploadClient
+	previousCheckRedirect := client.CheckRedirect
+	client.CheckRedirect = func(req *http.Request, via []*http.Request) error {
+		if previousCheckRedirect != nil {
+			if err := previousCheckRedirect(req, via); err != nil {
+				return err
+			}
+		} else if len(via) >= 10 {
+			return fmt.Errorf("stopped after 10 redirects")
+		}
+		if !sameOrigin(req.URL, apiURL) {
+			req.Header.Del("Authorization")
+		}
+		return nil
+	}
 
 	urlReq, err := http.NewRequestWithContext(uploadCtx, http.MethodPost, p.apiBase+"/uploads", nil)
 	if err != nil {
@@ -625,7 +647,7 @@ func (p *Platform) uploadAttachment(ctx context.Context, kind string, data []byt
 	q.Set("type", kind)
 	urlReq.URL.RawQuery = q.Encode()
 
-	urlResp, err := p.uploadClient.Do(urlReq)
+	urlResp, err := client.Do(urlReq)
 	if err != nil {
 		return "", fmt.Errorf("request upload url: %w", err)
 	}
@@ -665,10 +687,17 @@ func (p *Platform) uploadAttachment(ctx context.Context, kind string, data []byt
 	if err != nil {
 		return "", err
 	}
-	p.setAuth(cdnReq)
+	// The upload URL comes from the MAX API and may point to a different CDN.
+	// Keep the bot token on the configured API origin only. The official Go SDK
+	// sends multipart CDN uploads without the bot Authorization header.
+	if sameOrigin(cdnReq.URL, apiURL) {
+		p.setAuth(cdnReq)
+	} else {
+		cdnReq.Header.Del("Authorization")
+	}
 	cdnReq.Header.Set("Content-Type", mw.FormDataContentType())
 
-	cdnResp, err := p.uploadClient.Do(cdnReq)
+	cdnResp, err := client.Do(cdnReq)
 	if err != nil {
 		return "", fmt.Errorf("cdn upload: %w", err)
 	}
@@ -692,6 +721,31 @@ func (p *Platform) uploadAttachment(ctx context.Context, kind string, data []byt
 		return urlInfo.Token, nil
 	}
 	return "", fmt.Errorf("cdn upload: no token in response: %s", cdnBody)
+}
+
+// sameOrigin compares scheme, host, and effective port. A sibling domain or
+// the same host on a different port is a different authorization boundary.
+func sameOrigin(a, b *url.URL) bool {
+	if a == nil || b == nil || a.Hostname() == "" || b.Hostname() == "" {
+		return false
+	}
+	if !strings.EqualFold(a.Scheme, b.Scheme) || !strings.EqualFold(a.Hostname(), b.Hostname()) {
+		return false
+	}
+	port := func(u *url.URL) string {
+		if p := u.Port(); p != "" {
+			return p
+		}
+		switch strings.ToLower(u.Scheme) {
+		case "http":
+			return "80"
+		case "https":
+			return "443"
+		default:
+			return ""
+		}
+	}
+	return port(a) == port(b)
 }
 
 // extractCDNToken parses the token out of a MAX CDN upload response. Returns
