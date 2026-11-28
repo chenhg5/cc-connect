@@ -1124,7 +1124,16 @@ func main() {
 		if path == "" {
 			path = "/hook"
 		}
-		webhookSrv = core.NewWebhookServer(port, cfg.Webhook.Token, path)
+		webhookInsecure := cfg.Webhook.Insecure != nil && *cfg.Webhook.Insecure
+		if webhookInsecure {
+			webhookSrv = core.NewWebhookServerInsecure(port, cfg.Webhook.Token, path)
+		} else {
+			webhookSrv = core.NewWebhookServer(port, cfg.Webhook.Token, path)
+		}
+		if webhookSrv == nil {
+			slog.Error("webhook: failed to create server - token is required (or set insecure=true for local dev)")
+			os.Exit(1)
+		}
 		for i, e := range engines {
 			webhookSrv.RegisterEngine(cfg.Projects[i].Name, e)
 		}
@@ -1138,7 +1147,16 @@ func main() {
 		if port <= 0 {
 			port = 9820
 		}
-		mgmtSrv = core.NewManagementServer(port, cfg.Management.Token, cfg.Management.CORSOrigins)
+		mgmtInsecure := cfg.Management.Insecure != nil && *cfg.Management.Insecure
+		if mgmtInsecure {
+			mgmtSrv = core.NewManagementServerInsecure(port, cfg.Management.Token, cfg.Management.CORSOrigins)
+		} else {
+			mgmtSrv = core.NewManagementServer(port, cfg.Management.Token, cfg.Management.CORSOrigins)
+		}
+		if mgmtSrv == nil {
+			slog.Error("management: failed to create server - token is required (or set insecure=true for local dev)")
+			os.Exit(1)
+		}
 		for i, e := range engines {
 			mgmtSrv.RegisterEngine(cfg.Projects[i].Name, e)
 		}
