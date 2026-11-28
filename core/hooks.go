@@ -19,6 +19,7 @@ type HookEventType string
 const (
 	HookEventMessageReceived     HookEventType = "message.received"
 	HookEventMessageSent         HookEventType = "message.sent"
+	HookEventMessageFinalized    HookEventType = "message.finalized"
 	HookEventSessionStarted      HookEventType = "session.started"
 	HookEventSessionEnded        HookEventType = "session.ended"
 	HookEventTurnCancelled       HookEventType = "turn.cancelled"
@@ -65,10 +66,16 @@ type HookEvent struct {
 	Event      HookEventType  `json:"event"`
 	Timestamp  time.Time      `json:"timestamp"`
 	Project    string         `json:"project"`
+	TurnID     string         `json:"turn_id,omitempty"`
 	SessionKey string         `json:"session_key,omitempty"`
+	Workspace  string         `json:"workspace,omitempty"`
 	Platform   string         `json:"platform,omitempty"`
 	UserID     string         `json:"user_id,omitempty"`
 	UserName   string         `json:"user_name,omitempty"`
+	Source     string         `json:"source,omitempty"`
+	Internal   bool           `json:"internal"`
+	ReplyKind  string         `json:"reply_kind,omitempty"`
+	Changed    bool           `json:"changed,omitempty"`
 	Content    string         `json:"content,omitempty"`
 	Error      string         `json:"error,omitempty"`
 	Extra      map[string]any `json:"extra,omitempty"`
@@ -250,6 +257,12 @@ func eventToEnv(e HookEvent) []string {
 	if e.SessionKey != "" {
 		env = append(env, "CC_HOOK_SESSION_KEY="+e.SessionKey)
 	}
+	if e.TurnID != "" {
+		env = append(env, "CC_HOOK_TURN_ID="+e.TurnID)
+	}
+	if e.Workspace != "" {
+		env = append(env, "CC_HOOK_WORKSPACE="+e.Workspace)
+	}
 	if e.Platform != "" {
 		env = append(env, "CC_HOOK_PLATFORM="+e.Platform)
 	}
@@ -258,6 +271,14 @@ func eventToEnv(e HookEvent) []string {
 	}
 	if e.UserName != "" {
 		env = append(env, "CC_HOOK_USER_NAME="+e.UserName)
+	}
+	if e.Source != "" {
+		env = append(env, "CC_HOOK_SOURCE="+e.Source)
+	}
+	env = append(env, fmt.Sprintf("CC_HOOK_INTERNAL=%t", e.Internal))
+	env = append(env, fmt.Sprintf("CC_HOOK_CHANGED=%t", e.Changed))
+	if e.ReplyKind != "" {
+		env = append(env, "CC_HOOK_REPLY_KIND="+e.ReplyKind)
 	}
 	if e.Content != "" {
 		env = append(env, "CC_HOOK_CONTENT="+e.Content)
