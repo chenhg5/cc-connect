@@ -18,10 +18,12 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/BurntSushi/toml"
 	ccconnect "github.com/chenhg5/cc-connect"
 	"github.com/chenhg5/cc-connect/config"
 	"github.com/chenhg5/cc-connect/core"
 	"github.com/chenhg5/cc-connect/daemon"
+	"golang.org/x/term"
 	// Agent and platform imports are in separate plugin_*.go files
 	// controlled by build tags. See Makefile for selective compilation.
 )
@@ -81,7 +83,7 @@ func resolveLogMaxSize(flagValue string) (int64, logSizeSource) {
 	if strings.TrimSpace(flagValue) != "" {
 		n, err := daemon.ParseLogSize(flagValue)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "warning: ignoring --log-max-size=%q: %v\n", flagValue, err)
+			slog.Warn("ignoring invalid log size", "value", flagValue, "error", err)
 		} else {
 			return n, logSizeSourceFlag
 		}
@@ -89,7 +91,7 @@ func resolveLogMaxSize(flagValue string) (int64, logSizeSource) {
 	if v := os.Getenv("CC_LOG_MAX_SIZE"); v != "" {
 		n, err := daemon.ParseLogSize(v)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "warning: ignoring CC_LOG_MAX_SIZE=%q: %v\n", v, err)
+			slog.Warn("ignoring invalid log size environment", "value", v, "error", err)
 		} else {
 			return n, logSizeSourceEnv
 		}
@@ -137,7 +139,7 @@ func resolveLogMaxBackups(flagValue string) (int, logBackupsSource) {
 	if strings.TrimSpace(flagValue) != "" {
 		n, err := daemon.ParseLogBackups(flagValue)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "warning: ignoring --log-max-backups=%q: %v\n", flagValue, err)
+			slog.Warn("ignoring invalid log backup count", "value", flagValue, "error", err)
 		} else {
 			return n, logBackupsSourceFlag
 		}
@@ -145,7 +147,7 @@ func resolveLogMaxBackups(flagValue string) (int, logBackupsSource) {
 	if v := os.Getenv("CC_LOG_MAX_BACKUPS"); v != "" {
 		n, err := daemon.ParseLogBackups(v)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "warning: ignoring CC_LOG_MAX_BACKUPS=%q: %v\n", v, err)
+			slog.Warn("ignoring invalid log backup environment", "value", v, "error", err)
 		} else {
 			return n, logBackupsSourceEnv
 		}
@@ -185,7 +187,7 @@ func resolveMaxAttachmentSize(cfg *config.Config) int64 {
 		if n, err := strconv.ParseInt(v, 10, 64); err == nil && n > 0 {
 			return n << 20
 		}
-		fmt.Fprintf(os.Stderr, "warning: ignoring CC_MAX_ATTACHMENT_SIZE_MB=%q: must be a positive integer (MiB)\n", v)
+		slog.Warn("ignoring invalid attachment size environment", "value", v)
 	}
 	if cfg != nil && cfg.MaxAttachmentSizeMB > 0 {
 		return int64(cfg.MaxAttachmentSizeMB) << 20
@@ -239,26 +241,31 @@ func main() {
 		return
 	}
 
+	logFile := os.Getenv("CC_LOG_FILE")
+	// A console is eligible for detailed diagnostics only when it is the
+	// actual terminal sink and no managed log file was requested.
+	consoleDetails := logFile == "" && term.IsTerminal(int(os.Stderr.Fd()))
+	var logWriter io.Writer = os.Stderr
+	setupLogger("info", logWriter, consoleDetails)
 	checkUpdateAsync()
 	// When started as a daemon (CC_LOG_FILE set), redirect logs to a rotating file.
 	// Log file setup happens before flag.Parse() so the rotating writer is in
 	// place before any slog output. To still honour --log-max-size, we
 	// pre-scan os.Args here for the flag value; this is a small, deliberate
 	// duplication of flag parsing for one well-known key.
-	var logWriter io.Writer
 	var logCloser io.Closer
-	if logFile := os.Getenv("CC_LOG_FILE"); logFile != "" {
+	if logFile != "" {
 		maxSize, maxSizeSrc := resolveLogMaxSize(preScanLogMaxSizeFlag(os.Args[1:]))
 		maxBackups, maxBackupsSrc := resolveLogMaxBackups(preScanLogMaxBackupsFlag(os.Args[1:]))
-		fmt.Fprintf(os.Stderr, "log: redirecting to %s with max_size=%d bytes (source: %s), max_backups=%d (source: %s)\n", logFile, maxSize, maxSizeSrc, maxBackups, maxBackupsSrc)
+		fmt.Fprintf(os.Stderr, "log: redirecting output with max_size=%d bytes (source: %s), max_backups=%d (source: %s)\n", maxSize, maxSizeSrc, maxBackups, maxBackupsSrc)
 		w, err := daemon.NewRotatingWriter(logFile, maxSize, maxBackups)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "failed to open log file %s: %v\n", logFile, err)
+			fmt.Fprintln(os.Stderr, "failed to open log file")
 			os.Exit(1)
 		}
 		logWriter = w
 		logCloser = w
-		slog.SetDefault(slog.New(slog.NewTextHandler(w, &slog.HandlerOptions{Level: slog.LevelInfo})))
+		setupLogger("info", logWriter, false)
 	}
 
 	rootOpts, err := parseRootCLIOptions(os.Args[1:])
@@ -274,7 +281,7 @@ func main() {
 	// values surface a clear warning.
 	if strings.TrimSpace(rootOpts.logMaxSize) != "" {
 		if _, err := daemon.ParseLogSize(rootOpts.logMaxSize); err != nil {
-			fmt.Fprintf(os.Stderr, "warning: --log-max-size=%q: %v\n", rootOpts.logMaxSize, err)
+			slog.Warn("ignoring invalid parsed log size", "value", rootOpts.logMaxSize, "error", err)
 		}
 	}
 	if rootOpts.logMaxBackups < 0 {
@@ -291,7 +298,7 @@ func main() {
 	}
 
 	if err := validateNoExtraTopLevelArgs(rootOpts.args); err != nil {
-		fmt.Fprintf(os.Stderr, "Error: %v\n\n", err)
+		slog.Error("invalid command arguments", "error", err)
 		printUsage()
 		os.Exit(1)
 	}
@@ -313,25 +320,27 @@ func main() {
 	// Acquire instance lock to prevent duplicate processes
 	instanceLock, err := AcquireInstanceLock(configPath)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-		fmt.Fprintf(os.Stderr, "Use --force to kill the existing instance.\n")
+		slog.Error("cannot acquire instance lock", "startup_cause", instanceLockCause(err), "error", err)
+		if errors.Is(err, errInstanceLockHeld) {
+			fmt.Fprintln(os.Stderr, "Use --force to kill the existing instance.")
+		}
 		os.Exit(1)
 	}
 	slog.Info("acquired instance lock", "path", instanceLock.Path())
 
 	if _, err := os.Stat(configPath); os.IsNotExist(err) {
 		if err := bootstrapConfig(configPath); err != nil {
-			fmt.Fprintf(os.Stderr, "Error creating config: %v\n", err)
+			slog.Error("cannot create configuration", "error", err)
 			os.Exit(1)
 		}
-		fmt.Printf("Created default config at %s\n", configPath)
+		slog.Info("created default configuration")
 		fmt.Println("Please edit this file to add your agent and platform credentials, then run cc-connect again.")
 		os.Exit(0)
 	}
 
 	cfg, err := config.Load(configPath)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error loading config (%s): %v\n", configPath, err)
+		slog.Error("cannot load configuration", "startup_cause", configLoadCause(err), "path", configPath, "error", err)
 		os.Exit(1)
 	}
 
@@ -339,13 +348,13 @@ func main() {
 	slog.Info("config loaded", "path", configPath)
 
 	if len(cfg.Projects) == 0 {
-		fmt.Fprintf(os.Stderr, "Error: no projects configured in %s\n", configPath)
+		slog.Error("no projects configured")
 		fmt.Fprintln(os.Stderr, "Add at least one [[project]] section to your config.toml, or run:")
 		fmt.Fprintln(os.Stderr, "  cc-connect init")
 		os.Exit(1)
 	}
 
-	setupLogger(cfg.Log.Level, logWriter)
+	setupLogger(cfg.Log.Level, logWriter, consoleDetails)
 
 	// run_as_user preflight + isolation audit. MUST run before any engine
 	// or agent is constructed. If any project fails, abort startup
@@ -1679,7 +1688,7 @@ type = "feishu"
 
 [projects.platforms.options]
 app_id = "your-feishu-app-id"
-app_secret = "your-feishu-app-secret"
+app_secret = "" # set your Feishu app secret before starting
 
 # For more platforms (DingTalk, Telegram, Slack, Discord, LINE, WeChat Work)
 # see: https://github.com/chenhg5/cc-connect/blob/main/config.example.toml
@@ -1796,7 +1805,41 @@ Examples:
 `, v, updateHint)
 }
 
-func setupLogger(level string, w io.Writer) {
+var errInstanceLockHeld = errors.New("another cc-connect instance is already running")
+
+func instanceLockCause(err error) string {
+	switch {
+	case errors.Is(err, errInstanceLockHeld):
+		return "lock_held"
+	case errors.Is(err, os.ErrPermission):
+		return "lock_permission_denied"
+	default:
+		return "lock_unavailable"
+	}
+}
+
+func configLoadCause(err error) string {
+	var parseErr toml.ParseError
+	var pathErr *os.PathError
+	switch {
+	case errors.Is(err, os.ErrNotExist):
+		return "config_not_found"
+	case errors.Is(err, os.ErrPermission):
+		return "config_permission_denied"
+	case errors.As(err, &parseErr):
+		return "config_parse_error"
+	case errors.As(err, &pathErr):
+		return "config_read_error"
+	default:
+		return "config_invalid"
+	}
+}
+
+func setupLogger(level string, w io.Writer, consoleDetails bool) {
+	slog.SetDefault(newOperationalLogger(level, w, consoleDetails))
+}
+
+func newOperationalLogger(level string, w io.Writer, consoleDetails bool) *slog.Logger {
 	var logLevel slog.Level
 	switch level {
 	case "debug":
@@ -1808,12 +1851,11 @@ func setupLogger(level string, w io.Writer) {
 	default:
 		logLevel = slog.LevelInfo
 	}
-	if w == nil {
-		w = os.Stdout
+	options := &slog.HandlerOptions{Level: logLevel, AddSource: true}
+	if !consoleDetails {
+		options.ReplaceAttr = core.OperationalLogAttr
 	}
-	slog.SetDefault(slog.New(slog.NewTextHandler(w, &slog.HandlerOptions{
-		Level: logLevel,
-	})))
+	return slog.New(slog.NewTextHandler(w, options))
 }
 
 func applyDedupConfig(cfg *config.Config, engine *core.Engine) {
