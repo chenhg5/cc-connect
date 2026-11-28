@@ -468,6 +468,8 @@ Lists sessions for a project with summary info including the last message previe
         "agent_type": "claudecode",
         "active": true,
         "live": true,
+        "busy": false,
+        "agent_session_alive": true,
         "history_count": 12,
         "created_at": "2026-03-10T09:00:00Z",
         "updated_at": "2026-03-10T10:30:00Z",
@@ -490,11 +492,22 @@ Lists sessions for a project with summary info including the last message previe
 | Field          | Type    | Description                                                       |
 |----------------|---------|-------------------------------------------------------------------|
 | `active`       | boolean | Whether this is the selected session for its user key             |
-| `live`         | boolean | Whether there is a running agent process for this session         |
+| `live`         | boolean | Legacy routing-key state presence; does not establish process liveness         |
 | `last_message` | object  | Preview of the last message (role, content truncated to 200 chars, timestamp). `null` if no history. |
 | `user_name`    | string  | Display name of the user (from platform metadata)                 |
 | `chat_name`    | string  | Name of the chat/channel (from platform metadata)                 |
-| `active_keys`  | object  | Map of session keys with active agent connections → platform name |
+| `active_keys`  | object  | Map of routing keys with bridge state entries → platform name |
+
+Both session GET endpoints also return these transient runtime observations:
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `busy` | boolean | Whether this saved session's cc-connect execution lock is held. `false` means only that the lock is free, not that every execution path is idle. |
+| `agent_session_alive` | boolean or null | The registered interactive `AgentSession.Alive()` value for this specific saved session. `null` means no associated interactive AgentSession is available to observe; `false` means the associated backend reports its session is no longer alive. This is not an OS process-liveness check. |
+
+These fields are not persisted and are not an atomic snapshot across all sessions. `active` only indicates selection. The legacy `live`/`active_keys` fields only indicate bridge state presence for a routing key. AgentSession lifecycle follows the engine's actual Session association, not whichever saved session is selected.
+
+**Observation scope:** `busy` observes the cc-connect execution lock, while `agent_session_alive` observes only AgentSessions registered in interactive state. Relay and other unregistered execution paths may be running even when the response is `busy: false, agent_session_alive: null`; neither value proves global idleness or absence of a child process. In particular, Codex's exec backend remains alive between turns with no running child. `true` does not prove process presence, readiness or progress, and these fields do not measure platform connectivity.
 
 ---
 
@@ -563,6 +576,8 @@ Returns session detail including message history.
     "agent_session_id": "as_xxx",
     "active": true,
     "live": true,
+    "busy": false,
+    "agent_session_alive": true,
     "history_count": 12,
     "created_at": "2026-03-10T09:00:00Z",
     "updated_at": "2026-03-10T10:30:00Z",
@@ -584,7 +599,7 @@ Returns session detail including message history.
 
 | Field   | Type    | Description                                                   |
 |---------|---------|---------------------------------------------------------------|
-| `live`  | boolean | Whether the session has an active agent process (can receive messages via `/send`) |
+| `live`  | boolean | Legacy routing-key state presence; does not establish process liveness |
 
 ---
 
@@ -639,21 +654,21 @@ Switches the active session for a given session_key (e.g. when a user has multip
 
 #### POST /api/v1/projects/{name}/send
 
-Sends a message to a session. The message is delivered to the agent as if the user had sent it via the platform. **Requires the session to be live** (i.e., have an active agent process). Check the `live` field from session detail to verify before sending.
+Delivers an outbound message to the platform route identified by `session_key`, using an existing reply context or the platform's `ReplyContextReconstructor` capability. It calls the platform's send operation, not `AgentSession.Send`, and does not submit a prompt to the coding agent. An interactive AgentSession is not a prerequisite: delivery can succeed with `live: false` and `agent_session_alive: null` when the platform route can be reconstructed. Success confirms completion of the platform send operation, not agent execution.
 
 **Request body:**
 
 ```json
 {
   "session_key": "telegram:123:456",
-  "message": "Review the latest commit"
+  "message": "The latest build is ready"
 }
 ```
 
 | Field         | Type   | Required | Description                    |
 |---------------|--------|----------|--------------------------------|
 | `session_key`| string | yes      | Platform routing key           |
-| `message`    | string | yes      | Text to send to the agent      |
+| `message`    | string | yes      | Text to deliver to the platform route      |
 
 **Response:**
 
