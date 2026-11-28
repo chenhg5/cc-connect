@@ -705,7 +705,7 @@ function ProviderFormModal({
               {t('globalProviders.form.agentTypes')}
             </label>
             <div className="flex flex-wrap gap-2">
-              {['claudecode', 'codex', 'gemini', 'opencode', 'cursor', 'kimi', 'qoder', 'acp'].map(at => {
+              {['claudecode', 'codex', 'droid', 'gemini', 'opencode', 'cursor', 'kimi', 'qoder', 'acp'].map(at => {
                 const selected = agents.includes(at);
                 return (
                   <button
