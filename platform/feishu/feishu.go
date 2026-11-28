@@ -162,6 +162,10 @@ type Platform struct {
 	shareSessionInChannel      bool
 	threadIsolation            bool
 	groupChatHistoryShare      bool
+	// soloChatReplyAll admits group messages without @bot when the chat has
+	// exactly one human member and one bot (this one): there is nobody else
+	// the message could be meant for.
+	soloChatReplyAll bool
 	// noReplyToTrigger: when true, send via Create instead of Im.Message.Reply (no quote to the user's message).
 	noReplyToTrigger        bool
 	resolveMentions         bool
@@ -186,11 +190,14 @@ type Platform struct {
 	groupFilterDegradedErr string
 	groupFilterRetryCancel context.CancelFunc
 	groupFilterRetryStop   chan struct{}
-	peerBots               map[string]string // app_id -> friendly alias, for quoted-reply attribution
-	mentionMap             map[string]string // agent name -> open_id (for outbound @ resolution)
-	userNameCache          sync.Map          // open_id -> display name
-	chatNameCache          sync.Map          // chat_id -> chat name
-	chatMemberCache        sync.Map          // chatID -> *chatMemberEntry
+	peerBots               map[string]string                                          // app_id -> friendly alias, for quoted-reply attribution
+	mentionMap             map[string]string                                          // agent name -> open_id (for outbound @ resolution)
+	userNameCache          sync.Map                                                   // open_id -> display name
+	chatNameCache          sync.Map                                                   // chat_id -> chat name
+	chatMemberCache        sync.Map                                                   // chatID -> *chatMemberEntry
+	soloChatCache          sync.Map                                                   // chatID -> soloChatEntry
+	soloChatInFlight       sync.Map                                                   // chatID -> struct{}; concurrent lookups fail closed
+	soloChatFetch          func(context.Context, string) (*larkim.GetChatResp, error) // optional test seam
 	recalledMu             sync.Mutex
 	recalledMsgIDs         map[string]time.Time // message_id -> recall time, short TTL race guard
 	// Webhook mode fields (for Lark international version)
@@ -478,6 +485,7 @@ func newPlatform(name, domain string, opts map[string]any) (core.Platform, error
 	shareSessionInChannel, _ := opts["share_session_in_channel"].(bool)
 	threadIsolation, _ := opts["thread_isolation"].(bool)
 	groupChatHistoryShare, _ := opts["group_chat_history_share"].(bool)
+	soloChatReplyAll, _ := opts["solo_chat_reply_all"].(bool)
 	resolveMentionsOpt, _ := opts["resolve_mentions"].(bool)
 	noReplyToTrigger := false
 	if v, ok := opts["reply_to_trigger"].(bool); ok && !v {
@@ -645,6 +653,7 @@ func newPlatform(name, domain string, opts map[string]any) (core.Platform, error
 		shareSessionInChannel:      shareSessionInChannel,
 		threadIsolation:            threadIsolation,
 		groupChatHistoryShare:      groupChatHistoryShare,
+		soloChatReplyAll:           soloChatReplyAll,
 		resolveMentions:            resolveMentionsOpt,
 		noReplyToTrigger:           noReplyToTrigger,
 		client:                     lark.NewClient(appID, appSecret, clientOpts...),
@@ -2103,6 +2112,19 @@ func (p *Platform) onMessage(ctx context.Context, event *larkim.P2MessageReceive
 		return nil
 	}
 	atEveryone := p.respondToAtEveryoneAndHere && msg.Content != nil && strings.Contains(*msg.Content, "@_all")
+	holdScoped := p.threadIsolation && isThreadSessionKey(sessionKey) && p.attachmentWaitMentionEnabled()
+	legacyThreadAttachment := chatType == "group" && !groupReplyAllForChat && filterActive &&
+		!botMentioned && !atEveryone && p.threadIsolation && isAttachmentMsgType(msgType) &&
+		p.isActiveThreadSession(sessionKey)
+	// In a chat of one person and this bot every message is addressed to the
+	// bot, so it needs no @ -- unless it @-mentions somebody else, which says
+	// it is meant for them. Only asked when the mention filter would
+	// otherwise drop the message, and never while the filter is degraded.
+	soloChat := chatType == "group" && p.soloChatReplyAll && !groupReplyAllForChat && botOpenID != "" &&
+		!botMentioned && !atEveryone && len(msg.Mentions) == 0 && !legacyThreadAttachment &&
+		(!holdScoped || !canStageAttachment(msgType)) &&
+		core.AllowList(p.allowFrom, userID) && core.AllowList(p.allowChat, chatID) && p.isSoloChat(chatID)
+	triggered := botMentioned || atEveryone || soloChat
 
 	// When group_reply_all is enabled, optionally let another bot own messages
 	// that explicitly mention someone else. An empty botOpenID is deliberately
@@ -2120,7 +2142,7 @@ func (p *Platform) onMessage(ctx context.Context, event *larkim.P2MessageReceive
 	// cc-connect may observe the conversation, while allow_from controls who may
 	// trigger an agent turn.
 	if p.groupChatHistoryShare && chatType == "group" && !groupReplyAllForChat && botOpenID != "" &&
-		!botMentioned && !atEveryone && isGroupHistoryMessageType(msgType) {
+		!triggered && isGroupHistoryMessageType(msgType) {
 		if !core.AllowList(p.allowChat, chatID) {
 			slog.Debug(p.tag()+": group history ignored for unauthorized chat", "chat_id", chatID)
 			return nil
@@ -2154,11 +2176,13 @@ func (p *Platform) onMessage(ctx context.Context, event *larkim.P2MessageReceive
 			// With attachment_wait = "mention" (#2186) the attachment is
 			// staged instead, and handed over with the sender's next @bot
 			// message in this thread.
-			case p.threadIsolation && isAttachmentMsgType(msgType) && p.isActiveThreadSession(sessionKey):
+			case legacyThreadAttachment:
 				stageAttachmentOnly = p.attachmentWaitMentionEnabled() && canStageAttachment(msgType)
 				slog.Debug(p.tag()+": passing attachment through active thread without mention",
 					"chat_id", chatID, "session_key", sessionKey, "msg_type", msgType, "message_id", messageID,
 					"staged", stageAttachmentOnly)
+			case soloChat:
+				slog.Debug(p.tag()+": admitting message without mention in a one-person chat", "chat_id", chatID)
 			default:
 				if p.IsGroupFilterDegraded() && botOpenID == "" {
 					// Fail closed: drop the message. Use WARN (not
@@ -2234,7 +2258,7 @@ func (p *Platform) onMessage(ctx context.Context, event *larkim.P2MessageReceive
 
 	rctx := replyContext{messageID: messageID, chatID: chatID, sessionKey: sessionKey}
 	var groupHistoryCtx groupHistoryContext
-	if p.groupChatHistoryShare && chatType == "group" && !groupReplyAllForChat && botOpenID != "" && (botMentioned || atEveryone) {
+	if p.groupChatHistoryShare && chatType == "group" && !groupReplyAllForChat && botOpenID != "" && triggered {
 		scope := p.groupHistoryScope(msg, chatID)
 		if p.isGroupHistoryNewCommand(msgType, content, mentions) {
 			p.resetGroupHistory(scope)
@@ -2252,7 +2276,11 @@ func (p *Platform) onMessage(ctx context.Context, event *larkim.P2MessageReceive
 	// in the same thread can pass through without re-mentioning the bot. When
 	// this is the first accepted message in an existing thread, remember that
 	// dispatch must bootstrap the agent context from the parent/root message.
-	rctx.bootstrapThread = p.markThreadSessionActive(sessionKey)
+	if soloChat && holdScoped {
+		rctx.bootstrapThread = p.claimThreadQuoteBootstrap(sessionKey)
+	} else {
+		rctx.bootstrapThread = p.markThreadSessionActive(sessionKey)
+	}
 	if rctx.bootstrapThread && parentID == "" {
 		parentID = stringValue(msg.RootId)
 	}
@@ -2784,6 +2812,88 @@ func (p *Platform) resolveChatName(chatID string) string {
 	return name
 }
 
+// soloChatCacheTTL bounds how long a membership change goes unnoticed: once
+// membership changes in either direction, the cached decision can stay stale
+// for this window (including joins, departures, or a second bot).
+const soloChatCacheTTL = 30 * time.Second
+
+// Keep failures fail-closed without retrying on every incoming message.
+const soloChatFailureTTL = 5 * time.Second
+
+type soloChatEntry struct {
+	failed    bool
+	solo      bool
+	fetchedAt time.Time
+}
+
+// isSoloChat reports whether the chat's members are exactly one person and
+// one bot. Failed and concurrent lookups answer false. A short failure
+// cooldown avoids repeated API calls during outages. Cache misses still run
+// synchronously (up to 5s); preserving event/history order avoids a broad
+// dispatcher refactor. Successful membership results retain the 30s TTL.
+func (p *Platform) isSoloChat(chatID string) bool {
+	if chatID == "" || (p.client == nil && p.soloChatFetch == nil) {
+		return false
+	}
+	cachedResult := func() (bool, bool) {
+		if cached, ok := p.soloChatCache.Load(chatID); ok {
+			entry := cached.(soloChatEntry)
+			ttl := soloChatCacheTTL
+			if entry.failed {
+				ttl = soloChatFailureTTL
+			}
+			if time.Since(entry.fetchedAt) < ttl {
+				return entry.solo, true
+			}
+		}
+		return false, false
+	}
+	if solo, fresh := cachedResult(); fresh {
+		return solo
+	}
+	// Only one lookup per chat may run at once; other cache misses keep
+	// requiring a mention rather than waiting behind the same request.
+	if _, loaded := p.soloChatInFlight.LoadOrStore(chatID, struct{}{}); loaded {
+		return false
+	}
+	defer p.soloChatInFlight.Delete(chatID)
+	// Another request may have populated the cache before we acquired the slot.
+	if solo, fresh := cachedResult(); fresh {
+		return solo
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	fetch := p.soloChatFetch
+	if fetch == nil {
+		fetch = p.fetchSoloChatInfo
+	}
+	resp, err := fetch(ctx, chatID)
+	if err != nil || resp == nil {
+		p.soloChatCache.Store(chatID, soloChatEntry{failed: true, fetchedAt: time.Now()})
+		slog.Warn(p.tag()+": read chat members failed; mention still required", "chat_id", chatID, "error", err)
+		return false
+	}
+	if !resp.Success() || resp.Data == nil {
+		p.soloChatCache.Store(chatID, soloChatEntry{failed: true, fetchedAt: time.Now()})
+		slog.Warn(p.tag()+": read chat members failed; mention still required",
+			"chat_id", chatID, "code", resp.Code, "msg", resp.Msg)
+		return false
+	}
+	solo := stringValue(resp.Data.UserCount) == "1" && stringValue(resp.Data.BotCount) == "1"
+	p.soloChatCache.Store(chatID, soloChatEntry{solo: solo, fetchedAt: time.Now()})
+	// Dispatch resolves the chat name next; this response already has it.
+	if name := stringValue(resp.Data.Name); name != "" {
+		p.chatNameCache.Store(chatID, name)
+	}
+	slog.Debug(p.tag()+": chat membership read", "chat_id", chatID,
+		"user_count", stringValue(resp.Data.UserCount), "bot_count", stringValue(resp.Data.BotCount), "solo", solo)
+	return solo
+}
+
+func (p *Platform) fetchSoloChatInfo(ctx context.Context, chatID string) (*larkim.GetChatResp, error) {
+	return p.client.Im.Chat.Get(ctx, larkim.NewGetChatReqBuilder().ChatId(chatID).Build())
+}
+
 // --- Mention resolution ---
 
 const chatMemberCacheTTL = 1 * time.Hour
@@ -3026,6 +3136,9 @@ func (p *Platform) resolveBotSenderName(appID string) string {
 // fetchSingleMessage retrieves one message by ID from the Feishu API and
 // returns its extracted content as a chainMessage. Returns nil on any failure.
 func (p *Platform) fetchSingleMessage(ctx context.Context, messageID string) *chainMessage {
+	if p.client == nil {
+		return nil
+	}
 	apiPath := fmt.Sprintf("/open-apis/im/v1/messages/%s?card_msg_content_type=raw_card_content", messageID)
 	apiResp, err := p.client.Get(ctx, apiPath, nil, larkcore.AccessTokenTypeTenant)
 	if err != nil {
@@ -4621,6 +4734,14 @@ func (p *Platform) markThreadSessionActive(sessionKey string) bool {
 	return !loaded
 }
 
+// claimThreadQuoteBootstrap records that the first quote bootstrap was claimed
+// without granting attachment admission. The zero time is replaced by an actual
+// engagement timestamp when a legacy-accepted message reaches the thread.
+func (p *Platform) claimThreadQuoteBootstrap(sessionKey string) bool {
+	_, loaded := p.activeThreadSessions.LoadOrStore(sessionKey, time.Time{})
+	return !loaded
+}
+
 // isActiveThreadSession reports whether the given sessionKey corresponds to a
 // thread that has previously been engaged by an @bot message. With
 // attachment_wait = "mention" the engagement expires after attachment_wait_secs
@@ -4633,8 +4754,8 @@ func (p *Platform) isActiveThreadSession(sessionKey string) bool {
 	if !ok {
 		return false
 	}
-	if p.attachmentWaitMentionEnabled() {
-		if last, isTime := v.(time.Time); isTime && time.Since(last) > p.attachmentWaitWindow() {
+	if last, isTime := v.(time.Time); isTime {
+		if last.IsZero() || (p.attachmentWaitMentionEnabled() && time.Since(last) > p.attachmentWaitWindow()) {
 			return false
 		}
 	}

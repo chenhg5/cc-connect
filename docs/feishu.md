@@ -112,6 +112,7 @@ app_secret = "QhkMpxxxxxxxxxxxxxxxxxxxx"
 # thread_isolation = true    # 可选：按飞书 thread/root 隔离群聊会话
 # group_reply_all_chats = ["oc_group_a", "oc_group_b"] # 可选：仅指定群无需 @机器人
 # group_chat_history_share = false  # 可选：共享未 @ 机器人的群消息作为下一次触发的上下文；消息本身不会触发回复
+# solo_chat_reply_all = false  # 可选：群里只有一个人和这个机器人时无需 @；@ 了别人的消息仍不触发
 # progress_style = "legacy"  # 可选：legacy | compact | card
 # ack_emoji = "Get"           # 可选：消息被接受处理或入队时立即添加并保留的确认表情；默认禁用
 # reaction_emoji = "OnIt"      # 可选：agent 处理期间的临时表情，结束后移除
@@ -125,6 +126,7 @@ app_secret = "QhkMpxxxxxxxxxxxxxxxxxxxx"
 > `group_reply_all_chats` 可使用逗号分隔字符串（如 `"oc_group_a,oc_group_b"`）或字符串数组。非空列表仅让指定群绕过 @ 过滤，并优先于全局 `group_reply_all` 和 `require_mention`；其他群保留原有提及、@all 和已参与话题的附件规则。未配置或为空时沿用原有默认行为。此设置不放宽 `allow_from`、`allow_chat` 或 `group_only`，私聊行为不变。
 > 如果开启 `thread_isolation = true`，群聊里每个根消息 / reply thread 会对应一个独立 agent session；私聊行为保持原样。
 > `group_chat_history_share = true` 时，cc-connect 只在内存中保留当前进程观察到的、允许访问的群聊 text/post 消息，并在下一次明确 @ 机器人且真正进入 agent turn 时注入；未 @ 的消息不会触发回复。`/status` 等由 cc-connect 处理的命令不会消费这段待处理上下文，`/new` 会清空对应主频道或话题的上下文。
+> `solo_chat_reply_all = true` 时，群成员恰好是一个人和这个机器人的群里，没有 @ 任何人的消息也会交给 agent；@ 了别人却没 @ 机器人的消息仍不触发。详见 [飞书单人群免 @](feishu-solo-chat.md)（[English](feishu-solo-chat.en.md) · [Русский](feishu-solo-chat.ru.md)）。
 > 在 multi-workspace 模式下，`thread_isolation = true` 也会让每个话题独立绑定 workspace；在话题内执行 `/workspace bind <name>` 不会影响同群的其他话题。已有的群级 binding 会保留为默认值，由尚未显式绑定的话题继承，因此回退到旧版本时仍可使用。
 > `progress_style = "compact"` 会把思考/工具进度合并到一条可更新消息里，减少刷屏；`legacy` 保持原有逐条发送；`card` 会使用结构化卡片（标题 + 进度块）持续更新同一条消息，观感比纯文本更清晰。
 > `compact` / `card` 模式下，同一张进度卡片的更新最多每 1.5 秒一次；密集的工具事件只会刷新出一个较新的中间状态，短回合可能看不到全部步骤，最终回复不受该节流影响。
@@ -179,7 +181,7 @@ app_secret = "QhkMpxxxxxxxxxxxxxxxxxxxx"
 
 配置完权限后，点击「申请发布」使权限生效。
 
-如果启用了 `group_reply_all`、`group_reply_all_chats` 或 `group_chat_history_share`，必须为应用申请并发布 `im:message.group_msg`，否则飞书只会向机器人推送被 @ 的群消息，免 @ 回复及未提及消息的共享上下文无法生效。本地配置不会自动授予权限或补齐飞书未推送的事件。群上下文共享不会回溯 cc-connect 启动前的历史，也不会持久化待处理消息。
+如果启用了 `group_reply_all`、`group_reply_all_chats`、`group_chat_history_share` 或 `solo_chat_reply_all`，必须为应用申请并发布 `im:message.group_msg`，否则飞书只会向机器人推送被 @ 的群消息，免 @ 回复及未提及消息的共享上下文无法生效。本地配置不会自动授予权限或补齐飞书未推送的事件。群上下文共享不会回溯 cc-connect 启动前的历史，也不会持久化待处理消息。`solo_chat_reply_all` 还需要 `im:chat:readonly` 来读取群成员数。
 
 ---
 

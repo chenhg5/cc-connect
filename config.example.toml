@@ -1150,6 +1150,8 @@ app_secret = "your-feishu-app-secret"
 #                           # Agent 完成回复后添加的表情回复（如 "Done"）；设为 "none" 可禁用
 # group_reply_all = false   # If true, respond to ALL group messages without requiring @mention
 #                           # 设为 true 时，群聊中无需 @机器人 也会响应所有消息（默认 false）
+# solo_chat_reply_all = false  # If true, a group whose members are one person and one bot needs no @mention (unless the message @-mentions someone else)
+#                              # 设为 true 时，群里只有一个人和一个机器人时无需 @机器人；@ 了别人的消息仍不触发（默认 false）
 # skip_when_mention_others = false # If true, with group_reply_all or group_reply_all_chats enabled, ignore messages that @ others but not this bot
 #                                  # 设为 true 且开启 group_reply_all 或 group_reply_all_chats 时，@其他人但未 @本机器人 的消息不会触发
 # group_reply_all_chats = "oc_group_a,oc_group_b" # Only these groups bypass @mention; a non-empty list overrides group_reply_all / require_mention
