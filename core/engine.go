@@ -9017,12 +9017,13 @@ func (e *Engine) handleListSelectionInput(p Platform, msg *Message, content stri
 		e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgWsResolutionError, err))
 		return true
 	}
-	agentSessions, err := agent.ListSessions(e.ctx)
+	// Same source as /list and /switch, so numbers line up with the card
+	// (including upstream's local-session entries).
+	agentSessions, err := e.listCommandSessions(agent, sessions, msg.SessionKey)
 	if err != nil {
 		e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgError, err))
 		return true
 	}
-	agentSessions = e.applySessionFilter(agentSessions, sessions, msg.SessionKey)
 	view := e.buildListGroupedView(sessions, msg.SessionKey, agentSessions)
 	if len(view.Entries) == 0 {
 		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgListEmpty))
@@ -9060,10 +9061,18 @@ func (e *Engine) handleListSelectionInput(p Platform, msg *Message, content stri
 
 func (e *Engine) switchToListEntry(p Platform, msg *Message, agent Agent, sessions *SessionManager, interactiveKey string, entry listSessionEntry) {
 	e.cleanupInteractiveState(interactiveKey)
+	e.clearListSelection(msg.SessionKey)
+	if localID, local := strings.CutPrefix(entry.Info.ID, localSessionPrefix); local {
+		if _, err := sessions.SwitchSession(msg.SessionKey, localID); err != nil {
+			e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgError, err))
+			return
+		}
+		e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgSwitchSuccess, entry.Info.Summary, localID, entry.Info.MessageCount))
+		return
+	}
 	// Keep the stored history of the session being switched to; see the NOTE in cmdSwitch.
 	switched := sessions.SwitchToAgentSession(msg.SessionKey, entry.Info.ID, agent.Name(), entry.Info.Summary)
 	e.seedSwitchedSessionHistory(agent, sessions, switched, &entry.Info)
-	e.clearListSelection(msg.SessionKey)
 
 	shortID := entry.Info.ID
 	if len(shortID) > 12 {
