@@ -1828,6 +1828,9 @@ app_secret = "your-feishu-app-secret"
 #                                      # 在 Codex 配置中定义；替代旧式沙箱选项，不改变审批策略。
 # Requires a Codex version that confirms activePermissionProfile; see docs/usage.md.
 # 需要支持 activePermissionProfile 的 Codex 版本；详见 docs/usage.zh-CN.md。
+# Native /goal requires a compatible Codex CLI and app_server.
+# 原生 /goal 需要兼容的 Codex CLI 和 app_server 后端。
+# app_server_url = "stdio"
 #
 # Optional (app_server only): minutes to wait for an AskUserQuestion answer
 # before declining it. Default 5; values <= 0 or invalid fall back to 5.
