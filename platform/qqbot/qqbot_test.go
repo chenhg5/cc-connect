@@ -1430,3 +1430,30 @@ func TestPlatformImplementsInlineButtonSender(t *testing.T) {
 		t.Error("Platform does not implement core.InlineButtonSender")
 	}
 }
+
+// A reply that takes longer than msgSeqTTL used to reset the per-event counter to
+// 1, and QQ rejected the duplicate number with 40054005 ("消息被去重") — the bot's
+// answer vanished. This is the regression test for that: it fails on the pre-fix
+// 5-minute window (the stale entry is evicted and the counter restarts at 1).
+func TestNextMsgSeqKeepsCountingPastOldTTL(t *testing.T) {
+	p := &Platform{}
+	used := &msgSeqEntry{createdAt: time.Now().Add(-10 * time.Minute)}
+	used.seq.Store(1) // the event already got one reply ten minutes ago
+	p.msgSeqMap = map[string]*msgSeqEntry{"event-msg-1": used}
+
+	if got := p.nextMsgSeq("event-msg-1"); got != 2 {
+		t.Fatalf("msg_seq after a 10-minute-old entry = %d, want 2; a reset to 1 makes QQ deduplicate the reply (40054005)", got)
+	}
+}
+
+// The 24h window must not turn into an unbounded map on a long-lived daemon.
+func TestNextMsgSeqMapStaysBounded(t *testing.T) {
+	p := &Platform{}
+	for i := 0; i < msgSeqMaxEntries+100; i++ {
+		p.nextMsgSeq(fmt.Sprintf("event-msg-%d", i))
+	}
+
+	if got := len(p.msgSeqMap); got > msgSeqMaxEntries {
+		t.Fatalf("msgSeqMap grew to %d entries, want at most %d", got, msgSeqMaxEntries)
+	}
+}

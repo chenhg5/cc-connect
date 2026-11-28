@@ -33,7 +33,12 @@ const (
 	maxReconnectAttempts = 30
 	tokenRefreshMargin   = 5 * time.Minute
 	messageMaxLen        = 2000
-	msgSeqTTL            = 5 * time.Minute
+	// msg_seq has to keep increasing for a given event msg_id: QQ rejects a
+	// reused number with 40054005 (\"消息被去重\") and silently drops the reply.
+	// A turn that takes longer than the window used to restart the counter at 1,
+	// so keep it for a day and bound the map by size instead of by traffic rate.
+	msgSeqTTL            = 24 * time.Hour
+	msgSeqMaxEntries     = 4096
 	messageCacheTTL      = 7 * 24 * time.Hour
 	messageCacheMaxItems = 1000
 	quotedTextMaxRunes   = 800
@@ -1386,12 +1391,25 @@ func (p *Platform) nextMsgSeq(eventMsgID string) int32 {
 		p.msgSeqMap = make(map[string]*msgSeqEntry)
 	}
 
-	// Evict expired entries
+	// Evict expired entries.
 	now := time.Now()
 	for k, v := range p.msgSeqMap {
 		if now.Sub(v.createdAt) > msgSeqTTL {
 			delete(p.msgSeqMap, k)
 		}
+	}
+
+	// Bound memory under steady traffic: drop the oldest entries first so a
+	// long-lived daemon does not grow the map without limit.
+	for len(p.msgSeqMap) >= msgSeqMaxEntries {
+		var oldestKey string
+		var oldestAt time.Time
+		for k, v := range p.msgSeqMap {
+			if oldestKey == "" || v.createdAt.Before(oldestAt) {
+				oldestKey, oldestAt = k, v.createdAt
+			}
+		}
+		delete(p.msgSeqMap, oldestKey)
 	}
 
 	entry, ok := p.msgSeqMap[eventMsgID]
