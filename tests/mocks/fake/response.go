@@ -19,9 +19,9 @@ func TestUsageReport(provider, accountID, email string) *core.UsageReport {
 		Plan:      "pro",
 		Buckets: []core.UsageBucket{
 			{
-				Name:          "Standard Requests",
-				Allowed:       true,
-				LimitReached:  false,
+				Name:         "Standard Requests",
+				Allowed:      true,
+				LimitReached: false,
 				Windows: []core.UsageWindow{
 					{UsedPercent: 45, WindowSeconds: 3600},
 				},
