@@ -649,6 +649,7 @@ Notes:
 ## 📚 Documentation
 
 - [Usage Guide](docs/usage.md) — Complete feature documentation
+- [Queue receipt notices](docs/queue-notice.md)
 - [INSTALL.md](INSTALL.md) — AI-agent-friendly installation guide
 - [config.example.toml](config.example.toml) — Configuration template
 - [CONTRIBUTING.md](CONTRIBUTING.md) — How to report issues and contribute pull requests

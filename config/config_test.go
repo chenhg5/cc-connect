@@ -3693,3 +3693,12 @@ func TestRemoveGlobalProvider_CleansUpProviderRefs(t *testing.T) {
 		t.Errorf("proj2 provider_refs: want [], got %v", refs2)
 	}
 }
+
+func TestGetProjectConfigDetails_QueueNotice(t *testing.T) {
+	configPath := writeConfigFixture(t, strings.Replace(feishuConfigFixture, "name = \"alpha\"", "name = \"alpha\"\nqueue_notice = false", 1))
+	patchConfigPath(t, configPath)
+	details := GetProjectConfigDetails("alpha")
+	if details == nil || details["queue_notice"] != false {
+		t.Fatalf("queue_notice = %v, want false", details["queue_notice"])
+	}
+}

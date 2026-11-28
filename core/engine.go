@@ -366,6 +366,7 @@ type Engine struct {
 	tts                   *TTSCfg
 	display               DisplayCfg
 	injectSender          bool
+	queueNoticeDisabled   atomic.Bool // suppress MsgMessageQueued; zero keeps the default enabled
 	attachmentSendEnabled bool
 	startedAt             time.Time
 
@@ -1102,6 +1103,14 @@ func (e *Engine) SetSkipGit(skipGit bool) {
 // accordingly (e.g. personal task views, role-based access control).
 func (e *Engine) SetInjectSender(v bool) {
 	e.injectSender = v
+}
+
+// SetQueueNotice controls whether a message queued behind the running turn
+// gets the "will process after the current task" reply (default true). Off,
+// the message waits silently and is answered in order; a full queue is still
+// reported, since that message is not kept.
+func (e *Engine) SetQueueNotice(enabled bool) {
+	e.queueNoticeDisabled.Store(!enabled)
 }
 
 // SetAttachmentSendEnabled controls whether side-channel image/file delivery is allowed.
@@ -3659,7 +3668,9 @@ func (e *Engine) queueMessageForBusySession(p Platform, msg *Message, interactiv
 		"user", msg.UserName,
 		"queue_depth", queueDepth,
 	)
-	e.reply(p, msg.ReplyCtx, e.i18n.T(MsgMessageQueued))
+	if !e.queueNoticeDisabled.Load() {
+		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgMessageQueued))
+	}
 	return true
 }
 
