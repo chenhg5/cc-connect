@@ -3121,6 +3121,9 @@ func (e *Engine) handleMessage(p Platform, msg *Message) {
 		UserID:     msg.UserID,
 		UserName:   msg.UserName,
 		Content:    msg.Content,
+		// Not yet merged into Content (below): a reply that only
+		// mentions the bot carries its whole request here.
+		ExtraContent: msg.ExtraContent,
 	})
 
 	// Voice message: transcribe to text first
