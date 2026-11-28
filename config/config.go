@@ -84,7 +84,12 @@ var configMu sync.Mutex
 var ConfigPath string
 
 type Config struct {
-	DataDir        string `toml:"data_dir"` // session store directory, default ~/.cc-connect
+	DataDir string `toml:"data_dir"` // session store directory, default ~/.cc-connect
+	// Optional TCP listen address for the internal API server (e.g. "127.0.0.1:9375").
+	// Default = unix socket <data_dir>/run/api.sock. TCP is the reachable transport on
+	// Windows, where the AF_UNIX socket cannot be dialed by non-Go clients (libuv
+	// expects named pipes). Bind loopback only — the socket API has no auth layer.
+	APIAddr        string `toml:"api_addr"`
 	AttachmentSend string `toml:"attachment_send"`
 	// Quiet is legacy: when true and [display] does not set thinking_messages / tool_messages,
 	// engines behave as if those flags were false. Per-project quiet overrides when set.

@@ -24,6 +24,7 @@ const DefaultMaxAttachmentSize int64 = 50 << 20
 // to send messages to active sessions.
 type APIServer struct {
 	socketPath string
+	tcpAddr    string
 	listener   net.Listener
 	server     *http.Server
 	mux        *http.ServeMux
@@ -62,28 +63,42 @@ type SendRequest struct {
 	AtAll      bool              `json:"at_all,omitempty"`
 }
 
-// NewAPIServer creates an API server on a Unix socket.
-func NewAPIServer(dataDir string) (*APIServer, error) {
+// NewAPIServer creates the API server. By default it listens on the Unix socket
+// <dataDir>/run/api.sock. When apiAddr is set (config api_addr, e.g.
+// "127.0.0.1:9375") it listens on TCP instead — TCP is the transport reachable by
+// non-Go clients on Windows (libuv pipe dials named pipes, not AF_UNIX sockets).
+func NewAPIServer(dataDir, apiAddr string) (*APIServer, error) {
 	sockDir := filepath.Join(dataDir, "run")
 	if err := os.MkdirAll(sockDir, 0o755); err != nil {
 		return nil, fmt.Errorf("create run dir: %w", err)
 	}
 	sockPath := filepath.Join(sockDir, "api.sock")
 
-	// Remove stale socket
-	os.Remove(sockPath)
+	var listener net.Listener
+	if apiAddr != "" {
+		l, err := net.Listen("tcp", apiAddr)
+		if err != nil {
+			return nil, fmt.Errorf("listen tcp api: %w", err)
+		}
+		listener = l
+	} else {
+		// Remove stale socket
+		os.Remove(sockPath)
 
-	listener, err := net.Listen("unix", sockPath)
-	if err != nil {
-		return nil, fmt.Errorf("listen unix socket: %w", err)
-	}
-	if err := os.Chmod(sockPath, 0o600); err != nil {
-		_ = listener.Close()
-		return nil, fmt.Errorf("chmod socket: %w", err)
+		l, err := net.Listen("unix", sockPath)
+		if err != nil {
+			return nil, fmt.Errorf("listen unix socket: %w", err)
+		}
+		if err := os.Chmod(sockPath, 0o600); err != nil {
+			_ = l.Close()
+			return nil, fmt.Errorf("chmod socket: %w", err)
+		}
+		listener = l
 	}
 
 	s := &APIServer{
 		socketPath:         sockPath,
+		tcpAddr:            apiAddr,
 		listener:           listener,
 		mux:                http.NewServeMux(),
 		engines:            make(map[string]*Engine),
@@ -178,7 +193,11 @@ func (s *APIServer) Start() {
 			slog.Error("api server error", "error", err)
 		}
 	}()
-	slog.Info("api server started", "socket", s.socketPath)
+	if s.tcpAddr != "" {
+		slog.Info("api server started", "tcp", s.tcpAddr)
+	} else {
+		slog.Info("api server started", "socket", s.socketPath)
+	}
 }
 
 func (s *APIServer) Stop() {
