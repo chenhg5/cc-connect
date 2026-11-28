@@ -58,7 +58,7 @@ func TestRichCardPermissionContinuationOpensNewCard(t *testing.T) {
 		pending := state.pending
 		state.mu.Unlock()
 		if pending != nil {
-			close(pending.Resolved)
+			pending.resolve()
 			break
 		}
 		select {
@@ -117,7 +117,7 @@ func TestRichCardPermissionAtTurnEndDoesNotSendEmptyCard(t *testing.T) {
 		pending := state.pending
 		state.mu.Unlock()
 		if pending != nil {
-			close(pending.Resolved)
+			pending.resolve()
 			break
 		}
 		select {
