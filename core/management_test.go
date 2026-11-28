@@ -334,6 +334,63 @@ func TestMgmt_StatusReportsBridgeFailureAndDisabled(t *testing.T) {
 	}
 }
 
+func TestMgmt_StatusReportsAPIServerUnavailable(t *testing.T) {
+	mgmt, ts, _ := testManagementServer(t, "tok")
+	readStatus := func() map[string]json.RawMessage {
+		t.Helper()
+		r := mgmtGet(t, ts.URL+"/api/v1/status", "tok")
+		if !r.OK {
+			t.Fatalf("status failed: %s", r.Error)
+		}
+		var data map[string]json.RawMessage
+		if err := json.Unmarshal(r.Data, &data); err != nil {
+			t.Fatal(err)
+		}
+		return data
+	}
+	readAPIServer := func() map[string]any {
+		t.Helper()
+		raw, ok := readStatus()["api_server"]
+		if !ok {
+			t.Fatal("status omitted api_server after it was reported")
+		}
+		var apiServer map[string]any
+		if err := json.Unmarshal(raw, &apiServer); err != nil {
+			t.Fatal(err)
+		}
+		return apiServer
+	}
+	if _, ok := readStatus()["api_server"]; ok {
+		t.Fatal("status reported api_server before startup was recorded")
+	}
+
+	dir := t.TempDir()
+	owner, err := NewAPIServer(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	owner.Start()
+	t.Cleanup(owner.Stop)
+	mgmt.SetAPIServerStatus(nil)
+	if got := readAPIServer(); got["listening"] != true || got["last_error"] != "" {
+		t.Fatalf("expected listening API server, got %+v", got)
+	}
+
+	second, err := NewAPIServer(dir)
+	if err == nil {
+		second.Stop()
+		t.Fatal("expected a second API server on the same data dir to fail")
+	}
+	mgmt.SetAPIServerStatus(err)
+	got := readAPIServer()
+	if got["listening"] != false {
+		t.Fatalf("expected API server not listening, got %+v", got)
+	}
+	if msg, _ := got["last_error"].(string); !strings.Contains(msg, owner.SocketPath()) {
+		t.Fatalf("last_error should name the contended socket %s, got %+v", owner.SocketPath(), got)
+	}
+}
+
 func TestMgmt_Projects(t *testing.T) {
 	_, ts, _ := testManagementServer(t, "tok")
 

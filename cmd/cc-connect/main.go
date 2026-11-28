@@ -1300,8 +1300,11 @@ func main() {
 
 	// Start internal API server for CLI send
 	apiSrv, err := core.NewAPIServer(cfg.DataDir)
+	if mgmtSrv != nil {
+		mgmtSrv.SetAPIServerStatus(err)
+	}
 	if err != nil {
-		slog.Warn("api server unavailable", "error", err)
+		slog.Warn("api server unavailable: cc-connect send, cron and relay commands cannot reach this instance", "error", err)
 	} else {
 		globalAPIServer = apiSrv
 		apiSrv.SetMaxAttachmentSize(resolveMaxAttachmentSize(cfg))
