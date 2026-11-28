@@ -49,6 +49,9 @@ type claudeSession struct {
 	// carried a model field yet; callers should fall back to the Agent's
 	// configured model.
 	activeModel atomic.Value // stores string
+
+	sidechain *sidechainMeter
+	dataDir   string
 	// lastModelSwitch remembers the last model_refusal_fallback that was
 	// reported, so a fallback the CLI announces twice (provisional, then final)
 	// reaches the user once.
@@ -559,6 +562,8 @@ func newClaudeSession(ctx context.Context, workDir, cliBin string, cliExtraArgs 
 	}
 
 	cs := &claudeSession{
+		sidechain:            newSidechainMeter(),
+		dataDir:              ccDataDir,
 		cmd:                  cmd,
 		stdin:                stdin,
 		events:               make(chan core.Event, 64),
@@ -577,6 +582,10 @@ func newClaudeSession(ctx context.Context, workDir, cliBin string, cliExtraArgs 
 	}
 	cs.setPermissionMode(mode)
 	cs.sessionID.Store(sessionID)
+	if sessionID != "" && sessionID != core.ContinueSession && !cs.sidechain.persistTo(sidechainStatePath(ccDataDir, sessionID)) {
+		cs.sidechain.baseline(subagentsDir(cs.transcriptPath()))
+	}
+
 	cs.alive.Store(true)
 
 	go cs.readLoop(stdout, &stderrBuf)
@@ -1404,6 +1413,11 @@ func (cs *claudeSession) handleResult(raw map[string]any) {
 	}
 	cs.usageMu.Unlock()
 
+	var sidechain *core.SidechainUsage
+	if !isCompaction {
+		cs.sidechain.persistTo(sidechainStatePath(cs.dataDir, cs.CurrentSessionID()))
+		sidechain = cs.sidechain.collect(subagentsDir(cs.transcriptPath()))
+	}
 	evt := core.Event{
 		Type:                     core.EventResult,
 		Content:                  content,
@@ -1413,6 +1427,7 @@ func (cs *claudeSession) handleResult(raw map[string]any) {
 		OutputTokens:             outputTokens,
 		CacheCreationInputTokens: cacheCreationTokens,
 		CacheReadInputTokens:     cacheReadTokens,
+		Sidechain:                sidechain,
 	}
 	select {
 	case cs.events <- evt:

@@ -6685,8 +6685,8 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			if !event.Done {
 				slog.Debug("EventResult: non-terminal result event, continuing event loop",
 					"session", session.ID,
-					"input_tokens", event.InputTokens,
-					"output_tokens", event.OutputTokens,
+					"input_tokens", event.BillableUsage().InputTokens,
+					"output_tokens", event.BillableUsage().OutputTokens,
 					"metadata", event.Metadata,
 				)
 				continue
@@ -6950,8 +6950,8 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				"tools", toolCount,
 				"response_len", len(fullResponse),
 				"turn_duration", turnDuration,
-				"input_tokens", event.InputTokens,
-				"output_tokens", event.OutputTokens,
+				"input_tokens", event.BillableUsage().InputTokens,
+				"output_tokens", event.BillableUsage().OutputTokens,
 				"silent", isSilent,
 			)
 			// DEBUG: full assistant response for in-depth debugging.
@@ -12282,7 +12282,7 @@ func (e *Engine) cmdProviderAdd(p Platform, msg *Message, switcher ProviderSwitc
 	raw = strings.TrimSpace(raw)
 
 	if strings.HasPrefix(raw, "{") {
-		// JSON format: /provider add {"name":"relay","api_key":"sk-xxx",...}
+		// JSON format: /provider add accepts provider fields such as name and api_key.
 		var jp struct {
 			Name    string            `json:"name"`
 			APIKey  string            `json:"api_key"`

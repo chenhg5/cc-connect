@@ -24,6 +24,8 @@ import (
 // codexSession manages a multi-turn Codex conversation.
 // First Send() uses `codex exec`, subsequent ones use `codex exec resume <threadID>`.
 type codexSession struct {
+	turnTokenStart *codexTokenUsage
+	sidechain      codexSidechainMeter
 	workDir        string
 	model          string
 	effort         string
@@ -173,6 +175,7 @@ func (cs *codexSession) Send(prompt string, messageID string, images []core.Imag
 	}
 	cmd.Stdin = strings.NewReader(prompt)
 
+	cs.beginBillingUsage()
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
 		return fmt.Errorf("codexSession: stdout pipe: %w", err)
@@ -449,7 +452,11 @@ func (cs *codexSession) handleEvent(raw map[string]any) {
 	switch eventType {
 	case "thread.started":
 		if tid, ok := raw["thread_id"].(string); ok {
+			prevTID := cs.CurrentSessionID()
 			cs.threadID.Store(tid)
+			if root, err := resolveCodexHome(cs.extraEnv); err == nil {
+				cs.sidechain.begin(root, tid, prevTID == tid)
+			}
 			cs.contextMu.Lock()
 			cs.sessionFile = ""
 			cs.contextUsage = nil
@@ -481,6 +488,7 @@ func (cs *codexSession) handleEvent(raw map[string]any) {
 		cs.refreshContextUsageFromRollout()
 		cs.flushPendingAsText()
 		evt := core.Event{Type: core.EventResult, SessionID: cs.CurrentSessionID(), Done: true}
+		cs.finishBillingUsage(&evt, raw)
 		select {
 		case cs.events <- evt:
 		case <-cs.ctx.Done():
@@ -498,6 +506,7 @@ func (cs *codexSession) handleEvent(raw map[string]any) {
 		}
 		slog.Warn("codexSession: turn failed", "error", errMsg)
 		evt := core.Event{Type: core.EventError, Error: fmt.Errorf("%s", errMsg)}
+		cs.finishBillingUsage(&evt, raw)
 		select {
 		case cs.events <- evt:
 		case <-cs.ctx.Done():
