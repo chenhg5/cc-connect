@@ -378,3 +378,33 @@ func TestApplySessionFilter_NonMultiWorkspaceUnchanged(t *testing.T) {
 		t.Fatal("engine should not be in multi-workspace mode")
 	}
 }
+
+func TestApplySessionFilter_BackgroundAndTopicIsolation(t *testing.T) {
+	for _, hide := range []bool{true, false} {
+		for _, external := range []bool{true, false} {
+			e := NewEngine("test", &stubAgent{}, nil, "", LangEnglish)
+			e.multiWorkspace = true
+			e.SetHideSchedulerSessions(hide)
+			e.SetFilterExternalSessions(external)
+			sm := e.sessions
+			sm.GetOrCreateActive("topic-a").SetAgentSessionID("own", "test")
+			sm.GetOrCreateActive("topic-b").SetAgentSessionID("other", "test")
+			bg := sm.NewBackgroundSession("topic-a", "cron")
+			bg.SetAgentSessionID("bg-old", "test")
+			bg.SetAgentSessionID("bg-new", "test")
+			sm.Save()
+			all := []AgentSessionInfo{{ID: "own"}, {ID: "other"}, {ID: "bg-old"}, {ID: "bg-new"}, {ID: "external"}}
+			got := e.applySessionFilter(all, sm, "topic-a")
+			seen := make(map[string]bool)
+			for _, s := range got {
+				seen[s.ID] = true
+			}
+			if !seen["own"] || seen["other"] || seen["external"] == external {
+				t.Fatalf("hide=%v filterExternal=%v: incorrect ownership filtering: %v", hide, external, got)
+			}
+			if seen["bg-old"] == hide || seen["bg-new"] == hide {
+				t.Fatalf("hide=%v: incorrect scheduler filtering: %v", hide, got)
+			}
+		}
+	}
+}
