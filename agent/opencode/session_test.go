@@ -500,3 +500,47 @@ func TestHandleToolUseErrorNoMessageNoText(t *testing.T) {
 
 // verify Agent implements core.Agent
 var _ core.Agent = (*Agent)(nil)
+
+// TestStepBufferedFinalAnswer verifies that an intermediate step's narration is
+// forwarded as EventText while the final step's text is delivered only via
+// EventResult.Content, so the final answer never accumulates the per-step
+// narration.
+func TestStepBufferedFinalAnswer(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	s := &opencodeSession{events: make(chan core.Event, 16), ctx: ctx}
+
+	text := func(v string) map[string]any {
+		return map[string]any{"part": map[string]any{"text": v}}
+	}
+	finish := func(reason string) map[string]any {
+		return map[string]any{"part": map[string]any{"reason": reason}}
+	}
+
+	// Step 1: narration, ends with tool-calls.
+	s.handleStepStart(map[string]any{})
+	s.handleText(text("let me look around"))
+	s.handleStepFinish(finish("tool-calls"))
+
+	// Step 2: the real answer, ends with stop.
+	s.handleStepStart(map[string]any{})
+	s.handleText(text("here is the answer"))
+	s.handleStepFinish(finish("stop"))
+
+	var events []core.Event
+	for len(s.events) > 0 {
+		events = append(events, <-s.events)
+	}
+	if len(events) != 2 {
+		t.Fatalf("events = %d, want 2 (narration text + final result): %+v", len(events), events)
+	}
+	if events[0].Type != core.EventText || events[0].Content != "let me look around" {
+		t.Fatalf("event[0] = %+v, want narration EventText", events[0])
+	}
+	if events[1].Type != core.EventResult {
+		t.Fatalf("event[1] = %+v, want EventResult", events[1])
+	}
+	if events[1].Content != "here is the answer" {
+		t.Fatalf("result content = %q, want only the final answer", events[1].Content)
+	}
+}
