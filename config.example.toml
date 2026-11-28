@@ -1126,6 +1126,10 @@ mode = "default" # "default" | "acceptEdits" (edit) | "plan" | "auto" | "bypassP
 type = "feishu"
 
 [projects.platforms.options]
+# Optional: forward authorized app:-prefixed card actions to a local HTTP handler.
+# POST fields: action, user_id, chat_id, message_id, value, form_value and option.
+# Return a Feishu card-action response (toast or card) as JSON within 1500 ms.
+# card_action_webhook = "http://127.0.0.1:8090/card-action"
 app_id = "your-feishu-app-id"
 app_secret = "your-feishu-app-secret"
 # domain = "https://open.feishu.cn"  # Optional runtime API/WebSocket base URL override / 可选：运行时 API/WebSocket 域名覆盖
