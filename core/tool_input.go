@@ -3,6 +3,7 @@ package core
 import (
 	"encoding/json"
 	"strings"
+	"time"
 )
 
 // formatToolInput makes structured tool inputs readable in progress messages.
@@ -41,8 +42,11 @@ func formatToolInput(name, raw string) string {
 	return strings.Join(lines, "\n")
 }
 
+// appendToolStep adds the rich-card row of a tool call, stamped with the
+// time it is observed. A TodoWrite call replaces the turn's previous
+// checklist row, which then shows the latest call's time.
 func appendToolStep(steps []ToolStep, name, summary string) []ToolStep {
-	step := ToolStep{Kind: ToolStepKindTool, Name: name, Summary: summary}
+	step := ToolStep{Timestamp: time.Now(), Kind: ToolStepKindTool, Name: name, Summary: summary}
 	if strings.EqualFold(name, "TodoWrite") {
 		for i := len(steps) - 1; i >= 0; i-- {
 			if steps[i].Kind == ToolStepKindTool && strings.EqualFold(steps[i].Name, name) {

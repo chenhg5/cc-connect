@@ -102,19 +102,26 @@ func discordProgressItems(payload *core.ProgressCardPayload) []core.ProgressCard
 }
 
 func buildDiscordProgressLine(item core.ProgressCardEntry, lang string) string {
+	prefix := ""
+	if !item.Timestamp.IsZero() {
+		prefix = item.Timestamp.Format("15:04:05") + " · "
+	}
 	text := compactDiscordProgressText(item.Text)
+	marker := "• "
 	switch item.Kind {
 	case core.ProgressEntryThinking:
-		return "💭 " + trimDiscordRunes(text, maxDiscordProgressLineLen-2)
+		marker = "💭 "
 	case core.ProgressEntryToolUse:
-		return "🔧 " + trimDiscordRunes(buildDiscordToolUseSummary(item, lang), maxDiscordProgressLineLen-2)
+		marker = "🔧 "
+		text = buildDiscordToolUseSummary(item, lang)
 	case core.ProgressEntryToolResult:
-		return "🧾 " + trimDiscordRunes(buildDiscordToolResultSummary(item, lang), maxDiscordProgressLineLen-2)
+		marker = "🧾 "
+		text = buildDiscordToolResultSummary(item, lang)
 	case core.ProgressEntryError:
-		return "❌ " + trimDiscordRunes(text, maxDiscordProgressLineLen-2)
-	default:
-		return "• " + trimDiscordRunes(text, maxDiscordProgressLineLen-2)
+		marker = "❌ "
 	}
+	// Include the timestamp in the existing per-row character budget.
+	return prefix + marker + trimDiscordRunes(text, maxDiscordProgressLineLen-utf8.RuneCountInString(prefix+marker))
 }
 
 func buildDiscordToolUseSummary(item core.ProgressCardEntry, lang string) string {
