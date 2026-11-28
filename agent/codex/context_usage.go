@@ -161,14 +161,18 @@ func getenvFromList(env []string, key string) string {
 }
 
 func findSessionFileInCodexHome(codexHome, sessionID string) string {
-	if strings.TrimSpace(codexHome) == "" || strings.TrimSpace(sessionID) == "" {
+	if strings.TrimSpace(codexHome) == "" || strings.TrimSpace(sessionID) == "" || strings.ContainsAny(sessionID, `/\*?[]`) {
 		return ""
 	}
 
 	pattern := filepath.Join(codexHome, "sessions", "*", "*", "*", "rollout-*"+sessionID+".jsonl")
 	if matches, _ := filepath.Glob(pattern); len(matches) > 0 {
 		sort.Strings(matches)
-		return matches[len(matches)-1]
+		for i := len(matches) - 1; i >= 0; i-- {
+			if strings.HasSuffix(filepath.Base(matches[i]), "-"+sessionID+".jsonl") {
+				return matches[i]
+			}
+		}
 	}
 
 	sessionsDir := filepath.Join(codexHome, "sessions")
@@ -177,7 +181,7 @@ func findSessionFileInCodexHome(codexHome, sessionID string) string {
 		if err != nil || info == nil || info.IsDir() || found != "" {
 			return nil
 		}
-		if strings.Contains(filepath.Base(path), sessionID) {
+		if strings.HasSuffix(filepath.Base(path), "-"+sessionID+".jsonl") {
 			found = path
 		}
 		return nil
