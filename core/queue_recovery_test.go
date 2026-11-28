@@ -353,28 +353,27 @@ func TestExplicitCleanupDropsQueuedMessages(t *testing.T) {
 	}
 }
 
-// TestCmdNewNilSnapshotCleansConcurrentState forces the /new interleaving
-// where it observes no state, then a concurrent message starts a session
-// before /new performs cleanup. The new process must not survive the reset.
+// A startup that holds interactiveMu installs its process before /new can
+// switch sessions. The reset must close that process even if the key was empty
+// when the command arrived.
 func TestCmdNewNilSnapshotCleansConcurrentState(t *testing.T) {
 	e := newTestEngine()
+	defer e.cancel()
+	p := &stubPlatformEngine{n: "test"}
 	key := "test:new-start-race"
-	e.interactiveMu.Lock()
-	observed := e.interactiveStates[key]
-	e.interactiveMu.Unlock()
-	if observed != nil {
-		t.Fatal("expected an empty initial state")
-	}
 	backend := newControllableSession("concurrent-start")
 	started := make(chan struct{})
+	done := make(chan struct{})
+	e.interactiveMu.Lock()
 	go func() {
-		e.interactiveMu.Lock()
-		e.interactiveStates[key] = &interactiveState{agentSession: backend}
-		e.interactiveMu.Unlock()
 		close(started)
+		e.cmdNew(p, &Message{SessionKey: key}, nil)
+		close(done)
 	}()
 	<-started
-	e.cleanupInteractiveStateForNew(key, observed)
+	e.interactiveStates[key] = &interactiveState{agentSession: backend, platform: p}
+	e.interactiveMu.Unlock()
+	<-done
 	select {
 	case <-backend.closed:
 	default:
