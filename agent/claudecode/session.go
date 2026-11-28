@@ -28,6 +28,8 @@ import (
 // In "auto" mode, permission requests are auto-approved internally
 // (avoiding --dangerously-skip-permissions which fails under root).
 type claudeSession struct {
+	quotaReset       int64 // read-loop only; consumed by a terminal result
+	quotaCredits     bool
 	cmd              *exec.Cmd
 	stdin            io.WriteCloser
 	stdinMu          sync.Mutex
@@ -695,6 +697,23 @@ func (cs *claudeSession) handleReadLoopLine(line string) {
 	slog.Debug("claudeSession: event", "type", eventType)
 
 	switch eventType {
+	case "rate_limit_event":
+		// Field names follow the CLI's SDKRateLimitEvent (status, resetsAt,
+		// errorCode). A rejected snapshot alone does not mark the turn as
+		// quota-exhausted; it only annotates a confirmed terminal refusal.
+		info, _ := raw["rate_limit_info"].(map[string]any)
+		status, _ := info["status"].(string)
+		switch status {
+		case "allowed", "allowed_warning":
+			cs.quotaReset = 0
+			cs.quotaCredits = false
+		case "rejected":
+			if reset, ok := info["resetsAt"].(float64); ok && reset > 0 && reset < 1e12 {
+				cs.quotaReset = int64(reset)
+			}
+			code, _ := info["errorCode"].(string)
+			cs.quotaCredits = code == "credits_required"
+		}
 	case "system":
 		cs.handleSystem(raw)
 	case "assistant":
@@ -1413,6 +1432,23 @@ func (cs *claudeSession) handleResult(raw map[string]any) {
 		OutputTokens:             outputTokens,
 		CacheCreationInputTokens: cacheCreationTokens,
 		CacheReadInputTokens:     cacheReadTokens,
+	}
+	if !isCompaction {
+		// Claude Code sets the typed api_error kind "usage_limit_reached" on
+		// the turn's result when the account's usage limit refused the request
+		// (checked against CLI 2.1.308); api_error_status is the HTTP status.
+		// Result text and a bare HTTP 429 are deliberately not enough.
+		isError, _ := raw["is_error"].(bool)
+		code, _ := raw["api_error"].(string)
+		status, hasStatus := raw["api_error_status"].(float64)
+		if isError && code == "usage_limit_reached" && (!hasStatus || status == 429 || status == 402) {
+			evt.Type = core.EventError
+			evt.Content = ""
+			evt.Error = fmt.Errorf("quota exhausted")
+			evt.Metadata = map[string]any{"quota_exhausted": true, "quota_resets_at": cs.quotaReset, "quota_credits_required": cs.quotaCredits}
+		}
+		cs.quotaReset = 0
+		cs.quotaCredits = false
 	}
 	select {
 	case cs.events <- evt:
