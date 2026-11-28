@@ -38,8 +38,6 @@ type opencodeSession struct {
 	wg                sync.WaitGroup
 	alive             atomic.Bool
 	expectingContinue atomic.Bool // true when compaction_continue received, waiting for next step
-	resultSent        atomic.Bool // true when EventResult has been sent for this turn
-	errorSent         atomic.Bool // true when an explicit agent error has been sent for this turn
 	textSent          atomic.Bool // true when this turn streamed visible answer text
 }
 
@@ -80,8 +78,6 @@ func (s *opencodeSession) Send(prompt string, messageID string, images []core.Im
 		return fmt.Errorf("session is closed")
 	}
 
-	s.resultSent.Store(false)
-	s.errorSent.Store(false)
 	s.textSent.Store(false)
 	s.expectingContinue.Store(false)
 
@@ -230,6 +226,7 @@ func (s *opencodeSession) readLoop(cmd *exec.Cmd, stdout io.ReadCloser, stderrBu
 	scanner := bufio.NewScanner(stdout)
 	scanner.Buffer(make([]byte, 0, 64*1024), 10*1024*1024)
 
+	var explicitError error
 	for scanner.Scan() {
 		line := scanner.Text()
 		if line == "" {
@@ -242,6 +239,14 @@ func (s *opencodeSession) readLoop(cmd *exec.Cmd, stdout io.ReadCloser, stderrBu
 			continue
 		}
 
+		// Core treats an error as terminal too. Retain the first CLI error
+		// until the process has exited, just like a normal result.
+		if raw["type"] == "error" {
+			if explicitError == nil {
+				explicitError = fmt.Errorf("%s", extractErrorMessage(raw))
+			}
+			continue
+		}
 		s.handleEvent(raw)
 	}
 
@@ -276,16 +281,16 @@ func (s *opencodeSession) readLoop(cmd *exec.Cmd, stdout io.ReadCloser, stderrBu
 			s.chatID.Store("")
 			slog.Warn("opencodeSession: cleared stale session ID")
 		}
-		if s.errorSent.Load() {
-			return
+		if explicitError == nil {
+			explicitError = fmt.Errorf("opencode exited without a result: %w", waitErr)
+			if stderrMsg != "" {
+				explicitError = fmt.Errorf("opencode exited without a result: %w: %s", waitErr, stderrMsg)
+			}
 		}
-		err := fmt.Errorf("opencode exited without a result: %w", waitErr)
-		if stderrMsg != "" {
-			err = fmt.Errorf("opencode exited without a result: %w: %s", waitErr, stderrMsg)
-		}
-		evt := core.Event{Type: core.EventError, Error: err}
+	}
+	if explicitError != nil {
 		select {
-		case s.events <- evt:
+		case s.events <- core.Event{Type: core.EventError, Error: explicitError}:
 		case <-s.ctx.Done():
 		}
 		return
@@ -300,12 +305,6 @@ func (s *opencodeSession) readLoop(cmd *exec.Cmd, stdout io.ReadCloser, stderrBu
 		return
 	}
 
-	if s.resultSent.Load() {
-		return
-	}
-	if s.errorSent.Load() {
-		return
-	}
 	if s.textSent.Load() {
 		s.sendEventResult()
 		return
@@ -340,8 +339,6 @@ func (s *opencodeSession) handleEvent(raw map[string]any) {
 		s.handleStepStart(raw)
 	case "step_finish":
 		s.handleStepFinish(raw)
-	case "error":
-		s.handleError(raw)
 	default:
 		slog.Debug("opencodeSession: unhandled event", "type", eventType, "raw_fields", len(raw))
 	}
@@ -375,6 +372,9 @@ func (s *opencodeSession) handleText(raw map[string]any) {
 		select {
 		case s.events <- evt:
 			if !synthetic {
+				// A real answer after the marker means the same process
+				// continued, so its exit can now finish the turn.
+				s.expectingContinue.Store(false)
 				s.textSent.Store(true)
 			}
 		case <-s.ctx.Done():
@@ -483,18 +483,6 @@ func (s *opencodeSession) handleReasoning(raw map[string]any) {
 	}
 }
 
-func (s *opencodeSession) handleError(raw map[string]any) {
-	errMsg := extractErrorMessage(raw)
-	slog.Error("opencodeSession: agent error", "error", errMsg)
-	s.errorSent.Store(true)
-	evt := core.Event{Type: core.EventError, Error: fmt.Errorf("%s", errMsg)}
-	select {
-	case s.events <- evt:
-	case <-s.ctx.Done():
-		return
-	}
-}
-
 // extractErrorMessage tries to pull a human-readable message from various
 // OpenCode error JSON shapes.
 func extractErrorMessage(raw map[string]any) string {
@@ -558,17 +546,11 @@ func (s *opencodeSession) handleStepFinish(raw map[string]any) {
 	}
 	slog.Debug("opencodeSession: step finished", "reason", reason, "session_id", s.CurrentSessionID())
 
-	if reason == "stop" && s.textSent.Load() {
-		s.sendEventResult()
-	}
+	// A step is not a process boundary. The read loop emits the result
+	// after Wait so a queued turn cannot overlap this CLI process.
 }
 
 func (s *opencodeSession) sendEventResult() {
-	if s.resultSent.Load() {
-		slog.Debug("opencodeSession: EventResult already sent, skipping", "session_id", s.CurrentSessionID())
-		return
-	}
-	s.resultSent.Store(true)
 	sid := s.CurrentSessionID()
 	evt := core.Event{Type: core.EventResult, SessionID: sid, Done: true}
 	select {
@@ -590,6 +572,15 @@ func (s *opencodeSession) CurrentSessionID() string {
 	v, _ := s.chatID.Load().(string)
 	return v
 }
+
+// SpawnsProcessPerTurn reports that each Send runs its own `opencode run`.
+// A second one on a busy conversation pre-empts the running turn (its tool
+// call loses its work) instead of joining it, so /ps queues instead.
+func (s *opencodeSession) SpawnsProcessPerTurn() bool {
+	return true
+}
+
+var _ core.PerTurnProcessSession = (*opencodeSession)(nil)
 
 func (s *opencodeSession) Alive() bool {
 	return s.alive.Load()

@@ -7,7 +7,6 @@ import (
 	"path/filepath"
 	"reflect"
 	"strings"
-	"sync/atomic"
 	"testing"
 	"time"
 
@@ -295,35 +294,6 @@ func TestHandleStepStart_SessionIDFromPart(t *testing.T) {
 	}
 }
 
-// TestHandleStepStopSendsEventResult verifies that handleStepFinish sends
-// an EventResult when reason="stop", signaling turn completion to the engine.
-func TestHandleStepStopSendsEventResult(t *testing.T) {
-	jsonData := `{"type":"step_finish","part":{"reason":"stop"}}`
-
-	var raw map[string]any
-	if err := json.Unmarshal([]byte(jsonData), &raw); err != nil {
-		t.Fatalf("unmarshal: %v", err)
-	}
-
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	s := &opencodeSession{events: make(chan core.Event, 1), ctx: ctx}
-	s.textSent.Store(true)
-	s.handleStepFinish(raw)
-
-	select {
-	case evt := <-s.events:
-		if evt.Type != core.EventResult {
-			t.Errorf("event type = %q, want EventResult", evt.Type)
-		}
-		if !evt.Done {
-			t.Errorf("event.Done = false, want true")
-		}
-	default:
-		t.Error("expected EventResult to be sent when reason=stop")
-	}
-}
-
 // TestHandleStepToolCallsNoEventResult verifies that handleStepFinish does NOT
 // send EventResult when reason="tool-calls", allowing the agent to continue
 // with subsequent tool execution steps.
@@ -344,42 +314,6 @@ func TestHandleStepToolCallsNoEventResult(t *testing.T) {
 	case evt := <-s.events:
 		t.Errorf("unexpected event sent when reason=tool-calls: %v", evt)
 	default:
-	}
-}
-
-// TestHandleStepDuplicateEventResultPrevented verifies that calling
-// handleStepFinish multiple times with reason="stop" only sends one
-// EventResult, preventing duplicate completion signals to the engine.
-func TestHandleStepDuplicateEventResultPrevented(t *testing.T) {
-	jsonData := `{"type":"step_finish","part":{"reason":"stop"}}`
-
-	var raw map[string]any
-	if err := json.Unmarshal([]byte(jsonData), &raw); err != nil {
-		t.Fatalf("unmarshal: %v", err)
-	}
-
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	s := &opencodeSession{
-		events:     make(chan core.Event, 2),
-		ctx:        ctx,
-		resultSent: atomic.Bool{},
-	}
-	s.textSent.Store(true)
-
-	s.handleStepFinish(raw)
-	s.handleStepFinish(raw)
-
-	count := 0
-	for len(s.events) > 0 {
-		evt := <-s.events
-		if evt.Type == core.EventResult {
-			count++
-		}
-	}
-
-	if count != 1 {
-		t.Errorf("EventResult count = %d, want 1 (duplicate should be prevented)", count)
 	}
 }
 
@@ -500,3 +434,13 @@ func TestHandleToolUseErrorNoMessageNoText(t *testing.T) {
 
 // verify Agent implements core.Agent
 var _ core.Agent = (*Agent)(nil)
+
+// Each Send starts its own `opencode run`, so /ps must queue rather than
+// start a second one on a busy conversation.
+func TestOpencodeSessionSpawnsProcessPerTurn(t *testing.T) {
+	var session core.AgentSession = &opencodeSession{}
+	perTurn, ok := session.(core.PerTurnProcessSession)
+	if !ok || !perTurn.SpawnsProcessPerTurn() {
+		t.Fatal("opencode run session must report one process per turn")
+	}
+}

@@ -566,6 +566,7 @@ const (
 	MsgRateLimited       MsgKey = "rate_limited"
 	MsgPsSent            MsgKey = "ps_sent"
 	MsgPsSendFailed      MsgKey = "ps_send_failed"
+	MsgPsQueued          MsgKey = "ps_queued"
 	MsgPsEmpty           MsgKey = "ps_empty"
 	MsgPsNoSession       MsgKey = "ps_no_session"
 
@@ -3547,6 +3548,13 @@ var messages = map[MsgKey]map[Language]string{
 		LangTraditionalChinese: "❌ P.S. 傳送失敗。",
 		LangJapanese:           "❌ P.S. の送信に失敗しました。",
 		LangSpanish:            "❌ Error al entregar el P.S.",
+	},
+	MsgPsQueued: {
+		LangEnglish:            "📬 This agent cannot take a P.S. in the middle of a task, so it is queued and will be handled after the current task finishes.",
+		LangChinese:            "📬 当前 agent 不支持在任务进行中补充，P.S. 已排队，将在当前任务完成后处理。",
+		LangTraditionalChinese: "📬 目前的 agent 不支援在任務進行中補充，P.S. 已排隊，將在目前任務完成後處理。",
+		LangJapanese:           "📬 このエージェントはタスク実行中の P.S. に対応していないため、キューに入れました。現在のタスク完了後に処理します。",
+		LangSpanish:            "📬 Este agente no admite un P.S. durante una tarea; quedó en cola y se procesará cuando termine la tarea actual.",
 	},
 	MsgPsEmpty: {
 		LangEnglish:            "Usage: `/ps <message>`",
