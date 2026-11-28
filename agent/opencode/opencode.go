@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -526,15 +527,32 @@ func (a *Agent) ListSessions(_ context.Context) ([]core.AgentSessionInfo, error)
 func (a *Agent) Stop() error { return nil }
 
 // DeleteSession implements core.SessionDeleter via `opencode session delete <id>`.
-func (a *Agent) DeleteSession(_ context.Context, sessionID string) error {
+const deleteSessionTimeout = 30 * time.Second
+const deleteSessionWaitDelay = time.Second
+
+func (a *Agent) DeleteSession(ctx context.Context, sessionID string) error {
 	a.mu.RLock()
 	cmd := a.cmd
 	workDir := a.workDir
 	a.mu.RUnlock()
 
-	c := exec.Command(cmd, "session", "delete", sessionID)
+	ctx, cancel := context.WithTimeout(ctx, deleteSessionTimeout)
+	defer cancel()
+	c := exec.CommandContext(ctx, cmd, "session", "delete", sessionID)
 	c.Dir = workDir
-	if out, err := c.CombinedOutput(); err != nil {
+	c.WaitDelay = deleteSessionWaitDelay
+	cleanup := configureDeleteProcess(c)
+	// Never return from a timeout select while deletion is still running:
+	// CombinedOutput waits for the direct process to exit and be reaped.
+	out, err := c.CombinedOutput()
+	cleanupErr := cleanup()
+	if ctx.Err() != nil || errors.Is(err, exec.ErrWaitDelay) || cleanupErr != nil {
+		// The CLI may already have mutated storage. Keep the manager's
+		// reservation quarantined until the outcome can be reconciled.
+		cause := errors.Join(ctx.Err(), err, cleanupErr)
+		return fmt.Errorf("opencode: delete session %s: %w", sessionID, errors.Join(core.ErrSessionDeletionUncertain, cause))
+	}
+	if err != nil {
 		return fmt.Errorf("opencode: delete session %s: %w: %s", sessionID, err, strings.TrimSpace(string(out)))
 	}
 	return nil

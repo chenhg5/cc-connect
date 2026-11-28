@@ -631,7 +631,21 @@ type SkillCatalogProvider interface {
 	ListSkills(ctx context.Context) ([]*Skill, error)
 }
 
+// ErrSessionDeletionUncertain means an adapter could not confirm whether a
+// timed-out deletion stopped or committed. The ID must remain quarantined;
+// callers must not treat this as a safe rollback and reactivate it. Only a
+// later deletion attempt that succeeds lifts the quarantine.
+var ErrSessionDeletionUncertain = errors.New("session deletion outcome is uncertain; retry the deletion to confirm it, or verify the agent process and session before restarting")
+
+// ErrSessionDeletionNotSupported means the agent cannot delete sessions (for
+// example, its CLI does not implement the delete RPC). Callers show the
+// localized "not supported" message instead of the adapter error.
+var ErrSessionDeletionNotSupported = errors.New("agent does not support session deletion")
+
 // SessionDeleter is an optional interface for agents that support deleting sessions.
+// For a nonempty ID, a nil error confirms deletion. Unsupported operations and
+// failures must return an error so callers do not discard state for a session
+// that still exists.
 type SessionDeleter interface {
 	DeleteSession(ctx context.Context, sessionID string) error
 }

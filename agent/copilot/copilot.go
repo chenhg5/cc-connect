@@ -439,8 +439,8 @@ func (a *Agent) WorkspaceAgentOptions() map[string]any {
 func (a *Agent) Stop() error { return nil }
 
 // DeleteSession implements core.SessionDeleter by calling session.delete
-// via a short-lived probe process. Returns nil gracefully if the binary is
-// missing or the RPC is unsupported.
+// via a short-lived probe process. Only a confirmed successful deletion returns
+// nil for a nonempty ID, so callers can safely remove their local session state.
 func (a *Agent) DeleteSession(ctx context.Context, sessionID string) error {
 	if sessionID == "" {
 		return nil
@@ -451,7 +451,7 @@ func (a *Agent) DeleteSession(ctx context.Context, sessionID string) error {
 	a.mu.RUnlock()
 
 	if _, err := exec.LookPath(snapshot.cmd); err != nil {
-		return nil
+		return fmt.Errorf("copilot: delete session: find CLI: %w", err)
 	}
 
 	probeCtx, cancel := context.WithTimeout(ctx, listSessionsProbeTimeout)
@@ -459,34 +459,35 @@ func (a *Agent) DeleteSession(ctx context.Context, sessionID string) error {
 
 	probe, err := newProbeSession(probeCtx, snapshot)
 	if err != nil {
-		slog.Debug("copilot: DeleteSession probe spawn failed", "error", err)
-		return nil
+		return fmt.Errorf("copilot: delete session: start probe: %w", err)
 	}
 	defer probe.close()
 
 	pingResp, err := probe.call(probeCtx, "ping", nil)
-	if err != nil || pingResp.Error != nil {
-		slog.Debug("copilot: DeleteSession ping failed", "error", err)
-		return nil
+	if err != nil {
+		return fmt.Errorf("copilot: delete session: ping: %w", err)
+	}
+	if pingResp.Error != nil {
+		return fmt.Errorf("copilot: delete session: ping: %s", pingResp.Error.Message)
 	}
 
 	delResp, err := probe.call(probeCtx, "session.delete", map[string]any{"sessionId": sessionID})
 	if err != nil {
-		return nil
+		return fmt.Errorf("copilot: session.delete: %w", err)
 	}
 
 	if delResp.Error != nil {
-		// method-not-found or invalid-request means unsupported
-		if delResp.Error.Code == -32601 || delResp.Error.Code == -32600 {
-			return nil
+		if delResp.Error.Code == jsonRPCMethodNotFound {
+			// An older CLI without session.delete: still an error, so core keeps
+			// local state, but users get the localized "not supported" reply.
+			return fmt.Errorf("copilot: session.delete: %w", core.ErrSessionDeletionNotSupported)
 		}
 		return fmt.Errorf("copilot: session.delete: %s", delResp.Error.Message)
 	}
 
 	var result copilotDeleteSessionResponse
 	if err := json.Unmarshal(delResp.Result, &result); err != nil {
-		// Ignore parse errors - treat as success
-		return nil
+		return fmt.Errorf("copilot: session.delete: decode response: %w", err)
 	}
 	if !result.Success {
 		if result.Error != nil {

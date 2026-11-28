@@ -1505,31 +1505,106 @@ func TestCUJ_B5_CurrentShowsActiveInfo(t *testing.T) {
 
 // CUJ-B7 · /delete <name> removes the session AND it disappears from /list.
 func TestCUJ_B7_DeleteRemovesFromList(t *testing.T) {
-	env := newCUJEnv(t)
-	key := "test:b7"
-	env.userSends("b7", "first")
-	env.waitFor("turn1", 2*time.Second, func() bool { return len(env.plat.getSent()) >= 1 })
+	t.Run("LocalSessionCount", func(t *testing.T) {
+		env := newCUJEnv(t)
+		key := "test:b7"
+		env.userSends("b7", "first")
+		env.waitFor("turn1", 2*time.Second, func() bool { return len(env.plat.getSent()) >= 1 })
 
-	s1 := env.activeSession(key)
-	agentID := s1.GetAgentSessionID()
-	if agentID == "" {
-		t.Skip("agent session ID not set yet; cmdDelete needs a target ID")
-	}
-	env.engine.sessions.SetSessionName(agentID, "to-be-deleted")
+		s1 := env.activeSession(key)
+		agentID := s1.GetAgentSessionID()
+		if agentID == "" {
+			t.Skip("agent session ID not set yet; cmdDelete needs a target ID")
+		}
+		env.engine.sessions.SetSessionName(agentID, "to-be-deleted")
 
-	beforeCount := len(env.engine.sessions.ListSessions(key))
+		beforeCount := len(env.engine.sessions.ListSessions(key))
 
-	env.plat.clearSent()
-	env.userSends("b7", "/delete to-be-deleted")
-	env.waitFor("delete reply", 2*time.Second, func() bool { return len(env.plat.getSent()) >= 1 })
+		env.plat.clearSent()
+		env.userSends("b7", "/delete to-be-deleted")
+		env.waitFor("delete reply", 2*time.Second, func() bool { return len(env.plat.getSent()) >= 1 })
 
-	afterCount := len(env.engine.sessions.ListSessions(key))
-	// /delete is platform-dependent; some implementations target agent
-	// sessions, others target SessionManager sessions. We assert at minimum
-	// that the user got user-visible feedback and the count did not GROW.
-	if afterCount > beforeCount {
-		t.Fatalf("after /delete, session count went UP: was %d, now %d", beforeCount, afterCount)
-	}
+		afterCount := len(env.engine.sessions.ListSessions(key))
+		// /delete is platform-dependent; some implementations target agent
+		// sessions, others target SessionManager sessions. We assert at minimum
+		// that the user got user-visible feedback and the count did not GROW.
+		if afterCount > beforeCount {
+			t.Fatalf("after /delete, session count went UP: was %d, now %d", beforeCount, afterCount)
+		}
+	})
+
+	t.Run("ConcurrentSwitchCannotResumeDeletedSession", func(t *testing.T) {
+		p := &stubPlatformEngine{n: "test"}
+		d := &blockingSessionDeleter{entered: make(chan struct{}), release: make(chan struct{})}
+		agent := &blockingDeleteListAgent{
+			stubListAgent:          stubListAgent{sessions: []AgentSessionInfo{{ID: "target", Summary: "Target"}}},
+			blockingSessionDeleter: d,
+		}
+		e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+		var releaseOnce sync.Once
+		release := func() { releaseOnce.Do(func() { close(d.release) }) }
+		t.Cleanup(release)
+		send := func(user, command string) {
+			e.ReceiveMessage(p, &Message{
+				SessionKey: "test:" + user, Platform: p.Name(), UserID: user,
+				Content: command, ReplyCtx: user,
+			})
+		}
+		waitForReply := func(want string) {
+			t.Helper()
+			deadline := time.After(2 * time.Second)
+			ticker := time.NewTicker(5 * time.Millisecond)
+			defer ticker.Stop()
+			for {
+				for _, reply := range p.getSent() {
+					if strings.Contains(reply, want) {
+						return
+					}
+				}
+				select {
+				case <-ticker.C:
+				case <-deadline:
+					t.Fatalf("waiting for %q; visible replies: %v", want, p.getSent())
+				}
+			}
+		}
+
+		// User actions 1 and 2: select the target, then leave it for /new.
+		send("other", "/switch target")
+		waitForReply(e.i18n.Tf(MsgSwitchSuccess, "Target", "target", 0))
+		p.clearSent()
+		send("other", "/new")
+		waitForReply(e.i18n.T(MsgNewSessionCreated))
+		p.clearSent()
+
+		// User action 3: another chat deletes it, blocked after the active check.
+		go send("caller", "/delete target")
+		select {
+		case <-d.entered:
+		case <-time.After(2 * time.Second):
+			t.Fatal("delete did not reach the agent")
+		}
+
+		// User action 4: switch from a list obtained before deletion finished.
+		switchDone := make(chan struct{})
+		go func() {
+			send("other", "/switch target")
+			close(switchDone)
+		}()
+		select {
+		case <-switchDone:
+			t.Fatal("switch completed while deletion was in progress")
+		case <-time.After(50 * time.Millisecond):
+		}
+		release()
+		waitForReply(e.i18n.Tf(MsgDeleteSuccess, "Target"))
+		waitForReply(e.i18n.Tf(MsgSwitchNoMatch, "target"))
+		for _, reply := range p.getSent() {
+			if strings.Contains(reply, e.i18n.Tf(MsgSwitchSuccess, "Target", "target", 0)) {
+				t.Fatalf("user was told a deleted session was selected: %q", reply)
+			}
+		}
+	})
 }
 
 // CUJ-B8 · /history outputs the conversation history to the user.

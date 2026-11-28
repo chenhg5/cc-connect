@@ -2,8 +2,10 @@ package copilot
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -93,8 +95,8 @@ func TestAgent_PermissionModes(t *testing.T) {
 func TestAgent_DeleteSession(t *testing.T) {
 	a := &Agent{}
 	err := a.DeleteSession(context.Background(), "some-session-id")
-	if err != nil {
-		t.Fatalf("DeleteSession() = %v, want nil", err)
+	if err == nil {
+		t.Fatal("DeleteSession without a CLI reported success")
 	}
 }
 
@@ -380,11 +382,11 @@ func TestAgent_ListSessions_NoBinary(t *testing.T) {
 	}
 }
 
-// TestAgent_DeleteSession_NoBinary verifies graceful nil return when binary is missing.
+// TestAgent_DeleteSession_NoBinary must not report deletion when the CLI is missing.
 func TestAgent_DeleteSession_NoBinary(t *testing.T) {
 	a := &Agent{cmd: "copilot-nonexistent-xyz", workDir: "."}
-	if err := a.DeleteSession(context.Background(), "some-session-id"); err != nil {
-		t.Fatalf("DeleteSession with missing binary returned error: %v", err)
+	if err := a.DeleteSession(context.Background(), "some-session-id"); err == nil {
+		t.Fatal("DeleteSession with missing binary reported success")
 	}
 }
 
@@ -452,6 +454,82 @@ func TestAgent_DeleteSession_RPC(t *testing.T) {
 
 	if err := a.DeleteSession(ctx, "sess-001"); err != nil {
 		t.Fatalf("DeleteSession returned error: %v", err)
+	}
+}
+
+// Failed or unsupported deletion must remain an error: core keeps local state
+// and allows a later switch when the adapter cannot confirm deletion.
+func TestAgent_DeleteSession_FailuresNeverReportSuccess(t *testing.T) {
+	bin, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		name string
+		want string
+	}{
+		{"ping_error", "ping rejected"},
+		{"unsupported", "does not support session deletion"},
+		{"invalid_request", "invalid request"},
+		{"delete_error", "delete rejected"},
+		{"malformed_result", "decode response"},
+		{"unsuccessful_result", "permission denied"},
+		{"missing_success", "unknown error"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("CC_MOCK_COPILOT_MODE", "delete_session_failure")
+			t.Setenv("CC_MOCK_COPILOT_DELETE_FAILURE", tc.name)
+			a := &Agent{cmd: bin, workDir: "."}
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			err := a.DeleteSession(ctx, "sess-001")
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("DeleteSession() = %v, want error containing %q", err, tc.want)
+			}
+			if got, want := errors.Is(err, core.ErrSessionDeletionNotSupported), tc.name == "unsupported"; got != want {
+				t.Fatalf("errors.Is(%v, ErrSessionDeletionNotSupported) = %v, want %v", err, got, want)
+			}
+		})
+	}
+}
+
+func TestAgent_DeleteSession_ProbeStartFailure(t *testing.T) {
+	bin, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("CC_MOCK_COPILOT_MODE", "delete_session")
+	a := &Agent{cmd: bin, workDir: filepath.Join(t.TempDir(), "missing")}
+	if err := a.DeleteSession(context.Background(), "sess-001"); err == nil || !strings.Contains(err.Error(), "start probe") {
+		t.Fatalf("DeleteSession() = %v, want probe-start error", err)
+	}
+}
+
+func TestAgent_DeleteSession_PreservesContextErrors(t *testing.T) {
+	bin, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Run("canceled", func(t *testing.T) {
+		t.Setenv("CC_MOCK_COPILOT_MODE", "delete_session")
+		a := &Agent{cmd: bin, workDir: "."}
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+		if err := a.DeleteSession(ctx, "sess-001"); !errors.Is(err, context.Canceled) {
+			t.Fatalf("DeleteSession() = %v, want context cancellation", err)
+		}
+	})
+	for _, phase := range []string{"ping_timeout", "delete_timeout"} {
+		t.Run(phase, func(t *testing.T) {
+			t.Setenv("CC_MOCK_COPILOT_MODE", "delete_session_failure")
+			t.Setenv("CC_MOCK_COPILOT_DELETE_FAILURE", phase)
+			a := &Agent{cmd: bin, workDir: "."}
+			ctx, cancel := context.WithTimeout(context.Background(), 250*time.Millisecond)
+			defer cancel()
+			if err := a.DeleteSession(ctx, "sess-001"); !errors.Is(err, context.DeadlineExceeded) {
+				t.Fatalf("DeleteSession() = %v, want deadline error", err)
+			}
+		})
 	}
 }
 

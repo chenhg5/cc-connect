@@ -8508,14 +8508,14 @@ func (e *Engine) cmdSwitch(p Platform, msg *Message, args []string) {
 		return
 	}
 
-	slog.Info("cmdSwitch: cleaning up old session", "session_key", msg.SessionKey)
-	e.cleanupInteractiveState(interactiveKey)
-	slog.Info("cmdSwitch: cleanup done", "session_key", msg.SessionKey)
 	if localID, local := strings.CutPrefix(matched.ID, localSessionPrefix); local {
 		if _, err := sessions.SwitchSession(msg.SessionKey, localID); err != nil {
 			e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgError, err))
 			return
 		}
+		// Same ordering as the agent-session path below: a failed switch must
+		// not tear down the interaction that is still running in this chat.
+		e.cleanupInteractiveStateAfterSwitch(interactiveKey)
 		e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgSwitchSuccess, matched.Summary, localID, matched.MessageCount))
 		return
 	}
@@ -8527,7 +8527,14 @@ func (e *Engine) cmdSwitch(p Platform, msg *Message, args []string) {
 	// /switch round-trip. When SwitchToAgentSession creates a fresh Session
 	// (no prior match), History is already nil, so preserving is a no-op.
 	switched := sessions.SwitchToAgentSession(msg.SessionKey, matched.ID, agent.Name(), matched.Summary)
-	if switched != nil && switched.HistoryLen() == 0 && matched.MessageCount > 0 {
+	if switched == nil {
+		e.reply(p, msg.ReplyCtx, e.switchFailureText(sessions, matched.ID, query))
+		return
+	}
+	// Resolve the live interaction after the switch commits, not before a
+	// potentially blocking deletion wait. Preserve replacements during Close.
+	e.cleanupInteractiveStateAfterSwitch(interactiveKey)
+	if switched.HistoryLen() == 0 && matched.MessageCount > 0 {
 		if hp, ok := agent.(HistoryProvider); ok {
 			entries, err := hp.GetSessionHistory(e.ctx, matched.ID, 0)
 			if err != nil {
@@ -13853,6 +13860,32 @@ func workspaceFromInteractiveKey(interactiveKey, sessionKey string) string {
 
 // executeCardAction performs the side-effect for act: prefixed actions
 // (e.g. switching model/mode/lang) before the card is re-rendered.
+// cleanupInteractiveStateAfterSwitch snapshots the current state only after
+// activation succeeds, and does not remove a replacement installed during Close.
+func (e *Engine) cleanupInteractiveStateAfterSwitch(key string) {
+	e.interactiveMu.Lock()
+	state := e.interactiveStates[key]
+	e.interactiveMu.Unlock()
+	if state != nil {
+		e.cleanupInteractiveState(key, state)
+	}
+}
+
+func (e *Engine) switchFailureText(sessions *SessionManager, id, query string) string {
+	if err := sessions.AgentSessionDeletionError(id); err != nil {
+		return e.i18n.Tf(MsgError, err)
+	}
+	return e.i18n.Tf(MsgSwitchNoMatch, query)
+}
+
+// Card actions have no direct reply argument. Route a failed switch back to
+// the existing chat without tearing down its running interactive session.
+func (e *Engine) notifyCardSwitchFailure(sessionKey, text string) {
+	if err := e.SendToSession(sessionKey, text); err != nil {
+		slog.Warn("card switch feedback failed", "session_key", sessionKey, "error", err)
+	}
+}
+
 func (e *Engine) executeCardAction(cmd, args, sessionKey string) {
 	interactiveKey := e.interactiveKeyForSessionKey(sessionKey)
 
@@ -14044,21 +14077,26 @@ func (e *Engine) executeCardAction(cmd, args, sessionKey string) {
 		}
 		agent, sessions := e.sessionContextForKey(sessionKey)
 		agentSessions, err := agent.ListSessions(e.ctx)
-		if err != nil || len(agentSessions) == 0 {
+		if err != nil {
+			e.notifyCardSwitchFailure(sessionKey, e.i18n.Tf(MsgError, err))
 			return
 		}
 		agentSessions = e.applySessionFilter(agentSessions, sessions, sessionKey)
 		matched := e.matchSession(agentSessions, sessions, args)
 		if matched == nil {
+			e.notifyCardSwitchFailure(sessionKey, e.i18n.Tf(MsgSwitchNoMatch, args))
 			return
 		}
-		e.cleanupInteractiveState(interactiveKey)
 		// Same constraint as cmdSwitch: switching to a known agent session
 		// returns the existing Session, whose History still reflects the
 		// original conversation. Clearing it makes /status and /history report
 		// zero messages right after a successful card switch. A fresh Session
 		// already has nil History, so leaving it alone is a no-op there.
-		sessions.SwitchToAgentSession(sessionKey, matched.ID, agent.Name(), matched.Summary)
+		if sessions.SwitchToAgentSession(sessionKey, matched.ID, agent.Name(), matched.Summary) == nil {
+			e.notifyCardSwitchFailure(sessionKey, e.switchFailureText(sessions, matched.ID, args))
+			return
+		}
+		e.cleanupInteractiveStateAfterSwitch(interactiveKey)
 
 	case "/dir":
 		fields := strings.Fields(args)
@@ -17295,22 +17333,22 @@ func (e *Engine) deleteSingleSessionReply(msg *Message, deleter SessionDeleter, 
 		return ""
 	}
 
-	// Prevent deleting the currently active session
 	_, sessions := e.sessionContextForKey(msg.SessionKey)
-	activeSession := sessions.GetOrCreateActive(msg.SessionKey)
-	if activeSession.GetAgentSessionID() == matched.ID {
-		return e.i18n.T(MsgDeleteActiveDenied)
-	}
-
 	displayName := e.deleteSessionDisplayName(sessions, matched)
-
-	if err := deleter.DeleteSession(e.ctx, matched.ID); err != nil {
+	err := sessions.DeleteAgentSessionIfInactive(matched.ID, msg.SessionKey, func() error {
+		return deleter.DeleteSession(e.ctx, matched.ID)
+	})
+	switch {
+	case errors.Is(err, ErrAgentSessionActive):
+		return e.i18n.T(MsgDeleteActiveDenied)
+	case errors.Is(err, ErrAgentSessionActiveElsewhere):
+		return e.i18n.Tf(MsgDeleteInUseDenied, displayName)
+	case errors.Is(err, ErrSessionDeletionNotSupported):
+		return e.i18n.T(MsgDeleteNotSupported)
+	case err != nil:
 		return e.i18n.Tf(MsgFailedToDeleteSession, displayName, err)
 	}
 
-	// Keep local session snapshot aligned with agent-side deletion.
-	sessions.DeleteByAgentSessionID(matched.ID)
-	sessions.SetSessionName(matched.ID, "")
 	return fmt.Sprintf(e.i18n.T(MsgDeleteSuccess), displayName)
 }
 

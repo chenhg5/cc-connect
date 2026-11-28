@@ -20,6 +20,9 @@ func TestMain(m *testing.M) {
 	case "delete_session":
 		runMockCopilot(handleDeleteSession)
 		os.Exit(0)
+	case "delete_session_failure":
+		runMockCopilot(handleDeleteSessionFailure)
+		os.Exit(0)
 	default:
 		os.Exit(m.Run())
 	}
@@ -114,5 +117,42 @@ func handleDeleteSession(method string, id json.RawMessage, _ json.RawMessage, w
 		writeResponse(w, id, map[string]any{"success": true})
 	default:
 		writeError(w, id, -32601, fmt.Sprintf("method not found: %s", method))
+	}
+}
+
+func handleDeleteSessionFailure(method string, id json.RawMessage, params json.RawMessage, w *lspWriter) {
+	failure := os.Getenv("CC_MOCK_COPILOT_DELETE_FAILURE")
+	if method == "ping" {
+		switch failure {
+		case "ping_error":
+			writeError(w, id, -32000, "ping rejected")
+		case "ping_timeout":
+			// Leave the request pending until the caller's context expires.
+		default:
+			writeResponse(w, id, map[string]any{"pong": true})
+		}
+		return
+	}
+	if method != "session.delete" {
+		handleDeleteSession(method, id, params, w)
+		return
+	}
+	switch failure {
+	case "unsupported":
+		writeError(w, id, -32601, "method not found")
+	case "invalid_request":
+		writeError(w, id, -32600, "invalid request")
+	case "delete_error":
+		writeError(w, id, -32000, "delete rejected")
+	case "malformed_result":
+		writeResponse(w, id, "not a deletion result")
+	case "unsuccessful_result":
+		writeResponse(w, id, map[string]any{"success": false, "error": "permission denied"})
+	case "missing_success":
+		writeResponse(w, id, map[string]any{})
+	case "delete_timeout":
+		// Leave the request pending until the caller's context expires.
+	default:
+		writeError(w, id, -32600, "unknown mock deletion failure")
 	}
 }
