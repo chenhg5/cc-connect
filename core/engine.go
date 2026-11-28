@@ -494,6 +494,12 @@ type Engine struct {
 	observeSessionKey string // e.g. "slack:C123:U456" — target for forwarding
 	observeCancel     context.CancelFunc
 
+	// Short-lived cache of the agent's native session listing, used by the
+	// management API to resolve display names without a scan per request.
+	mgmtAgentSessionsMu sync.Mutex
+	mgmtAgentSessions   []AgentSessionInfo
+	mgmtAgentSessionsAt time.Time
+
 	// Interactive agent session management
 	interactiveMu     sync.Mutex
 	interactiveStates map[string]*interactiveState // key = sessionKey
@@ -3322,6 +3328,20 @@ func (e *Engine) handleMessage(p Platform, msg *Message) {
 	}
 
 	session := sessions.GetOrCreateActive(msg.SessionKey)
+	if msg.TargetSessionID != "" {
+		targetSession, err := sessions.ResolveSessionForRouting(msg.SessionKey, msg.TargetSessionID)
+		if err != nil {
+			slog.Warn("target session routing failed",
+				"platform", msg.Platform,
+				"session_key", msg.SessionKey,
+				"target_session_id", msg.TargetSessionID,
+				"error", err,
+			)
+			e.reply(p, msg.ReplyCtx, err.Error())
+			return
+		}
+		session = targetSession
+	}
 	chatID := msg.ChatID
 	if chatID == "" {
 		chatID = msg.ChannelID
@@ -14986,6 +15006,13 @@ func (e *Engine) renderDirCard(sessionKey string, page int) (*Card, error) {
 // Navigable sub-cards (for in-place card updates)
 // ──────────────────────────────────────────────────────────────
 
+// compactSessionDisplayName collapses newlines and repeated whitespace in an
+// agent-provided session summary so it fits on one line.
+func compactSessionDisplayName(name string) string {
+	name = strings.ReplaceAll(name, "\n", " ")
+	return strings.Join(strings.Fields(name), " ")
+}
+
 func (e *Engine) currentSessionDisplayName(agent Agent, sessions *SessionManager, agentID string) string {
 	if agentID == "" || agentID == e.i18n.T(MsgSessionNotStarted) {
 		return e.i18n.T(MsgUntitled)
@@ -14998,8 +15025,7 @@ func (e *Engine) currentSessionDisplayName(agent Agent, sessions *SessionManager
 	if err == nil {
 		for _, as := range agentSessions {
 			if as.ID == agentID {
-				displayName = strings.ReplaceAll(as.Summary, "\n", " ")
-				displayName = strings.Join(strings.Fields(displayName), " ")
+				displayName = compactSessionDisplayName(as.Summary)
 				break
 			}
 		}

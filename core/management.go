@@ -603,7 +603,7 @@ func (m *ManagementServer) handleProjects(w http.ResponseWriter, r *http.Request
 			platNames[i] = p.Name()
 		}
 
-		sessCount := len(e.sessions.AllSessions())
+		sessCount := len(managementVisibleSessions(e.sessions.AllSessions()))
 
 		hbEnabled := false
 		if m.heartbeatScheduler != nil {
@@ -709,7 +709,7 @@ func (m *ManagementServer) handleProjectDetail(w http.ResponseWriter, r *http.Re
 			platInfos[i] = entry
 		}
 
-		allSessions := e.sessions.AllSessions()
+		allSessions := managementVisibleSessions(e.sessions.AllSessions())
 		sessCount := len(allSessions)
 
 		e.interactiveMu.Lock()
@@ -1147,6 +1147,140 @@ func validateWorkspacePath(baseDir, target string) (string, error) {
 
 // ── Session endpoints ─────────────────────────────────────────
 
+// managementAgentSessionsTTL bounds how stale the native session listing used
+// for display names may be. Agent-side listing can be a full transcript scan,
+// and the web console hits the session list and detail endpoints together, so
+// the listing is shared across requests for a short window.
+const managementAgentSessionsTTL = 15 * time.Second
+
+// managementAgentSessions returns the agent's native session listing, cached
+// per engine for managementAgentSessionsTTL. The lock is held across the scan
+// so concurrent requests wait for one listing instead of each starting their
+// own. Errors are not cached. Callers must not modify the returned slice.
+func (e *Engine) managementAgentSessions() []AgentSessionInfo {
+	e.mgmtAgentSessionsMu.Lock()
+	defer e.mgmtAgentSessionsMu.Unlock()
+	if !e.mgmtAgentSessionsAt.IsZero() && time.Since(e.mgmtAgentSessionsAt) < managementAgentSessionsTTL {
+		return e.mgmtAgentSessions
+	}
+	agentSessions, err := e.agent.ListSessions(e.ctx)
+	if err != nil {
+		return nil
+	}
+	e.mgmtAgentSessions = agentSessions
+	e.mgmtAgentSessionsAt = time.Now()
+	return agentSessions
+}
+
+func (e *Engine) managementSessionDisplayNames() map[string]string {
+	if e == nil || e.agent == nil || e.sessions == nil {
+		return nil
+	}
+	agentSessions := e.managementAgentSessions()
+	if len(agentSessions) == 0 {
+		return nil
+	}
+	agentSessions = e.applySessionFilter(agentSessions, e.sessions, "")
+	if len(agentSessions) == 0 {
+		return nil
+	}
+	names := make(map[string]string, len(agentSessions))
+	for _, info := range agentSessions {
+		if summary := compactSessionDisplayName(info.Summary); summary != "" {
+			names[info.ID] = summary
+		}
+	}
+	return names
+}
+
+func (e *Engine) managementSessionDisplayName(s *Session, nativeNames map[string]string) string {
+	if e == nil || e.sessions == nil || s == nil {
+		return ""
+	}
+	s.mu.Lock()
+	agentID := s.AgentSessionID
+	pastIDs := append([]string(nil), s.PastAgentSessionIDs...)
+	s.mu.Unlock()
+	if agentID != "" {
+		if name := e.sessions.GetSessionName(agentID); name != "" {
+			return name
+		}
+		if name := nativeNames[agentID]; name != "" {
+			return name
+		}
+	}
+	for _, pastID := range pastIDs {
+		if name := e.sessions.GetSessionName(pastID); name != "" {
+			return name
+		}
+		if name := nativeNames[pastID]; name != "" {
+			return name
+		}
+	}
+	return s.GetName()
+}
+
+func managementVisibleSessions(stored []*Session) []*Session {
+	currentAgentIDs := make(map[string]struct{})
+	latestPastOnly := make(map[string]*Session)
+	for _, s := range stored {
+		if s == nil {
+			continue
+		}
+		s.mu.Lock()
+		agentID := s.AgentSessionID
+		pastIDs := append([]string(nil), s.PastAgentSessionIDs...)
+		updatedAt := s.UpdatedAt
+		s.mu.Unlock()
+		if agentID != "" {
+			currentAgentIDs[agentID] = struct{}{}
+			continue
+		}
+		for _, pastID := range pastIDs {
+			if pastID == "" {
+				continue
+			}
+			if prev := latestPastOnly[pastID]; prev != nil {
+				prevUpdated := prev.GetUpdatedAt()
+				if !updatedAt.After(prevUpdated) {
+					continue
+				}
+			}
+			latestPastOnly[pastID] = s
+		}
+	}
+
+	visible := make([]*Session, 0, len(stored))
+	for _, s := range stored {
+		if s == nil {
+			continue
+		}
+		s.mu.Lock()
+		agentID := s.AgentSessionID
+		pastIDs := append([]string(nil), s.PastAgentSessionIDs...)
+		s.mu.Unlock()
+
+		if agentID == "" && len(pastIDs) > 0 {
+			shadowed := false
+			for _, pastID := range pastIDs {
+				if _, ok := currentAgentIDs[pastID]; ok {
+					shadowed = true
+					break
+				}
+				if latest := latestPastOnly[pastID]; latest != nil && latest != s {
+					shadowed = true
+					break
+				}
+			}
+			if shadowed {
+				continue
+			}
+		}
+		visible = append(visible, s)
+	}
+	return visible
+}
+
 func (m *ManagementServer) handleProjectSessions(w http.ResponseWriter, r *http.Request, projName string, e *Engine, rest string) {
 	// sub-routes like /sessions/switch
 	if rest == "switch" {
@@ -1172,9 +1306,11 @@ func (m *ManagementServer) handleProjectSessions(w http.ResponseWriter, r *http.
 		e.interactiveMu.Unlock()
 
 		idToKey, activeIDs := e.sessions.SessionKeyMap()
-		stored := e.sessions.AllSessions()
+		stored := managementVisibleSessions(e.sessions.AllSessions())
+		nativeNames := e.managementSessionDisplayNames()
 		sessions := make([]map[string]any, 0, len(stored))
 		for _, s := range stored {
+			displayName := e.managementSessionDisplayName(s, nativeNames)
 			s.mu.Lock()
 			histCount := len(s.History)
 			var lastMsg map[string]any
@@ -1192,7 +1328,7 @@ func (m *ManagementServer) handleProjectSessions(w http.ResponseWriter, r *http.
 			}
 			info := map[string]any{
 				"id":               s.ID,
-				"name":             s.Name,
+				"name":             displayName,
 				"session_key":      idToKey[s.ID],
 				"agent_session_id": s.AgentSessionID,
 				"agent_type":       s.AgentType,
@@ -1294,10 +1430,11 @@ func (m *ManagementServer) handleProjectSessionDetail(w http.ResponseWriter, r *
 		_, live := e.interactiveStates[sessionKey]
 		e.interactiveMu.Unlock()
 
+		displayName := e.managementSessionDisplayName(s, e.managementSessionDisplayNames())
 		s.mu.Lock()
 		data := map[string]any{
 			"id":               s.ID,
-			"name":             s.Name,
+			"name":             displayName,
 			"session_key":      sessionKey,
 			"agent_session_id": s.AgentSessionID,
 			"agent_type":       s.AgentType,
@@ -1373,6 +1510,7 @@ func (m *ManagementServer) handleProjectSend(w http.ResponseWriter, r *http.Requ
 	}
 	var body struct {
 		SessionKey string `json:"session_key"`
+		SessionID  string `json:"session_id"`
 		Message    string `json:"message"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
@@ -1382,6 +1520,16 @@ func (m *ManagementServer) handleProjectSend(w http.ResponseWriter, r *http.Requ
 	if body.Message == "" {
 		mgmtError(w, http.StatusBadRequest, "message is required")
 		return
+	}
+	if body.SessionID != "" {
+		if body.SessionKey == "" {
+			mgmtError(w, http.StatusBadRequest, "session_key is required when session_id is provided")
+			return
+		}
+		if _, err := e.sessions.SwitchSessionForRouting(body.SessionKey, body.SessionID); err != nil {
+			mgmtError(w, http.StatusNotFound, err.Error())
+			return
+		}
 	}
 	if err := e.SendToSession(body.SessionKey, body.Message); err != nil {
 		mgmtError(w, http.StatusInternalServerError, err.Error())
