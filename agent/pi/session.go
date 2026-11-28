@@ -74,6 +74,10 @@ type piSession struct {
 	modelsCW    map[string]int // cached from ~/.pi/agent/models.json
 	usageMu     sync.Mutex
 	lastUsage   *core.ContextUsage
+	// turnUsage sums the token usage of every model call Pi made in the
+	// current turn (one per assistant message, retried attempts included);
+	// the turn's EventResult carries it. Guarded by usageMu.
+	turnUsage piTokenUsage
 
 	// pendingErr buffers the most recent assistant errorMessage. Pi
 	// auto-retries transient provider failures (e.g. HTTP 429 rate limits)
@@ -94,12 +98,62 @@ type piSession struct {
 	rpcResultSent    atomic.Bool
 	rpcPromptPending atomic.Bool
 	rpcAgentActive   bool // readLoopRPC alone owns this flag
+	rpcRetryPending  bool // a retry start belongs to the existing token-usage turn
 
 	// Extension UI: maps Pi's extension_ui_request id -> cc-connect RequestID
 	extPendingMu  sync.Mutex
 	extPending    map[string]string // Pi ext_ui_id -> cc-conn RequestID
 	extPendingRev map[string]string // cc-conn RequestID -> Pi ext_ui_id
 	extMethod     map[string]string // cc-conn RequestID -> method ("confirm"|"input"|"select")
+}
+
+// piTokenUsage is the token usage Pi reports on an assistant message. Pi
+// reports input net of cache reads and writes, and output with any
+// reasoning already in it.
+type piTokenUsage struct {
+	input, output, cacheRead, cacheWrite int
+}
+
+func (u piTokenUsage) apply(evt *core.Event) {
+	evt.InputTokens = u.input
+	evt.OutputTokens = u.output
+	evt.CacheReadInputTokens = u.cacheRead
+	evt.CacheCreationInputTokens = u.cacheWrite
+}
+
+// addTurnUsage adds one assistant message's usage to the turn's.
+func (s *piSession) addTurnUsage(msg map[string]any) {
+	usage, _ := msg["usage"].(map[string]any)
+	if usage == nil {
+		return
+	}
+	n := func(key string) int {
+		v, _ := usage[key].(float64)
+		return int(v)
+	}
+	s.usageMu.Lock()
+	s.turnUsage.input += n("input")
+	s.turnUsage.output += n("output")
+	s.turnUsage.cacheRead += n("cacheRead")
+	s.turnUsage.cacheWrite += n("cacheWrite")
+	s.usageMu.Unlock()
+}
+
+func (s *piSession) resetTurnUsage() {
+	s.usageMu.Lock()
+	s.turnUsage = piTokenUsage{}
+	s.usageMu.Unlock()
+}
+
+// resultEvent closes the turn: an EventResult carrying the turn's token
+// usage, which then starts over for the next turn.
+func (s *piSession) resultEvent() core.Event {
+	evt := core.Event{Type: core.EventResult, SessionID: s.CurrentSessionID(), Done: true}
+	s.usageMu.Lock()
+	s.turnUsage.apply(&evt)
+	s.turnUsage = piTokenUsage{}
+	s.usageMu.Unlock()
+	return evt
 }
 
 // stateProbeID is the request id used for the get_state probe that startRPC
@@ -444,8 +498,7 @@ func (s *piSession) sendJSON(prompt string, imageAtFiles []string, filePaths []s
 		case <-s.ctx.Done():
 		}
 	}
-	sid := s.CurrentSessionID()
-	evt := core.Event{Type: core.EventResult, SessionID: sid, Done: true}
+	evt := s.resultEvent()
 	select {
 	case s.events <- evt:
 	case <-s.ctx.Done():
@@ -640,9 +693,11 @@ func (s *piSession) handleEvent(raw map[string]any) {
 			// agent_end cycle. Keep the turn open and wait for the
 			// retry outcome instead of closing the turn on a failure
 			// Pi is about to recover from.
+			s.rpcRetryPending = s.rpc
 			break
 		}
 		s.rpcAgentActive = false
+		s.rpcRetryPending = false
 		if s.pendingErr != "" {
 			// Turn is really over and the last assistant message failed:
 			// surface the deferred error before closing the turn.
@@ -715,6 +770,12 @@ func (s *piSession) handleEvent(raw map[string]any) {
 
 	// Informational — no events produced
 	case "agent_start":
+		if s.rpc && !s.rpcRetryPending {
+			// A new run sometimes starts after an aborted turn with no
+			// terminal event. Its usage must not inherit that turn's counts.
+			s.resetTurnUsage()
+		}
+		s.rpcRetryPending = false
 		s.rpcAgentActive = true
 		s.rpcResultSent.Store(false)
 	case "turn_start", "turn_end", "message_start", "extension_error":
@@ -727,8 +788,10 @@ func (s *piSession) emitRPCCompletion() {
 	if s.rpcResultSent.Swap(true) {
 		return
 	}
+	// The first terminal event accounts for this turn; duplicate markers
+	// must not drain the counter or emit another result.
 	s.rpcPromptPending.Store(false)
-	evt := core.Event{Type: core.EventResult, SessionID: s.CurrentSessionID(), Done: true}
+	evt := s.resultEvent()
 	select {
 	case s.events <- evt:
 	case <-s.ctx.Done():
@@ -1060,6 +1123,7 @@ func (s *piSession) handleMessageEnd(raw map[string]any) {
 		}
 
 	case "assistant":
+		s.addTurnUsage(msg)
 		if errMsg, ok := msg["errorMessage"].(string); ok && errMsg != "" {
 			// Defer surfacing: Pi may auto-retry this turn (announced
 			// via agent_end.willRetry). The buffered error is flushed
