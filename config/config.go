@@ -204,6 +204,13 @@ const (
 	DisplayModeQuiet   = "quiet"   // hide thinking/tool, all text appends to one card
 )
 
+// Default progress card retention quotas per entry category.
+const (
+	DefaultProgressMaxTools    = 10
+	DefaultProgressMaxThinking = 3
+	DefaultProgressMaxUpdates  = 3
+)
+
 // DisplayConfig controls how intermediate messages (thinking, tool output) are shown.
 type DisplayConfig struct {
 	Mode                 *string `toml:"mode"`                   // "full" (default), "compact", or "quiet"
@@ -216,6 +223,9 @@ type DisplayConfig struct {
 	ShowContextIndicator *bool   `toml:"show_context_indicator"` // whether [ctx: ~N%] suffix is shown; default true
 	ReplyFooter          *bool   `toml:"reply_footer"`           // whether Codex-like footer is shown; default true
 	HideAgentFooter      *bool   `toml:"hide_agent_footer"`      // strip agent-emitted model/token footer lines; default false
+	ProgressMaxTools     *int    `toml:"progress_max_tools"`     // max tool entries kept in progress card; default 10
+	ProgressMaxThinking  *int    `toml:"progress_max_thinking"`  // max thinking entries kept in progress card; default 3
+	ProgressMaxUpdates   *int    `toml:"progress_max_updates"`   // max update entries kept in progress card; default 3
 }
 
 // StreamPreviewConfig controls real-time streaming preview in IM.
@@ -1036,6 +1046,51 @@ func EffectiveHistoryMaxLen(cfg *Config, proj *ProjectConfig) int {
 	return 1000
 }
 
+// EffectiveProgressQuotas returns the per-category retention quotas for
+// progress cards. Resolution order per field: project [projects.display] >
+// global [display] > built-in defaults (tools=10, thinking=3, updates=3).
+func EffectiveProgressQuotas(cfg *Config, proj *ProjectConfig) (tools, thinking, updates int) {
+	pickQuota := func(projVal, globalVal *int, dflt int) int {
+		if projVal != nil && *projVal > 0 {
+			return *projVal
+		}
+		if globalVal != nil && *globalVal > 0 {
+			return *globalVal
+		}
+		return dflt
+	}
+	var projDisp *DisplayConfig
+	if proj != nil {
+		projDisp = proj.Display
+	}
+	var globalDisp DisplayConfig
+	if cfg != nil {
+		globalDisp = cfg.Display
+	}
+	getProjInt := func(f func(*DisplayConfig) *int) *int {
+		if projDisp == nil {
+			return nil
+		}
+		return f(projDisp)
+	}
+	tools = pickQuota(
+		getProjInt(func(d *DisplayConfig) *int { return d.ProgressMaxTools }),
+		globalDisp.ProgressMaxTools,
+		DefaultProgressMaxTools,
+	)
+	thinking = pickQuota(
+		getProjInt(func(d *DisplayConfig) *int { return d.ProgressMaxThinking }),
+		globalDisp.ProgressMaxThinking,
+		DefaultProgressMaxThinking,
+	)
+	updates = pickQuota(
+		getProjInt(func(d *DisplayConfig) *int { return d.ProgressMaxUpdates }),
+		globalDisp.ProgressMaxUpdates,
+		DefaultProgressMaxUpdates,
+	)
+	return tools, thinking, updates
+}
+
 // EffectiveShell returns the shell binary, flag, and init command for the project.
 // Resolution: per-project > global > platform default.
 // The flag is auto-detected: "/C" for cmd, "-Command" for powershell/pwsh, "-c" for everything else.
@@ -1194,6 +1249,15 @@ func validateDisplayConfig(prefix string, display *DisplayConfig) error {
 	}
 	if display.HistoryMaxLen != nil && *display.HistoryMaxLen < 0 {
 		return fmt.Errorf("config: %s.history_max_len must be >= 0", prefix)
+	}
+	if display.ProgressMaxTools != nil && *display.ProgressMaxTools < 1 {
+		return fmt.Errorf("config: %s.progress_max_tools must be >= 1", prefix)
+	}
+	if display.ProgressMaxThinking != nil && *display.ProgressMaxThinking < 1 {
+		return fmt.Errorf("config: %s.progress_max_thinking must be >= 1", prefix)
+	}
+	if display.ProgressMaxUpdates != nil && *display.ProgressMaxUpdates < 1 {
+		return fmt.Errorf("config: %s.progress_max_updates must be >= 1", prefix)
 	}
 	return nil
 }

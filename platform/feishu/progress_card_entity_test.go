@@ -3,6 +3,7 @@ package feishu
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -486,5 +487,82 @@ func TestProgressCardEntity_FailuresDoNotReplaceCard(t *testing.T) {
 			t.Fatalf("%s: reset UpdateMessage() error = %v", failure.name, err)
 		}
 		stub.take()
+	}
+}
+
+func TestProgressCardEntity_ToolEvictionPreservesThinkingAndUpdatesPanels(t *testing.T) {
+	var initial []core.ProgressCardEntry
+	for i := 1; i <= 3; i++ {
+		initial = append(initial, core.ProgressCardEntry{
+			Kind: core.ProgressEntryThinking,
+			Text: fmt.Sprintf("think-%d", i),
+		})
+	}
+	for i := 1; i <= 3; i++ {
+		initial = append(initial, core.ProgressCardEntry{
+			Kind: core.ProgressEntryInfo,
+			Text: fmt.Sprintf("update-%d", i),
+		})
+	}
+	for i := 1; i <= 10; i++ {
+		initial = append(initial, core.ProgressCardEntry{
+			Kind: core.ProgressEntryToolUse,
+			Tool: "Bash",
+			Text: fmt.Sprintf("cmd-%d", i),
+		})
+	}
+
+	initPayload := progressPayload(t, core.ProgressCardStateRunning, false, initial...)
+	model, cardJSON := newProgressCard(initPayload)
+	if model.lanes[0].title != "思考 (3)" || model.lanes[1].title != "工具 (10)" || model.lanes[2].title != "更新 (3)" {
+		t.Fatalf("unexpected initial lane titles: [%q %q %q]", model.lanes[0].title, model.lanes[1].title, model.lanes[2].title)
+	}
+	card := mountClientCard(t, cardJSON)
+	card.open["pc_r"] = true
+	card.open["pc_u"] = true
+
+	// Evict tool cmd-1 and append cmd-11 while thinking and updates remain unchanged.
+	var refreshed []core.ProgressCardEntry
+	refreshed = append(refreshed, initial[:6]...)
+	for i := 2; i <= 11; i++ {
+		refreshed = append(refreshed, core.ProgressCardEntry{
+			Kind: core.ProgressEntryToolUse,
+			Tool: "Bash",
+			Text: fmt.Sprintf("cmd-%d", i),
+		})
+	}
+	refreshedPayload := progressPayload(t, core.ProgressCardStateRunning, true, refreshed...)
+	actions, next := progressCardUpdate(model, refreshedPayload)
+	if len(actions) == 0 {
+		t.Fatal("expected batch_update actions when tools roll forward")
+	}
+	for _, act := range actions {
+		params, _ := act["params"].(map[string]any)
+		if id, _ := params["element_id"].(string); strings.HasPrefix(id, "pc_r") || strings.HasPrefix(id, "pc_u") {
+			t.Fatalf("unexpected update targeting untouched panel element %q: %#v", id, act)
+		}
+		if target, _ := params["target_element_id"].(string); strings.HasPrefix(target, "pc_r") || strings.HasPrefix(target, "pc_u") {
+			t.Fatalf("unexpected append targeting untouched panel %q: %#v", target, act)
+		}
+		if ids, ok := params["element_ids"].([]string); ok {
+			for _, id := range ids {
+				if strings.HasPrefix(id, "pc_r") || strings.HasPrefix(id, "pc_u") {
+					t.Fatalf("unexpected delete targeting untouched panel element %q: %#v", id, act)
+				}
+			}
+		}
+	}
+
+	card.apply(actions)
+	if next.lanes[0].title != "思考 (3)" || next.lanes[1].title != "工具 (10)" || next.lanes[2].title != "更新 (3)" {
+		t.Fatalf("unexpected refreshed lane titles: [%q %q %q]", next.lanes[0].title, next.lanes[1].title, next.lanes[2].title)
+	}
+	if !card.open["pc_r"] || !card.open["pc_u"] {
+		t.Fatal("reader-opened Thinking/Updates panels should stay open during tool eviction")
+	}
+	if got, want := cardContent(t, card.elements), freshContent(t, refreshedPayload); !reflect.DeepEqual(got, want) {
+		gb, _ := json.Marshal(got)
+		wb, _ := json.Marshal(want)
+		t.Fatalf("refreshed card shows\n%s\nwant\n%s", gb, wb)
 	}
 }

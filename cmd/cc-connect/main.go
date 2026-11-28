@@ -566,15 +566,19 @@ func main() {
 		{
 			mode, tm, tool, tmlen, toollen, _, _, hideAgentFooter := config.EffectiveDisplay(cfg, &proj)
 			historyMaxLen := config.EffectiveHistoryMaxLen(cfg, &proj)
+			progressTools, progressThinking, progressUpdates := config.EffectiveProgressQuotas(cfg, &proj)
 			engine.SetDisplayConfig(core.DisplayCfg{
-				Mode:             mode,
-				CardMode:         config.EffectiveCardMode(cfg, &proj),
-				ThinkingMessages: tm,
-				ThinkingMaxLen:   tmlen,
-				ToolMaxLen:       toollen,
-				ToolMessages:     tool,
-				HistoryMaxLen:    &historyMaxLen,
-				HideAgentFooter:  hideAgentFooter,
+				Mode:                mode,
+				CardMode:            config.EffectiveCardMode(cfg, &proj),
+				ThinkingMessages:    tm,
+				ThinkingMaxLen:      tmlen,
+				ToolMaxLen:          toollen,
+				ToolMessages:        tool,
+				HistoryMaxLen:       &historyMaxLen,
+				HideAgentFooter:     hideAgentFooter,
+				ProgressMaxTools:    progressTools,
+				ProgressMaxThinking: progressThinking,
+				ProgressMaxUpdates:  progressUpdates,
 			})
 		}
 
@@ -1860,15 +1864,19 @@ func reloadConfig(configPath, projName string, engine *core.Engine) (*core.Confi
 	// Reload display config (includes legacy quiet → display mapping)
 	mode, tm, tool, tmlen, toollen, showCtx, showFooter, hideAgentFooter := config.EffectiveDisplay(cfg, proj)
 	historyMaxLen := config.EffectiveHistoryMaxLen(cfg, proj)
+	progressTools, progressThinking, progressUpdates := config.EffectiveProgressQuotas(cfg, proj)
 	engine.SetDisplayConfig(core.DisplayCfg{
-		Mode:             mode,
-		CardMode:         config.EffectiveCardMode(cfg, proj),
-		ThinkingMessages: tm,
-		ThinkingMaxLen:   tmlen,
-		ToolMaxLen:       toollen,
-		ToolMessages:     tool,
-		HistoryMaxLen:    &historyMaxLen,
-		HideAgentFooter:  hideAgentFooter,
+		Mode:                mode,
+		CardMode:            config.EffectiveCardMode(cfg, proj),
+		ThinkingMessages:    tm,
+		ThinkingMaxLen:      tmlen,
+		ToolMaxLen:          toollen,
+		ToolMessages:        tool,
+		HistoryMaxLen:       &historyMaxLen,
+		HideAgentFooter:     hideAgentFooter,
+		ProgressMaxTools:    progressTools,
+		ProgressMaxThinking: progressThinking,
+		ProgressMaxUpdates:  progressUpdates,
 	})
 	result.DisplayUpdated = true
 

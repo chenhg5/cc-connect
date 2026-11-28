@@ -330,14 +330,25 @@ var RestartCh = make(chan RestartRequest, 1)
 // DisplayCfg controls how intermediate messages are surfaced.
 // A value of -1 means "use default", 0 means "no truncation".
 type DisplayCfg struct {
-	Mode             string // "full" (default), "compact", or "quiet" — thinking/tool visibility
-	CardMode         string // "legacy" (default) or "rich" (Card 2.0 Feishu)
-	ThinkingMessages bool
-	ThinkingMaxLen   int // max runes for thinking preview; 0 = no truncation
-	ToolMaxLen       int // max runes for tool use preview; 0 = no truncation
-	ToolMessages     bool
-	HistoryMaxLen    *int // max runes for /history entries; nil = default, 0 = no truncation
-	HideAgentFooter  bool // strip model/token footer lines emitted as agent text
+	Mode                string // "full" (default), "compact", or "quiet" — thinking/tool visibility
+	CardMode            string // "legacy" (default) or "rich" (Card 2.0 Feishu)
+	ThinkingMessages    bool
+	ThinkingMaxLen      int // max runes for thinking preview; 0 = no truncation
+	ToolMaxLen          int // max runes for tool use preview; 0 = no truncation
+	ToolMessages        bool
+	HistoryMaxLen       *int // max runes for /history entries; nil = default, 0 = no truncation
+	HideAgentFooter     bool // strip model/token footer lines emitted as agent text
+	ProgressMaxTools    int  // max tool entries kept in progress card; <= 0 = default (10)
+	ProgressMaxThinking int  // max thinking entries kept in progress card; <= 0 = default (3)
+	ProgressMaxUpdates  int  // max update entries kept in progress card; <= 0 = default (3)
+}
+
+func (c DisplayCfg) progressCardQuotas() ProgressCardQuotas {
+	return normalizeProgressCardQuotas(ProgressCardQuotas{
+		Tools:    c.ProgressMaxTools,
+		Thinking: c.ProgressMaxThinking,
+		Updates:  c.ProgressMaxUpdates,
+	})
 }
 
 // InstantReplyCfg controls the immediate confirmation reply sent when a message
@@ -806,15 +817,25 @@ func (pp *pendingPermission) resolve() {
 func NewEngine(name string, ag Agent, platforms []Platform, sessionStorePath string, lang Language) *Engine {
 	ctx, cancel := context.WithCancel(context.Background())
 	e := &Engine{
-		name:                       name,
-		agent:                      ag,
-		platforms:                  platforms,
-		sessions:                   NewSessionManager(sessionStorePath),
-		ctx:                        ctx,
-		cancel:                     cancel,
-		i18n:                       NewI18n(lang),
-		attachmentSendEnabled:      true,
-		display:                    DisplayCfg{Mode: "full", ThinkingMessages: true, ThinkingMaxLen: defaultThinkingMaxLen, ToolMaxLen: defaultToolMaxLen, ToolMessages: true, CardMode: "legacy"},
+		name:                  name,
+		agent:                 ag,
+		platforms:             platforms,
+		sessions:              NewSessionManager(sessionStorePath),
+		ctx:                   ctx,
+		cancel:                cancel,
+		i18n:                  NewI18n(lang),
+		attachmentSendEnabled: true,
+		display: DisplayCfg{
+			Mode:                "full",
+			ThinkingMessages:    true,
+			ThinkingMaxLen:      defaultThinkingMaxLen,
+			ToolMaxLen:          defaultToolMaxLen,
+			ToolMessages:        true,
+			CardMode:            "legacy",
+			ProgressMaxTools:    DefaultProgressMaxTools,
+			ProgressMaxThinking: DefaultProgressMaxThinking,
+			ProgressMaxUpdates:  DefaultProgressMaxUpdates,
+		},
 		commands:                   NewCommandRegistry(),
 		skills:                     NewSkillRegistry(),
 		aliases:                    make(map[string]string),
@@ -5938,7 +5959,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 		}
 	}
 	sp := newStreamPreview(e.streamPreview, state.platform, state.replyCtx, e.ctx, workspaceRenderer)
-	cp := newCompactProgressWriter(e.ctx, state.platform, state.replyCtx, e.agent.Name(), e.i18n.CurrentLang(), workspaceRenderer)
+	cp := newCompactProgressWriterWithQuotas(e.ctx, state.platform, state.replyCtx, e.agent.Name(), e.i18n.CurrentLang(), workspaceRenderer, e.display.progressCardQuotas())
 	state.mu.Unlock()
 
 	// Send instant confirmation reply if enabled and no streaming card is active.
@@ -7276,7 +7297,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 					return e.renderOutgoingContentForWorkspace(queued.platform, content, workspaceDir)
 				}
 				sp = newStreamPreview(e.streamPreview, queued.platform, queued.replyCtx, e.ctx, queuedRenderer)
-				cp = newCompactProgressWriter(e.ctx, queued.platform, queued.replyCtx, e.agent.Name(), e.i18n.CurrentLang(), queuedRenderer)
+				cp = newCompactProgressWriterWithQuotas(e.ctx, queued.platform, queued.replyCtx, e.agent.Name(), e.i18n.CurrentLang(), queuedRenderer, e.display.progressCardQuotas())
 
 				// Reset streaming card state for the next turn
 				streamCard = nil

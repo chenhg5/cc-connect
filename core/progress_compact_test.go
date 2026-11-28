@@ -3,6 +3,7 @@ package core
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -425,5 +426,210 @@ func TestCompactProgressWriter_CancellationStopsRecovery(t *testing.T) {
 	}
 	if w.Finalize(ProgressCardStateCompleted) {
 		t.Fatal("cancelled final update should report failure")
+	}
+}
+
+func TestCompactProgressWriter_IndependentQuotas_ToolsDoNotEvictThinkingOrUpdates(t *testing.T) {
+	p := &previewCapturePlatform{}
+	w := newCompactProgressWriter(context.Background(), p,
+		progressHintReplyCtx{style: progressStyleCard, payload: true}, "codex", LangEnglish, nil)
+
+	for i := 1; i <= 3; i++ {
+		if !w.AppendEvent(ProgressEntryThinking, fmt.Sprintf("think-%d", i), "", "") {
+			t.Fatalf("append thinking %d failed", i)
+		}
+	}
+	for i := 1; i <= 3; i++ {
+		if !w.AppendEvent(ProgressEntryInfo, fmt.Sprintf("update-%d", i), "", "") {
+			t.Fatalf("append update %d failed", i)
+		}
+	}
+	for i := 1; i <= 10; i++ {
+		kind := ProgressEntryToolUse
+		if i%2 == 0 {
+			kind = ProgressEntryToolResult
+		}
+		if !w.AppendEvent(kind, fmt.Sprintf("tool-%d", i), "Bash", "") {
+			t.Fatalf("append tool %d failed", i)
+		}
+	}
+
+	beforeEvict, ok := ParseProgressCardPayload(w.content)
+	if !ok {
+		t.Fatalf("ParseProgressCardPayload failed: %q", w.content)
+	}
+	if beforeEvict.Truncated {
+		t.Fatal("Truncated = true before any category exceeded its quota, want false")
+	}
+	if len(beforeEvict.Items) != 16 {
+		t.Fatalf("items = %d, want 16 (3 thinking + 3 updates + 10 tools)", len(beforeEvict.Items))
+	}
+
+	// Exceeding the tool quota must evict only the oldest tools and preserve
+	// all thinking and update entries in chronological order.
+	if !w.AppendEvent(ProgressEntryToolUse, "tool-11", "Bash", "") {
+		t.Fatal("append tool-11 failed")
+	}
+	if !w.AppendEvent(ProgressEntryToolResult, "tool-12", "Bash", "") {
+		t.Fatal("append tool-12 failed")
+	}
+
+	afterEvict, ok := ParseProgressCardPayload(w.content)
+	if !ok {
+		t.Fatalf("ParseProgressCardPayload failed after tool eviction: %q", w.content)
+	}
+	if !afterEvict.Truncated {
+		t.Fatal("Truncated = false after tool eviction, want true")
+	}
+	if len(afterEvict.Items) != 16 {
+		t.Fatalf("items after tool eviction = %d, want 16", len(afterEvict.Items))
+	}
+	wantTexts := []string{
+		"think-1", "think-2", "think-3",
+		"update-1", "update-2", "update-3",
+		"tool-3", "tool-4", "tool-5", "tool-6", "tool-7",
+		"tool-8", "tool-9", "tool-10", "tool-11", "tool-12",
+	}
+	for i, want := range wantTexts {
+		if afterEvict.Items[i].Text != want {
+			t.Fatalf("item[%d].Text = %q, want %q (all=%v)", i, afterEvict.Items[i].Text, want, afterEvict.Items)
+		}
+	}
+}
+
+func TestCompactProgressWriter_IndependentQuotas_EachCategoryEvictsIndependently(t *testing.T) {
+	p := &previewCapturePlatform{}
+	w := newCompactProgressWriter(context.Background(), p,
+		progressHintReplyCtx{style: progressStyleCard, payload: true}, "codex", LangEnglish, nil)
+
+	for i := 1; i <= 3; i++ {
+		w.AppendEvent(ProgressEntryThinking, fmt.Sprintf("think-%d", i), "", "")
+	}
+	w.AppendEvent(ProgressEntryInfo, "upd-1", "", "")
+	w.AppendEvent(ProgressEntryError, "upd-2", "", "")
+	w.AppendEvent(ProgressEntryInfo, "upd-3", "", "")
+	for i := 1; i <= 10; i++ {
+		w.AppendEvent(ProgressEntryToolUse, fmt.Sprintf("tool-%d", i), "Bash", "")
+	}
+
+	// 4th thinking evicts think-1 only.
+	w.AppendEvent(ProgressEntryThinking, "think-4", "", "")
+	// 4th update (error) evicts upd-1 only.
+	w.AppendEvent(ProgressEntryError, "upd-4", "", "")
+	// 11th tool evicts tool-1 only.
+	w.AppendEvent(ProgressEntryToolUse, "tool-11", "Bash", "")
+
+	payload, ok := ParseProgressCardPayload(w.content)
+	if !ok {
+		t.Fatalf("ParseProgressCardPayload failed: %q", w.content)
+	}
+	if !payload.Truncated {
+		t.Fatal("Truncated = false, want true")
+	}
+
+	var thinking, updates, tools []string
+	for _, it := range payload.Items {
+		switch it.Kind {
+		case ProgressEntryThinking:
+			thinking = append(thinking, it.Text)
+		case ProgressEntryToolUse, ProgressEntryToolResult:
+			tools = append(tools, it.Text)
+		default:
+			updates = append(updates, it.Text)
+		}
+	}
+	if got := strings.Join(thinking, ","); got != "think-2,think-3,think-4" {
+		t.Fatalf("thinking = %q, want think-2,think-3,think-4", got)
+	}
+	if got := strings.Join(updates, ","); got != "upd-2,upd-3,upd-4" {
+		t.Fatalf("updates = %q, want upd-2,upd-3,upd-4", got)
+	}
+	if len(tools) != 10 || tools[0] != "tool-2" || tools[9] != "tool-11" {
+		t.Fatalf("tools = %v, want tool-2..tool-11 (len 10)", tools)
+	}
+
+	// Verify Truncated remains sticky on a subsequent non-evicting append
+	// after one bucket has already been truncated.
+	w2 := newCompactProgressWriterWithQuotas(context.Background(), &previewCapturePlatform{},
+		progressHintReplyCtx{style: progressStyleCard, payload: true}, "codex", LangEnglish, nil,
+		ProgressCardQuotas{Tools: 2, Thinking: 3, Updates: 3})
+	w2.AppendEvent(ProgressEntryToolUse, "t1", "Bash", "")
+	w2.AppendEvent(ProgressEntryToolUse, "t2", "Bash", "")
+	w2.AppendEvent(ProgressEntryToolUse, "t3", "Bash", "")
+	w2.AppendEvent(ProgressEntryThinking, "non-evicting-think", "", "")
+	stickyPayload, ok := ParseProgressCardPayload(w2.content)
+	if !ok || !stickyPayload.Truncated {
+		t.Fatalf("Truncated should remain sticky after earlier eviction, got ok=%v payload=%#v", ok, stickyPayload)
+	}
+}
+
+func TestCompactProgressWriter_IndependentQuotas_CustomOverridesAndFallback(t *testing.T) {
+	p := &previewCapturePlatform{}
+	w := newCompactProgressWriterWithQuotas(context.Background(), p,
+		progressHintReplyCtx{style: progressStyleCard, payload: true}, "codex", LangEnglish, nil,
+		ProgressCardQuotas{Tools: 4, Thinking: 2, Updates: 1})
+
+	for i := 1; i <= 3; i++ {
+		w.AppendEvent(ProgressEntryThinking, fmt.Sprintf("think-%d", i), "", "")
+	}
+	for i := 1; i <= 2; i++ {
+		w.AppendEvent(ProgressEntryInfo, fmt.Sprintf("upd-%d", i), "", "")
+	}
+	for i := 1; i <= 5; i++ {
+		w.AppendEvent(ProgressEntryToolUse, fmt.Sprintf("tool-%d", i), "Bash", "")
+	}
+
+	payload, ok := ParseProgressCardPayload(w.content)
+	if !ok {
+		t.Fatalf("ParseProgressCardPayload failed: %q", w.content)
+	}
+	if !payload.Truncated {
+		t.Fatal("Truncated = false, want true")
+	}
+	if len(payload.Items) != 7 {
+		t.Fatalf("items = %d, want 7 (2 thinking + 1 update + 4 tools)", len(payload.Items))
+	}
+	want := []string{"think-2", "think-3", "upd-2", "tool-2", "tool-3", "tool-4", "tool-5"}
+	for i, wText := range want {
+		if payload.Items[i].Text != wText {
+			t.Fatalf("item[%d] = %q, want %q", i, payload.Items[i].Text, wText)
+		}
+	}
+
+	// Non-positive quotas fall back to defaults (10, 3, 3).
+	wDefault := newCompactProgressWriterWithQuotas(context.Background(), &previewCapturePlatform{},
+		progressHintReplyCtx{style: progressStyleCard, payload: true}, "codex", LangEnglish, nil,
+		ProgressCardQuotas{Tools: 0, Thinking: -2, Updates: 0})
+	if wDefault.quotas != (ProgressCardQuotas{Tools: DefaultProgressMaxTools, Thinking: DefaultProgressMaxThinking, Updates: DefaultProgressMaxUpdates}) {
+		t.Fatalf("fallback quotas = %+v, want defaults (10/3/3)", wDefault.quotas)
+	}
+}
+
+func TestCompactProgressWriter_IndependentQuotas_MarkdownFallback(t *testing.T) {
+	p := &previewCapturePlatform{}
+	w := newCompactProgressWriter(context.Background(), p,
+		progressHintReplyCtx{style: progressStyleCard, payload: false}, "codex", LangEnglish, nil)
+
+	w.AppendEvent(ProgressEntryThinking, "think-1", "", "think-1")
+	w.AppendEvent(ProgressEntryThinking, "think-2", "", "think-2")
+	w.AppendEvent(ProgressEntryInfo, "upd-1", "", "upd-1")
+	w.AppendEvent(ProgressEntryInfo, "upd-2", "", "upd-2")
+	for i := 1; i <= 12; i++ {
+		line := fmt.Sprintf("tool-%d", i)
+		w.AppendEvent(ProgressEntryToolUse, line, "Bash", line)
+	}
+
+	if !strings.Contains(w.content, "_Showing latest updates only._") {
+		t.Fatalf("expected truncated notice in markdown fallback, got %q", w.content)
+	}
+	for _, want := range []string{"think-1", "think-2", "upd-1", "upd-2", "tool-3", "tool-12"} {
+		if !strings.Contains(w.content, want) {
+			t.Fatalf("markdown fallback missing %q: %q", want, w.content)
+		}
+	}
+	for _, evicted := range []string{"tool-1\n", "tool-2\n"} {
+		if strings.Contains(w.content, evicted) {
+			t.Fatalf("markdown fallback should have evicted %q: %q", evicted, w.content)
+		}
 	}
 }

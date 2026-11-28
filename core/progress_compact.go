@@ -27,7 +27,68 @@ const (
 
 	// Coalesce progress during an outage instead of retrying every tool event.
 	compactProgressRetryInterval = time.Second
+
+	// DefaultProgressMaxTools is the default number of tool entries
+	// (tool_use / tool_result) retained in a progress card.
+	DefaultProgressMaxTools = 10
+	// DefaultProgressMaxThinking is the default number of thinking entries
+	// retained in a progress card.
+	DefaultProgressMaxThinking = 3
+	// DefaultProgressMaxUpdates is the default number of update entries
+	// (info / error / other) retained in a progress card.
+	DefaultProgressMaxUpdates = 3
 )
+
+// ProgressCardQuotas bounds how many recent entries each progress-card
+// category retains independently. Non-positive values fall back to defaults.
+type ProgressCardQuotas struct {
+	Tools    int
+	Thinking int
+	Updates  int
+}
+
+func normalizeProgressCardQuotas(q ProgressCardQuotas) ProgressCardQuotas {
+	if q.Tools <= 0 {
+		q.Tools = DefaultProgressMaxTools
+	}
+	if q.Thinking <= 0 {
+		q.Thinking = DefaultProgressMaxThinking
+	}
+	if q.Updates <= 0 {
+		q.Updates = DefaultProgressMaxUpdates
+	}
+	return q
+}
+
+type progressEntryBucket int
+
+const (
+	progressBucketUpdate progressEntryBucket = iota
+	progressBucketThinking
+	progressBucketTool
+)
+
+func progressBucketForKind(kind ProgressCardEntryKind) progressEntryBucket {
+	switch kind {
+	case ProgressEntryThinking:
+		return progressBucketThinking
+	case ProgressEntryToolUse, ProgressEntryToolResult:
+		return progressBucketTool
+	default:
+		return progressBucketUpdate
+	}
+}
+
+func (q ProgressCardQuotas) limitFor(bucket progressEntryBucket) int {
+	switch bucket {
+	case progressBucketThinking:
+		return q.Thinking
+	case progressBucketTool:
+		return q.Tools
+	default:
+		return q.Updates
+	}
+}
 
 type ProgressCardState string
 
@@ -221,15 +282,15 @@ type compactProgressWriter struct {
 	style      string
 	usePayload bool
 
-	content    string
-	entries    []string
-	items      []ProgressCardEntry
-	state      ProgressCardState
-	agentName  string
-	lang       Language
-	truncated  bool
-	lastSent   string
-	maxEntries int
+	content   string
+	entries   []string
+	items     []ProgressCardEntry
+	state     ProgressCardState
+	agentName string
+	lang      Language
+	truncated bool
+	lastSent  string
+	quotas    ProgressCardQuotas
 
 	// Throttle message edits to avoid platform rate limits (e.g. Discord ~5 edits/5s).
 	minUpdateInterval time.Duration
@@ -297,16 +358,20 @@ func SuppressStandaloneToolResultEvent(p Platform) bool {
 }
 
 func newCompactProgressWriter(ctx context.Context, p Platform, replyCtx any, agentName string, lang Language, transform func(string) string) *compactProgressWriter {
+	return newCompactProgressWriterWithQuotas(ctx, p, replyCtx, agentName, lang, transform, ProgressCardQuotas{})
+}
+
+func newCompactProgressWriterWithQuotas(ctx context.Context, p Platform, replyCtx any, agentName string, lang Language, transform func(string) string, quotas ProgressCardQuotas) *compactProgressWriter {
 	w := &compactProgressWriter{
-		ctx:        ctx,
-		platform:   p,
-		replyCtx:   replyCtx,
-		transform:  transform,
-		style:      progressStyleForTarget(p, replyCtx),
-		state:      ProgressCardStateRunning,
-		agentName:  normalizeProgressAgentLabel(agentName),
-		lang:       lang,
-		maxEntries: 10,
+		ctx:       ctx,
+		platform:  p,
+		replyCtx:  replyCtx,
+		transform: transform,
+		style:     progressStyleForTarget(p, replyCtx),
+		state:     ProgressCardStateRunning,
+		agentName: normalizeProgressAgentLabel(agentName),
+		lang:      lang,
+		quotas:    normalizeProgressCardQuotas(quotas),
 	}
 	if throttler, ok := p.(ProgressUpdateThrottler); ok {
 		w.minUpdateInterval = throttler.ProgressUpdateInterval()
@@ -416,18 +481,10 @@ func (w *compactProgressWriter) AppendStructured(item ProgressCardEntry, fallbac
 	case progressStyleCard:
 		w.items = append(w.items, item)
 		w.entries = append(w.entries, fallback)
-		truncated := false
-		if w.maxEntries > 0 && len(w.items) > w.maxEntries {
-			w.items = w.items[len(w.items)-w.maxEntries:]
-			if len(w.entries) > w.maxEntries {
-				w.entries = w.entries[len(w.entries)-w.maxEntries:]
-			}
-			truncated = true
-		} else if w.maxEntries > 0 && len(w.entries) > w.maxEntries {
-			w.entries = w.entries[len(w.entries)-w.maxEntries:]
-			truncated = true
+		bucket := progressBucketForKind(item.Kind)
+		if w.trimBucket(bucket, w.quotas.limitFor(bucket)) {
+			w.truncated = true
 		}
-		w.truncated = truncated
 		if w.usePayload {
 			w.content = BuildProgressCardPayloadV2(w.items, w.truncated, w.agentName, w.lang, w.state)
 			if w.content == "" {
@@ -436,7 +493,7 @@ func (w *compactProgressWriter) AppendStructured(item ProgressCardEntry, fallbac
 				return false
 			}
 		} else {
-			w.content = renderCardProgressMarkdownFallback(w.entries, truncated)
+			w.content = renderCardProgressMarkdownFallback(w.entries, w.truncated)
 			w.content = trimCompactProgressText(w.content, compactProgressMaxChars)
 		}
 	default:
@@ -500,6 +557,46 @@ func (w *compactProgressWriter) AppendStructured(item ProgressCardEntry, fallbac
 	}
 	w.lastSent = w.content
 	w.lastUpdateAt = time.Now()
+	return true
+}
+
+func (w *compactProgressWriter) trimBucket(bucket progressEntryBucket, limit int) bool {
+	if limit <= 0 {
+		return false
+	}
+	count := 0
+	for _, it := range w.items {
+		if progressBucketForKind(it.Kind) == bucket {
+			count++
+		}
+	}
+	excess := count - limit
+	if excess <= 0 {
+		return false
+	}
+	hasEntries := len(w.entries) == len(w.items)
+	keptItems := w.items[:0]
+	var keptEntries []string
+	if hasEntries {
+		keptEntries = w.entries[:0]
+	}
+	dropped := 0
+	for i, it := range w.items {
+		if dropped < excess && progressBucketForKind(it.Kind) == bucket {
+			dropped++
+			continue
+		}
+		keptItems = append(keptItems, it)
+		if hasEntries {
+			keptEntries = append(keptEntries, w.entries[i])
+		}
+	}
+	clear(w.items[len(keptItems):])
+	w.items = keptItems
+	if hasEntries {
+		clear(w.entries[len(keptEntries):])
+		w.entries = keptEntries
+	}
 	return true
 }
 
