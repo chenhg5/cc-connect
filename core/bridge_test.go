@@ -269,8 +269,10 @@ func TestBridge_AuthRequired(t *testing.T) {
 func TestBridge_AuthQueryParam(t *testing.T) {
 	_, wsURL := startTestBridge(t, "qtoken")
 
-	conn := dialWS(t, wsURL+"?token=qtoken", nil)
-	register(t, conn, "qp-chat", []string{"text"})
+	_, response, err := websocket.DefaultDialer.Dial(wsURL+"?token=qtoken", nil)
+	if err == nil || response == nil || response.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("URL credential accepted: response=%v error=%v", response, err)
+	}
 }
 
 func TestBridge_RegisterMissingPlatform(t *testing.T) {
@@ -775,7 +777,7 @@ func TestBridge_SessionList(t *testing.T) {
 	_, baseURL := startTestBridgeWithREST(t, "tok")
 
 	// List sessions for a new key — should create a default session
-	r := bridgeGet(t, baseURL+"/bridge/sessions?session_key=test:u1:u1&token=tok", "")
+	r := bridgeGet(t, baseURL+"/bridge/sessions?session_key=test:u1:u1", "tok")
 	if !r.OK {
 		t.Logf("no sessions yet: %s", r.Error)
 	}

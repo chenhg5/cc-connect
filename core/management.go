@@ -353,16 +353,15 @@ func (m *ManagementServer) wrap(handler http.HandlerFunc) http.HandlerFunc {
 }
 
 func (m *ManagementServer) authenticate(r *http.Request) bool {
+	if r.URL.Query().Has("token") || r.URL.User != nil {
+		return false
+	}
 	if m.token == "" {
 		return true
 	}
 	// Bearer token
 	if auth := r.Header.Get("Authorization"); strings.HasPrefix(auth, "Bearer ") {
 		return subtle.ConstantTimeCompare([]byte(strings.TrimPrefix(auth, "Bearer ")), []byte(m.token)) == 1
-	}
-	// Query param
-	if t := r.URL.Query().Get("token"); t != "" {
-		return subtle.ConstantTimeCompare([]byte(t), []byte(m.token)) == 1
 	}
 	return false
 }

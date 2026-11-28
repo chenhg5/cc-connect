@@ -67,7 +67,7 @@ The adapter must authenticate on connection using one of:
 
 | Method | Example |
 |--------|---------|
-| Query parameter | `ws://host:9810/bridge/ws?token=your-secret` |
+| Browser subprotocols | `cc-connect`, `cc-connect-token.<base64url token>` |
 | Header | `Authorization: Bearer your-secret` |
 | Header | `X-Bridge-Token: your-secret` |
 
@@ -626,7 +626,7 @@ The same token used for WebSocket connections applies to REST endpoints:
 | Method | Example |
 |--------|---------|
 | Header | `Authorization: Bearer your-secret` |
-| Query param | `?token=your-secret` |
+| Header | `X-Bridge-Token: your-secret` |
 
 ### Response Format
 
@@ -851,8 +851,8 @@ import json
 import websockets
 
 async def main():
-    uri = "ws://localhost:9810/bridge/ws?token=your-secret"
-    async with websockets.connect(uri) as ws:
+    uri = "ws://localhost:9810/bridge/ws"
+    async with websockets.connect(uri, additional_headers={"Authorization": "Bearer your-secret"}) as ws:
         # 1. Register
         await ws.send(json.dumps({
             "type": "register",

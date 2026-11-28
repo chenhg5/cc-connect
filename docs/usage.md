@@ -240,11 +240,11 @@ provider = "anthropic"   # active provider
 
 [[projects.agent.providers]]
 name = "anthropic"
-api_key = "sk-ant-xxx"
+api_key = "<provider-api-key>"
 
 [[projects.agent.providers]]
 name = "relay"
-api_key = "sk-xxx"
+api_key = "<provider-api-key>"
 base_url = "https://api.relay-service.com"
 model = "claude-sonnet-4-20250514"
 
@@ -263,7 +263,7 @@ alias = "haiku"
 # MiniMax — OpenAI-compatible agent provider, 1M context
 [[projects.agent.providers]]
 name = "minimax"
-api_key = "your-minimax-api-key"
+api_key = "<provider-api-key>"
 # Use https://api.minimaxi.com/v1 for China-region accounts.
 base_url = "https://api.minimax.io/v1"
 model = "MiniMax-M3.1-Flash"
@@ -284,7 +284,7 @@ for conflicting environment values and remove them there.
 ### CLI Commands
 
 ```bash
-cc-connect provider add --project my-backend --name relay --api-key sk-xxx --base-url https://api.relay.com
+cc-connect provider add --project my-backend --name relay --api-key "$CC_CONNECT_PROVIDER_API_KEY" --base-url https://api.relay.com
 cc-connect provider list --project my-backend
 cc-connect provider remove --project my-backend --name relay
 cc-connect provider import --project my-backend  # from cc-switch
@@ -322,7 +322,7 @@ Pre-configure a list of selectable models per provider using `[[providers.models
 ```toml
 [[projects.agent.providers]]
 name = "openai"
-api_key = "sk-xxx"
+api_key = "<provider-api-key>"
 
 [[projects.agent.providers.models]]
 model = "gpt-5.3-codex"
@@ -698,12 +698,12 @@ Notes:
 2. Configure `~/.claude-code-router/config.json`:
 ```json
 {
-  "APIKEY": "your-secret-key",
+  "APIKEY": "<router-api-key>",
   "Providers": [
     {
       "name": "deepseek",
       "api_base_url": "https://api.deepseek.com/chat/completions",
-      "api_key": "sk-xxx",
+      "api_key": "<provider-api-key>",
       "models": ["deepseek-chat", "deepseek-reasoner"],
       "transformer": { "use": ["deepseek"] }
     }
@@ -721,7 +721,7 @@ Notes:
 ```toml
 [projects.agent.options]
 router_url = "http://127.0.0.1:3456"
-router_api_key = "your-secret-key"  # optional
+router_api_key = "<router-api-key>"  # optional
 ```
 
 ---
@@ -772,12 +772,12 @@ provider = "openai"    # or "groq"
 language = ""          # "zh", "en", or auto-detect
 
 [speech.openai]
-api_key = "sk-xxx"
+api_key = "<provider-api-key>"
 # base_url = ""
 # model = "whisper-1"
 
 # [speech.groq]
-# api_key = "gsk_xxx"
+# api_key = "<provider-api-key>"
 # model = "whisper-large-v3-turbo"
 ```
 
@@ -1145,11 +1145,11 @@ Add the following to `config.toml`:
 [management]
 enabled = true
 port = 9820                     # Management UI & API listen port
-token = "your-secret-token"     # Login token; /web setup generates one automatically
+token = "${CC_CONNECT_MANAGEMENT_TOKEN}"     # Login token; /web setup generates one automatically
 cors_origins = ["*"]            # Allowed CORS origins; empty = no CORS headers
 ```
 
-Then restart cc-connect.
+Set the referenced environment variable to a strong random token before restarting cc-connect.
 
 ### Build Options
 
@@ -1204,27 +1204,29 @@ Add the following to `config.toml`:
 [bridge]
 enabled = true
 port = 9810                     # Bridge listen port (separate from management)
-token = "your-bridge-secret"    # Auth token for WebSocket and REST
+token = "${CC_CONNECT_BRIDGE_TOKEN}"    # Auth token for WebSocket and REST
 path = "/bridge/ws"             # WebSocket endpoint path
 cors_origins = ["*"]            # Allowed CORS origins; empty = no CORS
 ```
 
-Then restart cc-connect.
+Set the referenced environment variable to a strong random token before restarting cc-connect.
 
 ### Authentication
 
 All Bridge connections require a token. Supported methods:
 
-- Query parameter: `?token=<bridge-token>`
+- Browser WebSocket subprotocols: `cc-connect` and `cc-connect-token.<base64url token>` (encode the UTF-8 token without padding).
 - Header: `Authorization: Bearer <bridge-token>`
 - Header: `X-Bridge-Token: <bridge-token>`
 
+For REST, send one of the headers above. Credentials in the URL are rejected even if a valid header is also present.
+
 ### WebSocket
 
-Connect to:
+Connect to the URL below and pass the credential by a header or browser subprotocol:
 
 ```
-ws://<host>:<bridge-port>/bridge/ws?token=<bridge-token>
+ws://<host>:<bridge-port>/bridge/ws
 ```
 
 The WebSocket supports bidirectional messaging — send user messages to the agent and receive agent events (text, tool calls, permission requests, etc.) in real time.

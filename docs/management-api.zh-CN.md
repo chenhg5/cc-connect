@@ -98,13 +98,11 @@ Authorization: Bearer <token>
 curl -H "Authorization: Bearer mgmt-secret" http://localhost:9820/api/v1/status
 ```
 
-### 3.2 查询参数
+### 3.2 拒绝网址中的凭据
 
-```
-GET /api/v1/status?token=mgmt-secret
-```
-
-> **注意：** 查询参数认证适用于难以设置请求头的环境。出于安全考虑，建议使用 Bearer 令牌（URL 中的令牌可能被记录到日志）。
+带 `token` 查询参数的请求会被拒绝，即使同时带有正确的 Authorization header。
+请改用 Bearer header。`cc-connect web` 打开不含凭据的登录网址，终端单独显示
+令牌，由用户在登录表单中填写。
 
 ### 3.3 未授权响应
 

@@ -30,11 +30,11 @@ func TestWebhookServer_AuthHeader(t *testing.T) {
 	}
 }
 
-func TestWebhookServer_AuthQuery(t *testing.T) {
+func TestWebhookServer_RejectAuthQuery(t *testing.T) {
 	ws := NewWebhookServer(0, "qsecret", "/hook")
 	r := httptest.NewRequest(http.MethodPost, "/hook?token=qsecret", nil)
-	if !ws.authenticate(r) {
-		t.Error("expected auth to succeed with query token")
+	if ws.authenticate(r) {
+		t.Error("query token must be rejected")
 	}
 }
 

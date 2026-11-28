@@ -58,8 +58,10 @@ ws://<host>:<port>/bridge/ws
 enabled = true
 port = 9810
 path = "/bridge/ws"       # optional, default "/bridge/ws"
-token = "your-secret"     # required for authentication
+token = "${CC_CONNECT_BRIDGE_TOKEN}"     # required for authentication
 ```
+
+Перед запуском задайте переменной окружения `CC_CONNECT_BRIDGE_TOKEN` стойкий случайный токен.
 
 ### Аутентификация
 
@@ -67,11 +69,11 @@ token = "your-secret"     # required for authentication
 
 | Способ | Пример |
 |--------|---------|
-| Параметр строки запроса | `ws://host:9810/bridge/ws?token=your-secret` |
-| Заголовок HTTP | `Authorization: Bearer your-secret` |
-| Заголовок HTTP | `X-Bridge-Token: your-secret` |
+| Подпротоколы WebSocket для браузера | `cc-connect`, `cc-connect-token.<base64url token>` |
+| Заголовок HTTP | `Authorization: Bearer <bridge-token>` |
+| Заголовок HTTP | `X-Bridge-Token: <bridge-token>` |
 
-Подключения без успешной аутентификации отклоняются со статусом ответа HTTP 401.
+Браузер передаёт токен в кодировке UTF-8, закодированный в base64url без заполнения; сервер согласовывает только `cc-connect`. Учётные данные в URL отклоняются даже при наличии действительного заголовка. Подключения без успешной аутентификации отклоняются со статусом HTTP 401.
 
 ### Жизненный цикл соединения
 
@@ -627,8 +629,8 @@ Adapter                          cc-connect
 
 | Способ | Пример |
 |--------|---------|
-| Заголовок HTTP | `Authorization: Bearer your-secret` |
-| Параметр строки запроса | `?token=your-secret` |
+| Заголовок HTTP | `Authorization: Bearer <bridge-token>` |
+| Заголовок HTTP | `X-Bridge-Token: <bridge-token>` |
 
 ### Формат ответа
 
@@ -823,7 +825,7 @@ Adapter                          cc-connect
 [bridge]
 enabled = true
 port = 9810
-token = "a-strong-random-secret"
+token = "${CC_CONNECT_BRIDGE_TOKEN}"
 
 # Optional: restrict which adapters can connect (by platform name).
 # Default: allow all registered adapters.
@@ -850,11 +852,13 @@ token = "a-strong-random-secret"
 ```python
 import asyncio
 import json
+import os
 import websockets
 
 async def main():
-    uri = "ws://localhost:9810/bridge/ws?token=your-secret"
-    async with websockets.connect(uri) as ws:
+    uri = "ws://localhost:9810/bridge/ws"
+    headers = {"Authorization": "Bearer " + os.environ["CC_CONNECT_BRIDGE_TOKEN"]}
+    async with websockets.connect(uri, additional_headers=headers) as ws:
         # 1. Register
         await ws.send(json.dumps({
             "type": "register",

@@ -98,13 +98,11 @@ Example:
 curl -H "Authorization: Bearer mgmt-secret" http://localhost:9820/api/v1/status
 ```
 
-### 3.2 Query Parameter
+### 3.2 URL credentials are rejected
 
-```
-GET /api/v1/status?token=mgmt-secret
-```
-
-> **Note:** Query parameter auth is provided for environments where setting headers is difficult. Prefer Bearer token for security (tokens in URLs may be logged).
+A `token` query parameter is rejected even if a correct Authorization header
+is also present. Send the token in the Bearer header instead. `cc-connect web`
+opens a clean login URL and displays the token separately for entry in the form.
 
 ### 3.3 Unauthorized Response
 

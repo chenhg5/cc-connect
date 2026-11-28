@@ -26,14 +26,14 @@ type WebhookServer struct {
 
 // WebhookRequest is the JSON body for POST /hook.
 type WebhookRequest struct {
-	Event      string `json:"event,omitempty"`       // event name for logging (e.g. "git:commit")
-	Project    string `json:"project,omitempty"`      // target project; optional if single project
-	SessionKey string `json:"session_key"`            // target session key (required)
-	Prompt     string `json:"prompt,omitempty"`       // agent prompt (mutually exclusive with exec)
-	Exec       string `json:"exec,omitempty"`         // shell command (mutually exclusive with prompt)
-	WorkDir    string `json:"work_dir,omitempty"`     // working dir for exec
-	Silent     bool   `json:"silent,omitempty"`       // suppress notification
-	Payload    any    `json:"payload,omitempty"`      // arbitrary extra data; appended to prompt context
+	Event      string `json:"event,omitempty"`    // event name for logging (e.g. "git:commit")
+	Project    string `json:"project,omitempty"`  // target project; optional if single project
+	SessionKey string `json:"session_key"`        // target session key (required)
+	Prompt     string `json:"prompt,omitempty"`   // agent prompt (mutually exclusive with exec)
+	Exec       string `json:"exec,omitempty"`     // shell command (mutually exclusive with prompt)
+	WorkDir    string `json:"work_dir,omitempty"` // working dir for exec
+	Silent     bool   `json:"silent,omitempty"`   // suppress notification
+	Payload    any    `json:"payload,omitempty"`  // arbitrary extra data; appended to prompt context
 }
 
 func NewWebhookServer(port int, token, path string) *WebhookServer {
@@ -152,6 +152,9 @@ func (ws *WebhookServer) handleHook(w http.ResponseWriter, r *http.Request) {
 }
 
 func (ws *WebhookServer) authenticate(r *http.Request) bool {
+	if r.URL.Query().Has("token") || r.URL.User != nil {
+		return false
+	}
 	if ws.token == "" {
 		return true
 	}
@@ -166,11 +169,6 @@ func (ws *WebhookServer) authenticate(r *http.Request) bool {
 
 	// Check X-Webhook-Token header
 	if tok := r.Header.Get("X-Webhook-Token"); tok != "" {
-		return subtle.ConstantTimeCompare([]byte(tok), []byte(ws.token)) == 1
-	}
-
-	// Check query parameter as fallback
-	if tok := r.URL.Query().Get("token"); tok != "" {
 		return subtle.ConstantTimeCompare([]byte(tok), []byte(ws.token)) == 1
 	}
 
