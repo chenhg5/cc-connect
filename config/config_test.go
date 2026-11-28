@@ -3693,3 +3693,16 @@ func TestRemoveGlobalProvider_CleansUpProviderRefs(t *testing.T) {
 		t.Errorf("proj2 provider_refs: want [], got %v", refs2)
 	}
 }
+
+func TestSaveAgentReasoningEffortCanBeCleared(t *testing.T) {
+	writeTestConfig(t, providerConfigTOML)
+	for _, effort := range []string{"high", ""} {
+		if err := SaveAgentReasoningEffort("demo", effort); err != nil {
+			t.Fatal(err)
+		}
+		cfg := readTestConfig(t)
+		if cfg.Projects[0].Agent.Options["reasoning_effort"] != effort {
+			t.Fatal("effort not persisted")
+		}
+	}
+}

@@ -348,6 +348,8 @@ alias = "spark"
 
 When `models` is configured, `/model` shows exactly that list without making an API round-trip. When omitted, models are fetched from the provider API or fall back to a built-in list.
 
+For the Antigravity CLI (`type = "antigravity"`), the `model`, `reasoning_effort`, `orchestrator_planner`, and `orchestrator_executor` options are described in [docs/antigravity.md](antigravity.md).
+
 ---
 
 ## Work Directory Switching (`/dir`, `/cd`)

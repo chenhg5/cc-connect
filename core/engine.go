@@ -376,6 +376,7 @@ type Engine struct {
 	providerRefsSaveFunc    func(refs []string) error
 	listGlobalProvidersFunc func(agentType string) ([]ProviderConfig, error)
 	modelSaveFunc           func(model string) error
+	reasoningSaveFunc       func(effort string) error
 
 	ttsSaveFunc func(mode string) error
 
@@ -1156,6 +1157,8 @@ func (e *Engine) SetProviderRefsSaveFunc(fn func(refs []string) error) {
 func (e *Engine) SetListGlobalProvidersFunc(fn func(agentType string) ([]ProviderConfig, error)) {
 	e.listGlobalProvidersFunc = fn
 }
+
+func (e *Engine) SetReasoningSaveFunc(fn func(string) error) { e.reasoningSaveFunc = fn }
 
 func (e *Engine) SetModelSaveFunc(fn func(model string) error) {
 	e.modelSaveFunc = fn
@@ -11310,6 +11313,14 @@ func (e *Engine) switchModel(target string) (string, error) {
 // When persistConfig is true, config-backed model/provider changes are saved so
 // reloads keep the new default. Workspace-scoped runtime switches pass false.
 func (e *Engine) switchModelOnAgent(agent Agent, target string, persistConfig bool) (string, error) {
+	if validator, ok := agent.(ModelValidator); ok {
+		ctx, cancel := context.WithTimeout(e.ctx, 10*time.Second)
+		defer cancel()
+		if err := validator.ValidateModel(ctx, target); err != nil {
+			return "", err
+		}
+	}
+
 	switcher, ok := agent.(ModelSwitcher)
 	if !ok {
 		return target, nil
@@ -11357,6 +11368,23 @@ func (e *Engine) switchModelOnAgent(agent Agent, target string, persistConfig bo
 	return target, nil
 }
 
+func resolveReasoningTarget(input string, efforts []string) (string, bool) {
+	target := strings.ToLower(strings.TrimSpace(input))
+	if index, err := strconv.Atoi(target); err == nil && index >= 1 && index <= len(efforts) {
+		target = efforts[index-1]
+	}
+	for _, effort := range efforts {
+		if effort == target {
+			return target, true
+		}
+	}
+	switch target {
+	case "off", "default", "clear":
+		return "", true
+	}
+	return target, false
+}
+
 func (e *Engine) cmdReasoning(p Platform, msg *Message, args []string) {
 	agent, sessions, _, err := e.commandContext(p, msg)
 	if err != nil {
@@ -11371,10 +11399,11 @@ func (e *Engine) cmdReasoning(p Platform, msg *Message, args []string) {
 	}
 
 	efforts := switcher.AvailableReasoningEfforts()
-	if len(efforts) == 0 {
+	if len(efforts) == 0 && len(args) == 0 {
 		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgReasoningNotSupported))
 		return
 	}
+
 	if len(args) == 0 {
 		if !supportsCards(p) {
 			var sb strings.Builder
@@ -11418,31 +11447,26 @@ func (e *Engine) cmdReasoning(p Platform, msg *Message, args []string) {
 		return
 	}
 
-	target := strings.ToLower(strings.TrimSpace(args[0]))
-	if idx, err := strconv.Atoi(target); err == nil && idx >= 1 && idx <= len(efforts) {
-		target = efforts[idx-1]
-	}
-
-	valid := false
-	for _, effort := range efforts {
-		if effort == target {
-			valid = true
-			break
-		}
-	}
+	target, valid := resolveReasoningTarget(args[0], efforts)
 	if !valid {
 		e.reply(p, msg.ReplyCtx, e.reasoningUsage(efforts))
 		return
 	}
 
+	if agent == e.agent && e.reasoningSaveFunc != nil {
+		if err := e.reasoningSaveFunc(target); err != nil {
+			e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgReasoningSaveFailed, err))
+			return
+		}
+	}
 	switcher.SetReasoningEffort(target)
 	e.cleanupInteractiveState(e.interactiveKeyForSessionKey(msg.SessionKey))
 
-	s := sessions.GetOrCreateActive(msg.SessionKey)
-	s.SetAgentSessionID("", "")
-	s.ClearHistory()
 	sessions.Save()
-
+	if target == "" {
+		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgReasoningDefault))
+		return
+	}
 	e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgReasoningChanged, target))
 }
 
@@ -12293,7 +12317,7 @@ func (e *Engine) cmdProviderAdd(p Platform, msg *Message, switcher ProviderSwitc
 	raw = strings.TrimSpace(raw)
 
 	if strings.HasPrefix(raw, "{") {
-		// JSON format: /provider add {"name":"relay","api_key":"sk-xxx",...}
+		// JSON format: /provider add {"name":"relay","api_key":"<your API key>",...}
 		var jp struct {
 			Name    string            `json:"name"`
 			APIKey  string            `json:"api_key"`
@@ -13912,21 +13936,19 @@ func (e *Engine) executeCardAction(cmd, args, sessionKey string) {
 			return
 		}
 		efforts := switcher.AvailableReasoningEfforts()
-		target := strings.ToLower(strings.TrimSpace(args))
-		if idx, err := strconv.Atoi(target); err == nil && idx >= 1 && idx <= len(efforts) {
-			target = efforts[idx-1]
+		target, valid := resolveReasoningTarget(args, efforts)
+		if !valid {
+			return
 		}
-		for _, effort := range efforts {
-			if effort == target {
-				switcher.SetReasoningEffort(target)
-				e.cleanupInteractiveState(interactiveKey)
-				s := sessions.GetOrCreateActive(sessionKey)
-				s.SetAgentSessionID("", "")
-				s.ClearHistory()
-				sessions.Save()
+		if agent == e.agent && e.reasoningSaveFunc != nil {
+			if err := e.reasoningSaveFunc(target); err != nil {
+				slog.Error("failed to save reasoning effort", "error", err)
 				return
 			}
 		}
+		switcher.SetReasoningEffort(target)
+		e.cleanupInteractiveState(interactiveKey)
+		sessions.Save()
 
 	case "/mode":
 		if args == "" {

@@ -14,6 +14,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode"
 	"unicode/utf8"
 
 	"github.com/chenhg5/cc-connect/core"
@@ -30,9 +31,11 @@ func init() {
 //   - "yolo":      auto-approve all tools (--dangerously-skip-permissions)
 //   - "plan":      read-only plan mode with terminal sandbox constraints (--sandbox)
 type Agent struct {
-	effort       string
 	workDir      string
 	model        string
+	effort       string
+	planner      string
+	executor     string
 	mode         string
 	cmd          string   // CLI binary name, default "agy"
 	cliExtraArgs []string // extra args from cmd after the binary name
@@ -51,6 +54,8 @@ func New(opts map[string]any) (core.Agent, error) {
 	}
 	model, _ := opts["model"].(string)
 	effort, _ := opts["reasoning_effort"].(string)
+	planner, _ := opts["orchestrator_planner"].(string)
+	executor, _ := opts["orchestrator_executor"].(string)
 	mode, _ := opts["mode"].(string)
 	mode = normalizeMode(mode)
 	cmd, extraArgs := core.ParseCmdOpts(opts, "agy")
@@ -78,9 +83,11 @@ func New(opts map[string]any) (core.Agent, error) {
 	}
 
 	return &Agent{
-		effort:       effort,
 		workDir:      workDir,
 		model:        model,
+		effort:       normalizeEffort(effort),
+		planner:      planner,
+		executor:     executor,
 		mode:         mode,
 		cmd:          cmd,
 		cliExtraArgs: extraArgs,
@@ -120,6 +127,9 @@ func (a *Agent) SetModel(model string) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	a.model = model
+	if !supportsEffort(model) {
+		a.effort = ""
+	}
 	slog.Info("antigravity: model changed", "model", model)
 }
 
@@ -127,6 +137,42 @@ func (a *Agent) GetModel() string {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	return core.GetProviderModel(a.providers, a.activeIdx, a.model)
+}
+
+// agyEfforts are the levels `agy --effort` accepts.
+var agyEfforts = []string{"low", "medium", "high", "xhigh", "max"}
+
+func normalizeEffort(raw string) string {
+	effort := strings.ToLower(strings.TrimSpace(raw))
+	for _, known := range agyEfforts {
+		if effort == known {
+			return effort
+		}
+	}
+	if effort != "" {
+		slog.Warn("antigravity: ignoring unknown reasoning effort", "input_len", len(raw))
+	}
+	return ""
+}
+
+func (a *Agent) SetReasoningEffort(effort string) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.effort = normalizeEffort(effort)
+	slog.Info("antigravity: reasoning effort changed", "effort", a.effort)
+}
+
+func (a *Agent) GetReasoningEffort() string {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.effort
+}
+
+func (a *Agent) AvailableReasoningEfforts() []string {
+	if !supportsEffort(a.GetModel()) {
+		return nil
+	}
+	return append([]string(nil), agyEfforts...)
 }
 
 func (a *Agent) configuredModels() []core.ModelOption {
@@ -139,15 +185,74 @@ func (a *Agent) AvailableModels(ctx context.Context) []core.ModelOption {
 	if models := a.configuredModels(); len(models) > 0 {
 		return models
 	}
-	if models := a.fetchModelsFromAPI(ctx); len(models) > 0 {
-		return models
+	cmdCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	a.mu.RLock()
+	cmd := exec.CommandContext(cmdCtx, a.cmd, append(append([]string{}, a.cliExtraArgs...), "models")...)
+	// Bound stdout draining even if a descendant survives the CLI and keeps the pipe open.
+	cmd.WaitDelay = time.Second
+	cmd.Dir = a.workDir
+	cmd.Env = core.MergeEnv(os.Environ(), append(append([]string{}, a.configEnv...), a.providerEnvLocked()...))
+	a.mu.RUnlock()
+	output, err := cmd.Output()
+	if err != nil {
+		slog.Warn("antigravity: list models", "error", err)
+		return a.fetchModelsFromAPI(ctx)
 	}
-	return []core.ModelOption{
-		{Name: "gemini-3.1-pro-preview", Desc: "Gemini 3.1 Pro Preview"},
-		{Name: "gemini-3-flash-preview", Desc: "Gemini 3 Flash Preview"},
-		{Name: "gemini-2.5-pro", Desc: "Gemini 2.5 Pro"},
-		{Name: "gemini-2.5-flash", Desc: "Gemini 2.5 Flash"},
+	// Recent agy versions print one id<TAB>label pair per line. Older
+	// versions may only print display labels, which cannot identify an ID.
+	var models []core.ModelOption
+	for _, line := range strings.Split(string(output), "\n") {
+		id, label, ok := strings.Cut(strings.TrimSpace(line), "\t")
+		if ok && id != "" && label != "" {
+			models = append(models, core.ModelOption{Name: id, Desc: label})
+		}
 	}
+	if len(models) == 0 {
+		slog.Debug("antigravity: agy models returned no ID and label pairs; trying the API catalog")
+		return a.fetchModelsFromAPI(ctx)
+	}
+	return models
+}
+
+// ValidateModel runs before the engine persists or applies a model change.
+func (a *Agent) ValidateModel(ctx context.Context, model string) error {
+	model = strings.TrimSpace(model)
+	if model == "" || strings.HasPrefix(model, "-") || strings.ContainsFunc(model, unicode.IsControl) {
+		return fmt.Errorf("antigravity: invalid model name")
+	}
+	// Keep enough of the caller's budget for a manual switch if the
+	// catalog command or API is slow rather than immediately unavailable.
+	catalogCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
+	defer cancel()
+	models := a.AvailableModels(catalogCtx)
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if len(models) == 0 {
+		// Older CLIs and offline sessions may not provide a catalog. Do
+		// not block every switch: let agy validate the literal model value.
+		slog.Warn("antigravity: model catalog unavailable; deferring model validation to agy")
+		return nil
+	}
+	for _, option := range models {
+		if strings.EqualFold(model, option.Name) || strings.EqualFold(model, option.Desc) {
+			return nil
+		}
+		for _, effort := range agyEfforts {
+			if strings.TrimSuffix(option.Name, "-"+effort) == model {
+				return nil
+			}
+		}
+	}
+	return fmt.Errorf("antigravity: unknown model %q", model)
+}
+
+func supportsEffort(model string) bool {
+	model = strings.ToLower(strings.TrimSpace(model))
+	return model != "gemini-pro-orchestrator" &&
+		!strings.HasPrefix(model, "gemini-pro-orchestrator-") &&
+		!strings.HasPrefix(model, "orchestrator (")
 }
 
 func (a *Agent) fetchModelsFromAPI(ctx context.Context) []core.ModelOption {
@@ -167,7 +272,8 @@ func (a *Agent) fetchModelsFromAPI(ctx context.Context) []core.ModelOption {
 
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
-		slog.Debug("antigravity: failed to fetch models", "error", err)
+		// Request errors can include the API key in the URL.
+		slog.Debug("antigravity: failed to fetch models")
 		return nil
 	}
 	defer func() {
@@ -209,6 +315,7 @@ func (a *Agent) StartSession(ctx context.Context, sessionID string) (core.AgentS
 	a.mu.Lock()
 	model := a.model
 	effort := a.effort
+	planner, executor := a.planner, a.executor
 	mode := a.mode
 	cmd := a.cmd
 	extraArgs := append([]string{}, a.cliExtraArgs...)
@@ -223,9 +330,33 @@ func (a *Agent) StartSession(ctx context.Context, sessionID string) (core.AgentS
 		}
 	}
 	a.mu.Unlock()
+	if !supportsEffort(model) {
+		effort = ""
+	}
 
-	if supportsAgyACP(ctx, cmd, extraArgs, workDir, extraEnv) {
+	// Probe with the base wrapper arguments, not flags for a specific session.
+	useACP := supportsAgyACP(ctx, cmd, extraArgs, workDir, extraEnv)
+	if planner != "" || executor != "" {
+		orchestrator := map[string]string{}
+		if planner != "" {
+			orchestrator["planner"] = planner
+		}
+		if executor != "" {
+			orchestrator["executor"] = executor
+		}
+		settings, err := json.Marshal(map[string]any{"orchestrator": orchestrator})
+		if err != nil {
+			return nil, err
+		}
+		extraArgs = append(extraArgs, "--settings", string(settings))
+	}
+
+	if useACP {
+		// ACP sets thought_level through the protocol, not the print-mode flag.
 		return newAgyACPSession(ctx, cmd, extraArgs, workDir, model, effort, mode, sessionID, extraEnv, timeout, 0)
+	}
+	if effort != "" {
+		extraArgs = append(extraArgs, "--effort", effort)
 	}
 	return newAntigravitySession(ctx, cmd, extraArgs, workDir, model, mode, sessionID, extraEnv, timeout)
 }

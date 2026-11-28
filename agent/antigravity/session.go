@@ -148,9 +148,6 @@ func (as *antigravitySession) Send(prompt string, messageID string, images []cor
 		agyConfigDir = as.permissionBridge.AgyConfigDir()
 	}
 	args := as.buildAntigravityArgs(chatID, isResume, as.mode, agyConfigDir, fullPrompt)
-	if strings.TrimSpace(as.model) != "" {
-		slog.Warn("antigravitySession: model is configured but ignored because agy does not support --model yet", "model", as.model)
-	}
 
 	var ctx context.Context
 	var cancel context.CancelFunc
@@ -208,6 +205,9 @@ func (as *antigravitySession) buildAntigravityArgs(chatID string, isResume bool,
 	// Prepend extra args from cmd so wrappers like "timeout 3600 agy" work.
 	// Keep "-p <prompt>" at the very end because agy consumes the immediate next arg.
 	args := append([]string{}, as.extraArgs...)
+	if as.model != "" {
+		args = append(args, "--model", as.model)
+	}
 	if agyConfigDir != "" {
 		// Antigravity currently names this compatibility flag --gemini_dir.
 		args = append(args, "--gemini_dir="+agyConfigDir, "--print-timeout=24h")

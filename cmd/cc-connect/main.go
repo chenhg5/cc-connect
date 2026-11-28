@@ -968,6 +968,9 @@ func main() {
 			}
 			return result, nil
 		})
+		engine.SetReasoningSaveFunc(func(effort string) error {
+			return config.SaveAgentReasoningEffort(projName, effort)
+		})
 		engine.SetModelSaveFunc(func(model string) error {
 			return config.SaveAgentModel(projName, model)
 		})

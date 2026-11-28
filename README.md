@@ -649,6 +649,7 @@ Notes:
 ## 📚 Documentation
 
 - [Usage Guide](docs/usage.md) — Complete feature documentation
+- [Antigravity CLI options](docs/antigravity.md) — Model, reasoning effort, and Orchestrator settings
 - [INSTALL.md](INSTALL.md) — AI-agent-friendly installation guide
 - [config.example.toml](config.example.toml) — Configuration template
 - [CONTRIBUTING.md](CONTRIBUTING.md) — How to report issues and contribute pull requests

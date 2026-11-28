@@ -6,6 +6,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -100,6 +102,56 @@ func TestAgyACPFactoryAndMidTurnHandover(t *testing.T) {
 		t.Fatalf("next turn: %q", got)
 	}
 	nextAgyACPEvent(t, s, core.EventResult)
+}
+
+func TestAgyACPResumeKeepsEffectiveReasoningSettings(t *testing.T) {
+	for _, tc := range []struct {
+		name, model, wantEffort string
+	}{
+		{name: "ordinary model", model: "gemini-4-neon", wantEffort: "high"},
+		{name: "provider overrides ordinary model with orchestrator", model: "gemini-pro-orchestrator-neon"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			trace := filepath.Join(t.TempDir(), "trace")
+			a := &Agent{
+				cmd: os.Args[0], cliExtraArgs: []string{"-test.run=^TestAgyACPHelperProcess$", "--"},
+				workDir: t.TempDir(), model: "gemini-4-neon", effort: "high", mode: "default",
+				planner: "Gemini 4 Neon (High)", executor: "Gemini 4 Hydrogen (High)",
+				activeIdx: 0, providers: []core.ProviderConfig{{Model: tc.model}},
+				configEnv: []string{"CC_AGY_ACP_FIXTURE=1", "CC_AGY_SETTINGS_TRACE=" + trace},
+			}
+			s, err := a.StartSession(context.Background(), "previous-session")
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = s.Close() })
+			if _, ok := s.(agyMidTurnInputSender); !ok {
+				t.Fatal("session-specific flags must not make the ACP version probe fail")
+			}
+			raw, err := os.ReadFile(trace)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var got []string
+			for _, line := range strings.Split(strings.TrimSpace(string(raw)), "\n") {
+				var entry string
+				if err := json.Unmarshal([]byte(line), &entry); err != nil {
+					t.Fatal(err)
+				}
+				got = append(got, entry)
+			}
+			want := []string{
+				`{"orchestrator":{"executor":"Gemini 4 Hydrogen (High)","planner":"Gemini 4 Neon (High)"}}`,
+				"resume:previous-session", "model:" + tc.model,
+			}
+			if tc.wantEffort != "" {
+				want = append(want, "thought_level:"+tc.wantEffort)
+			}
+			if !slices.Equal(got, want) {
+				t.Fatalf("ACP startup trace = %q; want %q", got, want)
+			}
+		})
+	}
 }
 
 func TestAgyACPMinimumVersionKeepsCorrectSessionWorkingDirectory(t *testing.T) {
@@ -426,6 +478,29 @@ func TestAgyACPHelperProcess(t *testing.T) {
 	if os.Getenv("CC_AGY_ACP_FIXTURE") != "1" {
 		return
 	}
+	var trace *json.Encoder
+	if path := os.Getenv("CC_AGY_SETTINGS_TRACE"); path != "" {
+		for i, arg := range os.Args {
+			switch arg {
+			case "--version":
+				if i < 1 || os.Args[i-1] != "--" {
+					os.Exit(3)
+				}
+			case "--effort":
+				os.Exit(3)
+			case "--settings":
+				if i+2 >= len(os.Args) || os.Args[i+2] != "acp" {
+					os.Exit(3)
+				}
+				file, err := os.Create(path)
+				if err != nil {
+					os.Exit(3)
+				}
+				trace = json.NewEncoder(file)
+				_ = trace.Encode(os.Args[i+1])
+			}
+		}
+	}
 	for _, arg := range os.Args {
 		if arg == "--version" {
 			version := os.Getenv("CC_AGY_ACP_VERSION")
@@ -456,7 +531,11 @@ func TestAgyACPHelperProcess(t *testing.T) {
 			ID     json.RawMessage `json:"id"`
 			Method string          `json:"method"`
 			Params struct {
-				Prompt []struct {
+				SessionID string `json:"sessionId"`
+				ModelID   string `json:"modelId"`
+				ConfigID  string `json:"configId"`
+				Value     string `json:"value"`
+				Prompt    []struct {
 					Text string `json:"text"`
 				} `json:"prompt"`
 			} `json:"params"`
@@ -468,8 +547,19 @@ func TestAgyACPHelperProcess(t *testing.T) {
 		case "initialize":
 			respond(request.ID, map[string]any{"protocolVersion": 1, "agentInfo": map[string]any{"name": "Antigravity ACP Server", "version": "1.5.13"}})
 		case "session/new", "session/resume":
+			if trace != nil && request.Method == "session/resume" {
+				_ = trace.Encode("resume:" + request.Params.SessionID)
+			}
 			respond(request.ID, map[string]any{"sessionId": "fixture-session"})
 		case "session/set_model", "session/set_config_option", "session/set_mode":
+			if trace != nil {
+				switch request.Method {
+				case "session/set_model":
+					_ = trace.Encode("model:" + request.Params.ModelID)
+				case "session/set_config_option":
+					_ = trace.Encode(request.Params.ConfigID + ":" + request.Params.Value)
+				}
+			}
 			switch os.Getenv("CC_AGY_OPTION_REPLY") {
 			case "unsupported":
 				write(map[string]any{"jsonrpc": "2.0", "id": request.ID, "error": map[string]any{"code": -32603, "message": "method not supported by this agent"}})
