@@ -1,7 +1,7 @@
 import { useTranslation } from 'react-i18next';
 import { useState, useRef, useEffect } from 'react';
 import {
-  RefreshCw, Sun, Moon, Monitor, LogOut, Languages, ChevronDown,
+  RefreshCw, Sun, Moon, Monitor, LogOut, Languages, ChevronDown, Menu,
 } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { useThemeStore } from '@/store/theme';
@@ -17,7 +17,7 @@ const languages = [
   { code: 'ru', label: 'RU' },
 ];
 
-export default function Header() {
+export default function Header({ onMenuClick }: { onMenuClick?: () => void }) {
   const { t, i18n } = useTranslation();
   const { theme, setTheme } = useThemeStore();
   const logout = useAuthStore((s) => s.logout);
@@ -63,6 +63,15 @@ export default function Header() {
         'bg-white/70 backdrop-blur-xl dark:bg-[rgba(0,0,0,0.72)]',
       )}
     >
+      <button
+        type="button"
+        onClick={onMenuClick}
+        className={cn(btnCls, 'mr-auto md:hidden', '-ml-2')}
+        aria-label="Open menu"
+      >
+        <Menu size={18} />
+      </button>
+
       <button type="button" onClick={handleRefresh} className={btnCls} aria-label={t('common.refresh')}>
         <RefreshCw size={16} className={spinning ? 'animate-spin' : ''} />
       </button>
