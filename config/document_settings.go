@@ -24,6 +24,9 @@ func globalSettingsEdits(u GlobalSettingsUpdate) []documentEdit {
 	if u.IdleTimeoutMins != nil {
 		add("", "idle_timeout_mins", *u.IdleTimeoutMins)
 	}
+	if u.CommentaryMessages != nil {
+		add("display", "commentary_messages", *u.CommentaryMessages)
+	}
 	if u.ThinkingMessages != nil {
 		add("display", "thinking_messages", *u.ThinkingMessages)
 	}

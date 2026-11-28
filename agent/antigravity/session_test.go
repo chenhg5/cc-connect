@@ -313,15 +313,32 @@ func TestRedactAgyStderr_RemovesEnvironmentSecrets(t *testing.T) {
 }
 
 func TestAntigravitySession_StreamResponseDiagnostics(t *testing.T) {
+	const (
+		narration = `{"event":"step_update","step_update":{"step_index":1,"step_type":"agent_response","text_delta":"working"}}`
+		laterTool = `{"event":"step_update","step_update":{"step_index":2,"step_type":"tool","tool_name":"run_command"}}`
+	)
 	for _, tt := range []struct {
-		name, output, want string
+		name, output, want, wantCommentary string
 	}{
-		{"session_only", `{"event":"init","conversation_id":"session-1"}`, ""},
-		{"tool_only", `{"event":"step_update","step_update":{"step_index":1,"state":"DONE","step_type":"tool","tool_info":{"name":"run_command","output":"tool output"}}}`, ""},
-		{"whitespace", `{"event":"step_update","step_update":{"step_type":"agent_response","text_delta":"  "}}`, ""},
-		{"text_delta", `{"event":"step_update","step_update":{"step_type":"agent_response","text_delta":"answer"}}`, "answer"},
-		{"final_response", `{"event":"result","result":{"status":"SUCCESS","response":"answer"}}`, "answer"},
-		{"plain_text", "answer", "answer\n"},
+		{"session_only", `{"event":"init","conversation_id":"session-1"}`, "", ""},
+		{"tool_only", `{"event":"step_update","step_update":{"step_index":1,"state":"DONE","step_type":"tool","tool_info":{"name":"run_command","output":"tool output"}}}`, "", ""},
+		{"whitespace", `{"event":"step_update","step_update":{"step_type":"agent_response","text_delta":"  "}}`, "  ", ""},
+		{"text_delta", `{"event":"step_update","step_update":{"step_type":"agent_response","text_delta":"answer"}}`, "answer", ""},
+		// A tool-only turn whose only text is the pre-tool narration delivered
+		// content, so it must not be reported as producing no response.
+		{"commentary_only", narration + "\n" + laterTool, "", "working"},
+		{"commentary_then_whitespace", narration + "\n" + laterTool + "\n" +
+			`{"event":"step_update","step_update":{"step_index":3,"step_type":"agent_response","text_delta":"  "}}`, "  ", "working"},
+		{"commentary_then_empty_result", narration + "\n" + laterTool + "\n" +
+			`{"event":"result","result":{"status":"SUCCESS","response":""}}`, "", "working"},
+		// AGY echoes the last assistant text in the result envelope; the
+		// narration was already delivered and must not be sent again.
+		{"commentary_then_result_echo", narration + "\n" + laterTool + "\n" +
+			`{"event":"result","result":{"status":"SUCCESS","response":"working"}}`, "", "working"},
+		{"commentary_then_answer_at_eof", narration + "\n" + laterTool + "\n" +
+			`{"event":"step_update","step_update":{"step_index":3,"step_type":"agent_response","text_delta":"answer"}}`, "answer", "working"},
+		{"final_response", `{"event":"result","result":{"status":"SUCCESS","response":"answer"}}`, "answer", ""},
+		{"plain_text", "answer", "answer\n", ""},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Setenv("HOME", t.TempDir())
@@ -338,7 +355,7 @@ func TestAntigravitySession_StreamResponseDiagnostics(t *testing.T) {
 			if err := s.Send("test", "", nil, nil); err != nil {
 				t.Fatal(err)
 			}
-			var response strings.Builder
+			var response, commentary strings.Builder
 			var responseErr error
 			deadline := time.After(3 * time.Second)
 			for {
@@ -347,15 +364,20 @@ func TestAntigravitySession_StreamResponseDiagnostics(t *testing.T) {
 					switch event.Type {
 					case core.EventText:
 						response.WriteString(event.Content)
+					case core.EventCommentary:
+						commentary.WriteString(event.Content)
 					case core.EventError:
 						responseErr = event.Error
 					case core.EventResult:
-						if tt.want == "" {
+						if response.String() != tt.want || commentary.String() != tt.wantCommentary {
+							t.Fatalf("response = %q, commentary = %q, want %q and %q", response.String(), commentary.String(), tt.want, tt.wantCommentary)
+						}
+						if strings.TrimSpace(tt.want) == "" && tt.wantCommentary == "" {
 							if responseErr == nil || !strings.Contains(responseErr.Error(), "without producing a response") {
 								t.Fatalf("error = %v, want missing response diagnostic", responseErr)
 							}
-						} else if responseErr != nil || response.String() != tt.want {
-							t.Fatalf("response = %q, error = %v, want %q", response.String(), responseErr, tt.want)
+						} else if responseErr != nil {
+							t.Fatalf("error = %v, want none after delivered output", responseErr)
 						}
 						return
 					}

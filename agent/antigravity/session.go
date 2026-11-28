@@ -312,7 +312,19 @@ func (as *antigravitySession) readLoop(ctx context.Context, cmd *exec.Cmd, stdou
 			continue
 		}
 		for _, event := range events {
-			if event.Type == core.EventText && strings.TrimSpace(event.Content) != "" {
+			if isAgyResponseEvent(event) {
+				hasResponse = true
+			}
+			select {
+			case as.events <- event:
+			case <-as.ctx.Done():
+				return
+			}
+		}
+	}
+	if ctx.Err() == nil {
+		for _, event := range parser.flushResponse(core.EventText) {
+			if isAgyResponseEvent(event) {
 				hasResponse = true
 			}
 			select {
@@ -329,6 +341,14 @@ func (as *antigravitySession) readLoop(ctx context.Context, cmd *exec.Cmd, stdou
 		case <-as.ctx.Done():
 		}
 	}
+}
+
+// isAgyResponseEvent reports whether an event delivered user-visible output.
+// Commentary counts: a tool-only turn may deliver its only text as narration,
+// and must not then be reported as having produced no response.
+func isAgyResponseEvent(event core.Event) bool {
+	return (event.Type == core.EventText || event.Type == core.EventCommentary) &&
+		strings.TrimSpace(event.Content) != ""
 }
 
 func redactAgyStderr(stderr string, env []string) string {
